@@ -13,7 +13,7 @@ $ anyhost resume 3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4
 
 anyhost has two parts:
 
-- **The `anyhost` program**, one copy per machine. It uploads the new bytes of every transcript under `~/.claude/projects` and `~/.codex/sessions` to R2, and answers `anyhost list`, `anyhost resume` and `anyhost doctor`.
+- **The `anyhost` program**, one copy per machine. It uploads every transcript that grows under `~/.claude/projects` and `~/.codex/sessions` to R2, and answers `anyhost list`, `anyhost resume` and `anyhost doctor`.
 - **A Claude Code mod** built with [cmod](https://github.com/heyJordanParker/cmod). It starts the program for the machine and stops a session that continues on another machine from taking prompts.
 
 ## Install
@@ -48,7 +48,7 @@ npm install -g @cmodjs/cli
 cmod install heyJordanParker/anyhost
 ```
 
-cmod downloads the `anyhost` program from this repository's release, checks it against the release's `SHA256SUMS`, and links it into `~/.local/bin`. Start Claude Code: the mod starts the program, which registers the machine in R2 and uploads every session the machine has. Run `anyhost doctor` to see that each part works.
+cmod downloads the `anyhost` program from this repository's release, checks it against the release's `SHA256SUMS`, and links it into `~/.local/bin`. Start Claude Code: the mod starts the program, which registers the machine in R2 and uploads each session you work in. Run `anyhost doctor` to see that each part works.
 
 ## Use it
 
@@ -57,9 +57,9 @@ cmod downloads the `anyhost` program from this repository's release, checks it a
 - **A session another machine resumed** answers each prompt you type with `This session continues on <machine>.` Resume it where you are with `anyhost resume <session> --take`.
 - **`anyhost doctor`** checks the AWS profile `r2`, the bucket, this machine's registration, and the program, and prints the fix for each problem.
 
-A virtual machine cloned from another keeps its machine id, so both would write as one machine. While the original still runs anyhost, anyhost refuses to run on the clone and prints the fix: on Linux `sudo rm /etc/machine-id && sudo systemd-machine-id-setup`, then a restart. A machine you renamed keeps its id too: anyhost takes the new name once the old name has been quiet for 10 minutes, and until then its error names the time to press Retry.
+A virtual machine cloned from another keeps its machine id, so both would write as one machine. While the original still runs anyhost, anyhost captures nothing on the clone and shows the fix: on Linux `sudo rm /etc/machine-id && sudo systemd-machine-id-setup`, then a restart. A machine you renamed keeps its id too: anyhost waits until the old name has been quiet for 10 minutes, then takes the new name by itself, and `anyhost doctor` says until when it waits.
 
-The first start uploads every transcript the machine already has. Sessions you work in keep uploading within 30 seconds while it runs, and the rest goes out in the time left in each pass, about 20 seconds of every 30.
+anyhost uploads a transcript once it grows while anyhost runs, from its first byte, so a running session, and an old one you resume, upload whole. It never reads the old transcripts you leave alone.
 
 ## How it works
 

@@ -10619,7 +10619,7 @@ function addressOf(line) {
   return;
 }
 
-// ../../../../../private/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/cmod-publish-anyhost-EXtt5B/release/src/mod.ts
+// ../../../../../private/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/cmod-publish-anyhost-cLJG7Z/release/src/mod.ts
 var HOLDER_CHECK_MS = 5000;
 var anyhost = defineMod({
   name: "anyhost",
@@ -10630,6 +10630,7 @@ var anyhost = defineMod({
       environment: { ANYHOST_DEVICE_ID: here.id, ANYHOST_DEVICE_NAME: here.name, ANYHOST_DEVICE_OS: here.os, ANYHOST_DEVICE_ARCH: here.arch },
       singleInstance: true
     }));
+    let isProblemShown = false;
     sessions.current.beforePrompt(async () => {
       const address = await capture.ready().catch(() => {
         return;
@@ -10639,13 +10640,17 @@ var anyhost = defineMod({
       const answer = await http.fetch(`${address.url}/claims/${sessions.current.id}`, address.socketPath === undefined ? {} : { socketPath: address.socketPath });
       if (!answer.ok)
         throw new Error(`The anyhost program answered ${answer.status}: ${answer.text}`);
-      const { machine } = JSON.parse(answer.text);
+      const { machine, problem } = JSON.parse(answer.text);
+      if (problem !== undefined && !isProblemShown) {
+        isProblemShown = true;
+        mod.toast.error("anyhost captures nothing on this machine", { description: problem, duration: Infinity });
+      }
       return machine === undefined ? undefined : { refuse: `This session continues on ${machine}.` };
     }, { timeoutMs: HOLDER_CHECK_MS });
   }
 });
 
-// ../../../../../private/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/cmod-publish-anyhost-EXtt5B/release/hooks/register.ts
+// ../../../../../private/var/folders/n6/hn37q6pj7sj_9dmqqc2113800000gn/T/cmod-publish-anyhost-cLJG7Z/release/hooks/register.ts
 function register(addHook, options) {
   registerMod(addHook, anyhost, options);
 }

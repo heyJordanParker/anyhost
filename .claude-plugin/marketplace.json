@@ -1,0 +1,27 @@
+{
+  "name": "anyhost",
+  "owner": {
+    "name": "heyJordanParker"
+  },
+  "description": "Every Claude Code and Codex session of every machine, kept in R2, listed everywhere and resumed on any machine",
+  "plugins": [
+    {
+      "name": "anyhost",
+      "description": "Every Claude Code and Codex session of every machine, kept in R2, listed everywhere and resumed on any machine",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/heyJordanParker/anyhost/releases/download/v0.1.0/anyhost-0.1.0.zip",
+        "sha256": "45a6197b34c32ebb56ca791de21ab5e9f206cc08cd800743eb9260b1f4ea77aa"
+      }
+    },
+    {
+      "name": "cmod",
+      "description": "Claude Mod Manager: runs the uninstall step of each mod Claude Code removes",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/heyJordanParker/cmod.git",
+        "ref": "release"
+      }
+    }
+  ]
+}
