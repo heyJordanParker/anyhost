@@ -1,0 +1,20 @@
+{
+  "name": "anyhost",
+  "private": true,
+  "os": ["darwin", "linux"],
+  "cpu": ["arm64", "x64"],
+  "type": "module",
+  "scripts": {
+    "test": "bun test"
+  },
+  "cmod": {
+    "program": "anyhost"
+  },
+  "files": [
+    "hooks",
+    "src"
+  ],
+  "dependencies": {
+    "@cmodjs/core": "^5.4.1"
+  }
+}
