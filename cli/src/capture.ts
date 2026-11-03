@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { heldElsewhere } from './claims.ts'
 import { stateFolder, type Device } from './device.ts'
 import type { Store } from './store.ts'
-import { codexNameOf, keyOf, sessionOf, summarize, type Root, type Summary, type Tool } from './transcript.ts'
+import { codexNameOf, keyOf, secondKeyOf, sessionOf, summarize, type Root, type Summary, type Tool } from './transcript.ts'
 
 const SEGMENT_BYTES = 8 * 1024 * 1024
 const QUIET_MS = 10 * 60_000
@@ -23,6 +23,7 @@ export type IndexedSession = {
 }
 export type Capture = { readonly store: Store; readonly db: Database; readonly device: Device }
 export class SkippedFile extends Error {}
+export type Problems = { set(key: string, error: unknown): void; clear(key: string): void }
 export type Segment = { readonly key: string; readonly start: number; readonly end: number }
 
 type FileRow = { path: string; key: string; offset: number; local_start: number; remote_start: number }
@@ -98,15 +99,16 @@ export async function recordSummary(db: Database, id: string, tool: Tool, text: 
 
 export async function uploadFile(capture: Capture, root: Root, path: string): Promise<'done' | 'more'> {
   const { store, db, device } = capture
-  const key = keyOf(root, path)
-  if (key === undefined) return 'done'
+  const pathKey = keyOf(root, path)
+  if (pathKey === undefined) return 'done'
   let row = db.query<FileRow, [string]>('select * from files where path = ?').get(path)
   if (row === null) {
-    const holder = db.query<{ path: string }, [string]>('select path from files where key = ?').get(key)
-    if (holder !== null) throw new SkippedFile(`${path} holds the session ${key}, which anyhost captures from ${holder.path} on this machine, so it captures only that one.`)
+    const isTaken = db.query<{ path: string }, [string]>('select path from files where key = ?').get(pathKey) !== null
+    const key = isTaken ? secondKeyOf(root, path, pathKey) : pathKey
     db.query('insert into files (path, key) values (?, ?)').run(path, key)
     row = { path, key, offset: 0, local_start: 0, remote_start: 0 }
   }
+  const { key } = row
   const found = await stat(path)
   if (found.size < row.offset) throw new SkippedFile(`${path} shrank from ${row.offset} to ${found.size} bytes. anyhost keeps the ${row.offset} bytes it uploaded and captures nothing more of it.`)
   if (found.size === row.offset) return 'done'
@@ -123,8 +125,8 @@ export async function uploadFile(capture: Capture, root: Root, path: string): Pr
 export async function captureFiles(
   capture: Capture,
   files: ReadonlyMap<string, Root>,
-  fail: (error: unknown) => void,
-  options: { readonly parallel: number; readonly until?: number } = { parallel: 1 },
+  problems: Problems,
+  parallel = 1,
 ): Promise<Map<string, Root>> {
   const sessionsOf = new Map([...files].flatMap(([path, root]) => {
     const key = keyOf(root, path)
@@ -138,19 +140,16 @@ export async function captureFiles(
       const [path, root] = next
       const session = sessionsOf.get(path)
       if (session === undefined || held.has(session)) continue
-      if (options.until !== undefined && Date.now() >= options.until) {
-        again.set(path, root)
-        continue
-      }
       try {
         if ((await uploadFile(capture, root, path)) === 'more') again.set(path, root)
+        problems.clear(path)
       } catch (error) {
-        fail(error)
+        problems.set(path, error)
         if (!(error instanceof SkippedFile)) again.set(path, root)
       }
     }
   }
-  await Promise.all(Array.from({ length: options.parallel }, work))
+  await Promise.all(Array.from({ length: parallel }, work))
   return again
 }
 

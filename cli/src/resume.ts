@@ -6,7 +6,7 @@ import { HeldElsewhere, takeClaim } from './claims.ts'
 import { devicesOf, type Device } from './device.ts'
 import { downloadSession, listSessions, type ListedSession } from './sessions.ts'
 import type { Store } from './store.ts'
-import { projectFolder, withCwd } from './transcript.ts'
+import { placementOf, withCwd } from './transcript.ts'
 
 const CHECKOUTS = join(homedir(), 'Developer')
 
@@ -84,11 +84,10 @@ export async function resume(store: Store, device: Device, id: string, options: 
   const main = transcripts.get(id)
   if (main === undefined) throw new Error(`R2 holds no transcript of the session ${id}.`)
   const cwd = await localCwd(session)
-  const folder = projectFolder(cwd)
   const db = openDatabase()
   for (const [key, bytes] of transcripts) {
     const placed = new TextEncoder().encode(withCwd(new TextDecoder().decode(bytes), cwd))
-    const path = join(folder, `${key}.jsonl`)
+    const path = placementOf(key, cwd)
     placeFile(db, path, key, placed.length, bytes.length)
     await mkdir(dirname(path), { recursive: true })
     await Bun.write(path, placed)

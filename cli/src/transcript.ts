@@ -1,5 +1,5 @@
 import { homedir } from 'node:os'
-import { basename, join, relative, sep } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 
 export type Tool = 'claude' | 'codex'
 export type Root = { readonly tool: Tool; readonly folder: string }
@@ -21,6 +21,19 @@ export function keyOf(root: Root, path: string): string | undefined {
 }
 
 export const sessionOf = (key: string): string => key.split('/')[0] ?? key
+
+const SECOND_COPY = '/@'
+
+export function secondKeyOf(root: Root, path: string, key: string): string {
+  const folders = relative(root.folder, dirname(path)).split(sep)
+  return `${key}${SECOND_COPY}${root.tool === 'claude' ? folders[0] : folders.join('-')}`
+}
+
+export function placementOf(key: string, cwd: string, home = homedir()): string {
+  const second = key.lastIndexOf(SECOND_COPY)
+  if (second < 0) return join(projectFolder(cwd, home), `${key}.jsonl`)
+  return join(home, '.claude', 'projects', key.slice(second + SECOND_COPY.length), `${key.slice(0, second)}.jsonl`)
+}
 
 export const projectFolder = (cwd: string, home = homedir()): string => join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
 

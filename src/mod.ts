@@ -15,13 +15,18 @@ export const anyhost = defineMod({
         singleInstance: true,
       }),
     )
+    let isProblemShown = false
     sessions.current.beforePrompt(
       async () => {
         const address = await capture.ready().catch(() => undefined)
         if (address === undefined) return undefined
         const answer = await http.fetch(`${address.url}/claims/${sessions.current.id}`, address.socketPath === undefined ? {} : { socketPath: address.socketPath })
         if (!answer.ok) throw new Error(`The anyhost program answered ${answer.status}: ${answer.text}`)
-        const { machine } = JSON.parse(answer.text) as { machine?: string }
+        const { machine, problem } = JSON.parse(answer.text) as { machine?: string; problem?: string }
+        if (problem !== undefined && !isProblemShown) {
+          isProblemShown = true
+          mod.toast.error('anyhost captures nothing on this machine', { description: problem, duration: Infinity })
+        }
         return machine === undefined ? undefined : { refuse: `This session continues on ${machine}.` }
       },
       { timeoutMs: HOLDER_CHECK_MS },

@@ -12,7 +12,7 @@ function running(address: string): HookStream<ProcessSpawnChunk, ProcessSpawnRes
   return Object.assign(read(), { result: new Promise<ProcessSpawnResult>(() => undefined) }) as HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 }
 
-function withHolder(holder: { machine?: string }) {
+function withHolder(holder: { machine?: string; problem?: string }) {
   const tested = testMod(anyhost)
   const spawned: ProcessSpawnRequest[] = []
   const fetched: string[] = []
@@ -44,6 +44,14 @@ test('a session whose claim another device holds refuses prompts', async () => {
 
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session continues on anyhost-b.' })
   expect(fetched).toEqual(['http://127.0.0.1:4100/claims/test-session'])
+})
+
+test('a cloned machine shows why anyhost captures nothing, once a session', async () => {
+  const { tested } = withHolder({ problem: 'This machine, anyhost-c, has the id of anyhost-a.' })
+
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
+  await tested.raise.beforePrompt({ text: 'And again' })
+  expect(tested.shown.toasts.filter(({ type }) => type === 'error')).toEqual([{ type: 'error', message: 'anyhost captures nothing on this machine', description: 'This machine, anyhost-c, has the id of anyhost-a.' }])
 })
 
 test('a session this device holds, or no device claims, takes prompts', async () => {

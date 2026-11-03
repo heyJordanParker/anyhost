@@ -1,10 +1,10 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { cloneFixFor, cmodDevice, QUIET_BEFORE_RENAME_MS, type DeviceRecord } from './device.ts'
+import { cmodDevice, type DeviceRecord } from './device.ts'
 import type { Status } from './serve.ts'
-import { BUCKET, PROFILE, profileOf, type Store } from './store.ts'
+import { BUCKET, messageOf, PROFILE, profileOf, type Store } from './store.ts'
 
-type Check = { readonly ok: string } | { readonly problem: string; readonly fix: string }
+type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
 
 const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod starts the anyhost program, which records and registers this machine.'
 
@@ -25,35 +25,43 @@ async function bucketCheck(store: Store): Promise<Check> {
     await store.list('devices/')
     return { ok: `The bucket ${BUCKET} answers.` }
   } catch (error) {
-    return { problem: `The bucket ${BUCKET} did not answer: ${String(error)}`, fix: `Check that the bucket exists in R2 and that the keys of the AWS profile ${PROFILE} can read and write it.` }
+    return { problem: `The bucket ${BUCKET} did not answer: ${messageOf(error)}`, fix: `Check that the bucket exists in R2 and that the keys of the AWS profile ${PROFILE} can read and write it.` }
   }
 }
 
 async function deviceCheck(store: Store): Promise<Check> {
   const device = await cmodDevice().catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
   if (device instanceof Error) return { problem: `cmod device cannot name this machine: ${device.message}`, fix: 'Give the machine a machine id with sudo systemd-machine-id-setup, or install cmod with npm install -g @cmodjs/cli.' }
-  const stored = await store.get(`devices/${device.id}.json`).catch(() => undefined)
+  const stored = await store.get(`devices/${device.id}.json`).catch((error: unknown) => new Error(messageOf(error)))
+  if (stored instanceof Error) return { problem: `${device.name}'s registration could not be read from ${BUCKET}: ${stored.message}`, fix: 'Fix what the bucket check names.' }
   if (stored === undefined) return { problem: `${device.name} is not registered in ${BUCKET}.`, fix: START_CLAUDE }
   const record = JSON.parse(new TextDecoder().decode(stored.body)) as DeviceRecord
   if (record.name === device.name) return { ok: `${device.name} is registered as ${device.id}.` }
-  if (Date.now() - stored.modifiedAt >= QUIET_BEFORE_RENAME_MS) return { problem: `${device.id} is registered as ${record.name}, which has been quiet since ${new Date(stored.modifiedAt).toISOString()}.`, fix: `${START_CLAUDE} The program registers ${device.name} as its new name.` }
-  return { problem: `This machine, ${device.name}, has the id of ${record.name}, which ran anyhost at ${new Date(stored.modifiedAt).toISOString()}.`, fix: cloneFixFor(device.os) }
+  return { wait: `${device.id} is registered as ${record.name}, which ran anyhost at ${new Date(stored.modifiedAt).toISOString()}. The program's line says whether ${device.name} is that machine renamed or its clone.` }
 }
 
-async function programCheck(): Promise<Check> {
+async function programChecks(): Promise<Check[]> {
   const instance = Bun.file(join(process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share'), 'cmod', 'instances', 'anyhost', 'anyhost.json'))
-  if (!(await instance.exists())) return { problem: 'The anyhost program is not running.', fix: START_CLAUDE }
+  if (!(await instance.exists())) return [{ problem: 'The anyhost program is not running.', fix: START_CLAUDE }]
   const { address } = (await instance.json()) as { address: string }
   const status = await fetch(`http://${address}/status`, { signal: AbortSignal.timeout(3000) })
     .then(async (response) => (await response.json()) as Status)
     .catch(() => undefined)
-  if (status === undefined) return { problem: `The anyhost program does not answer at ${address}.`, fix: START_CLAUDE }
-  if (status.lastError !== '') return { problem: `The anyhost program at ${address} failed: ${status.lastError}`, fix: 'Fix what the error names. The program tries again every 30 seconds.' }
-  return { ok: `The anyhost program runs at ${address}: its last capture was at ${status.capturedAt || 'none yet'}, ${status.pending} live files wait for the next one, and ${status.backlog} older files wait in the backlog.` }
+  if (status === undefined) return [{ problem: `The anyhost program does not answer at ${address}.`, fix: START_CLAUDE }]
+  const { state, message } = status.registration
+  const registration: Check =
+    state === 'registered'
+      ? { ok: `The anyhost program runs at ${address}: its last capture was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.` }
+      : state === 'waiting'
+        ? { wait: `The anyhost program at ${address} waits: ${message}` }
+        : state === 'cloned'
+          ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Restart the machine after the fix, then start Claude Code.' }
+          : { problem: `The anyhost program at ${address} has not registered this machine yet.`, fix: 'It tries again every 30 seconds. The line below names why it failed.' }
+  return [registration, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again every 30 seconds, and this line goes once the cause is gone.' }))]
 }
 
 export async function doctor(store: Store): Promise<number> {
-  const checks = [await profileCheck(), await bucketCheck(store), await deviceCheck(store), await programCheck()]
-  for (const check of checks) console.log('ok' in check ? `✔ ${check.ok}` : `✘ ${check.problem}\n  ${check.fix}`)
+  const checks = [await profileCheck(), await bucketCheck(store), await deviceCheck(store), ...(await programChecks())]
+  for (const check of checks) console.log('ok' in check ? `✔ ${check.ok}` : 'wait' in check ? `… ${check.wait}` : `✘ ${check.problem}\n  ${check.fix}`)
   return checks.some((check) => 'problem' in check) ? 1 : 0
 }

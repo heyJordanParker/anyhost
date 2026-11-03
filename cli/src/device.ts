@@ -25,7 +25,10 @@ export async function cmodDevice(): Promise<Device> {
 
 export const QUIET_BEFORE_RENAME_MS = 10 * 60_000
 
-export class ClonedDevice extends Error {}
+export type Registration =
+  | { readonly state: 'registered' }
+  | { readonly state: 'waiting'; readonly seenAt: number; readonly message: string }
+  | { readonly state: 'cloned'; readonly message: string }
 
 export function cloneFixFor(os: string): string {
   return os === 'darwin'
@@ -33,20 +36,30 @@ export function cloneFixFor(os: string): string {
     : 'Give it its own machine id with sudo rm /etc/machine-id && sudo systemd-machine-id-setup, then restart it.'
 }
 
-export async function register(store: Store, device: Device, now = Date.now()): Promise<void> {
+const isoOf = (ms: number): string => new Date(ms).toISOString()
+
+export async function register(store: Store, device: Device, now = Date.now(), earlier?: Registration): Promise<Registration> {
   const key = `devices/${device.id}.json`
   const record = JSON.stringify({ name: device.name, os: device.os, arch: device.arch, ssh: device.name } satisfies DeviceRecord)
-  if ((await store.put(key, record, { ifNoneMatch: '*' })) !== undefined) return
+  if ((await store.put(key, record, { ifNoneMatch: '*' })) !== undefined) return { state: 'registered' }
   const taken = await store.get(key)
   if (taken === undefined) throw new Error(`R2 refused ${key} as taken, then answered that it does not exist.`)
-  const owner = JSON.parse(new TextDecoder().decode(taken.body)) as DeviceRecord
-  if (owner.name !== device.name && now - taken.modifiedAt < QUIET_BEFORE_RENAME_MS) {
-    const renamedAt = new Date(taken.modifiedAt + QUIET_BEFORE_RENAME_MS).toISOString()
-    throw new ClonedDevice(
-      `This machine, ${device.name}, has the id of ${owner.name}, which ran anyhost at ${new Date(taken.modifiedAt).toISOString()}, as a machine cloned from it does, so anyhost does not run here. ${cloneFixFor(device.os)} If you renamed ${owner.name} to ${device.name}, anyhost takes the new name once ${owner.name} has been quiet for 10 minutes, from ${renamedAt}.`,
-    )
+  const owner = (JSON.parse(new TextDecoder().decode(taken.body)) as DeviceRecord).name
+  if (owner !== device.name && now - taken.modifiedAt < QUIET_BEFORE_RENAME_MS) {
+    if (earlier?.state === 'cloned' || (earlier?.state === 'waiting' && taken.modifiedAt > earlier.seenAt)) {
+      return {
+        state: 'cloned',
+        message: `This machine, ${device.name}, has the id of ${owner}, which still runs anyhost and wrote at ${isoOf(taken.modifiedAt)}, as a machine cloned from it does, so anyhost captures nothing here. ${cloneFixFor(device.os)}`,
+      }
+    }
+    return {
+      state: 'waiting',
+      seenAt: earlier?.state === 'waiting' ? earlier.seenAt : taken.modifiedAt,
+      message: `${device.name} has the id registered as ${owner}, which ran anyhost at ${isoOf(taken.modifiedAt)}. A renamed machine's old name goes quiet, so anyhost takes the name ${device.name} at ${isoOf(taken.modifiedAt + QUIET_BEFORE_RENAME_MS)} by itself, and captures nothing until then.`,
+    }
   }
   if ((await store.put(key, record, { ifMatch: taken.etag })) === undefined) throw new Error(`${key} changed while ${device.name} registered. anyhost registers it again on its next pass.`)
+  return { state: 'registered' }
 }
 
 export async function devicesOf(store: Store): Promise<Map<string, DeviceRecord>> {

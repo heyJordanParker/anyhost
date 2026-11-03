@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test'
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { captureFiles, merge, mergeQuiet, openDatabase, segmentPrefix, uploadFile, type Capture } from '../src/capture.ts'
+import { captureFiles, merge, mergeQuiet, openDatabase, segmentPrefix, uploadFile, type Capture, type Problems } from '../src/capture.ts'
 import { takeClaim } from '../src/claims.ts'
 import { chainOf, downloadSession } from '../src/sessions.ts'
-import { summarize, type Root, type Summary } from '../src/transcript.ts'
+import { placementOf, summarize, type Root, type Summary } from '../src/transcript.ts'
 import { memoryStore, temporaryFolder } from './memory.ts'
 
 const SESSION = '11111111-2222-3333-4444-555555555555'
@@ -17,8 +17,11 @@ const lines = [
 
 const emptySummary: Summary = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '' }
 
-const failTest =(error: unknown): never => {
-  throw error
+const failTest: Problems = {
+  set: (_key, error) => {
+    throw error
+  },
+  clear: () => undefined,
 }
 
 function transcript() {
@@ -97,19 +100,44 @@ test('a device whose session another device claimed uploads nothing more of it',
   expect(store.puts.filter(({ key }) => key.endsWith('.jsonl')).map(({ key }) => key)).toEqual([`sessions/device-a/${SESSION}/0-${Buffer.byteLength(lines[0] ?? '')}.jsonl`])
 })
 
-test('a backlog file the pass has no time left for waits for the next pass', async () => {
-  const { root, path, store, capture } = transcript()
-  writeFileSync(path, lines.join(''))
-
-  expect(await captureFiles(capture, new Map([[path, root]]), failTest, { parallel: 4, until: Date.now() - 1 })).toEqual(new Map([[path, root]]))
-  expect(store.puts).toEqual([])
-})
 
 test("the transcript follows the longest chain, past bytes the old holder wrote after the move", () => {
   const session = (device: string, start: number, end: number) => ({ key: `sessions/${device}/${SESSION}/${start}-${end}.jsonl`, start, end })
   const chain = chainOf([session('a', 0, 100), session('a', 100, 150), session('a', 150, 170), session('b', 100, 130), session('b', 130, 400)])
 
   expect(chain.map(({ key }) => key)).toEqual([`sessions/a/${SESSION}/0-100.jsonl`, `sessions/b/${SESSION}/100-130.jsonl`, `sessions/b/${SESSION}/130-400.jsonl`])
+})
+
+test('a file whose upload failed leaves the problems once it uploads', async () => {
+  const { root, path, store, capture } = transcript()
+  writeFileSync(path, lines.join(''))
+  const current = new Map<string, unknown>()
+  const problems: Problems = { set: (key, error) => void current.set(key, error), clear: (key) => void current.delete(key) }
+  const offline: Capture = { ...capture, store: { ...store, put: () => Promise.reject(new Error('connect ECONNREFUSED')) } }
+
+  expect(await captureFiles(offline, new Map([[path, root]]), problems)).toEqual(new Map([[path, root]]))
+  expect([...current.keys()]).toEqual([path])
+  expect(await captureFiles(capture, new Map([[path, root]]), problems)).toEqual(new Map())
+  expect(current).toEqual(new Map())
+})
+
+test('a session id in two project folders keeps both files, and resume places each back', async () => {
+  const { root, path, store, capture } = transcript()
+  const marker = `{"type":"history-suppression","sessionId":"${SESSION}","cause":"fork_inherit","ts":"2026-09-20T14:57:16.464Z"}\n`
+  const other = join(root.folder, '-nowhere-other', `${SESSION}.jsonl`)
+  mkdirSync(join(root.folder, '-nowhere-other'), { recursive: true })
+  writeFileSync(path, lines.join(''))
+  writeFileSync(other, marker)
+  await uploadFile(capture, root, path)
+  await uploadFile(capture, root, other)
+
+  const downloaded = await downloadSession(store, [device.id], SESSION)
+  expect([...downloaded.keys()].sort()).toEqual([SESSION, `${SESSION}/@-nowhere-other`])
+  expect(new TextDecoder().decode(downloaded.get(SESSION))).toBe(lines.join(''))
+  expect(new TextDecoder().decode(downloaded.get(`${SESSION}/@-nowhere-other`))).toBe(marker)
+  expect(placementOf(SESSION, '/work/trip', '/home/b')).toBe(`/home/b/.claude/projects/-work-trip/${SESSION}.jsonl`)
+  expect(placementOf(`${SESSION}/@-nowhere-other`, '/work/trip', '/home/b')).toBe(`/home/b/.claude/projects/-nowhere-other/${SESSION}.jsonl`)
+  expect(placementOf(`${SESSION}/subagents/agent-x`, '/work/trip', '/home/b')).toBe(`/home/b/.claude/projects/-work-trip/${SESSION}/subagents/agent-x.jsonl`)
 })
 
 test('a line still being written waits for its end', async () => {

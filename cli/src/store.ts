@@ -3,6 +3,8 @@ import { loadSharedConfigFiles } from '@smithy/core/config'
 
 export const PROFILE = 'r2'
 export const BUCKET = process.env['ANYHOST_BUCKET'] ?? 'anyhost'
+const CONNECT_MS = 10_000
+const REQUEST_MS = 120_000
 
 export type Stored = { readonly body: Uint8Array; readonly etag: string; readonly modifiedAt: number }
 export type Listed = { readonly key: string; readonly size: number }
@@ -15,6 +17,8 @@ export type Store = {
   delete(keys: readonly string[]): Promise<void>
 }
 
+export const messageOf = (error: unknown): string => (error instanceof AggregateError ? error.errors.map(String).join(', ') : String(error))
+
 const statusOf = (error: unknown): number | undefined => (error instanceof S3ServiceException ? error.$metadata.httpStatusCode : undefined)
 
 export async function profileOf(): Promise<{ readonly endpoint: string | undefined; readonly hasKeys: boolean }> {
@@ -26,7 +30,7 @@ export async function profileOf(): Promise<{ readonly endpoint: string | undefin
 async function clientOf(): Promise<S3Client> {
   const { endpoint } = await profileOf()
   if (endpoint === undefined) throw new Error(`The AWS profile ${PROFILE} names no endpoint_url, so anyhost cannot reach R2. anyhost doctor prints the fix.`)
-  return new S3Client({ profile: PROFILE, endpoint })
+  return new S3Client({ profile: PROFILE, endpoint, requestHandler: { connectionTimeout: CONNECT_MS, requestTimeout: REQUEST_MS, throwOnRequestTimeout: true } })
 }
 
 export function r2Store(bucket = BUCKET): Store {
