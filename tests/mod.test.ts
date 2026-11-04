@@ -3,22 +3,23 @@ import type { HookStream, ProcessSpawnChunk, ProcessSpawnRequest, ProcessSpawnRe
 import { testMod } from '../node_modules/@cmodjs/core/testing.js'
 import { anyhost } from '../src/mod.js'
 
-function running(address: string): HookStream<ProcessSpawnChunk, ProcessSpawnResult> {
+// `cmod program --service` loads the service, says `held` and ends, and the session reads the address the service
+// wrote to its instance file.
+function held(): HookStream<ProcessSpawnChunk, ProcessSpawnResult> {
   async function* read(): AsyncGenerator<ProcessSpawnChunk, ProcessSpawnResult> {
-    yield { stream: 'stdout', text: `${address}\n` }
-    await new Promise(() => undefined)
+    yield { stream: 'stdout', text: 'held\n' }
     return { code: 0, signal: null }
   }
-  return Object.assign(read(), { result: new Promise<ProcessSpawnResult>(() => undefined) }) as HookStream<ProcessSpawnChunk, ProcessSpawnResult>
+  return Object.assign(read(), { result: Promise.resolve<ProcessSpawnResult>({ code: 0, signal: null }) }) as HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 }
 
 function withHolder(holder: { machine?: string; problem?: string; untold?: string }, status = 200) {
-  const tested = testMod(anyhost)
+  const tested = testMod(anyhost, { files: { '/test/home/.local/share/cmod/instances/anyhost/anyhost.json': '{"address":"127.0.0.1:4100"}' } })
   const spawned: ProcessSpawnRequest[] = []
   const fetched: string[] = []
   tested.fakes.process.spawn = (request) => {
     spawned.push(request)
-    return running('127.0.0.1:4100')
+    return held()
   }
   tested.fakes.http.fetch = async (url) => {
     fetched.push(url)
@@ -27,13 +28,17 @@ function withHolder(holder: { machine?: string; problem?: string; untold?: strin
   return { tested, spawned, fetched }
 }
 
-test('the mod runs one anyhost program for the machine, with the machine in its environment', async () => {
+test('the mod runs the anyhost program as a service of the computer, with the machine in its environment', async () => {
   const { tested, spawned } = withHolder({})
   await tested.start()
 
   expect(spawned).toEqual([
     {
-      argv: ['/test/home/.local/share/cmod/programs/cmod', 'program', 'anyhost', '--no-wait', '--', 'anyhost', 'serve'],
+      argv: [
+        '/test/home/.local/share/cmod/programs/cmod', 'program', 'anyhost', '--service',
+        '--env', 'ANYHOST_DEVICE_ID', '--env', 'ANYHOST_DEVICE_NAME', '--env', 'ANYHOST_DEVICE_OS', '--env', 'ANYHOST_DEVICE_ARCH',
+        '--', 'anyhost', 'serve',
+      ],
       env: { ANYHOST_DEVICE_ID: '5f0e8c2a9b7d4e31a6c4d2b0e8f71a93', ANYHOST_DEVICE_NAME: 'test-computer', ANYHOST_DEVICE_OS: 'linux', ANYHOST_DEVICE_ARCH: 'x64', CLAUDE_CODE_SESSION_ID: 'test-session' },
     },
   ])

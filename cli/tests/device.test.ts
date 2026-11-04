@@ -45,13 +45,13 @@ test('a cloned device id is refused with the machine-id fix once the original wr
 
 test('a cloned Mac is refused with the hardware UUID fix', async () => {
   const store = memoryStore()
-  const mac = { id: '6649fe3715ce42ba91d9ea8ff5b8f67f', name: 'Jordans-M2-MBP', os: 'darwin', arch: 'arm64' }
+  const mac = { id: '9c3d7a1e5b2f4c8d0e6a1b7f3c9d2e4a', name: 'Adas-MacBook-Pro', os: 'darwin', arch: 'arm64' }
   await register(store, mac, roots, store.now)
-  const waiting = await register(store, { ...mac, name: 'Jordans-VM' }, roots, store.now)
+  const waiting = await register(store, { ...mac, name: 'Adas-VM' }, roots, store.now)
   store.now += MINUTE
   await register(store, mac, roots, store.now)
 
-  expect(await register(store, { ...mac, name: 'Jordans-VM' }, roots, store.now, waiting)).toMatchObject({
+  expect(await register(store, { ...mac, name: 'Adas-VM' }, roots, store.now, waiting)).toMatchObject({
     state: 'cloned',
     message: expect.stringContaining('Give this virtual Mac its own hardware UUID in its virtualization app, then restart it.'),
   })

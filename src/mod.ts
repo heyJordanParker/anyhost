@@ -26,11 +26,12 @@ export const anyhost = defineMod({
 
   async setup(mod) {
     const here = await device.read()
+    // a service of the computer, so capture runs from login on, with no Claude Code open
     const capture = mod.use(
       program({
         command: ['anyhost', 'serve'],
         environment: { ANYHOST_DEVICE_ID: here.id, ANYHOST_DEVICE_NAME: here.name, ANYHOST_DEVICE_OS: here.os, ANYHOST_DEVICE_ARCH: here.arch },
-        singleInstance: true,
+        isService: true,
       }),
     )
     const shown = new Set<string>()

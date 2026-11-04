@@ -10,7 +10,7 @@ import type { Store } from '../src/store.ts'
 import { memoryStore, noCode, noRelease, temporaryFolder } from './memory.ts'
 
 const mac: Device = { id: 'device-mac', name: 'mac', os: 'darwin', arch: 'arm64' }
-const devbox: Device = { id: 'device-devbox', name: 'devbox', os: 'linux', arch: 'x64' }
+const server: Device = { id: 'device-server', name: 'server', os: 'linux', arch: 'x64' }
 const failTest: Problems = {
   set: (_key, error) => {
     throw error
@@ -37,13 +37,13 @@ async function captured(store: Store, device: Device, session: string, prompt: s
 test('the index lists sessions of two devices', async () => {
   const store = memoryStore()
   await captured(store, mac, 'aaaaaaaa-0000-0000-0000-000000000001', 'Plan the release')
-  await captured(store, devbox, 'bbbbbbbb-0000-0000-0000-000000000002', 'Fix the deploy')
-  await takeClaim(store, 'aaaaaaaa-0000-0000-0000-000000000001', devbox.id, { take: false })
+  await captured(store, server, 'bbbbbbbb-0000-0000-0000-000000000002', 'Fix the deploy')
+  await takeClaim(store, 'aaaaaaaa-0000-0000-0000-000000000001', server.id, { take: false })
 
   const listed = (await listSessions(store)).map(({ id, tool, machine, holder, firstPrompt, cwd }) => ({ id, tool, machine, holder, firstPrompt, cwd }))
   expect(listed.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
-    { id: 'aaaaaaaa-0000-0000-0000-000000000001', tool: 'claude', machine: 'mac', holder: 'devbox', firstPrompt: 'Plan the release', cwd: '/work' },
-    { id: 'bbbbbbbb-0000-0000-0000-000000000002', tool: 'claude', machine: 'devbox', holder: '', firstPrompt: 'Fix the deploy', cwd: '/work' },
+    { id: 'aaaaaaaa-0000-0000-0000-000000000001', tool: 'claude', machine: 'mac', holder: 'server', firstPrompt: 'Plan the release', cwd: '/work' },
+    { id: 'bbbbbbbb-0000-0000-0000-000000000002', tool: 'claude', machine: 'server', holder: '', firstPrompt: 'Fix the deploy', cwd: '/work' },
   ])
 })
 
@@ -52,26 +52,26 @@ test("a claimed session lists the holder's entry, even when the old holder wrote
   const session = 'aaaaaaaa-0000-0000-0000-000000000001'
   const entry = { id: session, tool: 'claude', title: '', firstPrompt: 'Plan the release', cwd: '/work', repo: '', repoFolder: '', entrypoint: 'cli', size: 10 }
   await register(store, mac, machine(mac, store).roots)
-  await register(store, devbox, machine(devbox, store).roots)
+  await register(store, server, machine(server, store).roots)
   await store.put(`sessions/${mac.id}/index.json`, JSON.stringify([{ ...entry, lastActivity: '2026-11-03T12:45:00.000Z' }]))
-  await store.put(`sessions/${devbox.id}/index.json`, JSON.stringify([{ ...entry, cwd: '/home/devbox/work', lastActivity: '2026-11-03T12:44:00.000Z' }]))
-  await takeClaim(store, session, devbox.id, { take: false })
+  await store.put(`sessions/${server.id}/index.json`, JSON.stringify([{ ...entry, cwd: '/home/server/work', lastActivity: '2026-11-03T12:44:00.000Z' }]))
+  await takeClaim(store, session, server.id, { take: false })
 
-  expect((await listSessions(store)).map(({ machine, holder, cwd, entrypoint }) => ({ machine, holder, cwd, entrypoint }))).toEqual([{ machine: 'devbox', holder: 'devbox', cwd: '/home/devbox/work', entrypoint: 'cli' }])
+  expect((await listSessions(store)).map(({ machine, holder, cwd, entrypoint }) => ({ machine, holder, cwd, entrypoint }))).toEqual([{ machine: 'server', holder: 'server', cwd: '/home/server/work', entrypoint: 'cli' }])
 })
 
 test('a claim held by another device refuses resume without --take', async () => {
   const store = memoryStore()
   const session = 'aaaaaaaa-0000-0000-0000-000000000001'
   await captured(store, mac, session, 'Plan the release')
-  const { capture, roots } = machine(devbox, store)
-  await register(store, devbox, roots)
+  const { capture, roots } = machine(server, store)
+  await register(store, server, roots)
   await takeClaim(store, session, mac.id, { take: false })
 
   await expect(restore(capture, session, { take: false })).rejects.toThrow(`This session continues on mac. Run anyhost resume ${session} --take to continue it here.`)
-  await expect(takeClaim(store, session, devbox.id, { take: false })).rejects.toBeInstanceOf(HeldElsewhere)
-  await takeClaim(store, session, devbox.id, { take: true })
-  expect(JSON.parse(new TextDecoder().decode(store.objects.get(`claims/${session}.json`)?.body)).device).toBe(devbox.id)
+  await expect(takeClaim(store, session, server.id, { take: false })).rejects.toBeInstanceOf(HeldElsewhere)
+  await takeClaim(store, session, server.id, { take: true })
+  expect(JSON.parse(new TextDecoder().decode(store.objects.get(`claims/${session}.json`)?.body)).device).toBe(server.id)
 })
 
 test('restore gives restoreCode the last code header and its parts, places no part as a file, and continues in the folder it answers', async () => {
@@ -99,15 +99,15 @@ test('restore gives restoreCode the last code header and its parts, places no pa
 
   const worktree = join(home, 'work', 'shop-eeeeeeee')
   const given: string[] = []
-  const b = machine(devbox, store, home)
-  const restorer = openCapture(store, devbox, b.roots, b.capture.db, {
+  const b = machine(server, store, home)
+  const restorer = openCapture(store, server, b.roots, b.capture.db, {
     captureCode: async () => undefined,
     restoreCode: async (header, readPart, folder) => {
       given.push(new TextDecoder().decode(header), new TextDecoder().decode(await readPart(part.path)), folder)
       return worktree
     },
   })
-  await register(store, devbox, b.roots)
+  await register(store, server, b.roots)
   const { cwd: continued } = await restore(restorer, session, { take: false, release: noRelease })
 
   expect(given).toEqual(['header 2', 'a bundle', cwd])
@@ -120,8 +120,8 @@ test('a new session is listed with its working folder by its first upload, so a 
   const store = memoryStore()
   const session = '99999999-0000-4000-8000-000000000009'
   const home = join(temporaryFolder(), 'home')
-  const cwd = join(home, 'Developer', 'anyhost')
-  const transcript = join(home, '.claude', 'projects', '-Developer-anyhost', `${session}.jsonl`)
+  const cwd = join(home, 'work', 'anyhost')
+  const transcript = join(home, '.claude', 'projects', '-work-anyhost', `${session}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   mkdirSync(cwd, { recursive: true })
   const a = machine(mac, store, home)
@@ -136,9 +136,9 @@ test('a new session is listed with its working folder by its first upload, so a 
 
   expect((await listSessions(store)).map(({ id, cwd: listed }) => ({ id, cwd: listed }))).toEqual([{ id: session, cwd }])
   const given: string[] = []
-  const b = machine(devbox, store, home)
-  const restorer = openCapture(store, devbox, b.roots, b.capture.db, { captureCode: async () => undefined, restoreCode: async (_header, _readPart, folder) => (given.push(folder), folder) })
-  await register(store, devbox, b.roots)
+  const b = machine(server, store, home)
+  const restorer = openCapture(store, server, b.roots, b.capture.db, { captureCode: async () => undefined, restoreCode: async (_header, _readPart, folder) => (given.push(folder), folder) })
+  await register(store, server, b.roots)
   await restore(restorer, session, { take: true, release: noRelease })
   expect(given).toEqual([cwd])
 })
@@ -150,7 +150,7 @@ test("restore onto another home rewrites the writer's paths, and a /rewind backu
   const second = join(temporaryFolder(), 'bob')
   const encoded = (path: string): string => path.replace(/[^a-zA-Z0-9]/g, '-')
   const a = machine(mac, store, first)
-  const b = machine(devbox, store, second)
+  const b = machine(server, store, second)
   const at = (home: string) => ({
     transcript: join(home, '.claude', 'projects', encoded(join(home, 'work', 'shop')), `${session}.jsonl`),
     plan: join(home, '.claude', 'plans', 'shop.md'),
@@ -170,7 +170,7 @@ test("restore onto another home rewrites the writer's paths, and a /rewind backu
   writeFileSync(there.planBackup, plan)
   writeFileSync(there.notesBackup, `notes kept at ${first}/work/shop\n`)
   await register(store, mac, a.roots)
-  await register(store, devbox, b.roots)
+  await register(store, server, b.roots)
   await uploadSession(a.capture, session, 'claude', new Set(Object.values(there)), failTest)
   await writeIndex(a.capture)
 
@@ -228,8 +228,8 @@ test('a session restores on another machine byte for byte from R2 alone, and tha
   writeFileSync(join(home, 'unrelated'), '')
   mkdirSync(claude)
   writeFileSync(history, `{"display":"here before","project":"/work","sessionId":"${other}"}\n`)
-  const b = machine(devbox, store, home)
-  await register(store, devbox, b.roots)
+  const b = machine(server, store, home)
+  await register(store, server, b.roots)
   const { cwd: continued } = await restore(b.capture, session, { take: false, release: noRelease })
 
   expect(continued).toBe(cwd)
@@ -238,19 +238,19 @@ test('a session restores on another machine byte for byte from R2 alone, and tha
   const end = journalOf(b.capture.db, session)?.end ?? 0
   expect(end).toBeGreaterThan(0)
 
-  appendFileSync(transcript, line('Continue on devbox'))
+  appendFileSync(transcript, line('Continue on server'))
   await uploadSession(b.capture, session, 'claude', new Set([transcript]), failTest)
   expect(store.objects.has(`journals/${session}/hot/${String(end).padStart(16, '0')}.zst`)).toBe(true)
   const replayed = await downloadJournal(store, session, temporaryFolder(), ({ path }) => path)
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '').equals(readFileSync(transcript))).toBe(true)
-  expect(replayed.files.get(transcript)?.segments.map(({ device }) => device)).toEqual([mac.id, mac.id, mac.id, devbox.id])
+  expect(replayed.files.get(transcript)?.segments.map(({ device }) => device)).toEqual([mac.id, mac.id, mac.id, server.id])
 })
 
 test("a session comes back to a machine that kept a longer copy, although the history its last writer had holds a prompt the journal never got", async () => {
   const store = memoryStore()
   const session = '88888888-0000-4000-8000-000000000008'
   const a = machine(mac, store)
-  const b = machine(devbox, store)
+  const b = machine(server, store)
   const at = (home: string) => ({ transcript: join(home, '.claude', 'projects', '-work', `${session}.jsonl`), history: join(home, '.claude', 'history.jsonl') })
   const prompt = (text: string): string => `{"display":"${text}","project":"/work","sessionId":"${session}"}\n`
   const there = at(a.roots.home)
@@ -258,13 +258,13 @@ test("a session comes back to a machine that kept a longer copy, although the hi
   writeFileSync(there.transcript, `{"type":"user","message":{"role":"user","content":"Plan the release"},"cwd":${JSON.stringify(join(a.roots.home, 'work'))},"sessionId":"${session}"}\n`)
   writeFileSync(there.history, prompt('Plan the release'))
   await register(store, mac, a.roots)
-  await register(store, devbox, b.roots)
+  await register(store, server, b.roots)
   await uploadSession(a.capture, session, 'claude', new Set(Object.values(there)), failTest)
   await writeIndex(a.capture)
-  // devbox refused this prompt while mac held the session, and its history keeps it
+  // server refused this prompt while mac held the session, and its history keeps it
   const here = at(b.roots.home)
   mkdirSync(dirname(here.history), { recursive: true })
-  writeFileSync(here.history, prompt('Refused on devbox'))
+  writeFileSync(here.history, prompt('Refused on server'))
   await restore(b.capture, session, { take: true, release: noRelease })
   appendFileSync(here.history, prompt('Ship it'))
   await uploadSession(b.capture, session, 'claude', new Set([here.history]), failTest)
@@ -282,7 +282,7 @@ test('a plan and a task the session deleted stay gone after a restore, also on a
   const store = memoryStore()
   const session = '66666666-0000-4000-8000-000000000006'
   const a = machine(mac, store)
-  const b = machine(devbox, store)
+  const b = machine(server, store)
   const at = (home: string) => ({
     transcript: join(home, '.claude', 'projects', '-work', `${session}.jsonl`),
     task: join(home, '.claude', 'tasks', session, '1.json'),
@@ -294,13 +294,13 @@ test('a plan and a task the session deleted stay gone after a restore, also on a
   writeFileSync(there.task, '{"subject":"book the train"}')
   writeFileSync(there.plan, '# Trip\n')
   await register(store, mac, a.roots)
-  await register(store, devbox, b.roots)
+  await register(store, server, b.roots)
   await uploadSession(a.capture, session, 'claude', new Set(Object.values(there)), failTest)
   await writeIndex(a.capture)
   await restore(b.capture, session, { take: true, release: noRelease })
   const here = at(b.roots.home)
   expect([existsSync(here.task), existsSync(here.plan)]).toEqual([true, true])
-  // devbox's /rewind takes the plan back and Claude Code deletes the task
+  // server's /rewind takes the plan back and Claude Code deletes the task
   rmSync(here.plan)
   rmSync(here.task)
   await uploadSession(b.capture, session, 'claude', new Set([here.plan, here.task]), failTest)
@@ -321,8 +321,8 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
   const home = join(temporaryFolder(), 'home')
   const a = machine(mac, store, home)
   const writer = openCapture(store, mac, a.roots, a.capture.db, { captureCode: async () => ({ header: new TextEncoder().encode('header'), parts: [] }), restoreCode: async () => '' })
-  const cwd = join(home, 'Developer', 'shop')
-  const transcript = join(home, '.claude', 'projects', '-Developer-shop', `${session}.jsonl`)
+  const cwd = join(home, 'work', 'shop')
+  const transcript = join(home, '.claude', 'projects', '-work-shop', `${session}.jsonl`)
   for (const folder of [cwd, dirname(transcript)]) mkdirSync(folder, { recursive: true })
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Ship it"},"cwd":${JSON.stringify(cwd)},"sessionId":"${session}"}\n`)
   await register(store, mac, a.roots)
@@ -335,10 +335,10 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
 
   const restoredInto = async (setUp: (folder: string, capture: Capture) => Promise<void>, checkouts?: string): Promise<string> => {
     const folder = join(temporaryFolder(), 'bob')
-    const b = machine(devbox, store, folder)
+    const b = machine(server, store, folder)
     const given: string[] = []
-    const restorer = openCapture(store, devbox, b.roots, b.capture.db, { captureCode: async () => undefined, restoreCode: async (_header, _readPart, at) => (given.push(at), at) })
-    await register(store, devbox, b.roots)
+    const restorer = openCapture(store, server, b.roots, b.capture.db, { captureCode: async () => undefined, restoreCode: async (_header, _readPart, at) => (given.push(at), at) })
+    await register(store, server, b.roots)
     await setUp(folder, restorer)
     await restore(restorer, session, { take: true, release: noRelease, ...(checkouts === undefined ? {} : { checkouts: checkouts.replace('<home>', folder) }) })
     return (given[0] ?? '').replace(folder, '<home>')
@@ -358,7 +358,7 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
   expect(await restoredInto(withCheckouts, '<home>/src')).toBe('<home>/src/shop')
 })
 
-// The session mac captures, which devbox then takes over, telling mac with `releaseOn(mac's capture)`.
+// The session mac captures, which server then takes over, telling mac with `releaseOn(mac's capture)`.
 async function takenOver(releaseOn: (old: Capture) => Release) {
   const store = memoryStore()
   const session = '77777777-0000-4000-8000-000000000007'
@@ -370,8 +370,8 @@ async function takenOver(releaseOn: (old: Capture) => Release) {
   await register(store, mac, old.roots)
   await uploadSession(old.capture, session, 'claude', new Set([transcript]), failTest)
   await writeIndex(old.capture)
-  const taker = machine(devbox, store)
-  await register(store, devbox, taker.roots)
+  const taker = machine(server, store)
+  await register(store, server, taker.roots)
   await restore(taker.capture, session, { take: true, release: releaseOn(old.capture) })
   appendFileSync(transcript, line('Keep going'))
   return { store, session, old, transcript, taker }
@@ -390,10 +390,10 @@ test('a takeover refuses the first prompt on the old machine with R2 stalled for
   Object.assign(store, { get: stalled, put: stalled, list: stalled })
 
   const asked = performance.now()
-  expect(journalOf(old.capture.db, session)?.holder).toBe('devbox')
+  expect(journalOf(old.capture.db, session)?.holder).toBe('server')
   expect(await uploadSession(old.capture, session, 'claude', new Set([transcript]), failTest)).toEqual(new Set())
   expect(performance.now() - asked).toBeLessThan(100)
-  expect(said).toEqual([`mac ${session} devbox`])
+  expect(said).toEqual([`mac ${session} server`])
 })
 
 test('a machine the takeover could not reach learns it at its next start, before it captures, and the session opened says so once', async () => {
@@ -402,7 +402,7 @@ test('a machine the takeover could not reach learns it at its next start, before
   expect([takeUntold(taker.capture.db, session), takeUntold(taker.capture.db, session)]).toEqual(['mac', ''])
 
   await checkHolders(old.capture)
-  expect(journalOf(old.capture.db, session)).toMatchObject({ holder: 'devbox', stopped: expect.stringContaining('devbox took the session') })
+  expect(journalOf(old.capture.db, session)).toMatchObject({ holder: 'server', stopped: expect.stringContaining('server took the session') })
 })
 
 test('an upload of a session another machine took over stops its capture and names that machine', async () => {
@@ -410,6 +410,6 @@ test('an upload of a session another machine took over stops its capture and nam
   const frames = [...store.objects.keys()].filter((key) => key.startsWith(`journals/${session}/`)).length
 
   expect(await uploadSession(old.capture, session, 'claude', new Set([transcript]), failTest)).toEqual(new Set())
-  expect(journalOf(old.capture.db, session)).toMatchObject({ holder: 'devbox', stopped: expect.stringContaining('devbox took the session') })
+  expect(journalOf(old.capture.db, session)).toMatchObject({ holder: 'server', stopped: expect.stringContaining('server took the session') })
   expect([...store.objects.keys()].filter((key) => key.startsWith(`journals/${session}/`)).length).toBe(frames)
 })

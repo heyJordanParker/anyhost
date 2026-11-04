@@ -6,7 +6,7 @@ import { BUCKET, messageOf, PROFILE, profileOf, type Store } from './store.ts'
 
 type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
 
-const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod starts the anyhost program, which records and registers this machine.'
+const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod makes the anyhost program a service of the machine, which registers it and records its sessions from each login on.'
 
 async function profileCheck(): Promise<Check> {
   const config = process.env['AWS_CONFIG_FILE'] ?? join(homedir(), '.aws', 'config')

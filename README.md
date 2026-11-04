@@ -4,9 +4,9 @@
 
 ```text
 $ anyhost list
-SESSION                               TOOL    ENTRYPOINT  MACHINE    HOLDER     LAST ACTIVITY     REPOSITORY             FOLDER                TITLE           FIRST PROMPT
-3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4  claude  cli         devbox     -          2026-11-03 14:02  heyJordanParker/shop   ~/Developer/shop      Checkout retry  Make the checkout retry a declined card once…
-8e41d0aa-52b3-4f1e-a9c6-0b7d3e9f2c11  codex   cli         mac        -          2026-11-03 13:40  heyJordanParker/blog   ~/Developer/blog      -               Draft the post about the release…
+SESSION                               TOOL    ENTRYPOINT  MACHINE  HOLDER  LAST ACTIVITY     REPOSITORY  FOLDER       TITLE           FIRST PROMPT
+3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4  claude  cli         server   -       2026-11-03 14:02  acme/shop   ~/code/shop  Checkout retry  Make the checkout retry a declined card once…
+8e41d0aa-52b3-4f1e-a9c6-0b7d3e9f2c11  codex   cli         laptop   -       2026-11-03 13:40  acme/blog   ~/code/blog  -               Draft the post about the release…
 
 $ anyhost resume 3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4
 ```
@@ -14,7 +14,7 @@ $ anyhost resume 3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4
 anyhost has two parts:
 
 - **The `anyhost` program**, one copy per machine. It uploads every file Claude Code and Codex keep for a session to R2 as it changes, and answers `anyhost list`, `anyhost resume` and `anyhost doctor`.
-- **A Claude Code mod** built with [cmod](https://github.com/heyJordanParker/cmod). It starts the program for the machine and stops a session that continues on another machine from taking prompts.
+- **A Claude Code mod** built with [cmod](https://github.com/heyJordanParker/cmod). It runs the program as a service of the machine, from each login on, and stops a session that continues on another machine from taking prompts.
 
 ## Install
 
@@ -50,7 +50,7 @@ npm install -g @cmodjs/cli
 cmod install heyJordanParker/anyhost
 ```
 
-cmod downloads the `anyhost` program from this repository's release, checks it against the release's `SHA256SUMS`, and links it into `~/.local/bin`. Start Claude Code: the mod starts the program, which registers the machine in R2 and uploads each session you work in. Run `anyhost doctor` to see that each part works.
+cmod downloads the `anyhost` program from this repository's release, checks it against the release's `SHA256SUMS`, and links it into `~/.local/bin`. Start Claude Code once: the mod makes the program a service of the machine, a launchd agent on macOS or a systemd user service on Linux, which starts at each login with no Claude Code open, registers the machine in R2, and uploads each session you work in, in Claude Code or Codex. Run `anyhost doctor` to see that each part works.
 
 ## Use it
 
@@ -85,7 +85,7 @@ journals/<session>/sealed/<start>-<end>.zst     the uploads of a session that we
 - Each upload claims its place in the journal. When two machines write the same place, one write wins, and the other machine stops uploading the session and logs that its lines from there are a fork.
 - No machine keeps a copy of another machine's sessions. `anyhost list` reads one index per machine, and `anyhost resume` downloads only the session it resumes.
 - The program keeps what it uploaded of each file in `~/.local/state/anyhost/anyhost.db`.
-- `ANYHOST_BUCKET` names another bucket, such as one for tests.
+- `ANYHOST_BUCKET` names another bucket, such as one for tests. The program's service reads it from the service manager, not from your shell or Claude Code: on Linux from a line `ANYHOST_BUCKET=<bucket>` in `~/.config/environment.d/anyhost.conf`, from your next login on, and on macOS from `launchctl setenv ANYHOST_BUCKET <bucket>`, until the Mac restarts.
 
 ## Documentation
 

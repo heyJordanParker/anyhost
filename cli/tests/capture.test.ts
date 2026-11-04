@@ -593,10 +593,10 @@ test("the working folder is the session's own, never a folder a tool call names"
   const claude = summarize(empty, `{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"cwd":"/elsewhere"}}]},"cwd":"/work/app"}\n`, 'claude')
   const codex = summarize(
     empty,
-    `{"timestamp":"2026-10-27T20:02:13.653Z","type":"session_meta","payload":{"id":"x","cwd":"/Users/jordan","source":"cli"}}\n{"timestamp":"2026-10-27T20:02:20.000Z","type":"response_item","payload":{"arguments":{"cwd":"file:///Users/jordan/other"}}}\n`,
+    `{"timestamp":"2026-10-27T20:02:13.653Z","type":"session_meta","payload":{"id":"x","cwd":"/Users/ada","source":"cli"}}\n{"timestamp":"2026-10-27T20:02:20.000Z","type":"response_item","payload":{"arguments":{"cwd":"file:///Users/ada/other"}}}\n`,
     'codex',
   )
-  expect([claude.cwd, codex.cwd, codex.entrypoint]).toEqual(['/work/app', '/Users/jordan', 'cli'])
+  expect([claude.cwd, codex.cwd, codex.entrypoint]).toEqual(['/work/app', '/Users/ada', 'cli'])
 })
 
 test("the index entry holds the session's title, first prompt, working folder and entrypoint", async () => {

@@ -5,6 +5,7 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 ## [Unreleased]
 
 ### Changed
+- The `anyhost` program runs as a service of the machine, a launchd agent on macOS or a systemd user service on Linux, so it captures from each login on, also sessions you work in with no Claude Code open, such as Codex's. The first Claude Code session after the update makes the service. `ANYHOST_BUCKET` now reaches the program from the service manager's environment, not from your shell or Claude Code's settings: the README says where to set it.
 - anyhost keeps each session's whole state, not only its transcript: subagents, saved tool output, the plan, the task list, `/rewind`'s checkpoints, background command output, the session's prompt history and pasted text, its environment, and the agent view's entry. A Codex session keeps its thread's entry and name too. `anyhost resume` puts every file back, so the session continues on another machine as it was.
 - Each write reaches R2 about a second after it happens, instead of within 30 seconds, also while the session's repository commits. An upload that fails tries again by itself after 1 second, then less often, up to once a minute.
 - A new session is listed on every machine about a second after its first write, instead of within a minute.
