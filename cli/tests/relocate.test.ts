@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { relocate, type Roots } from '../src/relocate.ts'
 
-const mac: Roots = { home: '/Users/alice', claudeTmp: '/private/tmp/claude-501', codexHome: '/Users/alice/.codex', checkout: '/Users/alice/code/app' }
-const linux: Roots = { home: '/home/al', claudeTmp: '/tmp/claude-1000', codexHome: '/home/al/.codex', checkout: '/home/al/src/app' }
+const mac: Roots = { home: '/Users/alice', claudeHome: '/Users/alice/.claude', claudeTmp: '/private/tmp/claude-501', codexHome: '/Users/alice/.codex', checkout: '/Users/alice/code/app' }
+const linux: Roots = { home: '/home/al', claudeHome: '/home/al/.claude', claudeTmp: '/tmp/claude-1000', codexHome: '/home/al/.codex', checkout: '/home/al/src/app' }
 
 const text = (bytes: Uint8Array): string => new TextDecoder().decode(bytes)
 const moved = (content: string, path = '/Users/alice/.claude/projects/-Users-alice-code-app/s.jsonl', from = mac, to = linux): string => text(relocate(new TextEncoder().encode(content), path, from, to).bytes)
@@ -29,7 +29,7 @@ test("a transcript line names this machine's home, temp root, checkout and proje
 })
 
 test('a root matches only at a path boundary', () => {
-  const from: Roots = { ...mac, home: '/Users/al', codexHome: '/Users/al/.codex', checkout: '/Users/al' }
+  const from: Roots = { ...mac, home: '/Users/al', claudeHome: '/Users/al/.claude', codexHome: '/Users/al/.codex', checkout: '/Users/al' }
   const content = '{"a":"/Users/alice /data/Users/al /Users/al.bak /Users/al-old -Users-alfred x-Users-al","b":"/Users/al","c":"\\n/Users/al/x","d":"file:///Users/al/y","e":"(/Users/al)"}\n'
 
   expect(moved(content, '/Users/al/.claude/history.jsonl', from)).toBe('{"a":"/Users/alice /data/Users/al /Users/al.bak /Users/al-old -Users-alfred x-Users-al","b":"/home/al","c":"\\n/home/al/x","d":"file:///home/al/y","e":"(/home/al)"}\n')
@@ -61,6 +61,16 @@ test("Codex's home moves on its own when it sits outside the home", () => {
 
   expect(moved.path).toBe('/srv/codex-al/sessions/r.jsonl')
   expect(text(moved.bytes)).toBe('{"type":"session_meta","payload":{"cwd":"/home/al/src/app","rollout":"/srv/codex-al/sessions/r.jsonl"}}\n')
+})
+
+test("Claude Code's folder moves on its own when CLAUDE_CONFIG_DIR puts it outside the home, and its backups keep their bytes", () => {
+  const to: Roots = { ...linux, claudeHome: '/srv/claude-al' }
+  const where = (path: string): string => relocate(new Uint8Array(), path, mac, to).path
+  const backup = new TextEncoder().encode('root=/Users/alice/.claude\n')
+
+  expect(where('/Users/alice/.claude/projects/-Users-alice-code-app/s.jsonl')).toBe('/srv/claude-al/projects/-home-al-src-app/s.jsonl')
+  expect(moved('{"plan":"/Users/alice/.claude/plans/p.md","home":"/Users/alice/notes"}\n', undefined, mac, to)).toBe('{"plan":"/srv/claude-al/plans/p.md","home":"/home/al/notes"}\n')
+  expect(relocate(backup, '/Users/alice/.claude/file-history/s/0a1b@v1', mac, to)).toEqual({ path: '/srv/claude-al/file-history/s/0a1b@v1', bytes: backup })
 })
 
 test("the state_5.sqlite row's JSON form names this machine's rollout, working folder and sandbox", () => {

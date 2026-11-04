@@ -3,7 +3,7 @@ import { register } from '../src/device.ts'
 import { memoryStore } from './memory.ts'
 
 const original = { id: '5f0e8c2a9b7d4e31a6c4d2b0e8f71a93', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
-const roots = { home: '/home/ada', claudeTmp: '/tmp/claude-1000', codexHome: '/home/ada/.codex' }
+const roots = { home: '/home/ada', claudeHome: '/home/ada/.claude', claudeTmp: '/tmp/claude-1000', codexHome: '/home/ada/.codex' }
 const MINUTE = 60_000
 const recordOf = (store: ReturnType<typeof memoryStore>): unknown => JSON.parse(new TextDecoder().decode(store.objects.get(`devices/${original.id}.json`)?.body))
 
@@ -12,7 +12,7 @@ test("a device registers once with its home folders, and its next start register
   expect(await register(store, original, roots, store.now)).toEqual({ state: 'registered' })
   expect(await register(store, original, roots, store.now)).toEqual({ state: 'registered' })
 
-  expect(recordOf(store)).toEqual({ name: 'anyhost-a', os: 'linux', arch: 'arm64', ssh: 'anyhost-a', home: '/home/ada', claudeTmp: '/tmp/claude-1000', codexHome: '/home/ada/.codex' })
+  expect(recordOf(store)).toEqual({ name: 'anyhost-a', os: 'linux', arch: 'arm64', ssh: 'anyhost-a', home: '/home/ada', claudeHome: '/home/ada/.claude', claudeTmp: '/tmp/claude-1000', codexHome: '/home/ada/.codex' })
 })
 
 test('a renamed device waits while its old name may still run, then takes the new name by itself', async () => {

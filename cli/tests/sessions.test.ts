@@ -7,7 +7,7 @@ import { register, type Device, type MachineRoots } from '../src/device.ts'
 import { restore, type Release } from '../src/resume.ts'
 import { downloadJournal, listSessions } from '../src/sessions.ts'
 import type { Store } from '../src/store.ts'
-import { memoryStore, noCode, noRelease, temporaryFolder } from './memory.ts'
+import { MEMORY, memoryStore, noCode, noRelease, temporaryFolder } from './memory.ts'
 
 const mac: Device = { id: 'device-mac', name: 'mac', os: 'darwin', arch: 'arm64' }
 const server: Device = { id: 'device-server', name: 'server', os: 'linux', arch: 'x64' }
@@ -19,9 +19,9 @@ const failTest: Problems = {
 }
 
 function machine(device: Device, store: Store, home = join(temporaryFolder(), 'home')) {
-  const roots: MachineRoots = { home, claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') }
+  const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') }
   // the same roots on both machines, where relocate places every byte as its writer wrote it
-  return { roots, capture: openCapture(store, device, roots, openDatabase(join(temporaryFolder(), 'state')), noCode) }
+  return { roots, capture: openCapture(store, device, roots, openDatabase(MEMORY, join(temporaryFolder(), 'state')), noCode) }
 }
 
 async function captured(store: Store, device: Device, session: string, prompt: string): Promise<void> {

@@ -1,19 +1,22 @@
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import type { Roots } from './relocate.ts'
 import type { Store } from './store.ts'
 
 export type Device = { readonly id: string; readonly name: string; readonly os: string; readonly arch: string }
 export type MachineRoots = Omit<Roots, 'checkout'>
-export type DeviceRecord = MachineRoots & { readonly name: string; readonly os: string; readonly arch: string; readonly ssh: string }
+// A record anyhost 0.1 wrote has no `claudeHome`: its Claude Code folder is `<home>/.claude`.
+export type DeviceRecord = Omit<MachineRoots, 'claudeHome'> & { readonly claudeHome?: string; readonly name: string; readonly os: string; readonly arch: string; readonly ssh: string }
 
 export const stateFolder = (): string => join(process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state'), 'anyhost')
 const cmodProgram = (): string => join(process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share'), 'cmod', 'programs', 'cmod')
 
-// Claude Code keeps background output under `/tmp/claude-<uid>`, which macOS resolves to `/private/tmp`.
+// Claude Code keeps its folder at `CLAUDE_CONFIG_DIR`, else `~/.claude`, and background output under `/tmp/claude-<uid>`,
+// which macOS resolves to `/private/tmp`.
 export const rootsHere = (home = homedir()): MachineRoots => ({
   home,
+  claudeHome: resolve(process.env['CLAUDE_CONFIG_DIR'] || join(home, '.claude')),
   claudeTmp: join(realpathSync(process.env['CLAUDE_CODE_TMPDIR'] || '/tmp'), `claude-${process.getuid?.() ?? 0}`),
   codexHome: process.env['CODEX_HOME'] || join(home, '.codex'),
 })
@@ -36,7 +39,7 @@ async function cmod(...args: string[]): Promise<string> {
 export const cmodDevice = async (): Promise<Device> => JSON.parse(await cmod('device', '--json')) as Device
 
 // The values the person set in /config. An option they never set is absent, and its default applies.
-type PersonOptions = { readonly uploadEvery?: number; readonly checkouts?: string }
+type PersonOptions = { readonly uploadEvery?: number; readonly checkouts?: string; readonly bucket?: string }
 export const personOptions = async (): Promise<PersonOptions> => (JSON.parse(await cmod('options', 'anyhost', '--json')) as { person: PersonOptions }).person
 
 export const QUIET_BEFORE_RENAME_MS = 10 * 60_000

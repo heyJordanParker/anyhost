@@ -14,11 +14,15 @@ export const noRelease: Release = async () => false
 
 export type MemoryStore = Store & { readonly objects: Map<string, Stored>; readonly puts: { key: string; body: Uint8Array }[]; now: number }
 
+// the bucket every memory store stands for
+export const MEMORY = 'memory'
+
 export function memoryStore(): MemoryStore {
   const objects = new Map<string, Stored>()
   const puts: { key: string; body: Uint8Array }[] = []
   let version = 0
   const store: MemoryStore = {
+    bucket: MEMORY,
     objects,
     puts,
     now: Date.now(),

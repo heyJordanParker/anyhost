@@ -22,7 +22,7 @@ You need:
 
 - macOS, or Linux with a machine id in `/etc/machine-id`, on arm64 or x64
 - [Claude Code](https://code.claude.com)
-- an R2 bucket named `anyhost` in your Cloudflare account, and an R2 API token that can read and write it
+- an R2 bucket named `anyhost` in your Cloudflare account, or another name you set as **R2 bucket** in `/config`, and an R2 API token that can read and write it
 - Node.js with npm, or Bun, to install cmod
 
 Give anyhost the R2 token as the AWS profile `r2`. `~/.aws/config` holds the endpoint:
@@ -85,7 +85,7 @@ journals/<session>/sealed/<start>-<end>.zst     the uploads of a session that we
 - Each upload claims its place in the journal. When two machines write the same place, one write wins, and the other machine stops uploading the session and logs that its lines from there are a fork.
 - No machine keeps a copy of another machine's sessions. `anyhost list` reads one index per machine, and `anyhost resume` downloads only the session it resumes.
 - The program keeps what it uploaded of each file in `~/.local/state/anyhost/anyhost.db`.
-- `ANYHOST_BUCKET` names another bucket, such as one for tests. The program's service reads it from the service manager, not from your shell or Claude Code: on Linux from a line `ANYHOST_BUCKET=<bucket>` in `~/.config/environment.d/anyhost.conf`, from your next login on, and on macOS from `launchctl setenv ANYHOST_BUCKET <bucket>`, until the Mac restarts.
+- **R2 bucket** in `/config` (the option `bucket`) names another bucket than `anyhost`, such as one for tests. Every machine names the same one. The program restarts on the new bucket within a minute of a change, and uploads each session from its first byte there once it changes again.
 
 ## Documentation
 

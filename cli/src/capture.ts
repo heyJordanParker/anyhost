@@ -6,7 +6,7 @@
 //   journals/<session>/hot/<start>.zst            one upload, written with If-None-Match: one writer wins each position
 //   journals/<session>/sealed/<start>-<end>.zst   the hot frames of a quiet session, up to 64 MiB each, never rewritten
 import { Database } from 'bun:sqlite'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import zlib from 'node:zlib'
@@ -77,16 +77,26 @@ type SessionRow = { id: string; tool: Tool; title: string; title_rank: number; f
 type Source = { readonly size: number; readonly mtime: number; read(from: number, to: number): Promise<Uint8Array> }
 type Change = { readonly header: RecordHeader; readonly bytes: Uint8Array; readonly state: FileState; readonly hasher: Bun.CryptoHasher; readonly isPartial: boolean }
 
-export function openDatabase(folder = stateFolder()): Database {
+// The database of what this machine uploaded to `bucket`. anyhost 0.1 kept per-device segment offsets here, which the
+// journal has no use for, and the journals' ends and the code parts uploaded count what one bucket holds, so a database
+// of another version or another bucket starts over, as does the record of code parts. A database from before the
+// bucket was kept counts as this bucket's.
+export function openDatabase(bucket: string, folder = stateFolder()): Database {
   mkdirSync(folder, { recursive: true })
   const db = new Database(join(folder, 'anyhost.db'))
   db.run('pragma journal_mode = wal')
   db.run('pragma busy_timeout = 5000')
-  // anyhost 0.1 kept per-device segment offsets here, which the journal has no use for.
-  if (db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version !== SCHEMA) {
+  db.run('create table if not exists bucket (name text not null)')
+  const kept = db.query<{ name: string }, []>('select name from bucket').get()?.name ?? bucket
+  if (db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version !== SCHEMA || kept !== bucket) {
     for (const table of ['files', 'sessions', 'journals', 'line_offsets']) db.run(`drop table if exists ${table}`)
+    rmSync(join(folder, 'code'), { recursive: true, force: true })
     db.run(`pragma user_version = ${SCHEMA}`)
   }
+  db.transaction(() => {
+    db.run('delete from bucket')
+    db.query('insert into bucket (name) values (?)').run(bucket)
+  })()
   // `untold` names the machine that held the session before this one took it and that ssh could not reach
   db.run(`create table if not exists journals (
     session text primary key, tool text not null, end integer not null default 0, sealed integer not null default 0,
@@ -110,7 +120,7 @@ export const openCapture = (
   store: Store,
   device: Device,
   roots: MachineRoots,
-  db = openDatabase(),
+  db = openDatabase(store.bucket),
   code: Code = { captureCode, restoreCode },
   onCode: Capture['onCode'] = () => undefined,
 ): Capture => ({ ...code, store, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), missingFolders: new Set(), onCode })

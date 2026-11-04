@@ -2,7 +2,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { cmodDevice, type DeviceRecord } from './device.ts'
 import type { Status } from './serve.ts'
-import { BUCKET, messageOf, PROFILE, profileOf, type Store } from './store.ts'
+import { messageOf, PROFILE, profileOf, type Store } from './store.ts'
 
 type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
 
@@ -23,9 +23,12 @@ async function profileCheck(): Promise<Check> {
 async function bucketCheck(store: Store): Promise<Check> {
   try {
     await store.list('devices/')
-    return { ok: `The bucket ${BUCKET} answers.` }
+    return { ok: `The bucket ${store.bucket} answers.` }
   } catch (error) {
-    return { problem: `The bucket ${BUCKET} did not answer: ${messageOf(error)}`, fix: `Check that the bucket exists in R2 and that the keys of the AWS profile ${PROFILE} can read and write it.` }
+    return {
+      problem: `The bucket ${store.bucket} did not answer: ${messageOf(error)}`,
+      fix: `Check that the bucket exists in R2 and that the keys of the AWS profile ${PROFILE} can read and write it, or choose another in /config (the option bucket).`,
+    }
   }
 }
 
@@ -33,8 +36,8 @@ async function deviceCheck(store: Store): Promise<Check> {
   const device = await cmodDevice().catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
   if (device instanceof Error) return { problem: `cmod device cannot name this machine: ${device.message}`, fix: 'Give the machine a machine id with sudo systemd-machine-id-setup, or install cmod with npm install -g @cmodjs/cli.' }
   const stored = await store.get(`devices/${device.id}.json`).catch((error: unknown) => new Error(messageOf(error)))
-  if (stored instanceof Error) return { problem: `${device.name}'s registration could not be read from ${BUCKET}: ${stored.message}`, fix: 'Fix what the bucket check names.' }
-  if (stored === undefined) return { problem: `${device.name} is not registered in ${BUCKET}.`, fix: START_CLAUDE }
+  if (stored instanceof Error) return { problem: `${device.name}'s registration could not be read from ${store.bucket}: ${stored.message}`, fix: 'Fix what the bucket check names.' }
+  if (stored === undefined) return { problem: `${device.name} is not registered in ${store.bucket}.`, fix: START_CLAUDE }
   const record = JSON.parse(new TextDecoder().decode(stored.body)) as DeviceRecord
   if (record.name === device.name) return { ok: `${device.name} is registered as ${device.id}.` }
   return { wait: `${device.id} is registered as ${record.name}, which ran anyhost at ${new Date(stored.modifiedAt).toISOString()}. The program's line says whether ${device.name} is that machine renamed or its clone.` }
@@ -52,7 +55,7 @@ async function programChecks(): Promise<Check[]> {
   const registration: Check =
     state === 'registered'
       ? {
-          ok: `The anyhost program runs at ${address}: it uploads ${status.uploadEvery === 0 ? 'every write' : `every ${status.uploadEvery} seconds`}, its last upload was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.`,
+          ok: `The anyhost program runs at ${address}: it uploads to ${status.bucket} ${status.uploadEvery === 0 ? 'every write' : `every ${status.uploadEvery} seconds`}, its last upload was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.`,
         }
       : state === 'waiting'
         ? { wait: `The anyhost program at ${address} waits: ${message}` }

@@ -87,7 +87,13 @@ async function writersOf(store: Store, devices: ReadonlyMap<string, DeviceRecord
   return (device) => {
     const record = devices.get(device)
     if (record?.home === undefined) throw new Error(`The session ${session.id} holds records of the device ${device}, and R2 holds no record of that device's home folders, so anyhost cannot rewrite its paths.`)
-    return { home: record.home, claudeTmp: record.claudeTmp, codexHome: record.codexHome, checkout: checkoutOfEntry(entries.get(device) ?? session, record.home) }
+    return {
+      home: record.home,
+      claudeHome: record.claudeHome ?? join(record.home, '.claude'),
+      claudeTmp: record.claudeTmp,
+      codexHome: record.codexHome,
+      checkout: checkoutOfEntry(entries.get(device) ?? session, record.home),
+    }
   }
 }
 
@@ -109,7 +115,7 @@ async function readStaged(file: ReplayedFile, offset: number, size: number): Pro
 }
 
 // The file each `/rewind` backup holds, by backup name, from the `trackedFileBackups` of the session's transcripts. Only
-// a file named by its absolute path can lie outside the working folder, such as a plan under `~/.claude/plans`.
+// a file named by its absolute path can lie outside the working folder, such as a plan in Claude Code's `plans/`.
 async function trackedFilesOf(replayed: Replayed, session: string): Promise<Map<string, string>> {
   const tracked = new Map<string, string>()
   for (const [path, file] of replayed.files) {
@@ -126,7 +132,7 @@ function rulesPathOf(path: string, from: Roots, writers: Writers): string | unde
   if (isCodePart(path)) return undefined
   const tracked = path.includes('/file-history/') ? writers.tracked.get(basename(path)) : undefined
   if (tracked === undefined) return path
-  const isState = [`${from.home}/.claude`, from.codexHome, from.claudeTmp].some((root) => tracked.startsWith(`${root}/`))
+  const isState = [from.claudeHome, from.codexHome, from.claudeTmp].some((root) => tracked.startsWith(`${root}/`))
   return isState ? tracked : path
 }
 

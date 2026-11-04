@@ -20,6 +20,8 @@ import { basename } from 'node:path'
 
 export type Roots = {
   readonly home: string
+  // Claude Code's own folder: `CLAUDE_CONFIG_DIR`, else `<home>/.claude`
+  readonly claudeHome: string
   // Claude Code's per-user temp root: `/private/tmp/claude-501` on macOS, `/tmp/claude-1000` on Linux
   readonly claudeTmp: string
   readonly codexHome: string
@@ -32,16 +34,18 @@ export type Roots = {
 export function relocate(bytes: Uint8Array, path: string, from: Roots, to: Roots): { path: string; bytes: Uint8Array } {
   check(from, 'from')
   check(to, 'to')
-  if (from.home === to.home && from.claudeTmp === to.claudeTmp && from.codexHome === to.codexHome && from.checkout === to.checkout) return { path, bytes }
+  if (ROOTS.every((key) => from[key] === to[key])) return { path, bytes }
   const plain = new Relocation(from, to, (text) => text)
   const moved = new TextDecoder().decode(plain.rewrite(encoder.encode(path)))
-  if (path.startsWith(`${from.home}/.claude/file-history/`)) return { path: moved, bytes }
+  if (path.startsWith(`${from.claudeHome}/file-history/`)) return { path: moved, bytes }
   if (path.endsWith('.jsonl') || path.endsWith('.json') || basename(path) === 'state_5.sqlite') return { path: moved, bytes: new Relocation(from, to, jsonText).rewrite(bytes) }
   return { path: moved, bytes: isText(bytes) ? plain.rewrite(bytes) : bytes }
 }
 
+const ROOTS = ['home', 'claudeHome', 'claudeTmp', 'codexHome', 'checkout'] as const
+
 function check(roots: Roots, name: string) {
-  for (const key of ['home', 'claudeTmp', 'codexHome', 'checkout'] as const) {
+  for (const key of ROOTS) {
     const value = roots[key]
     if (!value.startsWith('/') || (value.length > 1 && value.endsWith('/'))) throw new Error(`relocate: ${name}.${key} must be an absolute path without a trailing slash, got ${JSON.stringify(value)}`)
   }
@@ -70,7 +74,7 @@ type Root = { readonly from: Buffer; readonly to: Buffer }
 type Match = { readonly end: number; readonly with: Buffer }
 
 class Relocation {
-  // longest first, so `<home>/.claude` and the checkout win over the home they sit in
+  // longest first, so Claude Code's folder and the checkout win over the home they sit in
   readonly roots: Root[]
   readonly encoded: { readonly from: string; readonly to: string }[]
   // the bytes a match starts with: each root and encoded root that has no other as its prefix
@@ -80,7 +84,7 @@ class Relocation {
     // a session in the home folder has no checkout of its own: the home maps it
     const checkout = from.checkout !== from.home
     const pairs: [string, string][] = [
-      [`${from.home}/.claude`, `${to.home}/.claude`],
+      [from.claudeHome, to.claudeHome],
       [from.codexHome, to.codexHome],
       ...forms(from.claudeTmp).map((tmp): [string, string] => [tmp, to.claudeTmp]),
       [from.home, to.home],

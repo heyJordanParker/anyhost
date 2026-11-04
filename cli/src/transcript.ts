@@ -28,7 +28,7 @@ const PROMPT_LENGTH = 300
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const ROLLOUT = /^rollout-.*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/
 
-const claudeFolder = (roots: MachineRoots, ...parts: string[]): string => join(roots.home, '.claude', ...parts)
+const claudeFolder = (roots: MachineRoots, ...parts: string[]): string => join(roots.claudeHome, ...parts)
 
 // Codex keeps a thread's row in this database. Its JSON form is the session's record of it.
 export const codexState = (roots: MachineRoots): string => join(roots.codexHome, 'state_5.sqlite')

@@ -3,7 +3,7 @@ import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { changedFiles, checkHolders, journalOf, openCapture, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSession, writeIndex, type Problems } from './capture.ts'
 import { personOptions, register, rootsHere, stateFolder, type Device, type Registration } from './device.ts'
-import { messageOf, type Store } from './store.ts'
+import { bucketOf, messageOf, type Store } from './store.ts'
 import { codexState, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
@@ -12,6 +12,7 @@ const RETRY_MS = 1000
 
 export type Status = {
   readonly device: Device
+  readonly bucket: string
   readonly registration: { readonly state: Registration['state'] | 'unregistered'; readonly message: string }
   readonly pending: number
   readonly uploadEvery: number
@@ -190,7 +191,14 @@ export async function serve(store: Store, device: Device): Promise<void> {
     if (registration?.state !== 'registered' || started - registeredAt >= REGISTER_MS) await registerHere(started)
     await watchFolders()
     await Bun.write(heartbeat, '')
-    await settle('options', async () => void (queue.uploadEvery = (await personOptions()).uploadEvery ?? 0))
+    await settle('options', async () => {
+      const options = await personOptions()
+      queue.uploadEvery = options.uploadEvery ?? 0
+      // the database counts what one bucket holds, so a new bucket takes a new start, which the service gives the program
+      if (bucketOf(options.bucket) === store.bucket) return
+      console.error(`${new Date().toISOString()} The bucket is ${bucketOf(options.bucket)} now, not ${store.bucket}, so anyhost exits, and its service starts it again on that bucket.`)
+      process.exit(0)
+    })
     if (registration?.state !== 'registered') return
     await settle('backup', async () => {
       for (const [session, paths] of await changedFiles(capture)) {
@@ -213,6 +221,7 @@ export async function serve(store: Store, device: Device): Promise<void> {
   }
   const statusOf = (): Status => ({
     device,
+    bucket: store.bucket,
     registration: registration === undefined ? { state: 'unregistered', message: '' } : { state: registration.state, message: 'message' in registration ? registration.message : '' },
     pending: queue.pending,
     uploadEvery: queue.uploadEvery,

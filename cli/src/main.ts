@@ -2,12 +2,12 @@ import { homedir } from 'node:os'
 import { parseArgs } from 'node:util'
 import plugin from '../../.claude-plugin/plugin.json'
 import { holdElsewhere, openCapture, openDatabase } from './capture.ts'
-import { cmodDevice, deviceFromEnvironment, rootsHere } from './device.ts'
+import { cmodDevice, deviceFromEnvironment, personOptions, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
 import { repoSlug, resume } from './resume.ts'
 import { serve } from './serve.ts'
 import { listSessions, type ListedSession } from './sessions.ts'
-import { r2Store } from './store.ts'
+import { bucketOf, r2Store, type Store } from './store.ts'
 
 const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex session of every machine in R2.
 
@@ -47,23 +47,25 @@ async function main(argv: string[]): Promise<number> {
     console.log(plugin.version)
     return 0
   }
+  // the bucket the person chose in /config
+  const chosenStore = async (): Promise<Store> => r2Store(bucketOf((await personOptions()).bucket))
   if (command === 'list') {
-    const sessions = await listSessions(r2Store())
+    const sessions = await listSessions(await chosenStore())
     console.log(values.json === true ? JSON.stringify(sessions, null, 2) : table(sessions))
     return 0
   }
   if (command === 'resume' && rest.length === 1 && rest[0] !== undefined) {
-    return await resume(openCapture(r2Store(), await cmodDevice(), rootsHere()), rest[0], { take: values.take === true })
+    return await resume(openCapture(await chosenStore(), await cmodDevice(), rootsHere()), rest[0], { take: values.take === true })
   }
   if (command === 'released' && rest.length === 1 && rest[0] !== undefined && values.to !== undefined) {
-    const db = openDatabase()
+    const db = openDatabase((await chosenStore()).bucket)
     holdElsewhere(db, rest[0], values.to, `${new Date().toISOString()} ${values.to} took the session ${rest[0]} over and said so over ssh, so this machine captures nothing more of it.`)
     db.close()
     return 0
   }
-  if (command === 'doctor') return await doctor(r2Store())
+  if (command === 'doctor') return await doctor(await chosenStore())
   if (command === 'serve') {
-    await serve(r2Store(), deviceFromEnvironment())
+    await serve(await chosenStore(), deviceFromEnvironment())
     return 0
   }
   console.log(USAGE)

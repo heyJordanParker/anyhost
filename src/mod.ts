@@ -8,9 +8,14 @@ type Holder = { readonly machine?: string; readonly problem?: string; readonly u
 
 export const anyhost = defineMod({
   name: 'anyhost',
-  // The anyhost program reads them with cmod options: uploadEvery within a minute of a change, since one program serves
-  // every session, and checkouts at each anyhost resume.
+  // The anyhost program reads them with cmod options: bucket at its start and uploadEvery within a minute of a change,
+  // since one program serves every session, and checkouts at each anyhost resume. A new bucket restarts the program.
   options: {
+    bucket: option.text({
+      title: 'R2 bucket',
+      description: 'The bucket in your R2 account that keeps every session. Each machine names the same one.',
+      default: 'anyhost',
+    }),
     uploadEvery: option.number({
       title: 'Upload every',
       description: 'Seconds between uploads of a session to R2. 0 uploads every write.',

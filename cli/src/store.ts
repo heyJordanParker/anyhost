@@ -2,7 +2,6 @@ import { DeleteObjectsCommand, GetObjectCommand, ListObjectsV2Command, PutObject
 import { loadSharedConfigFiles } from '@smithy/core/config'
 
 export const PROFILE = 'r2'
-export const BUCKET = process.env['ANYHOST_BUCKET'] ?? 'anyhost'
 const CONNECT_MS = 10_000
 const REQUEST_MS = 120_000
 
@@ -11,6 +10,7 @@ export type Listed = { readonly key: string; readonly size: number }
 export type Condition = { readonly ifNoneMatch: '*' } | { readonly ifMatch: string }
 
 export type Store = {
+  readonly bucket: string
   get(key: string): Promise<Stored | undefined>
   put(key: string, body: Uint8Array | string, condition?: Condition): Promise<string | undefined>
   list(prefix: string): Promise<Listed[]>
@@ -33,10 +33,14 @@ async function clientOf(): Promise<S3Client> {
   return new S3Client({ profile: PROFILE, endpoint, requestHandler: { connectionTimeout: CONNECT_MS, requestTimeout: REQUEST_MS, throwOnRequestTimeout: true } })
 }
 
-export function r2Store(bucket = BUCKET): Store {
+// The bucket the person chose in /config, the option `bucket`, which `cmod options` leaves out until they set it.
+export const bucketOf = (chosen: string | undefined): string => chosen || 'anyhost'
+
+export function r2Store(bucket: string): Store {
   let made: Promise<S3Client> | undefined
   const s3 = (): Promise<S3Client> => (made ??= clientOf())
   return {
+    bucket,
     async get(key) {
       const answer = await (await s3()).send(new GetObjectCommand({ Bucket: bucket, Key: key })).catch((error: unknown) => {
         if (statusOf(error) === 404) return undefined

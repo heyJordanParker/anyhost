@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite'
 import { expect, spyOn, test } from 'bun:test'
-import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, decompress, encodeRecord, hotKey, isCodePart, journalOf, openCapture, openDatabase, seal, sessionsOf, startLineOffsets, uploadSession,
@@ -11,7 +11,7 @@ import { UploadQueue } from '../src/serve.ts'
 import { downloadJournal } from '../src/sessions.ts'
 import type { Store } from '../src/store.ts'
 import { codexState, summarize } from '../src/transcript.ts'
-import { memoryStore, noCode, temporaryFolder, type MemoryStore } from './memory.ts'
+import { MEMORY, memoryStore, noCode, temporaryFolder, type MemoryStore } from './memory.ts'
 
 const SESSION = '11111111-2222-3333-4444-555555555555'
 const OTHER = '99999999-2222-3333-4444-555555555555'
@@ -34,10 +34,10 @@ const failTest: Problems = {
 const decoded = (bytes: Uint8Array): string => new TextDecoder().decode(bytes)
 
 function machine(device: Device, store: Store, folder = temporaryFolder()) {
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
+  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
-  const capture = openCapture(store, device, roots, openDatabase(join(folder, 'state')), noCode)
+  const capture = openCapture(store, device, roots, openDatabase(MEMORY, join(folder, 'state')), noCode)
   const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(capture, SESSION, 'claude', new Set(paths), failTest)
   return { roots, transcript, capture, upload }
 }
@@ -154,7 +154,7 @@ test('replay of append, write-once and rewrite records', async () => {
 test("a drain never waits on git: the files go up at once, the code follows in its own frame, and a part goes up once", async () => {
   const store = memoryStore()
   const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
+  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   const part = { path: `anyhost:code/${SESSION}/parts/aa11`, bytes: new TextEncoder().encode('a large binary diff') }
@@ -164,7 +164,7 @@ test("a drain never waits on git: the files go up at once, the code follows in i
     store,
     deviceA,
     roots,
-    openDatabase(join(folder, 'state')),
+    openDatabase(MEMORY, join(folder, 'state')),
     {
       captureCode: (_folder, _session) => new Promise((resolve) => releases.push(() => resolve({ header: new TextEncoder().encode(`{"head":"${releases.length}"}`), parts: [part] }))),
       restoreCode: async (_header, _readPart, at) => at,
@@ -205,7 +205,7 @@ test('a code record whose upload failed goes up with the next drain, since captu
   let isOffline = false
   const flaky: Store = { ...store, put: (key, body, condition) => (isOffline ? Promise.reject(new Error('connect ECONNREFUSED')) : store.put(key, body, condition)) }
   const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
+  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   const bundle = { path: `anyhost:code/${SESSION}/parts/cc33`, bytes: new TextEncoder().encode('a bundle') }
@@ -213,7 +213,7 @@ test('a code record whose upload failed goes up with the next drain, since captu
     { header: new TextEncoder().encode('header 1'), parts: [bundle] },
     { header: new TextEncoder().encode('header 2'), parts: [] },
   ]
-  const capture = openCapture(flaky, deviceA, roots, openDatabase(join(folder, 'state')), {
+  const capture = openCapture(flaky, deviceA, roots, openDatabase(MEMORY, join(folder, 'state')), {
     captureCode: async () => captures.shift(),
     restoreCode: async (_header, _readPart, at) => at,
   })
@@ -238,12 +238,12 @@ test('a code record whose upload failed goes up with the next drain, since captu
 test('at uploadEvery 0 a line goes up alone, and a long code part in pieces, several frames at once', async () => {
   const store = memoryStore()
   const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
+  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   const bundle = { path: `anyhost:code/${SESSION}/parts/dd44`, bytes: crypto.getRandomValues(new Uint8Array((CODE_PIECES + 1) * CODE_PIECE_BYTES + 5)) }
   let reads = 0
-  const capture = openCapture(store, deviceA, roots, openDatabase(join(folder, 'state')), {
+  const capture = openCapture(store, deviceA, roots, openDatabase(MEMORY, join(folder, 'state')), {
     captureCode: async () => ({ header: new TextEncoder().encode(`header ${++reads}`), parts: reads === 1 ? [bundle] : [] }),
     restoreCode: async (_header, _readPart, at) => at,
   })
@@ -335,11 +335,11 @@ test('a code frame that fails leaves the journal at the frames before it, and th
     put: (key, body, condition) => ((puts += 1) === failing ? Promise.reject(new Error('connect ECONNREFUSED')) : store.put(key, body, condition)),
   }
   const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
+  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   const bundle = { path: `anyhost:code/${SESSION}/parts/ee55`, bytes: crypto.getRandomValues(new Uint8Array(3 * CODE_PIECE_BYTES)) }
-  const capture = openCapture(flaky, deviceA, roots, openDatabase(join(folder, 'state')), {
+  const capture = openCapture(flaky, deviceA, roots, openDatabase(MEMORY, join(folder, 'state')), {
     captureCode: async () => ({ header: new TextEncoder().encode('header'), parts: [bundle] }),
     restoreCode: async (_header, _readPart, at) => at,
   })
@@ -395,12 +395,12 @@ test('a file the session deleted goes up as a deletion record, heard from the wa
 test('a session whose working folder this machine lacks uploads its lines, keeps no code, and says so once', async () => {
   const store = memoryStore()
   const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
+  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
   const transcript = join(roots.home, '.claude', 'projects', '-gone', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   const gone = join(folder, 'gone')
   let reads = 0
-  const capture = openCapture(store, deviceA, roots, openDatabase(join(folder, 'state')), {
+  const capture = openCapture(store, deviceA, roots, openDatabase(MEMORY, join(folder, 'state')), {
     captureCode: async () => ((reads += 1), undefined),
     restoreCode: async (_header, _readPart, at) => at,
   })
@@ -606,4 +606,25 @@ test("the index entry holds the session's title, first prompt, working folder an
   await upload(transcript)
   const row = capture.db.query<{ title: string; first_prompt: string; cwd: string; entrypoint: string }, []>('select title, first_prompt, cwd, entrypoint from sessions').get()
   expect(row).toEqual({ title: 'Plan the trip', first_prompt: 'Book a train to Sofia 🚆, ще пътувам утре', cwd: TRIP, entrypoint: 'cli' })
+})
+
+test('the database keeps what one bucket holds, and another bucket starts it over with the code parts it named', async () => {
+  const folder = join(temporaryFolder(), 'state')
+  const store = memoryStore()
+  const { transcript, upload } = machine(deviceA, store, dirname(folder))
+  writeFileSync(transcript, lines.join(''))
+  await upload(transcript)
+  const parts = join(folder, 'code', SESSION, 'repo.json')
+  mkdirSync(dirname(parts), { recursive: true })
+  writeFileSync(parts, '{}')
+  const journals = (bucket: string): number => {
+    const db = openDatabase(bucket, folder)
+    const count = db.query<{ count: number }, []>('select count(*) as count from journals').get()?.count ?? -1
+    db.close()
+    return count
+  }
+
+  expect(journals(MEMORY)).toBe(1)
+  expect(journals('anyhost-other')).toBe(0)
+  expect(existsSync(parts)).toBe(false)
 })
