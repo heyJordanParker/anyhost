@@ -1,43 +1,116 @@
+import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, join, relative, sep } from 'node:path'
+import { basename, join, sep } from 'node:path'
+import type { MachineRoots } from './device.ts'
 
 export type Tool = 'claude' | 'codex'
-export type Root = { readonly tool: Tool; readonly folder: string }
-export type Summary = { readonly title: string; readonly titleRank: number; readonly firstPrompt: string; readonly cwd: string; readonly repo: string }
+export type Summary = {
+  readonly title: string
+  readonly titleRank: number
+  readonly firstPrompt: string
+  readonly cwd: string
+  readonly repo: string
+  readonly entrypoint: string
+}
+
+// Who a file belongs to:
+// - `session`: the path names its session, and `isTranscript` says it is the session's own transcript
+// - `prefix`: `tasks/session-<8 hex>/` and `jobs/<8 hex>/state.json` name the first 8 hex digits of the session id
+// - `lines`: a file every session writes lines to, each naming its session in the key `lines`
+// - `named`: a plan or a pasted text, which belongs to the sessions whose files name it
+export type Owner =
+  | { readonly session: string; readonly tool: Tool; readonly isTranscript: boolean }
+  | { readonly prefix: string }
+  | { readonly lines: string; readonly tool: Tool }
+  | { readonly named: true }
 
 const PROMPT_LENGTH = 300
+const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const ROLLOUT = /^rollout-.*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/
 
-export const roots = (home = homedir()): Root[] => [
-  { tool: 'claude', folder: join(home, '.claude', 'projects') },
-  { tool: 'codex', folder: join(home, '.codex', 'sessions') },
+const claudeFolder = (roots: MachineRoots, ...parts: string[]): string => join(roots.home, '.claude', ...parts)
+
+// Codex keeps a thread's row in this database. Its JSON form is the session's record of it.
+export const codexState = (roots: MachineRoots): string => join(roots.codexHome, 'state_5.sqlite')
+
+export const linesFiles = (roots: MachineRoots): Map<string, { readonly lines: string; readonly tool: Tool }> =>
+  new Map([
+    [claudeFolder(roots, 'history.jsonl'), { lines: 'sessionId', tool: 'claude' }],
+    [join(roots.codexHome, 'history.jsonl'), { lines: 'session_id', tool: 'codex' }],
+    [join(roots.codexHome, 'session_index.jsonl'), { lines: 'id', tool: 'codex' }],
+  ])
+
+// The folders the program watches. `jobs/` is left out because each job keeps a scratch tree in `jobs/<id>/tmp/`:
+// the 60-second backup stats `jobs/<id>/state.json` instead.
+export const watchedFolders = (roots: MachineRoots): { readonly folder: string; readonly isRecursive: boolean }[] => [
+  { folder: claudeFolder(roots), isRecursive: false },
+  ...['projects', 'file-history', 'tasks', 'session-env', 'plans', 'paste-cache'].map((name) => ({ folder: claudeFolder(roots, name), isRecursive: true })),
+  { folder: roots.claudeTmp, isRecursive: true },
+  { folder: roots.codexHome, isRecursive: false },
+  { folder: join(roots.codexHome, 'sessions'), isRecursive: true },
 ]
 
-export function keyOf(root: Root, path: string): string | undefined {
-  if (!path.endsWith('.jsonl')) return undefined
-  if (root.tool === 'codex') return /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/.exec(basename(path))?.[1]
-  const parts = relative(root.folder, path).split(sep)
-  if (parts.length < 2 || parts[0] === '..') return undefined
-  return parts.slice(1).join('/').slice(0, -'.jsonl'.length)
+export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
+  const lines = linesFiles(roots).get(path)
+  if (lines !== undefined) return lines
+  // a dotfile such as `.lock`, or the temp file of an atomic write, `custom-title.json.tmp.2cbcf23f`
+  if (basename(path).startsWith('.') || /\.tmp\.[0-9a-f]+$/.test(path)) return undefined
+  const under = (folder: string): string[] => (path.startsWith(folder + sep) ? path.slice(folder.length + 1).split(sep) : [])
+  const project = under(claudeFolder(roots, 'projects'))
+  if (project.length === 2 && project[1]?.endsWith('.jsonl') === true) {
+    const session = project[1].slice(0, -'.jsonl'.length)
+    return ID.test(session) ? { session, tool: 'claude', isTranscript: true } : undefined
+  }
+  if (project.length > 2 && ID.test(project[1] ?? '')) return { session: project[1] ?? '', tool: 'claude', isTranscript: false }
+  for (const name of ['file-history', 'session-env', 'tasks']) {
+    const [folder = '', ...rest] = under(claudeFolder(roots, name))
+    if (rest.length === 0) continue
+    if (ID.test(folder)) return { session: folder, tool: 'claude', isTranscript: false }
+    const prefix = /^session-([0-9a-f]{8})$/.exec(folder)?.[1]
+    if (name === 'tasks' && prefix !== undefined) return { prefix }
+  }
+  const [job = '', file] = under(claudeFolder(roots, 'jobs'))
+  if (/^[0-9a-f]{8}$/.test(job) && file === 'state.json') return { prefix: job }
+  if (under(claudeFolder(roots, 'plans')).length > 0 || under(claudeFolder(roots, 'paste-cache')).length === 1) return { named: true }
+  // background output: <temp root>/<encoded working folder>/<session>/tasks/<task>.output
+  const output = under(roots.claudeTmp)
+  if (output.length === 4 && ID.test(output[1] ?? '') && output[2] === 'tasks' && output[3]?.endsWith('.output') === true) return { session: output[1] ?? '', tool: 'claude', isTranscript: false }
+  const rollout = under(join(roots.codexHome, 'sessions')).length > 0 ? ROLLOUT.exec(basename(path))?.[1] : undefined
+  if (rollout !== undefined) return { session: rollout, tool: 'codex', isTranscript: true }
+  return undefined
 }
 
-export const sessionOf = (key: string): string => key.split('/')[0] ?? key
-
-const SECOND_COPY = '/@'
-
-export function secondKeyOf(root: Root, path: string, key: string): string {
-  const folders = relative(root.folder, dirname(path)).split(sep)
-  return `${key}${SECOND_COPY}${root.tool === 'claude' ? folders[0] : folders.join('-')}`
+async function filesUnder(folder: string): Promise<string[]> {
+  const entries = await readdir(folder, { recursive: true, withFileTypes: true }).catch(() => [])
+  return entries.filter((entry) => entry.isFile() && !entry.name.startsWith('.') && !/\.tmp\.[0-9a-f]+$/.test(entry.name)).map((entry) => join(entry.parentPath, entry.name))
 }
 
-export function placementOf(key: string, cwd: string, home = homedir()): string {
-  const second = key.lastIndexOf(SECOND_COPY)
-  if (second < 0) return join(projectFolder(cwd, home), `${key}.jsonl`)
-  return join(home, '.claude', 'projects', key.slice(second + SECOND_COPY.length), `${key.slice(0, second)}.jsonl`)
+const foldersIn = async (folder: string): Promise<string[]> =>
+  (await readdir(folder, { withFileTypes: true }).catch(() => [])).filter((entry) => entry.isDirectory()).map((entry) => join(folder, entry.name))
+
+// Every file of a session that exists now, and the files it will write to whose names are known: the program
+// captures a session it sees for the first time from byte 0 of each.
+export async function filesOf(session: string, tool: Tool, roots: MachineRoots): Promise<string[]> {
+  const lines = [...linesFiles(roots)].filter(([, file]) => file.tool === tool).map(([path]) => path)
+  if (tool === 'codex') return [...lines, codexState(roots)]
+  const short = session.slice(0, 8)
+  const projects = await foldersIn(claudeFolder(roots, 'projects'))
+  const temporary = await foldersIn(roots.claudeTmp)
+  const found = await Promise.all([
+    ...projects.map(async (project) => [...((await Bun.file(join(project, `${session}.jsonl`)).exists()) ? [join(project, `${session}.jsonl`)] : []), ...(await filesUnder(join(project, session)))]),
+    ...[claudeFolder(roots, 'file-history', session), claudeFolder(roots, 'tasks', session), claudeFolder(roots, 'tasks', `session-${short}`), claudeFolder(roots, 'session-env', session)].map(filesUnder),
+    ...temporary.map(async (folder) => (await filesUnder(join(folder, session, 'tasks'))).filter((path) => path.endsWith('.output'))),
+  ])
+  return [...found.flat(), ...lines, claudeFolder(roots, 'jobs', short, 'state.json')]
 }
 
-export const projectFolder = (cwd: string, home = homedir()): string => join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+// The plans and pasted texts a session's bytes name: Claude Code's `planFilePath` and history's `contentHash`.
+export function namedIn(text: string, roots: MachineRoots): string[] {
+  const plans = [...text.matchAll(/"planFilePath":("(?:[^"\\]|\\.)*")/g)].map((match) => JSON.parse(match[1] ?? '""') as string)
+  const pastes = [...text.matchAll(/"contentHash":"([0-9a-f]+)"/g)].map((match) => claudeFolder(roots, 'paste-cache', `${match[1]}.txt`))
+  return [...plans.filter((plan) => plan.startsWith('/')), ...pastes]
+}
 
-const CWD = /"cwd":("(?:[^"\\]|\\.)*")/g
 const CWD_LINE_LENGTH = 64 * 1024
 const TITLES: Record<string, readonly [string, number]> = { 'custom-title': ['customTitle', 3], 'ai-title': ['aiTitle', 2], summary: ['summary', 1] }
 
@@ -72,27 +145,35 @@ function cwdOf(line: string, tool: Tool): string | undefined {
   return typeof found === 'string' ? found : undefined
 }
 
+// How the session started: Claude Code's `entrypoint` (`cli`, `sdk-cli`), Codex's `source` (`cli`, `vscode`, `exec`).
+function entrypointOf(line: string, tool: Tool): string | undefined {
+  if (tool === 'claude') return /"entrypoint":"([^"]*)"/.exec(line.slice(0, CWD_LINE_LENGTH))?.[1]
+  if (!line.slice(0, 120).includes('"type":"session_meta"')) return undefined
+  return (JSON.parse(line) as { payload?: { source?: string } }).payload?.source
+}
+
 export function summarize(summary: Summary, text: string, tool: Tool): Summary {
-  let { title, titleRank, firstPrompt, cwd, repo } = summary
+  let { title, titleRank, firstPrompt, cwd, repo, entrypoint } = summary
   for (const line of text.split('\n')) {
     if (line === '') continue
     cwd = cwdOf(line, tool) ?? cwd
     if (firstPrompt === '') firstPrompt = oneLine(promptOf(line, tool) ?? '')
+    if (entrypoint === '') entrypoint = entrypointOf(line, tool) ?? ''
     const type = /^\{"type":"([a-z-]+)"/.exec(line)?.[1]
     const titled = type === undefined ? undefined : TITLES[type]
     if (titled !== undefined && titled[1] >= titleRank) {
       const value = (JSON.parse(line) as Record<string, unknown>)[titled[0]]
       if (typeof value === 'string' && value.trim() !== '') [title, titleRank] = [oneLine(value), titled[1]]
     }
-    if (tool === 'codex' && line.includes('"type":"session_meta"')) repo =(JSON.parse(line) as { payload?: { git?: { repository_url?: string } } }).payload?.git?.repository_url ?? repo
+    if (tool === 'codex' && line.includes('"type":"session_meta"')) repo = (JSON.parse(line) as { payload?: { git?: { repository_url?: string } } }).payload?.git?.repository_url ?? repo
   }
-  return { title, titleRank, firstPrompt, cwd, repo }
+  return { title, titleRank, firstPrompt, cwd, repo, entrypoint }
 }
 
 let codexNames = { modifiedAt: -1, names: new Map<string, string>() }
 
-export async function codexNameOf(id: string, home = homedir()): Promise<string | undefined> {
-  const file = Bun.file(join(home, '.codex', 'session_index.jsonl'))
+export async function codexNameOf(id: string, codexHome = join(homedir(), '.codex')): Promise<string | undefined> {
+  const file = Bun.file(join(codexHome, 'session_index.jsonl'))
   const modifiedAt = await file.stat().then((info) => info.mtimeMs, () => undefined)
   if (modifiedAt === undefined) return undefined
   if (modifiedAt !== codexNames.modifiedAt) {
@@ -102,5 +183,3 @@ export async function codexNameOf(id: string, home = homedir()): Promise<string 
   }
   return codexNames.names.get(id)
 }
-
-export const withCwd =(text: string, cwd: string): string => text.replace(CWD, () => `"cwd":${JSON.stringify(cwd)}`)

@@ -12,7 +12,7 @@ function running(address: string): HookStream<ProcessSpawnChunk, ProcessSpawnRes
   return Object.assign(read(), { result: new Promise<ProcessSpawnResult>(() => undefined) }) as HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 }
 
-function withHolder(holder: { machine?: string; problem?: string }) {
+function withHolder(holder: { machine?: string; problem?: string; untold?: string }, status = 200) {
   const tested = testMod(anyhost)
   const spawned: ProcessSpawnRequest[] = []
   const fetched: string[] = []
@@ -22,7 +22,7 @@ function withHolder(holder: { machine?: string; problem?: string }) {
   }
   tested.fakes.http.fetch = async (url) => {
     fetched.push(url)
-    return { status: 200, ok: true, headers: {}, text: JSON.stringify(holder) }
+    return { status, ok: status === 200, headers: {}, text: status === 200 ? JSON.stringify(holder) : 'R2 refused the request.' }
   }
   return { tested, spawned, fetched }
 }
@@ -46,12 +46,36 @@ test('a session whose claim another device holds refuses prompts', async () => {
   expect(fetched).toEqual(['http://127.0.0.1:4100/claims/test-session'])
 })
 
+test('a program that fails to answer the check lets the prompt through and says why, once a session', async () => {
+  const { tested } = withHolder({}, 500)
+
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
+  await tested.raise.beforePrompt({ text: 'And again' })
+  expect(tested.shown.toasts.filter(({ type }) => type === 'error')).toEqual([
+    { type: 'error', message: 'anyhost could not check which machine holds this session', description: 'The anyhost program answered 500: R2 refused the request.' },
+  ])
+})
+
 test('a cloned machine shows why anyhost captures nothing, once a session', async () => {
   const { tested } = withHolder({ problem: 'This machine, anyhost-c, has the id of anyhost-a.' })
 
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
   await tested.raise.beforePrompt({ text: 'And again' })
   expect(tested.shown.toasts.filter(({ type }) => type === 'error')).toEqual([{ type: 'error', message: 'anyhost captures nothing on this machine', description: 'This machine, anyhost-c, has the id of anyhost-a.' }])
+})
+
+test('a session resumed from a machine ssh could not reach names that machine as it starts', async () => {
+  const { tested, fetched } = withHolder({ untold: 'anyhost-a' })
+
+  await tested.raise.onSessionStart({ source: 'resume' })
+  expect(fetched).toEqual(['http://127.0.0.1:4100/claims/test-session'])
+  expect(tested.shown.toasts.filter(({ type }) => type === 'warning')).toEqual([
+    {
+      type: 'warning',
+      message: 'anyhost-a may take one more prompt of this session',
+      description: 'anyhost could not reach anyhost-a over ssh to say this machine holds the session now. anyhost-a learns it when its anyhost program next starts or uploads the session.',
+    },
+  ])
 })
 
 test('a session this device holds, or no device claims, takes prompts', async () => {

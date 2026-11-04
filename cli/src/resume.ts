@@ -1,14 +1,20 @@
-import { mkdir, readdir, stat } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { Database, type SQLQueryBindings } from 'bun:sqlite'
+import { existsSync } from 'node:fs'
+import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { checkoutOf, openDatabase, placeFile, recordSummary } from './capture.ts'
+import { checkoutOf, continueJournal, isCodePart, linesOf, markUntold, recordSummary, stopJournal, type Capture, type FileState, type IndexedSession } from './capture.ts'
 import { HeldElsewhere, takeClaim } from './claims.ts'
-import { devicesOf, type Device } from './device.ts'
-import { downloadSession, listSessions, type ListedSession } from './sessions.ts'
-import type { Store } from './store.ts'
-import { placementOf, withCwd } from './transcript.ts'
+import { devicesOf, personOptions, type DeviceRecord } from './device.ts'
+import { relocate, type Roots } from './relocate.ts'
+import { downloadJournal, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
+import { messageOf, type Store } from './store.ts'
+import { codexState, linesFiles, ownerOf } from './transcript.ts'
 
-const CHECKOUTS = join(homedir(), 'Developer')
+const NOTHING = new Uint8Array()
+const TAIL_BYTES = 32
+// A whole `ssh anyhost-b echo` took 0.26 to 0.34 s between the test machines (claim-race, 2026-11-04). The limit only
+// keeps a resume from waiting out the system's TCP timeout, over a minute, on a machine that is off.
+const SSH_CONNECT_SECONDS = 10
 
 export const repoSlug = (remote: string): string =>
   remote
@@ -28,30 +34,211 @@ async function run(argv: string[]): Promise<string> {
   return output
 }
 
-async function findCheckout(remote: string): Promise<string | undefined> {
-  const db = openDatabase()
-  const known = db.query<{ cwd: string; repo_folder: string }, []>("select distinct cwd, repo_folder from sessions where repo != ''").all()
-  db.close()
-  const children = (await isFolder(CHECKOUTS)) ? (await readdir(CHECKOUTS)).map((name) => ({ cwd: join(CHECKOUTS, name), repo_folder: '' })) : []
-  for (const { cwd, repo_folder } of [...known, ...children]) {
-    const root = repo_folder === '' ? cwd : cwd.slice(0, -repo_folder.length - 1)
+// The checkout roots of the sessions this machine wrote or restored in a repository.
+const knownCheckouts = (capture: Capture): string[] =>
+  capture.db
+    .query<{ cwd: string; repo_folder: string }, []>("select distinct cwd, repo_folder from sessions where repo != ''")
+    .all()
+    .map(({ cwd, repo_folder }) => (repo_folder === '' ? cwd : cwd.slice(0, -repo_folder.length - 1)))
+
+// The deepest folder that holds both paths, `/` when they share none.
+function sharedFolder(a: string, b: string): string {
+  const [left, right] = [a.split('/'), b.split('/')]
+  const same = left.findIndex((part, index) => part !== right[index])
+  return left.slice(0, same < 0 ? left.length : same).join('/') || '/'
+}
+
+// The folder this machine keeps its checkouts in, where resume clones a missing repository: `chosen`, the person's
+// `checkouts` option, else the folder the checkouts of this machine's sessions share, else the home folder.
+function checkoutsOf(capture: Capture, chosen: string): string {
+  if (chosen !== '') return chosen
+  const shared = knownCheckouts(capture).map((root) => dirname(root)).reduce<string | undefined>((folder, parent) => (folder === undefined ? parent : sharedFolder(folder, parent)), undefined)
+  return shared === undefined || shared === '/' ? capture.roots.home : shared
+}
+
+async function findCheckout(capture: Capture, remote: string, checkouts: string): Promise<string | undefined> {
+  const children = (await isFolder(checkouts)) ? (await readdir(checkouts)).map((name) => join(checkouts, name)) : []
+  for (const root of [...knownCheckouts(capture), ...children]) {
     if (sameRepo((await checkoutOf(root)).repo, remote)) return root
   }
   return undefined
 }
 
-async function localCwd(session: ListedSession): Promise<string> {
-  if (session.repo === '') return (await isFolder(session.cwd)) ? session.cwd : homedir()
-  let root = await findCheckout(session.repo)
-  if (root === undefined) {
-    root = join(CHECKOUTS, basename(repoSlug(session.repo)))
-    if (await isFolder(root)) throw new Error(`${root} holds another repository than ${session.repo}, so anyhost does not clone the session's repository there. Clone it yourself, then run anyhost resume again.`)
-    await mkdir(CHECKOUTS, { recursive: true })
-    console.log(`Cloning ${session.repo} into ${root}`)
-    await run(['git', 'clone', session.repo, root])
+// The checkout a session works in: its repository's root, or its working folder outside git. A session with no working
+// folder has the home folder, since relocate takes only absolute roots.
+const checkoutOfEntry = (entry: Pick<IndexedSession, 'cwd' | 'repo' | 'repoFolder'>, home: string): string =>
+  (entry.repo !== '' && entry.repoFolder !== '' ? entry.cwd.slice(0, -entry.repoFolder.length - 1) : entry.cwd) || home
+
+// How restore rewrites each record: its writer's roots, and the file each `/rewind` backup of the session holds by
+// backup name, for the backups whose file lies under Claude Code's or Codex's own folders.
+type Writers = { readonly rootsOf: (device: string) => Roots; readonly tracked: ReadonlyMap<string, string> }
+
+// Each machine's roots for the session: its home folders from its device record, its checkout from its index.
+async function writersOf(store: Store, devices: ReadonlyMap<string, DeviceRecord>, session: ListedSession): Promise<(device: string) => Roots> {
+  const entries = new Map(
+    await Promise.all(
+      [...devices.keys()].map(async (device) => {
+        const index = await store.get(`sessions/${device}/index.json`)
+        const entries = index === undefined ? [] : (JSON.parse(new TextDecoder().decode(index.body)) as IndexedSession[])
+        return [device, entries.find((entry) => entry.id === session.id) ?? session] as const
+      }),
+    ),
+  )
+  return (device) => {
+    const record = devices.get(device)
+    if (record?.home === undefined) throw new Error(`The session ${session.id} holds records of the device ${device}, and R2 holds no record of that device's home folders, so anyhost cannot rewrite its paths.`)
+    return { home: record.home, claudeTmp: record.claudeTmp, codexHome: record.codexHome, checkout: checkoutOfEntry(entries.get(device) ?? session, record.home) }
   }
-  const cwd = join(root, session.repoFolder)
-  return (await isFolder(cwd)) ? cwd : root
+}
+
+// Where the session's working folder goes on this machine: in the checkout of its repository found by remote, or
+// in the folder this machine keeps checkouts in; outside git, at its path under this machine's home.
+async function localFolder(capture: Capture, session: ListedSession, writer: Roots, chosen: string): Promise<string> {
+  const { home } = capture.roots
+  if (session.repo !== '') {
+    const checkouts = checkoutsOf(capture, chosen)
+    return join((await findCheckout(capture, session.repo, checkouts)) ?? join(checkouts, basename(repoSlug(session.repo))), session.repoFolder)
+  }
+  if (session.cwd === '') return home
+  const underHome = session.cwd === writer.home || session.cwd.startsWith(`${writer.home}/`)
+  return underHome ? `${home}${session.cwd.slice(writer.home.length)}` : session.cwd
+}
+
+async function readStaged(file: ReplayedFile, offset: number, size: number): Promise<Uint8Array> {
+  return new Uint8Array(await Bun.file(file.staged).slice(offset, offset + size).arrayBuffer())
+}
+
+// The file each `/rewind` backup holds, by backup name, from the `trackedFileBackups` of the session's transcripts. Only
+// a file named by its absolute path can lie outside the working folder, such as a plan under `~/.claude/plans`.
+async function trackedFilesOf(replayed: Replayed, session: string): Promise<Map<string, string>> {
+  const tracked = new Map<string, string>()
+  for (const [path, file] of replayed.files) {
+    if (!path.endsWith(`${session}.jsonl`)) continue
+    for (const match of (await Bun.file(file.staged).text()).matchAll(/"(\/(?:[^"\\]|\\.)*)":\{"backupFileName":"([^"]+)"/g)) tracked.set(match[2] ?? '', JSON.parse(`"${match[1]}"`) as string)
+  }
+  return tracked
+}
+
+// The path whose rules rewrite a record's bytes: a code part never changes, and a backup of a file under Claude Code's
+// or Codex's own folders changes as that file does, so `/rewind` never writes another machine's paths back. Every
+// other backup keeps its bytes, as relocate keeps `file-history/`.
+function rulesPathOf(path: string, from: Roots, writers: Writers): string | undefined {
+  if (isCodePart(path)) return undefined
+  const tracked = path.includes('/file-history/') ? writers.tracked.get(basename(path)) : undefined
+  if (tracked === undefined) return path
+  const isState = [`${from.home}/.claude`, from.codexHome, from.claudeTmp].some((root) => tracked.startsWith(`${root}/`))
+  return isState ? tracked : path
+}
+
+// A file as the machine with `to` roots has it, one record at a time: each record's bytes rewritten from its writer's roots.
+async function* viewOf(file: ReplayedFile, writers: Writers, to: Roots): AsyncGenerator<Uint8Array> {
+  for (const segment of file.segments) {
+    const bytes = await readStaged(file, segment.offset, segment.size)
+    const from = writers.rootsOf(segment.device)
+    const rules = rulesPathOf(segment.path, from, writers)
+    yield rules === undefined ? bytes : relocate(bytes, rules, from, to).bytes
+  }
+}
+
+const sha256 = (bytes: Uint8Array): string => new Bun.CryptoHasher('sha256').update(bytes).digest('hex')
+
+// Every file must be what its last writer had after its last record: its size and sha256.
+async function checkFile(file: ReplayedFile, writers: Writers): Promise<void> {
+  const { device, path, after } = file.last
+  const hasher = new Bun.CryptoHasher('sha256')
+  let size = 0
+  for await (const part of viewOf(file, writers, writers.rootsOf(device))) {
+    hasher.update(part)
+    size += part.length
+  }
+  const found = hasher.digest('hex')
+  if (size !== after.size || found !== after.sha256) {
+    throw new Error(`${path} rebuilds to ${size} bytes with sha256 ${found}, and its last record says ${after.size} bytes with sha256 ${after.sha256}, so anyhost places nothing of the session.`)
+  }
+}
+
+// Lines another session wrote stay. The session's lines the file lacks are appended.
+async function mergeLines(path: string, placed: Uint8Array): Promise<void> {
+  const local = existsSync(path) ? await Bun.file(path).text() : ''
+  const present = new Set(local.split('\n'))
+  const missing = new TextDecoder().decode(placed).split('\n').filter((line) => line !== '' && !present.has(line))
+  await mkdir(dirname(path), { recursive: true })
+  if (missing.length > 0) await appendFile(path, `${local === '' || local.endsWith('\n') ? '' : '\n'}${missing.map((line) => `${line}\n`).join('')}`)
+}
+
+// A Codex thread's row goes into this machine's Codex database. A machine Codex never ran on has none, and the
+// session's session_index.jsonl line names the thread instead.
+function placeCodexRow(path: string, placed: Uint8Array): void {
+  if (!existsSync(path)) return
+  const row = JSON.parse(new TextDecoder().decode(placed)) as Record<string, unknown>
+  const db = new Database(path)
+  try {
+    db.run('pragma busy_timeout = 5000')
+    const columns = new Set(db.query<{ name: string }, []>('pragma table_info(threads)').all().map(({ name }) => name))
+    for (const key of db.query<{ table: string; from: string; to: string }, []>('pragma foreign_key_list(threads)').all()) {
+      if (row[key.from] !== null && db.query(`select 1 from "${key.table}" where "${key.to}" = ?`).get(row[key.from] as string) === null) row[key.from] = null
+    }
+    const names = Object.keys(row).filter((name) => columns.has(name))
+    db.query(`insert or replace into threads (${names.map((name) => `"${name}"`).join(', ')}) values (${names.map(() => '?').join(', ')})`).run(...(names.map((name) => row[name]) as SQLQueryBindings[]))
+  } finally {
+    db.close()
+  }
+}
+
+// Places a replayed file at its path on this machine and answers what this machine uploaded of it.
+async function placeFile(session: string, file: ReplayedFile, writers: Writers, here: Roots): Promise<FileState> {
+  const path = relocate(NOTHING, file.last.path, writers.rootsOf(file.last.device), here).path
+  const lines = linesFiles(here).get(path)
+  const known = { journalSize: file.size, mtime: 0 }
+  if (lines !== undefined || path === codexState(here)) {
+    const parts: Uint8Array[] = []
+    for await (const part of viewOf(file, writers, here)) parts.push(part)
+    const placed = Buffer.concat(parts)
+    if (lines === undefined) placeCodexRow(path, placed)
+    else await mergeLines(path, placed)
+    const local = lines === undefined ? placed : linesOf(await Bun.file(path).text(), lines.lines, session)
+    return { session, path, ...known, localSize: local.length, tail: local.slice(Math.max(0, local.length - TAIL_BYTES)), sha256: sha256(local) }
+  }
+  await mkdir(dirname(path), { recursive: true })
+  // 'w' empties a copy this machine already has, such as its own longer transcript of a session it takes back
+  const handle = await open(path, 'w')
+  const hasher = new Bun.CryptoHasher('sha256')
+  let [size, tail] = [0, NOTHING]
+  try {
+    for await (const part of viewOf(file, writers, here)) {
+      for (let at = 0; at < part.length; ) at += (await handle.write(part, at)).bytesWritten
+      hasher.update(part)
+      size += part.length
+      tail = Buffer.concat([tail, part.subarray(Math.max(0, part.length - TAIL_BYTES))]).subarray(-TAIL_BYTES)
+    }
+  } finally {
+    await handle.close()
+  }
+  return { session, path, ...known, localSize: size, tail: Uint8Array.from(tail), sha256: hasher.digest('hex'), mtime: (await stat(path)).mtimeMs }
+}
+
+// How a takeover reaches the machine that held the session, by its device record: `anyhost released` there. Answers
+// whether that machine heard it.
+export type Release = (holder: DeviceRecord, session: string, to: string) => Promise<boolean>
+
+// Over the ssh name the holder's device record gives, while the restore downloads. The holder stops capturing the
+// session and refuses its prompts with this machine's name as soon as it lands. A machine ssh cannot reach learns it
+// when its program next starts or uploads the session, and the session opened here says so.
+const releaseOverSsh: Release = async (holder, session, to) => {
+  // the remote shell reads the command, so it carries only a session id and a machine name, never a quote
+  if (!/^[\w.-]+$/.test(`${session}${to}`)) {
+    console.error(`anyhost tells ${holder.name} nothing, because the session ${session} or this machine's name ${to} holds a character other than a letter, a digit, '.', '_' or '-', so ${holder.name} learns it when its program next starts or uploads the session.`)
+    return false
+  }
+  // the login shell puts anyhost on PATH, which a command over ssh lacks on Ubuntu
+  const command = `$SHELL -lc 'anyhost released ${session} --to ${to}'`
+  return await run(['ssh', '-o', 'BatchMode=yes', '-o', `ConnectTimeout=${SSH_CONNECT_SECONDS}`, holder.ssh, command]).then(
+    () => true,
+    (error: unknown) => {
+      console.error(`anyhost could not tell ${holder.name} that ${to} holds ${session} now, so ${holder.name} learns it when its program next starts or uploads the session: ${messageOf(error)}`)
+      return false
+    },
+  )
 }
 
 async function herdrRuns(): Promise<boolean> {
@@ -59,40 +246,91 @@ async function herdrRuns(): Promise<boolean> {
   return (await run(['herdr', 'status', 'server']).catch(() => '')).includes('status: running')
 }
 
-async function openClaude(session: ListedSession, cwd: string): Promise<number> {
+async function openSession(session: ListedSession, cwd: string): Promise<number> {
+  const command = session.tool === 'claude' ? ['claude', '--resume', session.id] : ['codex', 'resume', session.id]
   if (await herdrRuns()) {
     const created = JSON.parse(await run(['herdr', 'workspace', 'create', '--cwd', cwd, '--label', session.title || session.id])) as { result: { root_pane: { pane_id: string } } }
-    await run(['herdr', 'pane', 'run', created.result.root_pane.pane_id, `claude --resume ${session.id}`])
+    await run(['herdr', 'pane', 'run', created.result.root_pane.pane_id, command.join(' ')])
     console.log(`Resumed ${session.id} in a herdr pane in ${cwd}.`)
     return 0
   }
-  return await Bun.spawn(['claude', '--resume', session.id], { cwd, stdio: ['inherit', 'inherit', 'inherit'] }).exited
+  return await Bun.spawn(command, { cwd, stdio: ['inherit', 'inherit', 'inherit'] }).exited
 }
 
-export async function resume(store: Store, device: Device, id: string, options: { take: boolean }): Promise<number> {
+// Takes the claim, downloads and replays the session's journal, checks every file against its last writer, restores
+// the working folder's code, and places every file with its paths rewritten to this machine's. Answers the session
+// and the folder it continues in. `checkouts` is the person's option of that name.
+export async function restore(capture: Capture, id: string, options: { take: boolean; release?: Release; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
+  const { store, db, device, roots } = capture
   const devices = await devicesOf(store)
   const session = (await listSessions(store, devices)).find((listed) => listed.id === id)
   if (session === undefined) throw new Error(`No machine lists the session ${id}. anyhost list shows every session.`)
-  if (session.tool !== 'claude') throw new Error(`${id} is a Codex session, and anyhost resumes Claude Code sessions.`)
+  let previous: string | undefined
   try {
-    await takeClaim(store, id, device.id, options)
+    previous = await takeClaim(store, id, device.id, options)
   } catch (error) {
     if (!(error instanceof HeldElsewhere)) throw error
     throw new Error(`This session continues on ${devices.get(error.device)?.name ?? error.device}. Run anyhost resume ${id} --take to continue it here.`)
   }
-  const transcripts = await downloadSession(store, devices.keys(), id)
-  const main = transcripts.get(id)
-  if (main === undefined) throw new Error(`R2 holds no transcript of the session ${id}.`)
-  const cwd = await localCwd(session)
-  const db = openDatabase()
-  for (const [key, bytes] of transcripts) {
-    const placed = new TextEncoder().encode(withCwd(new TextDecoder().decode(bytes), cwd))
-    const path = placementOf(key, cwd)
-    placeFile(db, path, key, placed.length, bytes.length)
-    await mkdir(dirname(path), { recursive: true })
-    await Bun.write(path, placed)
+  // a session no machine claimed yet is held by the machine that last wrote it
+  const holder = previous ?? session.device
+  const record = holder === device.id ? undefined : devices.get(holder)
+  const told = record === undefined ? undefined : (options.release ?? releaseOverSsh)(record, id, device.name)
+  const rootsOf = await writersOf(store, devices, session)
+  const folder = await localFolder(capture, session, rootsOf(session.device), options.checkouts ?? '')
+  const provisional: Roots = { ...roots, checkout: checkoutOfEntry({ ...session, cwd: folder }, roots.home) }
+  const staging = join(dirname(db.filename), 'restore', id)
+  await rm(staging, { recursive: true, force: true })
+  const named = new Map<string, string>()
+  const replayed = await downloadJournal(store, id, staging, ({ device: writer, path }) => {
+    const key = `${writer}\0${path}`
+    if (!named.has(key)) named.set(key, relocate(NOTHING, path, rootsOf(writer), provisional).path)
+    return named.get(key) ?? path
+  })
+  const writers: Writers = { rootsOf, tracked: await trackedFilesOf(replayed, id) }
+  // A lines file is shared by every session, and its writer's view of the session's lines can hold lines the journal
+  // never got, such as the prompts that machine refused while another one held the session. So nothing checks it, and
+  // placing it appends the session's lines this machine lacks.
+  for (const [path, file] of replayed.files) if (!linesFiles(roots).has(path)) await checkFile(file, writers)
+  const code = [...replayed.code.values()].at(-1)
+  if (code !== undefined && sha256(code.bytes) !== code.header.after?.sha256) throw new Error(`The code record of ${code.header.path} does not hash to the sha256 its header says.`)
+  const readPart = async (path: string): Promise<Uint8Array> => {
+    const part = replayed.files.get(path)
+    if (part === undefined) throw new Error(`The code of ${id} names the part ${path}, which its journal does not hold.`)
+    return new Uint8Array(await Bun.file(part.staged).arrayBuffer())
   }
-  await recordSummary(db, id, 'claude', withCwd(new TextDecoder().decode(main), cwd), main.length, session.lastActivity)
-  db.close()
-  return await openClaude(session, cwd)
+  let cwd = folder
+  if (code !== undefined) cwd = await capture.restoreCode(code.bytes, readPart, folder)
+  else if (session.repo !== '' && !(await isFolder(provisional.checkout))) {
+    console.log(`Cloning ${session.repo} into ${provisional.checkout}`)
+    await run(['git', 'clone', session.repo, provisional.checkout])
+  }
+  await mkdir(cwd, { recursive: true })
+  const here: Roots = { ...roots, checkout: checkoutOfEntry({ ...session, cwd }, roots.home) }
+  stopJournal(db, id, session.tool, `anyhost resume is placing the files of ${id}, and stopped there.`)
+  const placed: FileState[] = []
+  for (const [path, file] of replayed.files) {
+    // a code part stays in the journal: this machine holds it, so capture never uploads it again
+    if (isCodePart(path)) placed.push({ session: id, path, journalSize: file.size, localSize: file.size, tail: NOTHING, sha256: file.last.after.sha256, mtime: 0 })
+    else placed.push(await placeFile(id, file, writers, here))
+  }
+  // a file the session deleted is gone here too, and capture knows it, so it uploads the file whole if it comes back
+  for (const path of replayed.deleted) {
+    await rm(path, { force: true })
+    placed.push({ session: id, path, journalSize: 0, localSize: 0, tail: NOTHING, sha256: '', mtime: 0 })
+  }
+  continueJournal(db, { session: id, tool: session.tool, end: replayed.end, sealed: replayed.sealedEnd }, placed)
+  const transcript = placed.find(({ path }) => {
+    const owner = ownerOf(path, roots)
+    return owner !== undefined && 'isTranscript' in owner && owner.isTranscript
+  })
+  await recordSummary(capture, id, session.tool, transcript === undefined ? '' : await Bun.file(transcript.path).text(), replayed.end, session.lastActivity)
+  await rm(staging, { recursive: true, force: true })
+  if (record !== undefined && !(await told)) markUntold(db, id, record.name)
+  return { session, cwd }
+}
+
+export async function resume(capture: Capture, id: string, options: { take: boolean }): Promise<number> {
+  const { session, cwd } = await restore(capture, id, { ...options, checkouts: (await personOptions()).checkouts ?? '' })
+  return await openSession(session, cwd)
 }

@@ -1,7 +1,16 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { Code } from '../src/capture.ts'
+import type { Release } from '../src/resume.ts'
 import type { Store, Stored } from '../src/store.ts'
+
+// The stand-in for the working folder's code: nothing to record, and the session continues in the folder it names.
+export const noCode: Code = { captureCode: async () => undefined, restoreCode: async (_header, _readPart, folder) => folder }
+
+// The stand-in for the ssh message a restore sends the machine that held the session: none, so no test reaches ssh,
+// and the machine that held it hears nothing.
+export const noRelease: Release = async () => false
 
 export type MemoryStore = Store & { readonly objects: Map<string, Stored>; readonly puts: { key: string; body: Uint8Array }[]; now: number }
 

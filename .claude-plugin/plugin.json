@@ -12,5 +12,20 @@
       "name": "cmod",
       "version": ">=5.4.0"
     }
-  ]
+  ],
+  "userConfig": {
+    "uploadEvery": {
+      "type": "number",
+      "title": "Upload every",
+      "description": "Seconds between uploads of a session to R2. 0 uploads every write.",
+      "default": 0,
+      "min": 0
+    },
+    "checkouts": {
+      "type": "directory",
+      "title": "Checkouts folder",
+      "description": "Where anyhost resume clones a repository this machine lacks. Empty: the folder your checkouts share, else your home folder.",
+      "default": ""
+    }
+  }
 }

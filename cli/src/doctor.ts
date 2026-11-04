@@ -17,7 +17,7 @@ async function profileCheck(): Promise<Check> {
     ...(hasKeys ? [] : [`aws_access_key_id and aws_secret_access_key under [${PROFILE}] in ${credentials}`]),
   ]
   if (missing.length === 0) return { ok: `The AWS profile ${PROFILE} names R2's endpoint and keys.` }
-  return { problem: `The AWS profile ${PROFILE} lacks ${missing.join(', and ')}.`, fix: `Write endpoint_url = https://<account id>.eu.r2.cloudflarestorage.com and region = auto under [profile ${PROFILE}] in ${config}, and the R2 API token's keys under [${PROFILE}] in ${credentials}.` }
+  return { problem: `The AWS profile ${PROFILE} lacks ${missing.join(', and ')}.`, fix: `Write endpoint_url = https://<account id>.r2.cloudflarestorage.com (with .eu. before r2 for a bucket in the EU jurisdiction) and region = auto under [profile ${PROFILE}] in ${config}, and the R2 API token's keys under [${PROFILE}] in ${credentials}.` }
 }
 
 async function bucketCheck(store: Store): Promise<Check> {
@@ -51,13 +51,15 @@ async function programChecks(): Promise<Check[]> {
   const { state, message } = status.registration
   const registration: Check =
     state === 'registered'
-      ? { ok: `The anyhost program runs at ${address}: its last capture was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.` }
+      ? {
+          ok: `The anyhost program runs at ${address}: it uploads ${status.uploadEvery === 0 ? 'every write' : `every ${status.uploadEvery} seconds`}, its last upload was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.`,
+        }
       : state === 'waiting'
         ? { wait: `The anyhost program at ${address} waits: ${message}` }
         : state === 'cloned'
           ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Restart the machine after the fix, then start Claude Code.' }
-          : { problem: `The anyhost program at ${address} has not registered this machine yet.`, fix: 'It tries again every 30 seconds. The line below names why it failed.' }
-  return [registration, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again every 30 seconds, and this line goes once the cause is gone.' }))]
+          : { problem: `The anyhost program at ${address} has not registered this machine yet.`, fix: 'It tries again every 60 seconds. The line below names why it failed.' }
+  return [registration, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' }))]
 }
 
 export async function doctor(store: Store): Promise<number> {

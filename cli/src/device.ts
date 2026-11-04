@@ -1,12 +1,22 @@
+import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { Roots } from './relocate.ts'
 import type { Store } from './store.ts'
 
 export type Device = { readonly id: string; readonly name: string; readonly os: string; readonly arch: string }
-export type DeviceRecord = { readonly name: string; readonly os: string; readonly arch: string; readonly ssh: string }
+export type MachineRoots = Omit<Roots, 'checkout'>
+export type DeviceRecord = MachineRoots & { readonly name: string; readonly os: string; readonly arch: string; readonly ssh: string }
 
 export const stateFolder = (): string => join(process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state'), 'anyhost')
 const cmodProgram = (): string => join(process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share'), 'cmod', 'programs', 'cmod')
+
+// Claude Code keeps background output under `/tmp/claude-<uid>`, which macOS resolves to `/private/tmp`.
+export const rootsHere = (home = homedir()): MachineRoots => ({
+  home,
+  claudeTmp: join(realpathSync(process.env['CLAUDE_CODE_TMPDIR'] || '/tmp'), `claude-${process.getuid?.() ?? 0}`),
+  codexHome: process.env['CODEX_HOME'] || join(home, '.codex'),
+})
 
 export function deviceFromEnvironment(): Device {
   const { ANYHOST_DEVICE_ID: id, ANYHOST_DEVICE_NAME: name, ANYHOST_DEVICE_OS: os, ANYHOST_DEVICE_ARCH: arch } = process.env
@@ -14,14 +24,20 @@ export function deviceFromEnvironment(): Device {
   return { id, name, os, arch }
 }
 
-export async function cmodDevice(): Promise<Device> {
-  const cmod = (await Bun.file(cmodProgram()).exists()) ? cmodProgram() : Bun.which('cmod')
-  if (cmod === null) throw new Error(`anyhost reads this machine from cmod device, and neither ${cmodProgram()} nor a cmod on PATH exists. Install cmod with npm install -g @cmodjs/cli.`)
-  const child = Bun.spawn([cmod, 'device', '--json'], { stdout: 'pipe', stderr: 'pipe' })
+async function cmod(...args: string[]): Promise<string> {
+  const program = (await Bun.file(cmodProgram()).exists()) ? cmodProgram() : Bun.which('cmod')
+  if (program === null) throw new Error(`anyhost runs cmod ${args[0]}, and neither ${cmodProgram()} nor a cmod on PATH exists. Install cmod with npm install -g @cmodjs/cli.`)
+  const child = Bun.spawn([program, ...args], { stdout: 'pipe', stderr: 'pipe' })
   const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-  if (code !== 0) throw new Error(error.trim() || `cmod device exited with ${code}.`)
-  return JSON.parse(output) as Device
+  if (code !== 0) throw new Error(error.trim() || `cmod ${args[0]} exited with ${code}.`)
+  return output
 }
+
+export const cmodDevice = async (): Promise<Device> => JSON.parse(await cmod('device', '--json')) as Device
+
+// The values the person set in /config. An option they never set is absent, and its default applies.
+type PersonOptions = { readonly uploadEvery?: number; readonly checkouts?: string }
+export const personOptions = async (): Promise<PersonOptions> => (JSON.parse(await cmod('options', 'anyhost', '--json')) as { person: PersonOptions }).person
 
 export const QUIET_BEFORE_RENAME_MS = 10 * 60_000
 
@@ -38,9 +54,9 @@ export function cloneFixFor(os: string): string {
 
 const isoOf = (ms: number): string => new Date(ms).toISOString()
 
-export async function register(store: Store, device: Device, now = Date.now(), earlier?: Registration): Promise<Registration> {
+export async function register(store: Store, device: Device, roots: MachineRoots, now = Date.now(), earlier?: Registration): Promise<Registration> {
   const key = `devices/${device.id}.json`
-  const record = JSON.stringify({ name: device.name, os: device.os, arch: device.arch, ssh: device.name } satisfies DeviceRecord)
+  const record = JSON.stringify({ name: device.name, os: device.os, arch: device.arch, ssh: device.name, ...roots } satisfies DeviceRecord)
   if ((await store.put(key, record, { ifNoneMatch: '*' })) !== undefined) return { state: 'registered' }
   const taken = await store.get(key)
   if (taken === undefined) throw new Error(`R2 refused ${key} as taken, then answered that it does not exist.`)
