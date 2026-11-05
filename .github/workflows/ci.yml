@@ -33,15 +33,18 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install -g @cmodjs/cli
 
-      - name: Install the packages of the mod and the program
+      - name: Install the packages of the mod, the program and the relay
         run: |
           bun install --frozen-lockfile
           bun install --cwd cli --frozen-lockfile
+          bun install --cwd relay --frozen-lockfile
 
-      - name: Check the types of the anyhost program
-        run: bun run --cwd cli check
+      - name: Check the types of the anyhost program and the relay
+        run: |
+          bun run --cwd cli check
+          bun run --cwd relay check
 
-      - name: Test the mod and the anyhost program
+      - name: Test the mod, the anyhost program and the relay
         run: bun test
 
       - name: Check and test the mod

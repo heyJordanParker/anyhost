@@ -1,6 +1,7 @@
 {
   "ignorePatterns": [
     ".claude-plugin/types/**",
-    "cli/dist/**"
+    "cli/dist/**",
+    "relay/dist/**"
   ]
 }

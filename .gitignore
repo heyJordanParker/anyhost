@@ -1,4 +1,5 @@
 node_modules/
 .claude-plugin/types/
 cli/dist/
+relay/dist/
 /docs/agents/
