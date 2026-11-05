@@ -1,6 +1,6 @@
 {
   "name": "anyhost",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Every Claude Code and Codex session of every machine, kept in R2, listed everywhere and resumed on any machine",
   "author": {
     "name": "Jordan Parker",
@@ -10,7 +10,28 @@
   "dependencies": [
     {
       "name": "cmod",
-      "version": ">=5.4.0"
+      "version": ">=5.11.0"
     }
-  ]
+  ],
+  "userConfig": {
+    "bucket": {
+      "type": "string",
+      "title": "R2 bucket",
+      "description": "The bucket in your R2 account that keeps every session. Each machine names the same one.",
+      "default": "anyhost"
+    },
+    "uploadEvery": {
+      "type": "number",
+      "title": "Upload every",
+      "description": "Seconds between uploads of a session to R2. 0 uploads every write.",
+      "default": 0,
+      "min": 0
+    },
+    "checkouts": {
+      "type": "directory",
+      "title": "Checkouts folder",
+      "description": "Where anyhost resume clones a repository this machine lacks. Empty: the folder your checkouts share, else your home folder.",
+      "default": ""
+    }
+  }
 }
