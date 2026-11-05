@@ -3,22 +3,17 @@ import { program } from '../node_modules/@cmodjs/core/jobs/program.js'
 import { option } from '../node_modules/@cmodjs/core/options.js'
 
 // The program's /claims/<session> answer: the machine that took the session over, or why this machine captures nothing.
-// `untold`, answered once, is the machine this one took the session from without reaching it over ssh.
+// `untold`, answered once, is the machine this one took the session from while that machine was not connected.
 type Holder = { readonly machine?: string; readonly problem?: string; readonly untold?: string }
 
 export const anyhost = defineMod({
   name: 'anyhost',
-  // The anyhost program reads them with cmod options: bucket at its start and uploadEvery within a minute of a change,
-  // since one program serves every session, and checkouts at each anyhost resume. A new bucket restarts the program.
+  // The anyhost program reads them with cmod options: uploadEvery within a minute of a change, since one program
+  // serves every session, and checkouts at each anyhost resume.
   options: {
-    bucket: option.text({
-      title: 'R2 bucket',
-      description: 'The bucket in your R2 account that keeps every session. Each machine names the same one.',
-      default: 'anyhost',
-    }),
     uploadEvery: option.number({
       title: 'Upload every',
-      description: 'Seconds between uploads of a session to R2. 0 uploads every write.',
+      description: 'Seconds between uploads of a session to your Cloudflare account. 0 uploads every write.',
       default: 5,
       min: 0,
     }),
@@ -60,7 +55,7 @@ export const anyhost = defineMod({
       if (holder.problem !== undefined) showOnce('anyhost captures nothing on this machine', holder.problem)
       if (holder.untold !== undefined) {
         mod.toast.warning(`${holder.untold} may take one more prompt of this session`, {
-          description: `anyhost could not reach ${holder.untold} over ssh to say this machine holds the session now. ${holder.untold} learns it when its anyhost program next starts or uploads the session.`,
+          description: `${holder.untold}'s anyhost was not connected when this machine took the session, so it learns that this machine holds the session when it next connects.`,
           duration: Infinity,
         })
       }

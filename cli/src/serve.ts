@@ -1,13 +1,12 @@
 import { watch } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { changedFiles, checkHolders, journalOf, openCapture, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSession, writeIndex, type Problems } from './capture.ts'
-import { personOptions, register, rootsHere, stateFolder, type Device, type Registration } from './device.ts'
-import { bucketOf, messageOf, type Store } from './store.ts'
+import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
+import { personOptions, relayLogin, rootsHere, stateFolder, type Device } from './device.ts'
+import { connectRelay, type RelayState } from './relay.ts'
 import { codexState, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
-const REGISTER_MS = 5 * 60_000
 const RETRY_MS = 1000
 
 // The option `uploadEvery`, which `cmod options` leaves out until the person sets it. Replayed from a Mac's 30 days of
@@ -17,20 +16,21 @@ export const uploadEveryOf = (chosen: number | undefined): number => chosen ?? 5
 
 export type Status = {
   readonly device: Device
-  readonly bucket: string
-  readonly registration: { readonly state: Registration['state'] | 'unregistered'; readonly message: string }
+  // `message` says why the program uploads nothing, empty while it connects or is connected
+  readonly relay: { readonly url: string; readonly state: RelayState['is']; readonly message: string; readonly bucket: string }
   readonly pending: number
   readonly uploadEvery: number
   readonly capturedAt: string
   readonly problems: readonly string[]
 }
-type Upload = (session: string, tool: Tool, paths: ReadonlySet<string>) => Promise<Set<string>>
+type Queued = { readonly tool: Tool; readonly paths: ReadonlySet<string> }
+type Upload = (sessions: ReadonlyMap<string, Queued>) => ReadonlyMap<string, Promise<Set<string>>>
 
 // The upload queue: one per machine, filled on every write the watcher names, and drained every `every` seconds, or on
-// every write at 0. A drain uploads each queued session once with everything written since its last upload. One
-// upload is in flight per session: writes during it join the next drain, which at 0 starts as soon as it ends. At 0 a
-// failed upload tries again after 1 second, then 2, 4 and so on up to a minute, so a line waits out no more of an
-// outage than that.
+// every write at 0. A drain uploads every queued session once, in one upload, with everything written since its last
+// upload. One upload is in flight per session: writes during it join the next drain, which at 0 starts as soon as it
+// ends. At 0 a failed upload tries again after 1 second, then 2, 4 and so on up to a minute, so a line waits out no
+// more of an outage than that.
 export class UploadQueue {
   private readonly queued = new Map<string, { tool: Tool; paths: Set<string> }>()
   private readonly uploading = new Set<string>()
@@ -67,11 +67,11 @@ export class UploadQueue {
     const queued = this.queued.get(session) ?? { tool, paths: new Set() }
     this.queued.set(session, queued)
     queued.paths.add(path)
-    if (this.every === 0) this.drainSession(session)
+    if (this.every === 0) this.drainSessions([session])
   }
 
   drain(): void {
-    for (const session of this.queued.keys()) this.drainSession(session)
+    this.drainSessions([...this.queued.keys()])
   }
 
   private schedule(): void {
@@ -79,29 +79,38 @@ export class UploadQueue {
     this.timer = this.every > 0 ? setInterval(() => this.drain(), this.every * 1000) : undefined
   }
 
-  private drainSession(session: string): void {
-    const queued = this.queued.get(session)
-    if (queued === undefined || this.uploading.has(session) || !this.isReady()) return
-    this.queued.delete(session)
-    this.uploading.add(session)
-    this.upload(session, queued.tool, queued.paths).then(
-      (left) => {
-        this.uploading.delete(session)
-        this.retryMs.delete(session)
-        for (const path of left) this.add(session, queued.tool, path)
-        if (this.every === 0) this.drainSession(session)
-      },
-      (error: unknown) => {
-        // the paths wait for the next drain: the retry at 0, the next write, the timer, or the 60-second backup
-        this.uploading.delete(session)
-        const now = this.queued.get(session) ?? { tool: queued.tool, paths: new Set() }
-        this.queued.set(session, { tool: now.tool, paths: new Set([...queued.paths, ...now.paths]) })
-        this.onFailure(session, error)
-        const wait = this.retryMs.get(session) ?? RETRY_MS
-        this.retryMs.set(session, Math.min(2 * wait, BACKUP_MS))
-        if (this.every === 0) setTimeout(() => this.drainSession(session), wait)
-      },
-    )
+  private drainSessions(sessions: readonly string[]): void {
+    if (!this.isReady()) return
+    const drained = new Map<string, { tool: Tool; paths: Set<string> }>()
+    for (const session of sessions) {
+      const queued = this.queued.get(session)
+      if (queued === undefined || this.uploading.has(session)) continue
+      this.queued.delete(session)
+      this.uploading.add(session)
+      drained.set(session, queued)
+    }
+    if (drained.size === 0) return
+    const uploads = this.upload(drained)
+    for (const [session, queued] of drained) {
+      ;(uploads.get(session) ?? Promise.reject(new Error(`The drain uploaded nothing of the session ${session}.`))).then(
+        (left) => {
+          this.uploading.delete(session)
+          this.retryMs.delete(session)
+          for (const path of left) this.add(session, queued.tool, path)
+          if (this.every === 0) this.drainSessions([session])
+        },
+        (error: unknown) => {
+          // the paths wait for the next drain: the retry at 0, the next write, the timer, or the 60-second backup
+          this.uploading.delete(session)
+          const now = this.queued.get(session) ?? { tool: queued.tool, paths: new Set() }
+          this.queued.set(session, { tool: now.tool, paths: new Set([...queued.paths, ...now.paths]) })
+          this.onFailure(session, error)
+          const wait = this.retryMs.get(session) ?? RETRY_MS
+          this.retryMs.set(session, Math.min(2 * wait, BACKUP_MS))
+          if (this.every === 0) setTimeout(() => this.drainSessions([session]), wait)
+        },
+      )
+    }
   }
 }
 
@@ -110,22 +119,23 @@ async function filesUnder(folder: string, isRecursive: boolean): Promise<string[
   return entries.filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name))
 }
 
-export async function serve(store: Store, device: Device): Promise<void> {
+export async function serve(device: Device): Promise<void> {
   const roots = rootsHere()
+  const relay = connectRelay({ login: relayLogin, device, isPatient: true })
+  const db = openDatabase()
+  const counted = countedBucket(db)
   // a session's code that captureCode read after an upload goes up in the session's next drains
-  const capture = openCapture(store, device, roots, undefined, undefined, (session, tool, folder) => queue.add(session, tool, `${folder}/`))
+  const capture = openCapture(relay, device, roots, db, undefined, (session, tool, folder) => queue.add(session, tool, `${folder}/`))
   const heartbeat = join(stateFolder(), 'heartbeat')
   const watched = new Set<string>()
   const current = new Map<string, string>()
-  let registration: Registration | undefined
-  let registeredAt = 0
   let capturedAt = ''
   let lastIndex = ''
 
   // a problem names what failed, such as `seal <session>` or a file's path, so a timeout says which call it ended
   const problems: Problems = {
     set(key, error) {
-      const message = `${new Date().toISOString()} ${key}: ${messageOf(error)}`
+      const message = `${new Date().toISOString()} ${key}: ${error instanceof AggregateError ? error.errors.map(String).join(', ') : String(error)}`
       current.set(key, message)
       console.error(message)
     },
@@ -141,15 +151,30 @@ export async function serve(store: Store, device: Device): Promise<void> {
   }
   const queue = new UploadQueue(
     uploadEveryOf(undefined),
-    async (session, tool, paths) => {
-      const left = await uploadSession(capture, session, tool, paths, problems, queue.uploadEvery === 0)
-      problems.clear(`upload ${session}`)
-      capturedAt = new Date().toISOString()
-      return left
-    },
+    (sessions) =>
+      new Map(
+        [...uploadSessions(capture, sessions, problems, queue.uploadEvery === 0)].map(([session, upload]) => [
+          session,
+          upload.then((left) => {
+            problems.clear(`upload ${session}`)
+            capturedAt = new Date().toISOString()
+            return left
+          }),
+        ]),
+      ),
     (session, error) => problems.set(`upload ${session}`, error),
-    () => registration?.state === 'registered',
+    () => relay.state.is === 'connected',
   )
+  // The welcome's sessions another machine took are in the database by now, so the queue drains what waited for the
+  // relay. The database counts what one bucket holds, so a relay of another bucket takes a new start, which the
+  // service gives the program.
+  relay.on('welcome', ({ bucket }) => {
+    if (counted !== undefined && bucket !== counted) {
+      console.error(`${new Date().toISOString()} The relay keeps sessions in ${bucket} now, not ${counted}, so anyhost exits, and its service starts it again on that bucket.`)
+      process.exit(0)
+    }
+    queue.drain()
+  })
   const heard = (path: string): void => {
     if (!watched.has(path) && watchedFolders(roots).some(({ folder }) => folder === path)) void watchFolders()
     // a write to Codex's write-ahead log is a change of its database
@@ -184,27 +209,11 @@ export async function serve(store: Store, device: Device): Promise<void> {
       }
     }
   }
-  const registerHere = (now: number): Promise<void> =>
-    settle('registration', async () => {
-      registration = await register(store, device, roots, now, registration)
-      if (registration.state === 'registered') {
-        registeredAt = now
-        queue.drain()
-      }
-    })
-  const backup = async (started: number): Promise<void> => {
-    if (registration?.state !== 'registered' || started - registeredAt >= REGISTER_MS) await registerHere(started)
+  const backup = async (): Promise<void> => {
     await watchFolders()
     await Bun.write(heartbeat, '')
-    await settle('options', async () => {
-      const options = await personOptions()
-      queue.uploadEvery = uploadEveryOf(options.uploadEvery)
-      // the database counts what one bucket holds, so a new bucket takes a new start, which the service gives the program
-      if (bucketOf(options.bucket) === store.bucket) return
-      console.error(`${new Date().toISOString()} The bucket is ${bucketOf(options.bucket)} now, not ${store.bucket}, so anyhost exits, and its service starts it again on that bucket.`)
-      process.exit(0)
-    })
-    if (registration?.state !== 'registered') return
+    await settle('options', async () => void (queue.uploadEvery = uploadEveryOf((await personOptions()).uploadEvery)))
+    if (relay.state.is !== 'connected') return
     await settle('backup', async () => {
       for (const [session, paths] of await changedFiles(capture)) {
         const tool = capture.db.query<{ tool: Tool }, [string]>('select tool from journals where session = ?').get(session)?.tool ?? 'claude'
@@ -215,28 +224,29 @@ export async function serve(store: Store, device: Device): Promise<void> {
     await settle('index', async () => void (lastIndex = await writeIndex(capture, lastIndex)))
     await sealQuiet(capture, problems)
   }
-  // What a prompt waits for: this machine's own record of who holds the session, which a takeover's ssh message, the
-  // program's start, and each upload keep, so the answer never waits on R2. `untold` names, once, the machine this
-  // machine took the session from without reaching it.
+  // What a prompt waits for: this machine's own record of who holds the session, which the relay's `released` and each
+  // upload keep, so the answer never waits on the relay. `untold` names, once, the machine this machine took the
+  // session from while that machine had no connection to the relay.
   const holderOf = (session: string): { machine?: string; problem?: string; untold?: string } => {
-    if (registration?.state === 'cloned') return { problem: registration.message }
+    const { state } = relay
+    if (state.is === 'refused') return { problem: state.message }
     const holder = journalOf(capture.db, session)?.holder ?? ''
     const untold = takeUntold(capture.db, session)
     return { ...(holder === '' ? {} : { machine: holder }), ...(untold === '' ? {} : { untold }) }
   }
-  const statusOf = (): Status => ({
-    device,
-    bucket: store.bucket,
-    registration: registration === undefined ? { state: 'unregistered', message: '' } : { state: registration.state, message: 'message' in registration ? registration.message : '' },
-    pending: queue.pending,
-    uploadEvery: queue.uploadEvery,
-    capturedAt,
-    problems: [...current.values()],
-  })
+  const statusOf = (): Status => {
+    const { state, url } = relay
+    return {
+      device,
+      relay: { url, state: state.is, message: 'message' in state ? state.message : '', bucket: state.is === 'connected' ? state.welcome.bucket : (countedBucket(capture.db) ?? '') },
+      pending: queue.pending,
+      uploadEvery: queue.uploadEvery,
+      capturedAt,
+      problems: [...current.values()],
+    }
+  }
 
   await startLineOffsets(capture)
-  await settle('holders', () => checkHolders(capture))
-  await registerHere(Date.now())
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -256,7 +266,7 @@ export async function serve(store: Store, device: Device): Promise<void> {
   await settle('catch-up', catchUp)
   const loop = async (): Promise<void> => {
     const started = Date.now()
-    await backup(started).catch((error: unknown) => problems.set('backup', error))
+    await backup().catch((error: unknown) => problems.set('backup', error))
     setTimeout(() => void loop(), Math.max(0, started + BACKUP_MS - Date.now()))
   }
   await loop()

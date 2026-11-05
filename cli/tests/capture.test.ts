@@ -1,17 +1,19 @@
 import { Database } from 'bun:sqlite'
-import { expect, spyOn, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import {
   changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, decompress, encodeRecord, hotKey, isCodePart, journalOf, openCapture, openDatabase, seal, sessionsOf, startLineOffsets, uploadSession,
-  type Problems, type RecordHeader,
+  uploadSessions, type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
 import { downloadJournal } from '../src/sessions.ts'
-import type { Store } from '../src/store.ts'
 import { codexState, summarize } from '../src/transcript.ts'
-import { MEMORY, memoryStore, noCode, temporaryFolder, type MemoryStore } from './memory.ts'
+import { memoryRelay, noCode, stopRelays, temporaryFolder, welcomed, type MemoryRelay } from './memory.ts'
+
+afterEach(stopRelays)
 
 const SESSION = '11111111-2222-3333-4444-555555555555'
 const OTHER = '99999999-2222-3333-4444-555555555555'
@@ -32,12 +34,13 @@ const failTest: Problems = {
   clear: () => undefined,
 }
 const decoded = (bytes: Uint8Array): string => new TextDecoder().decode(bytes)
+const rootsUnder = (folder: string): MachineRoots => ({ home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') })
 
-function machine(device: Device, store: Store, folder = temporaryFolder()) {
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
+function machine(device: Device, relay: MemoryRelay, folder = temporaryFolder(), code = noCode, onCode?: (session: string, tool: 'claude' | 'codex', folder: string) => void) {
+  const roots = rootsUnder(folder)
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
-  const capture = openCapture(store, device, roots, openDatabase(MEMORY, join(folder, 'state')), noCode)
+  const capture = openCapture(relay.connect(device, roots), device, roots, openDatabase(join(folder, 'state')), code, onCode)
   const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(capture, SESSION, 'claude', new Set(paths), failTest)
   return { roots, transcript, capture, upload }
 }
@@ -53,12 +56,13 @@ function recordsOf(body: Uint8Array): { header: RecordHeader; text: string }[] {
   return records
 }
 
-const hotFrames = (store: MemoryStore, session = SESSION): string[] => [...store.objects.keys()].filter((key) => key.startsWith(`journals/${session}/hot/`)).sort()
-const journalBytes = (store: MemoryStore): Uint8Array => Buffer.concat(hotFrames(store).map((key) => decompress(store.objects.get(key)?.body ?? new Uint8Array())))
+const hotFrames = (relay: MemoryRelay, session = SESSION): string[] => [...relay.objects.keys()].filter((key) => key.startsWith(`journals/${session}/hot/`)).sort()
+const frameOf = (relay: MemoryRelay, key: string): Uint8Array => decompress(relay.objects.get(key)?.body ?? new Uint8Array())
+const journalBytes = (relay: MemoryRelay): Uint8Array => Buffer.concat(hotFrames(relay).map((key) => frameOf(relay, key)))
 
 test('offset capture never re-uploads a byte', async () => {
-  const store = memoryStore()
-  const { transcript, upload } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { transcript, upload } = machine(deviceA, relay)
   writeFileSync(transcript, lines[0] ?? '')
   await upload(transcript)
   appendFileSync(transcript, `${lines[1]}${lines[2]?.slice(0, 20)}`)
@@ -67,16 +71,16 @@ test('offset capture never re-uploads a byte', async () => {
   appendFileSync(transcript, lines[2]?.slice(20) ?? '')
   await upload(transcript)
 
-  const records = recordsOf(journalBytes(store)).filter(({ header }) => header.path === transcript)
+  const records = recordsOf(journalBytes(relay)).filter(({ header }) => header.path === transcript)
   expect(records.map(({ text }) => text)).toEqual(lines)
   expect(records.map(({ header }) => header.at)).toEqual([0, Buffer.byteLength(lines[0] ?? ''), Buffer.byteLength(`${lines[0]}${lines[1]}`)])
   expect(records.at(-1)?.header.after).toEqual({ size: Bun.file(transcript).size, sha256: new Bun.CryptoHasher('sha256').update(readFileSync(transcript)).digest('hex') })
-  expect(hotFrames(store).length).toBe(3)
+  expect(hotFrames(relay).length).toBe(3)
 })
 
 test("a background command's output uploads whole lines, as a transcript does", async () => {
-  const store = memoryStore()
-  const { roots, transcript, upload } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { roots, transcript, upload } = machine(deviceA, relay)
   const output = join(roots.claudeTmp, '-work-trip', SESSION, 'tasks', 'b1.output')
   mkdirSync(dirname(output), { recursive: true })
   writeFileSync(transcript, lines[0] ?? '')
@@ -85,20 +89,20 @@ test("a background command's output uploads whole lines, as a transcript does", 
   appendFileSync(output, 'rk/trip\n')
   await upload(output)
 
-  expect(recordsOf(journalBytes(store)).filter(({ header }) => header.path === output).map(({ text }) => text)).toEqual(['building /home/ada/work/trip\n', 'linking /home/ada/work/trip\n'])
+  expect(recordsOf(journalBytes(relay)).filter(({ header }) => header.path === output).map(({ text }) => text)).toEqual(['building /home/ada/work/trip\n', 'linking /home/ada/work/trip\n'])
 })
 
 test('a line still being written waits for its end', async () => {
-  const store = memoryStore()
-  const { transcript, upload } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { transcript, upload } = machine(deviceA, relay)
   writeFileSync(transcript, lines[0]?.slice(0, 10) ?? '')
   await upload(transcript)
-  expect(store.puts).toEqual([])
+  expect([relay.puts, relay.requests]).toEqual([[], []])
 })
 
 test("a session's subagents, tool results, plan, pasted text, history lines and background output enter its journal", async () => {
-  const store = memoryStore()
-  const { roots, transcript, upload } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { roots, transcript, upload } = machine(deviceA, relay)
   const claude = join(roots.home, '.claude')
   const plan = join(claude, 'plans', 'trip-plan.md')
   const files = {
@@ -123,24 +127,25 @@ test("a session's subagents, tool results, plan, pasted text, history lines and 
   writeFileSync(join(claude, 'history.jsonl'), `{"display":"other","pastedContents":{},"project":"/work","sessionId":"${OTHER}"}\n${mine}`)
   await upload(transcript)
 
-  const records = recordsOf(journalBytes(store))
+  const records = recordsOf(journalBytes(relay))
   for (const [name, path] of Object.entries(files)) expect(records.find(({ header }) => header.path === path)?.text).toBe(`${name}\n`)
   expect(records.find(({ header }) => header.path === join(claude, 'history.jsonl'))?.text).toBe(mine)
   expect(records.some(({ header }) => header.path === atomicWrite)).toBe(false)
 })
 
 test('replay of append, write-once and rewrite records', async () => {
-  const store = memoryStore()
+  const relay = memoryRelay()
+  const { capture } = machine(deviceA, relay)
   const record = (device: string, path: string, at: number, text: string): Uint8Array[] =>
     encodeRecord({ device, path, at, size: Buffer.byteLength(text), after: { size: at + Buffer.byteLength(text), sha256: '' } }, new TextEncoder().encode(text))
   const first = Buffer.concat([...record('a', '/h/log.jsonl', 0, 'one\n'), ...record('a', '/h/once.txt', 0, 'written once'), ...record('a', '/h/state.json', 0, '{"step":"first, and longer"}')])
   const second = Buffer.concat([...record('b', '/h/log.jsonl', 4, 'two\n'), ...record('b', '/h/state.json', 0, '{"step":2}')])
   // a record may span two frames
-  await store.put(hotKey(SESSION, 0), compressHot(first))
-  await store.put(hotKey(SESSION, first.length), compressHot(second.subarray(0, 30)))
-  await store.put(hotKey(SESSION, first.length + 30), compressHot(second.subarray(30)))
+  relay.put(hotKey(SESSION, 0), compressHot(first))
+  relay.put(hotKey(SESSION, first.length), compressHot(second.subarray(0, 30)))
+  relay.put(hotKey(SESSION, first.length + 30), compressHot(second.subarray(30)))
 
-  const replayed = await downloadJournal(store, SESSION, temporaryFolder(), ({ path }) => path)
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   const text = (path: string): string => readFileSync(replayed.files.get(path)?.staged ?? '', 'utf8')
   expect([text('/h/log.jsonl'), text('/h/once.txt'), text('/h/state.json')]).toEqual(['one\ntwo\n', 'written once', '{"step":2}'])
   expect(replayed.files.get('/h/log.jsonl')?.segments).toEqual([
@@ -151,20 +156,58 @@ test('replay of append, write-once and rewrite records', async () => {
   expect(replayed.end).toBe(first.length + second.length)
 })
 
+test('a drain of several sessions goes up in one request, each session claimed before its frames', async () => {
+  const relay = memoryRelay()
+  const { roots, transcript, capture } = machine(deviceA, relay)
+  const other = join(roots.home, '.claude', 'projects', '-work-trip', `${OTHER}.jsonl`)
+  writeFileSync(transcript, lines[0] ?? '')
+  writeFileSync(other, `{"type":"user","message":{"role":"user","content":"Pack"},"sessionId":"${OTHER}"}\n`)
+  const sessions = new Map([
+    [SESSION, { tool: 'claude' as const, paths: new Set([transcript]) }],
+    [OTHER, { tool: 'claude' as const, paths: new Set([other]) }],
+  ])
+  await Promise.all(uploadSessions(capture, sessions, failTest).values())
+
+  expect(relay.requests[0]?.map((op) => (op.op === 'claim' ? `claim ${op.session}` : op.op === 'put' ? `put ${op.key}` : op.op))).toEqual([
+    `claim ${SESSION}`,
+    `put ${hotKey(SESSION, 0)}`,
+    `claim ${OTHER}`,
+    `put ${hotKey(OTHER, 0)}`,
+  ])
+  expect(relay.claims).toEqual(new Map([[SESSION, deviceA.id], [OTHER, deviceA.id]]))
+  // the next drain claims nothing again
+  appendFileSync(transcript, lines[1] ?? '')
+  await uploadSession(capture, SESSION, 'claude', new Set([transcript]), failTest)
+  expect(relay.requests.flat().filter(({ op }) => op === 'claim')).toHaveLength(2)
+})
+
+test('a frame over 1 MiB goes up by HTTP beside the request, and the journal reads it back byte for byte', async () => {
+  const relay = memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
+  const toolResult = join(dirname(transcript), SESSION, 'tool-results', 'big.txt')
+  mkdirSync(dirname(toolResult), { recursive: true })
+  // random bytes compress to about their own size
+  const big = Buffer.from(crypto.getRandomValues(new Uint8Array(3 * MAX_MESSAGE_BYTES / 2))).toString('base64')
+  writeFileSync(toolResult, big)
+  writeFileSync(transcript, lines[0] ?? '')
+  await upload(transcript, toolResult)
+
+  const frame = hotFrames(relay)[0] ?? ''
+  expect(relay.objects.get(frame)?.body.length).toBeGreaterThan(MAX_MESSAGE_BYTES)
+  expect(relay.requests.flat().some((op) => op.op === 'put' && op.key === frame)).toBe(false)
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
+  expect(readFileSync(replayed.files.get(toolResult)?.staged ?? '', 'utf8')).toBe(big)
+})
+
 test("a drain never waits on git: the files go up at once, the code follows in its own frame, and a part goes up once", async () => {
-  const store = memoryStore()
-  const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
-  const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
-  mkdirSync(dirname(transcript), { recursive: true })
+  const relay = memoryRelay()
   const part = { path: `anyhost:code/${SESSION}/parts/aa11`, bytes: new TextEncoder().encode('a large binary diff') }
   const releases: (() => void)[] = []
   const heard: string[] = []
-  const capture = openCapture(
-    store,
+  const { transcript, capture } = machine(
     deviceA,
-    roots,
-    openDatabase(MEMORY, join(folder, 'state')),
+    relay,
+    temporaryFolder(),
     {
       captureCode: (_folder, _session) => new Promise((resolve) => releases.push(() => resolve({ header: new TextEncoder().encode(`{"head":"${releases.length}"}`), parts: [part] }))),
       restoreCode: async (_header, _readPart, at) => at,
@@ -179,7 +222,7 @@ test("a drain never waits on git: the files go up at once, the code follows in i
     while (releases.length < count) await Bun.sleep(1)
   }
   await upload(transcript)
-  expect(recordsOf(journalBytes(store)).map(({ header }) => header.path)).not.toContain(`${TRIP}/`)
+  expect(recordsOf(journalBytes(relay)).map(({ header }) => header.path)).not.toContain(`${TRIP}/`)
   await gitAsked(1)
   releases[0]?.()
   await capture.codeRuns.get(SESSION)
@@ -192,7 +235,7 @@ test("a drain never waits on git: the files go up at once, the code follows in i
   await capture.codeRuns.get(SESSION)
   await upload(`${TRIP}/`)
 
-  const frames = hotFrames(store).map((key) => recordsOf(decompress(store.objects.get(key)?.body ?? new Uint8Array())).map(({ header, text }) => `${header.path} ${text}`))
+  const frames = hotFrames(relay).map((key) => recordsOf(frameOf(relay, key)).map(({ header, text }) => `${header.path} ${text}`))
   expect(frames.slice(1)).toEqual([
     [`${part.path} a large binary diff`, `${TRIP}/ {"head":"1"}`],
     [`${transcript} ${lines[2]}`],
@@ -201,22 +244,15 @@ test("a drain never waits on git: the files go up at once, the code follows in i
 })
 
 test('a code record whose upload failed goes up with the next drain, since captureCode counts its parts as written', async () => {
-  const store = memoryStore()
+  const relay = memoryRelay()
   let isOffline = false
-  const flaky: Store = { ...store, put: (key, body, condition) => (isOffline ? Promise.reject(new Error('connect ECONNREFUSED')) : store.put(key, body, condition)) }
-  const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
-  const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
-  mkdirSync(dirname(transcript), { recursive: true })
+  relay.refuse = (op) => (isOffline && op.op === 'put' ? 'connect ECONNREFUSED' : undefined)
   const bundle = { path: `anyhost:code/${SESSION}/parts/cc33`, bytes: new TextEncoder().encode('a bundle') }
   const captures = [
     { header: new TextEncoder().encode('header 1'), parts: [bundle] },
     { header: new TextEncoder().encode('header 2'), parts: [] },
   ]
-  const capture = openCapture(flaky, deviceA, roots, openDatabase(MEMORY, join(folder, 'state')), {
-    captureCode: async () => captures.shift(),
-    restoreCode: async (_header, _readPart, at) => at,
-  })
+  const { transcript, capture } = machine(deviceA, relay, temporaryFolder(), { captureCode: async () => captures.shift(), restoreCode: async (_header, _readPart, at) => at })
   const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(capture, SESSION, 'claude', new Set(paths), failTest)
   writeFileSync(transcript, lines[1] ?? '')
   await upload(transcript)
@@ -229,21 +265,17 @@ test('a code record whose upload failed goes up with the next drain, since captu
   await capture.codeRuns.get(SESSION)
   await upload(`${TRIP}/`)
 
-  const code = recordsOf(journalBytes(store))
+  const code = recordsOf(journalBytes(relay))
     .filter(({ header }) => isCodePart(header.path) || header.path.endsWith('/'))
     .map(({ header, text }) => `${header.path} ${text}`)
   expect(code).toEqual([`${bundle.path} a bundle`, `${TRIP}/ header 1`, `${TRIP}/ header 2`])
 })
 
 test('at uploadEvery 0 a line goes up alone, and a long code part in pieces, several frames at once', async () => {
-  const store = memoryStore()
-  const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
-  const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
-  mkdirSync(dirname(transcript), { recursive: true })
+  const relay = memoryRelay()
   const bundle = { path: `anyhost:code/${SESSION}/parts/dd44`, bytes: crypto.getRandomValues(new Uint8Array((CODE_PIECES + 1) * CODE_PIECE_BYTES + 5)) }
   let reads = 0
-  const capture = openCapture(store, deviceA, roots, openDatabase(MEMORY, join(folder, 'state')), {
+  const { transcript, capture } = machine(deviceA, relay, temporaryFolder(), {
     captureCode: async () => ({ header: new TextEncoder().encode(`header ${++reads}`), parts: reads === 1 ? [bundle] : [] }),
     restoreCode: async (_header, _readPart, at) => at,
   })
@@ -260,9 +292,7 @@ test('at uploadEvery 0 a line goes up alone, and a long code part in pieces, sev
   await capture.codeRuns.get(SESSION)
   await upload(`${TRIP}/`)
 
-  const frames = hotFrames(store).map((key) =>
-    recordsOf(decompress(store.objects.get(key)?.body ?? new Uint8Array())).map(({ header, text }) => (header.path === transcript ? text : `${header.path} ${header.at} ${header.size}`)),
-  )
+  const frames = hotFrames(relay).map((key) => recordsOf(frameOf(relay, key)).map(({ header, text }) => (header.path === transcript ? text : `${header.path} ${header.at} ${header.size}`)))
   const piece = (index: number): string[] => [`${bundle.path} ${index * CODE_PIECE_BYTES} ${CODE_PIECE_BYTES}`]
   expect(frames.slice(1)).toEqual([
     ...Array.from({ length: CODE_PIECES }, (_, index) => piece(index)),
@@ -271,75 +301,92 @@ test('at uploadEvery 0 a line goes up alone, and a long code part in pieces, sev
     [`${bundle.path} ${(CODE_PIECES + 1) * CODE_PIECE_BYTES} 5`, `${TRIP}/ 0 8`],
     [`${TRIP}/ 0 8`],
   ])
-  const replayed = await downloadJournal(store, SESSION, temporaryFolder(), ({ path }) => path)
+  // the pieces of one drain go in one request
+  expect(relay.requests.filter((ops) => ops.filter(({ op }) => op === 'put').length === CODE_PIECES)).toHaveLength(1)
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(Buffer.from(readFileSync(replayed.files.get(bundle.path)?.staged ?? '')).equals(Buffer.from(bundle.bytes))).toBe(true)
   expect(replayed.files.get(bundle.path)?.last.after).toEqual({ size: bundle.bytes.length, sha256: new Bun.CryptoHasher('sha256').update(bundle.bytes).digest('hex') })
   expect(reads).toBe(2)
 })
 
 test('a refused position stops the machine that lost it, and its lines from there are a fork', async () => {
-  const store = memoryStore()
-  const a = machine(deviceA, store)
-  const b = machine(deviceB, store)
-  writeFileSync(a.transcript, lines[0] ?? '')
+  const relay = memoryRelay()
+  const a = machine(deviceA, relay)
+  const b = machine(deviceB, relay)
+  // anyhost-a wrote byte 0 before any machine claimed the session, as anyhost before the relay did
+  const bytes = new TextEncoder().encode(lines[0])
+  relay.put(hotKey(SESSION, 0), compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: a.transcript, at: 0, size: bytes.length, after: { size: bytes.length, sha256: '' } }, bytes))))
   writeFileSync(b.transcript, lines[1] ?? '')
-  await a.upload(a.transcript)
+  await welcomed(a.capture.relay)
   const logged = spyOn(console, 'error').mockImplementation(() => undefined)
 
   expect(await b.upload(b.transcript)).toEqual(new Set())
   appendFileSync(b.transcript, lines[2] ?? '')
   await b.upload(b.transcript)
 
-  expect(hotFrames(store)).toEqual([hotKey(SESSION, 0)])
-  expect(recordsOf(journalBytes(store)).map(({ text }) => text)).toEqual([lines[0] ?? ''])
-  expect(journalOf(b.capture.db, SESSION)?.stopped).toContain(`Another machine wrote byte 0 of the session ${SESSION}'s journal first, so anyhost-b stops capturing it`)
+  expect(hotFrames(relay)).toEqual([hotKey(SESSION, 0)])
+  expect(recordsOf(journalBytes(relay)).map(({ text }) => text)).toEqual([lines[0] ?? ''])
+  expect(journalOf(b.capture.db, SESSION)).toMatchObject({
+    holder: 'anyhost-a',
+    stopped: expect.stringContaining(`Another machine wrote byte 0 of the session ${SESSION}'s journal first, so anyhost-b stops capturing it`),
+  })
   expect(logged).toHaveBeenCalledTimes(1)
   logged.mockRestore()
 })
 
+test('a session another machine holds refuses this machine\'s frames, and it stops capturing the session', async () => {
+  const relay = memoryRelay()
+  const a = machine(deviceA, relay)
+  const b = machine(deviceB, relay)
+  writeFileSync(a.transcript, lines[0] ?? '')
+  writeFileSync(b.transcript, lines[1] ?? '')
+  await a.upload(a.transcript)
+
+  expect(await b.upload(b.transcript)).toEqual(new Set())
+  expect(hotFrames(relay)).toEqual([hotKey(SESSION, 0)])
+  expect(journalOf(b.capture.db, SESSION)).toMatchObject({ holder: 'anyhost-a', stopped: expect.stringContaining('anyhost-a took the session') })
+})
+
 test('a refused position that holds the same bytes counts as uploaded, as a retry after a lost answer does', async () => {
-  const store = memoryStore()
-  const { transcript, upload, capture } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
   writeFileSync(transcript, lines[0] ?? '')
   const bytes = new TextEncoder().encode(lines[0])
   const after = { size: bytes.length, sha256: new Bun.CryptoHasher('sha256').update(bytes).digest('hex') }
-  await store.put(hotKey(SESSION, 0), compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at: 0, size: bytes.length, after }, bytes))))
+  relay.put(hotKey(SESSION, 0), compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at: 0, size: bytes.length, after }, bytes))))
+  const before = relay.puts.length
 
   await upload(transcript)
-  expect(journalOf(capture.db, SESSION)).toMatchObject({ end: decompress(store.objects.get(hotKey(SESSION, 0))?.body ?? new Uint8Array()).length, stopped: '' })
+  expect(journalOf(capture.db, SESSION)).toMatchObject({ end: frameOf(relay, hotKey(SESSION, 0)).length, stopped: '' })
+  // the frame stays the one there, and no get was needed to know it
+  expect(relay.puts.slice(before).map(({ key }) => key)).toEqual([`sessions/${deviceA.id}/index.json`])
+  expect(relay.requests.flat().some(({ op }) => op === 'get')).toBe(false)
 })
 
 test("a frame this machine put up that its journal never counted is written over, and a restore never reads one off the journal's chain", async () => {
-  const store = memoryStore()
-  const { transcript, upload, capture } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
   writeFileSync(transcript, lines[0] ?? '')
   const old = new TextEncoder().encode('old')
   const stray = compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at: 0, size: old.length, after: { size: old.length, sha256: '' } }, old)))
   // one where the next upload goes, as before a crash, and one past a position that failed
-  await store.put(hotKey(SESSION, 0), stray)
-  await store.put(hotKey(SESSION, 100_000), stray)
+  relay.put(hotKey(SESSION, 0), stray)
+  relay.put(hotKey(SESSION, 100_000), stray)
 
   await upload(transcript)
   expect(journalOf(capture.db, SESSION)?.stopped).toBe('')
-  const replayed = await downloadJournal(store, SESSION, temporaryFolder(), ({ path }) => path)
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '', 'utf8')).toBe(lines[0] ?? '')
   expect(replayed.end).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
 })
 
 test('a code frame that fails leaves the journal at the frames before it, and the next drain writes the rest', async () => {
-  const store = memoryStore()
+  const relay = memoryRelay()
   let failing = 0
   let puts = 0
-  const flaky: Store = {
-    ...store,
-    put: (key, body, condition) => ((puts += 1) === failing ? Promise.reject(new Error('connect ECONNREFUSED')) : store.put(key, body, condition)),
-  }
-  const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
-  const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
-  mkdirSync(dirname(transcript), { recursive: true })
+  relay.refuse = (op) => (op.op === 'put' && (puts += 1) === failing ? 'connect ECONNREFUSED' : undefined)
   const bundle = { path: `anyhost:code/${SESSION}/parts/ee55`, bytes: crypto.getRandomValues(new Uint8Array(3 * CODE_PIECE_BYTES)) }
-  const capture = openCapture(flaky, deviceA, roots, openDatabase(MEMORY, join(folder, 'state')), {
+  const { transcript, capture } = machine(deviceA, relay, temporaryFolder(), {
     captureCode: async () => ({ header: new TextEncoder().encode('header'), parts: [bundle] }),
     restoreCode: async (_header, _readPart, at) => at,
   })
@@ -353,18 +400,18 @@ test('a code frame that fails leaves the journal at the frames before it, and th
   await expect(upload(`${TRIP}/`)).rejects.toThrow('ECONNREFUSED')
 
   const counted = journalOf(capture.db, SESSION)?.end ?? 0
-  expect(hotFrames(store).at(-1)).toBe(hotKey(SESSION, lineEnd))
-  expect(counted).toBe(lineEnd + decompress(store.objects.get(hotKey(SESSION, lineEnd))?.body ?? new Uint8Array()).length)
+  expect(hotFrames(relay).at(-1)).toBe(hotKey(SESSION, lineEnd))
+  expect(counted).toBe(lineEnd + frameOf(relay, hotKey(SESSION, lineEnd)).length)
   await upload(`${TRIP}/`)
-  const replayed = await downloadJournal(store, SESSION, temporaryFolder(), ({ path }) => path)
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(Buffer.from(readFileSync(replayed.files.get(bundle.path)?.staged ?? '')).equals(Buffer.from(bundle.bytes))).toBe(true)
   expect([...replayed.code.keys()]).toEqual([`${TRIP}/`])
   expect(replayed.end).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
 })
 
 test('a file the session deleted goes up as a deletion record, heard from the watcher or found by the backup', async () => {
-  const store = memoryStore()
-  const { roots, transcript, upload, capture } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { roots, transcript, upload, capture } = machine(deviceA, relay)
   const task = join(roots.home, '.claude', 'tasks', SESSION, '1.json')
   const plan = join(roots.home, '.claude', 'plans', 'trip-plan.md')
   for (const path of [task, plan]) mkdirSync(dirname(path), { recursive: true })
@@ -379,31 +426,27 @@ test('a file the session deleted goes up as a deletion record, heard from the wa
   await upload(plan)
   expect(await changedFiles(capture)).toEqual(new Map())
 
-  const deletions = recordsOf(journalBytes(store)).filter(({ header }) => header.after === null)
+  const deletions = recordsOf(journalBytes(relay)).filter(({ header }) => header.after === null)
   expect(deletions.map(({ header }) => [header.path, header.at, header.size])).toEqual([
     [task, 0, 0],
     [plan, 0, 0],
   ])
-  const replayed = await downloadJournal(store, SESSION, temporaryFolder(), ({ path }) => path)
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect([replayed.files.has(task), replayed.files.has(plan), [...replayed.deleted]]).toEqual([false, false, [task, plan]])
   writeFileSync(task, '{"subject":"pack the bag"}')
   await upload(task)
-  const again = await downloadJournal(store, SESSION, temporaryFolder(), ({ path }) => path)
+  const again = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect([readFileSync(again.files.get(task)?.staged ?? '', 'utf8'), [...again.deleted]]).toEqual(['{"subject":"pack the bag"}', [plan]])
 })
 
 test('a session whose working folder this machine lacks uploads its lines, keeps no code, and says so once', async () => {
-  const store = memoryStore()
+  const relay = memoryRelay()
   const folder = temporaryFolder()
-  const roots: MachineRoots = { home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') }
+  let reads = 0
+  const { roots, capture } = machine(deviceA, relay, folder, { captureCode: async () => ((reads += 1), undefined), restoreCode: async (_header, _readPart, at) => at })
   const transcript = join(roots.home, '.claude', 'projects', '-gone', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   const gone = join(folder, 'gone')
-  let reads = 0
-  const capture = openCapture(store, deviceA, roots, openDatabase(MEMORY, join(folder, 'state')), {
-    captureCode: async () => ((reads += 1), undefined),
-    restoreCode: async (_header, _readPart, at) => at,
-  })
   const line = (text: string): string => `{"type":"user","message":{"role":"user","content":"${text}"},"cwd":${JSON.stringify(gone)},"sessionId":"${SESSION}"}\n`
   const logged = spyOn(console, 'error').mockImplementation(() => undefined)
   for (const text of ['one', 'two']) {
@@ -415,56 +458,64 @@ test('a session whose working folder this machine lacks uploads its lines, keeps
   expect(reads).toBe(0)
   expect(logged.mock.calls.map(([message]) => String(message).slice(25))).toEqual([`${gone} is no folder on anyhost-a, so anyhost keeps no code of the sessions that work in it.`])
   logged.mockRestore()
-  expect(recordsOf(journalBytes(store)).map(({ text }) => text)).toEqual([line('one'), line('two')])
+  expect(recordsOf(journalBytes(relay)).map(({ text }) => text)).toEqual([line('one'), line('two')])
 })
 
 test('a quiet session seals its hot frames into one sealed frame, and the journal reads the same', async () => {
-  const store = memoryStore()
-  const { transcript, upload } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
   for (const line of lines) {
     appendFileSync(transcript, line)
     await upload(transcript)
   }
-  const before = journalBytes(store)
+  const before = journalBytes(relay)
 
-  expect(await seal(store, SESSION)).toBe(before.length)
-  expect([...store.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/`))).toEqual([`journals/${SESSION}/sealed/${'0'.padStart(16, '0')}-${String(before.length).padStart(16, '0')}.zst`])
+  expect(await seal(capture.relay, SESSION)).toBe(before.length)
+  expect([...relay.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/`))).toEqual([`journals/${SESSION}/sealed/${'0'.padStart(16, '0')}-${String(before.length).padStart(16, '0')}.zst`])
   appendFileSync(transcript, lines[0] ?? '')
   await upload(transcript)
-  const replayed = await downloadJournal(store, SESSION, temporaryFolder(), ({ path }) => path)
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '', 'utf8')).toBe(`${lines.join('')}${lines[0]}`)
   expect(replayed.sealedEnd).toBe(before.length)
 })
 
-test('a seal of a session of many frames reads at most 16 of them at once, as a restore does', async () => {
-  const store = memoryStore()
-  let reading = 0
-  let most = 0
-  const counting: Store = {
-    ...store,
-    get: async (key) => {
-      most = Math.max(most, (reading += 1))
-      return await store.get(key).finally(() => (reading -= 1))
-    },
-  }
-  const { transcript, upload } = machine(deviceA, store)
+test('a seal reads small frames many to a request, and at most 16 requests at once', async () => {
+  const relay = memoryRelay()
+  const { transcript, capture } = machine(deviceA, relay)
+  // 40 frames of 600 KiB of random bytes, which compress to about their own size, so each takes a request of its own
+  const bodies: Uint8Array[] = []
+  let at = 0
   for (let index = 0; index < 40; index += 1) {
-    appendFileSync(transcript, `{"type":"user","message":{"role":"user","content":"line ${index}"},"sessionId":"${SESSION}"}\n`)
-    await upload(transcript)
+    const bytes = crypto.getRandomValues(new Uint8Array(600 * 1024))
+    const body = Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at, size: bytes.length, after: { size: at + bytes.length, sha256: '' } }, bytes))
+    relay.put(hotKey(SESSION, bodies.reduce((total, frame) => total + frame.length, 0)), compressHot(body))
+    bodies.push(body)
+    at += bytes.length
   }
-  expect(hotFrames(store)).toHaveLength(40)
-  const before = journalBytes(store)
+  // and 40 lines after them, which fit one request
+  for (let index = 0; index < 40; index += 1) {
+    const bytes = new TextEncoder().encode(`{"line":${index}}\n`)
+    const body = Buffer.concat(encodeRecord({ device: deviceA.id, path: `${transcript}.small`, at: index * bytes.length, size: bytes.length, after: { size: (index + 1) * bytes.length, sha256: '' } }, bytes))
+    relay.put(hotKey(SESSION, bodies.reduce((total, frame) => total + frame.length, 0)), compressHot(body))
+    bodies.push(body)
+  }
+  const before = Buffer.concat(bodies)
+  await welcomed(capture.relay)
+  relay.delayMs = 20
+  const asked = relay.requests.length
 
-  expect(await seal(counting, SESSION)).toBe(before.length)
-  expect(most).toBe(16)
-  const sealed = [...store.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/`))
+  expect(await seal(capture.relay, SESSION)).toBe(before.length)
+  expect(relay.mostAtOnce).toBe(16)
+  // the last large frame leaves room for the 40 lines
+  expect(relay.requests.slice(asked).filter((ops) => ops[0]?.op === 'get').map((ops) => ops.length)).toEqual([...Array.from({ length: 39 }, () => 1), 41])
+  const sealed = [...relay.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/`))
   expect(sealed).toEqual([`journals/${SESSION}/sealed/${'0'.padStart(16, '0')}-${String(before.length).padStart(16, '0')}.zst`])
-  expect(Buffer.from(decompress(store.objects.get(sealed[0] ?? '')?.body ?? new Uint8Array())).equals(Buffer.from(before))).toBe(true)
+  expect(Buffer.from(frameOf(relay, sealed[0] ?? '')).equals(before)).toBe(true)
 })
 
 test("a Codex thread on a machine with no Codex database gets its name into the row Codex makes, as Codex writes it", async () => {
-  const store = memoryStore()
-  const { roots, capture } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { roots, capture } = machine(deviceA, relay)
   const rollout = join(roots.codexHome, 'sessions', '2026', '11', '04', `rollout-2026-11-04T14-54-13-${SESSION}.jsonl`)
   mkdirSync(dirname(rollout), { recursive: true })
   writeFileSync(rollout, `{"type":"session_meta","payload":{"id":"${SESSION}","cwd":${JSON.stringify(TRIP)}}}\n`)
@@ -482,14 +533,14 @@ test("a Codex thread on a machine with no Codex database gets its name into the 
 
   expect(codex.query<{ name: string }, [string]>('select name from threads where id = ?').get(SESSION)?.name).toBe('Osprey sighting notes')
   codex.close()
-  const replayed = await downloadJournal(store, SESSION, temporaryFolder(), ({ path }) => path)
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(JSON.parse(readFileSync(replayed.files.get(codexState(roots))?.staged ?? '', 'utf8'))).toEqual({ id: SESSION, title: 'What bird is named in notes.md?', name: 'Osprey sighting notes' })
   expect(await sessionsOf(capture, wal)).toEqual([])
 })
 
 test('the backup finds a file that grew without an event', async () => {
-  const store = memoryStore()
-  const { transcript, upload, capture } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
   writeFileSync(transcript, lines[0] ?? '')
   await upload(transcript)
   expect(await changedFiles(capture)).toEqual(new Map())
@@ -498,8 +549,8 @@ test('the backup finds a file that grew without an event', async () => {
 })
 
 test('a lines file names the sessions that wrote new lines, and never the lines before the first start', async () => {
-  const store = memoryStore()
-  const { roots, capture } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { roots, capture } = machine(deviceA, relay)
   const history = join(roots.home, '.claude', 'history.jsonl')
   writeFileSync(history, `{"display":"old","project":"/work","sessionId":"${OTHER}"}\n`)
   await startLineOffsets(capture)
@@ -508,15 +559,20 @@ test('a lines file names the sessions that wrote new lines, and never the lines 
   expect(await sessionsOf(capture, history)).toEqual([])
 })
 
+type Queued = ReadonlyMap<string, { readonly paths: ReadonlySet<string> }>
+
 test('the queue at 0 uploads on every write, one upload in flight per session', async () => {
   const uploads: { session: string; paths: string[] }[] = []
   const ends: (() => void)[] = []
   const queue = new UploadQueue(
     0,
-    (session, _tool, paths) => {
-      uploads.push({ session, paths: [...paths] })
-      return new Promise((resolve) => ends.push(() => resolve(new Set())))
-    },
+    (sessions: Queued) =>
+      new Map(
+        [...sessions].map(([session, { paths }]) => {
+          uploads.push({ session, paths: [...paths] })
+          return [session, new Promise<Set<string>>((resolve) => ends.push(() => resolve(new Set())))]
+        }),
+      ),
     (_session, error) => {
       throw error
     },
@@ -541,12 +597,15 @@ test('the queue at 0 tries a failed upload again by itself, 1 second later and t
   const started = Date.now()
   const queue = new UploadQueue(
     0,
-    async (_session, _tool, paths) => {
-      tries.push(Date.now() - started)
-      if (tries.length < 3) throw new Error('connect ECONNREFUSED')
-      expect([...paths]).toEqual(['/a'])
-      return new Set()
-    },
+    (sessions: Queued) =>
+      new Map(
+        [...sessions].map(([session, { paths }]) => {
+          tries.push(Date.now() - started)
+          if (tries.length < 3) return [session, Promise.reject(new Error('connect ECONNREFUSED'))]
+          expect([...paths]).toEqual(['/a'])
+          return [session, Promise.resolve(new Set<string>())]
+        }),
+      ),
     (session) => void failures.push(session),
   )
   queue.add(SESSION, 'claude', '/a')
@@ -556,14 +615,14 @@ test('the queue at 0 tries a failed upload again by itself, 1 second later and t
   expect(queue.pending).toBe(0)
 })
 
-test('the queue at N uploads each session once per N seconds while it writes', async () => {
-  const uploads: { session: string; paths: string[]; at: number }[] = []
+test('the queue at N uploads every session written meanwhile in one drain, once per N seconds', async () => {
+  const uploads: { sessions: string[]; paths: string[][]; at: number }[] = []
   const started = Date.now()
   const queue = new UploadQueue(
     0.3,
-    async (session, _tool, paths) => {
-      uploads.push({ session, paths: [...paths], at: Date.now() - started })
-      return new Set()
+    (sessions: Queued) => {
+      uploads.push({ sessions: [...sessions.keys()], paths: [...sessions.values()].map(({ paths }) => [...paths]), at: Date.now() - started })
+      return new Map([...sessions.keys()].map((session) => [session, Promise.resolve(new Set<string>())]))
     },
     (_session, error) => {
       throw error
@@ -573,18 +632,16 @@ test('the queue at N uploads each session once per N seconds while it writes', a
     queue.add(SESSION, 'claude', path)
     await Bun.sleep(50)
   }
+  queue.add(OTHER, 'claude', '/x')
   await Bun.sleep(350 - (Date.now() - started))
-  expect(uploads.map(({ paths }) => paths)).toEqual([['/a', '/b', '/c']])
+  expect(uploads.map(({ sessions, paths }) => [sessions, paths])).toEqual([[[SESSION, OTHER], [['/a', '/b', '/c'], ['/x']]]])
   for (const path of ['/d', '/e']) {
     queue.add(SESSION, 'claude', path)
     await Bun.sleep(50)
   }
   await Bun.sleep(700 - (Date.now() - started))
   queue.uploadEvery = 0
-  expect(uploads.map(({ paths }) => paths)).toEqual([
-    ['/a', '/b', '/c'],
-    ['/d', '/e'],
-  ])
+  expect(uploads.map(({ paths }) => paths)).toEqual([[['/a', '/b', '/c'], ['/x']], [['/d', '/e']]])
   expect(uploads.map(({ at }) => Math.round(at / 300))).toEqual([1, 2])
 })
 
@@ -604,31 +661,28 @@ test("the working folder is the session's own, never a folder a tool call names"
 })
 
 test("the index entry holds the session's title, first prompt, working folder and entrypoint", async () => {
-  const store = memoryStore()
-  const { transcript, upload, capture } = machine(deviceA, store)
+  const relay = memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
   writeFileSync(transcript, lines.join(''))
   await upload(transcript)
   const row = capture.db.query<{ title: string; first_prompt: string; cwd: string; entrypoint: string }, []>('select title, first_prompt, cwd, entrypoint from sessions').get()
   expect(row).toEqual({ title: 'Plan the trip', first_prompt: 'Book a train to Sofia 🚆, ще пътувам утре', cwd: TRIP, entrypoint: 'cli' })
 })
 
-test('the database keeps what one bucket holds, and another bucket starts it over with the code parts it named', async () => {
-  const folder = join(temporaryFolder(), 'state')
-  const store = memoryStore()
-  const { transcript, upload } = machine(deviceA, store, dirname(folder))
+test('the database keeps what one bucket holds, and a relay of another bucket starts it over with the code parts it named', async () => {
+  const folder = temporaryFolder()
+  const { transcript, upload, capture } = machine(deviceA, memoryRelay(), folder)
   writeFileSync(transcript, lines.join(''))
   await upload(transcript)
-  const parts = join(folder, 'code', SESSION, 'repo.json')
+  const parts = join(folder, 'state', 'code', SESSION, 'repo.json')
   mkdirSync(dirname(parts), { recursive: true })
   writeFileSync(parts, '{}')
-  const journals = (bucket: string): number => {
-    const db = openDatabase(bucket, folder)
-    const count = db.query<{ count: number }, []>('select count(*) as count from journals').get()?.count ?? -1
-    db.close()
-    return count
-  }
+  const journals = (db: Database): number => db.query<{ count: number }, []>('select count(*) as count from journals').get()?.count ?? -1
 
-  expect(journals(MEMORY)).toBe(1)
-  expect(journals('anyhost-other')).toBe(0)
-  expect(existsSync(parts)).toBe(false)
+  const same = machine(deviceA, memoryRelay(), folder)
+  await welcomed(same.capture.relay)
+  expect([journals(capture.db), existsSync(parts)]).toEqual([1, true])
+  const other = machine(deviceA, memoryRelay('anyhost-other'), folder)
+  await welcomed(other.capture.relay)
+  expect([journals(other.capture.db), existsSync(parts)]).toEqual([0, false])
 })

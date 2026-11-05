@@ -1,46 +1,39 @@
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { cmodDevice, type DeviceRecord } from './device.ts'
+import plugin from '../../.claude-plugin/plugin.json'
+import { PROTOCOL_VERSION, type Health } from '../../relay/protocol.ts'
+import { cmodDevice, relayLogin } from './device.ts'
 import type { Status } from './serve.ts'
-import { messageOf, PROFILE, profileOf, type Store } from './store.ts'
 
 type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
 
-const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod makes the anyhost program a service of the machine, which registers it and records its sessions from each login on.'
+const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod makes the anyhost program a service of the machine, which records its sessions from each login on.'
+const JOIN = 'Connect Cloudflare in the anyhost mod on your first machine, and join every other machine with a link from Add a machine on a joined one.'
+// The relay answered /v1/health in under a second from the test machines (relay-spec R11).
+const HEALTH_MS = 10_000
 
-async function profileCheck(): Promise<Check> {
-  const config = process.env['AWS_CONFIG_FILE'] ?? join(homedir(), '.aws', 'config')
-  const credentials = process.env['AWS_SHARED_CREDENTIALS_FILE'] ?? join(homedir(), '.aws', 'credentials')
-  const { endpoint, hasKeys } = await profileOf()
-  const missing = [
-    ...(endpoint === undefined ? [`endpoint_url under [profile ${PROFILE}] in ${config}`] : []),
-    ...(hasKeys ? [] : [`aws_access_key_id and aws_secret_access_key under [${PROFILE}] in ${credentials}`]),
-  ]
-  if (missing.length === 0) return { ok: `The AWS profile ${PROFILE} names R2's endpoint and keys.` }
-  return { problem: `The AWS profile ${PROFILE} lacks ${missing.join(', and ')}.`, fix: `Write endpoint_url = https://<account id>.r2.cloudflarestorage.com (with .eu. before r2 for a bucket in the EU jurisdiction) and region = auto under [profile ${PROFILE}] in ${config}, and the R2 API token's keys under [${PROFILE}] in ${credentials}.` }
-}
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
-async function bucketCheck(store: Store): Promise<Check> {
-  try {
-    await store.list('devices/')
-    return { ok: `The bucket ${store.bucket} answers.` }
-  } catch (error) {
-    return {
-      problem: `The bucket ${store.bucket} did not answer: ${messageOf(error)}`,
-      fix: `Check that the bucket exists in R2 and that the keys of the AWS profile ${PROFILE} can read and write it, or choose another in /config (the option bucket).`,
-    }
+// This machine joined a relay, and that relay answers the protocol this program speaks.
+async function relayChecks(): Promise<Check[]> {
+  const login = await relayLogin().catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
+  if (login instanceof Error) return [{ problem: `anyhost cannot read which relay this machine joined: ${login.message}`, fix: JOIN }]
+  if (login === undefined) return [{ problem: 'This machine is not joined to your relay, so anyhost uploads nothing from it.', fix: JOIN }]
+  const joined: Check = { ok: `This machine is joined to the relay at ${login.url}.` }
+  const health = await fetch(`${login.url}/v1/health`, { signal: AbortSignal.timeout(HEALTH_MS) })
+    .then(async (answer) => (answer.ok ? ((await answer.json()) as Health) : new Error(`it answered ${answer.status}`)))
+    .catch((error: unknown) => new Error(messageOf(error)))
+  if (health instanceof Error) return [joined, { problem: `The relay at ${login.url} did not answer: ${health.message}`, fix: 'Check this machine reaches the internet. The program keeps every change meanwhile and uploads it once the relay answers.' }]
+  if (health.protocol < PROTOCOL_VERSION) {
+    return [joined, { problem: `The relay at ${login.url} answers protocol ${health.protocol}, and anyhost ${plugin.version} needs ${PROTOCOL_VERSION}.`, fix: 'Connect Cloudflare again in the anyhost mod, which updates the relay.' }]
   }
+  return [joined, { ok: `The relay answers protocol ${health.protocol} and keeps every session in the bucket ${health.bucket}.` }]
 }
 
-async function deviceCheck(store: Store): Promise<Check> {
+async function deviceCheck(): Promise<Check> {
   const device = await cmodDevice().catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
   if (device instanceof Error) return { problem: `cmod device cannot name this machine: ${device.message}`, fix: 'Give the machine a machine id with sudo systemd-machine-id-setup, or install cmod with npm install -g @cmodjs/cli.' }
-  const stored = await store.get(`devices/${device.id}.json`).catch((error: unknown) => new Error(messageOf(error)))
-  if (stored instanceof Error) return { problem: `${device.name}'s registration could not be read from ${store.bucket}: ${stored.message}`, fix: 'Fix what the bucket check names.' }
-  if (stored === undefined) return { problem: `${device.name} is not registered in ${store.bucket}.`, fix: START_CLAUDE }
-  const record = JSON.parse(new TextDecoder().decode(stored.body)) as DeviceRecord
-  if (record.name === device.name) return { ok: `${device.name} is registered as ${device.id}.` }
-  return { wait: `${device.id} is registered as ${record.name}, which ran anyhost at ${new Date(stored.modifiedAt).toISOString()}. The program's line says whether ${device.name} is that machine renamed or its clone.` }
+  return { ok: `This machine is ${device.name}, ${device.id}.` }
 }
 
 async function programChecks(): Promise<Check[]> {
@@ -51,22 +44,24 @@ async function programChecks(): Promise<Check[]> {
     .then(async (response) => (await response.json()) as Status)
     .catch(() => undefined)
   if (status === undefined) return [{ problem: `The anyhost program does not answer at ${address}.`, fix: START_CLAUDE }]
-  const { state, message } = status.registration
-  const registration: Check =
-    state === 'registered'
+  const { state, message, bucket } = status.relay
+  const connection: Check =
+    state === 'connected'
       ? {
-          ok: `The anyhost program runs at ${address}: it uploads to ${status.bucket} ${status.uploadEvery === 0 ? 'every write' : `every ${status.uploadEvery} seconds`}, its last upload was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.`,
+          ok: `The anyhost program runs at ${address}: it uploads to ${bucket} ${status.uploadEvery === 0 ? 'every write' : `every ${status.uploadEvery} seconds`}, its last upload was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.`,
         }
-      : state === 'waiting'
-        ? { wait: `The anyhost program at ${address} waits: ${message}` }
-        : state === 'cloned'
-          ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Restart the machine after the fix, then start Claude Code.' }
-          : { problem: `The anyhost program at ${address} has not registered this machine yet.`, fix: 'It tries again every 60 seconds. The line below names why it failed.' }
-  return [registration, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' }))]
+      : state === 'connecting'
+        ? { wait: `The anyhost program at ${address} connects to the relay, and ${status.pending} files wait for it.` }
+        : state === 'refused'
+          ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Do what the line says. The program connects again within a minute.' }
+          : state === 'unjoined'
+            ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
+            : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
+  return [connection, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' }))]
 }
 
-export async function doctor(store: Store): Promise<number> {
-  const checks = [await profileCheck(), await bucketCheck(store), await deviceCheck(store), ...(await programChecks())]
+export async function doctor(): Promise<number> {
+  const checks = [...(await relayChecks()), await deviceCheck(), ...(await programChecks())]
   for (const check of checks) console.log('ok' in check ? `✔ ${check.ok}` : 'wait' in check ? `… ${check.wait}` : `✘ ${check.problem}\n  ${check.fix}`)
   return checks.some((check) => 'problem' in check) ? 1 : 0
 }

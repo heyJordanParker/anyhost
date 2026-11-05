@@ -1,13 +1,12 @@
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import type * as Protocol from '../../relay/protocol.ts'
+import type { Login, Relay } from './relay.ts'
 import type { Roots } from './relocate.ts'
-import type { Store } from './store.ts'
 
 export type Device = { readonly id: string; readonly name: string; readonly os: string; readonly arch: string }
 export type MachineRoots = Omit<Roots, 'checkout'>
-// A record anyhost 0.1 wrote has no `claudeHome`: its Claude Code folder is `<home>/.claude`.
-export type DeviceRecord = Omit<MachineRoots, 'claudeHome'> & { readonly claudeHome?: string; readonly name: string; readonly os: string; readonly arch: string; readonly ssh: string }
 
 export const stateFolder = (): string => join(process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state'), 'anyhost')
 const cmodProgram = (): string => join(process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share'), 'cmod', 'programs', 'cmod')
@@ -39,55 +38,23 @@ async function cmod(...args: string[]): Promise<string> {
 export const cmodDevice = async (): Promise<Device> => JSON.parse(await cmod('device', '--json')) as Device
 
 // The values the person set in /config. An option they never set is absent, and its default applies.
-type PersonOptions = { readonly uploadEvery?: number; readonly checkouts?: string; readonly bucket?: string }
+type PersonOptions = { readonly uploadEvery?: number; readonly checkouts?: string }
 export const personOptions = async (): Promise<PersonOptions> => (JSON.parse(await cmod('options', 'anyhost', '--json')) as { person: PersonOptions }).person
 
-export const QUIET_BEFORE_RENAME_MS = 10 * 60_000
-
-export type Registration =
-  | { readonly state: 'registered' }
-  | { readonly state: 'waiting'; readonly seenAt: number; readonly message: string }
-  | { readonly state: 'cloned'; readonly message: string }
-
-export function cloneFixFor(os: string): string {
-  return os === 'darwin'
-    ? 'Give this virtual Mac its own hardware UUID in its virtualization app, then restart it.'
-    : 'Give it its own machine id with sudo rm /etc/machine-id && sudo systemd-machine-id-setup, then restart it.'
+// The relay this machine joined: its address in `relay.json` in the state folder, and the device token cmod keeps as
+// the secret `token`. A machine that never joined has neither.
+export async function relayLogin(): Promise<Login | undefined> {
+  const file = Bun.file(join(stateFolder(), 'relay.json'))
+  if (!(await file.exists())) return undefined
+  const { url } = (await file.json()) as { url?: unknown }
+  if (typeof url !== 'string' || url === '') throw new Error(`${file.name} names no relay address in url.`)
+  const token = await cmod('secret', 'get', 'anyhost', 'token')
+  return token === '' ? undefined : { url: url.replace(/\/+$/, ''), token }
 }
 
-const isoOf = (ms: number): string => new Date(ms).toISOString()
-
-export async function register(store: Store, device: Device, roots: MachineRoots, now = Date.now(), earlier?: Registration): Promise<Registration> {
-  const key = `devices/${device.id}.json`
-  const record = JSON.stringify({ name: device.name, os: device.os, arch: device.arch, ssh: device.name, ...roots } satisfies DeviceRecord)
-  if ((await store.put(key, record, { ifNoneMatch: '*' })) !== undefined) return { state: 'registered' }
-  const taken = await store.get(key)
-  if (taken === undefined) throw new Error(`R2 refused ${key} as taken, then answered that it does not exist.`)
-  const owner = (JSON.parse(new TextDecoder().decode(taken.body)) as DeviceRecord).name
-  if (owner !== device.name && now - taken.modifiedAt < QUIET_BEFORE_RENAME_MS) {
-    if (earlier?.state === 'cloned' || (earlier?.state === 'waiting' && taken.modifiedAt > earlier.seenAt)) {
-      return {
-        state: 'cloned',
-        message: `This machine, ${device.name}, has the id of ${owner}, which still runs anyhost and wrote at ${isoOf(taken.modifiedAt)}, as a machine cloned from it does, so anyhost captures nothing here. ${cloneFixFor(device.os)}`,
-      }
-    }
-    return {
-      state: 'waiting',
-      seenAt: earlier?.state === 'waiting' ? earlier.seenAt : taken.modifiedAt,
-      message: `${device.name} has the id registered as ${owner}, which ran anyhost at ${isoOf(taken.modifiedAt)}. A renamed machine's old name goes quiet, so anyhost takes the name ${device.name} at ${isoOf(taken.modifiedAt + QUIET_BEFORE_RENAME_MS)} by itself, and captures nothing until then.`,
-    }
-  }
-  if ((await store.put(key, record, { ifMatch: taken.etag })) === undefined) throw new Error(`${key} changed while ${device.name} registered. anyhost registers it again on its next pass.`)
-  return { state: 'registered' }
-}
-
-export async function devicesOf(store: Store): Promise<Map<string, DeviceRecord>> {
-  const listed = await store.list('devices/')
-  const records = await Promise.all(
-    listed.map(async ({ key }) => {
-      const stored = await store.get(key)
-      return [key.slice('devices/'.length, -'.json'.length), stored === undefined ? undefined : (JSON.parse(new TextDecoder().decode(stored.body)) as DeviceRecord)] as const
-    }),
-  )
-  return new Map(records.flatMap(([id, record]) => (record === undefined ? [] : [[id, record] as const])))
+// Every machine joined to the relay, by its device id, with the roots it joined with.
+export async function devicesOf(relay: Relay): Promise<Map<string, Protocol.Device>> {
+  const answer = await relay.run([{ op: 'devices' }])[0]
+  if (answer === undefined || !('devices' in answer)) throw new Error('The relay answered no list of machines.')
+  return new Map(answer.devices.map((device) => [device.id, device]))
 }

@@ -2,19 +2,16 @@ import { Database, type SQLQueryBindings } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
 import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { checkoutOf, continueJournal, isCodePart, linesOf, markUntold, recordSummary, stopJournal, type Capture, type FileState, type IndexedSession } from './capture.ts'
+import type * as Protocol from '../../relay/protocol.ts'
+import { checkoutOf, continueJournal, isCodePart, linesOf, markUntold, recordSummary, stopJournal, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
 import { HeldElsewhere, takeClaim } from './claims.ts'
-import { devicesOf, personOptions, type DeviceRecord } from './device.ts'
+import { devicesOf } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
-import { downloadJournal, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
-import { messageOf, type Store } from './store.ts'
+import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
 import { codexState, linesFiles, ownerOf } from './transcript.ts'
 
 const NOTHING = new Uint8Array()
 const TAIL_BYTES = 32
-// A whole `ssh anyhost-b echo` took 0.26 to 0.34 s between the test machines (claim-race, 2026-11-04). The limit only
-// keeps a resume from waiting out the system's TCP timeout, over a minute, on a machine that is off.
-const SSH_CONNECT_SECONDS = 10
 
 export const repoSlug = (remote: string): string =>
   remote
@@ -73,27 +70,12 @@ const checkoutOfEntry = (entry: Pick<IndexedSession, 'cwd' | 'repo' | 'repoFolde
 // backup name, for the backups whose file lies under Claude Code's or Codex's own folders.
 type Writers = { readonly rootsOf: (device: string) => Roots; readonly tracked: ReadonlyMap<string, string> }
 
-// Each machine's roots for the session: its home folders from its device record, its checkout from its index.
-async function writersOf(store: Store, devices: ReadonlyMap<string, DeviceRecord>, session: ListedSession): Promise<(device: string) => Roots> {
-  const entries = new Map(
-    await Promise.all(
-      [...devices.keys()].map(async (device) => {
-        const index = await store.get(`sessions/${device}/index.json`)
-        const entries = index === undefined ? [] : (JSON.parse(new TextDecoder().decode(index.body)) as IndexedSession[])
-        return [device, entries.find((entry) => entry.id === session.id) ?? session] as const
-      }),
-    ),
-  )
+// Each machine's roots for the session: its home folders as it joined the relay with them, its checkout from its index.
+function writersOf(devices: ReadonlyMap<string, Protocol.Device>, indexes: ReadonlyMap<string, readonly IndexedSession[]>, session: ListedSession): (device: string) => Roots {
   return (device) => {
-    const record = devices.get(device)
-    if (record?.home === undefined) throw new Error(`The session ${session.id} holds records of the device ${device}, and R2 holds no record of that device's home folders, so anyhost cannot rewrite its paths.`)
-    return {
-      home: record.home,
-      claudeHome: record.claudeHome ?? join(record.home, '.claude'),
-      claudeTmp: record.claudeTmp,
-      codexHome: record.codexHome,
-      checkout: checkoutOfEntry(entries.get(device) ?? session, record.home),
-    }
+    const roots = devices.get(device)?.roots
+    if (roots === undefined) throw new Error(`The session ${session.id} holds records of the device ${device}, and the relay knows no machine of that id, so anyhost cannot rewrite its paths.`)
+    return { ...roots, checkout: checkoutOfEntry(indexes.get(device)?.find((entry) => entry.id === session.id) ?? session, roots.home) }
   }
 }
 
@@ -224,36 +206,13 @@ async function placeFile(session: string, file: ReplayedFile, writers: Writers, 
   return { session, path, ...known, localSize: size, tail: Uint8Array.from(tail), sha256: hasher.digest('hex'), mtime: (await stat(path)).mtimeMs }
 }
 
-// How a takeover reaches the machine that held the session, by its device record: `anyhost released` there. Answers
-// whether that machine heard it.
-export type Release = (holder: DeviceRecord, session: string, to: string) => Promise<boolean>
-
-// Over the ssh name the holder's device record gives, while the restore downloads. The holder stops capturing the
-// session and refuses its prompts with this machine's name as soon as it lands. A machine ssh cannot reach learns it
-// when its program next starts or uploads the session, and the session opened here says so.
-const releaseOverSsh: Release = async (holder, session, to) => {
-  // the remote shell reads the command, so it carries only a session id and a machine name, never a quote
-  if (!/^[\w.-]+$/.test(`${session}${to}`)) {
-    console.error(`anyhost tells ${holder.name} nothing, because the session ${session} or this machine's name ${to} holds a character other than a letter, a digit, '.', '_' or '-', so ${holder.name} learns it when its program next starts or uploads the session.`)
-    return false
-  }
-  // the login shell puts anyhost on PATH, which a command over ssh lacks on Ubuntu
-  const command = `$SHELL -lc 'anyhost released ${session} --to ${to}'`
-  return await run(['ssh', '-o', 'BatchMode=yes', '-o', `ConnectTimeout=${SSH_CONNECT_SECONDS}`, holder.ssh, command]).then(
-    () => true,
-    (error: unknown) => {
-      console.error(`anyhost could not tell ${holder.name} that ${to} holds ${session} now, so ${holder.name} learns it when its program next starts or uploads the session: ${messageOf(error)}`)
-      return false
-    },
-  )
-}
-
 async function herdrRuns(): Promise<boolean> {
   if (Bun.which('herdr') === null) return false
   return (await run(['herdr', 'status', 'server']).catch(() => '')).includes('status: running')
 }
 
-async function openSession(session: ListedSession, cwd: string): Promise<number> {
+// Opens the session in the folder it continues in: in a herdr workspace when a herdr server runs, else here.
+export async function openSession(session: ListedSession, cwd: string): Promise<number> {
   const command = session.tool === 'claude' ? ['claude', '--resume', session.id] : ['codex', 'resume', session.id]
   if (await herdrRuns()) {
     const created = JSON.parse(await run(['herdr', 'workspace', 'create', '--cwd', cwd, '--label', session.title || session.id])) as { result: { root_pane: { pane_id: string } } }
@@ -265,31 +224,30 @@ async function openSession(session: ListedSession, cwd: string): Promise<number>
 }
 
 // Takes the claim, downloads and replays the session's journal, checks every file against its last writer, restores
-// the working folder's code, and places every file with its paths rewritten to this machine's. Answers the session
-// and the folder it continues in. `checkouts` is the person's option of that name.
-export async function restore(capture: Capture, id: string, options: { take: boolean; release?: Release; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
-  const { store, db, device, roots } = capture
-  const devices = await devicesOf(store)
-  const session = (await listSessions(store, devices)).find((listed) => listed.id === id)
+// the working folder's code, and places every file with its paths rewritten to this machine's. The relay tells the
+// machine that held the session, which stops capturing it and refuses its prompts with this machine's name, at once
+// or as it next connects. Answers the session and the folder it continues in. `checkouts` is the person's option of
+// that name.
+export async function restore(capture: Capture, id: string, options: { take: boolean; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
+  const { relay, db, roots } = capture
+  const devices = await devicesOf(relay)
+  const [listed, indexes] = await Promise.all([listSessions(relay, devices), indexesOf(relay, devices.keys())])
+  const session = listed.find((entry) => entry.id === id)
   if (session === undefined) throw new Error(`No machine lists the session ${id}. anyhost list shows every session.`)
-  let previous: string | undefined
-  try {
-    previous = await takeClaim(store, id, device.id, options)
-  } catch (error) {
+  // A session only the machine it started on wrote is that machine's by capture alone, so a resume takes it. Once
+  // another machine resumed it, which lists it then, taking it needs --take.
+  const hasMoved = [...indexes.values()].filter((index) => index.some((entry) => entry.id === id)).length > 1
+  const claim = await takeClaim(relay, id, { take: options.take || !hasMoved }).catch((error: unknown) => {
     if (!(error instanceof HeldElsewhere)) throw error
-    throw new Error(`This session continues on ${devices.get(error.device)?.name ?? error.device}. Run anyhost resume ${id} --take to continue it here.`)
-  }
-  // a session no machine claimed yet is held by the machine that last wrote it
-  const holder = previous ?? session.device
-  const record = holder === device.id ? undefined : devices.get(holder)
-  const told = record === undefined ? undefined : (options.release ?? releaseOverSsh)(record, id, device.name)
-  const rootsOf = await writersOf(store, devices, session)
+    throw new Error(`This session continues on ${error.holder.name}. Run anyhost resume ${id} --take to continue it here.`)
+  })
+  const rootsOf = writersOf(devices, indexes, session)
   const folder = await localFolder(capture, session, rootsOf(session.device), options.checkouts ?? '')
   const provisional: Roots = { ...roots, checkout: checkoutOfEntry({ ...session, cwd: folder }, roots.home) }
   const staging = join(dirname(db.filename), 'restore', id)
   await rm(staging, { recursive: true, force: true })
   const named = new Map<string, string>()
-  const replayed = await downloadJournal(store, id, staging, ({ device: writer, path }) => {
+  const replayed = await downloadJournal(relay, id, staging, ({ device: writer, path }) => {
     const key = `${writer}\0${path}`
     if (!named.has(key)) named.set(key, relocate(NOTHING, path, rootsOf(writer), provisional).path)
     return named.get(key) ?? path
@@ -332,12 +290,9 @@ export async function restore(capture: Capture, id: string, options: { take: boo
     return owner !== undefined && 'isTranscript' in owner && owner.isTranscript
   })
   await recordSummary(capture, id, session.tool, transcript === undefined ? '' : await Bun.file(transcript.path).text(), replayed.end, session.lastActivity)
+  // this machine lists the session at once, so taking it back from here needs --take
+  await writeIndex(capture)
   await rm(staging, { recursive: true, force: true })
-  if (record !== undefined && !(await told)) markUntold(db, id, record.name)
+  if (claim.previous !== undefined && !claim.told) markUntold(db, id, claim.previous.name)
   return { session, cwd }
-}
-
-export async function resume(capture: Capture, id: string, options: { take: boolean }): Promise<number> {
-  const { session, cwd } = await restore(capture, id, { ...options, checkouts: (await personOptions()).checkouts ?? '' })
-  return await openSession(session, cwd)
 }

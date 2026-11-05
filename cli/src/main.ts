@@ -1,21 +1,19 @@
 import { homedir } from 'node:os'
 import { parseArgs } from 'node:util'
 import plugin from '../../.claude-plugin/plugin.json'
-import { holdElsewhere, openCapture, openDatabase } from './capture.ts'
-import { cmodDevice, deviceFromEnvironment, personOptions, rootsHere } from './device.ts'
+import { openCapture, type Capture } from './capture.ts'
+import { cmodDevice, deviceFromEnvironment, personOptions, relayLogin, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
-import { repoSlug, resume } from './resume.ts'
+import { connectRelay } from './relay.ts'
+import { openSession, repoSlug, restore } from './resume.ts'
 import { serve } from './serve.ts'
 import { listSessions, type ListedSession } from './sessions.ts'
-import { bucketOf, r2Store, type Store } from './store.ts'
 
-const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex session of every machine in R2.
+const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex session of every machine in your own Cloudflare account.
 
   anyhost list [--json]              list every session of every machine
   anyhost resume <session> [--take]  continue a Claude Code or Codex session on this machine
-  anyhost released <session> --to <machine>
-                                     mark a session another machine took over, as its anyhost resume --take does over ssh
-  anyhost doctor                     check the AWS profile, the bucket, this machine and the program
+  anyhost doctor                     check this machine's relay, the machine and the program
   anyhost serve                      capture this machine's sessions, as the anyhost mod runs it
   anyhost --version                  print the version`
 
@@ -41,31 +39,37 @@ function table(sessions: readonly ListedSession[]): string {
 }
 
 async function main(argv: string[]): Promise<number> {
-  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { json: { type: 'boolean' }, take: { type: 'boolean' }, to: { type: 'string' }, version: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } })
+  const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { json: { type: 'boolean' }, take: { type: 'boolean' }, version: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } } })
   const [command, ...rest] = positionals
   if (values.version === true) {
     console.log(plugin.version)
     return 0
   }
-  // the bucket the person chose in /config
-  const chosenStore = async (): Promise<Store> => r2Store(bucketOf((await personOptions()).bucket))
+  // A command keeps its own connection to the relay while it runs, and fails once the relay cannot be reached.
+  const connected = async <T>(work: (capture: Capture) => Promise<T>): Promise<T> => {
+    const device = await cmodDevice()
+    const relay = connectRelay({ login: relayLogin, device, isPatient: false })
+    try {
+      return await work(openCapture(relay, device, rootsHere()))
+    } finally {
+      relay.close()
+    }
+  }
   if (command === 'list') {
-    const sessions = await listSessions(await chosenStore())
+    const sessions = await connected(async ({ relay }) => await listSessions(relay))
     console.log(values.json === true ? JSON.stringify(sessions, null, 2) : table(sessions))
     return 0
   }
   if (command === 'resume' && rest.length === 1 && rest[0] !== undefined) {
-    return await resume(openCapture(await chosenStore(), await cmodDevice(), rootsHere()), rest[0], { take: values.take === true })
+    const id = rest[0]
+    const { checkouts } = await personOptions()
+    // the session opens once the connection is closed, as it runs for as long as the person works in it
+    const { session, cwd } = await connected(async (capture) => await restore(capture, id, { take: values.take === true, checkouts: checkouts ?? '' }))
+    return await openSession(session, cwd)
   }
-  if (command === 'released' && rest.length === 1 && rest[0] !== undefined && values.to !== undefined) {
-    const db = openDatabase((await chosenStore()).bucket)
-    holdElsewhere(db, rest[0], values.to, `${new Date().toISOString()} ${values.to} took the session ${rest[0]} over and said so over ssh, so this machine captures nothing more of it.`)
-    db.close()
-    return 0
-  }
-  if (command === 'doctor') return await doctor(await chosenStore())
+  if (command === 'doctor') return await doctor()
   if (command === 'serve') {
-    await serve(await chosenStore(), deviceFromEnvironment())
+    await serve(deviceFromEnvironment())
     return 0
   }
   console.log(USAGE)

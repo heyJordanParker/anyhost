@@ -1,9 +1,10 @@
 import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
+import type * as Protocol from '../../relay/protocol.ts'
 import { chainOf, framesOf, journalPrefix, type IndexedSession, type RecordHeader } from './capture.ts'
-import { claimOf } from './claims.ts'
-import { devicesOf, type DeviceRecord } from './device.ts'
-import type { Store } from './store.ts'
+import { claimsOf } from './claims.ts'
+import { devicesOf } from './device.ts'
+import type { Relay } from './relay.ts'
 
 export type ListedSession = IndexedSession & { readonly machine: string; readonly device: string; readonly holder: string }
 // A run of one record's bytes in a replayed file: `size` bytes from `offset`, as `device` wrote them at `path`.
@@ -24,28 +25,25 @@ export type Replayed = {
 
 const decoded = (body: Uint8Array): unknown => JSON.parse(new TextDecoder().decode(body))
 
-export async function listSessions(store: Store, devices?: Map<string, DeviceRecord>): Promise<ListedSession[]> {
-  const known = devices ?? (await devicesOf(store))
-  const [indexes, claimed] = await Promise.all([
-    Promise.all([...known.keys()].map(async (device) => ({ device, stored: await store.get(`sessions/${device}/index.json`) }))),
-    store.list('claims/'),
-  ])
-  const claims = new Map(
-    await Promise.all(
-      claimed.map(async ({ key }) => {
-        const session = key.slice('claims/'.length, -'.json'.length)
-        return [session, (await claimOf(store, session))?.claim.device ?? ''] as const
-      }),
-    ),
-  )
+// The index each machine wrote, by its device id, read in as few requests as the indexes fit.
+export async function indexesOf(relay: Relay, devices: Iterable<string>): Promise<Map<string, IndexedSession[]>> {
+  const ids = [...devices]
+  const read = await Promise.all(relay.run(ids.map((device) => ({ op: 'get', key: `sessions/${device}/index.json` }))))
+  return new Map(ids.flatMap((device, at) => {
+    const index = read[at]
+    return index !== undefined && 'bytes' in index ? [[device, decoded(index.bytes) as IndexedSession[]] as const] : []
+  }))
+}
+
+export async function listSessions(relay: Relay, devices?: ReadonlyMap<string, Protocol.Device>): Promise<ListedSession[]> {
+  const [known, claims] = await Promise.all([devices ?? devicesOf(relay), claimsOf(relay)])
   const latest = new Map<string, ListedSession>()
-  for (const { device, stored } of indexes) {
-    if (stored === undefined) continue
-    for (const session of decoded(stored.body) as IndexedSession[]) {
+  for (const [device, index] of await indexesOf(relay, known.keys())) {
+    for (const session of index) {
       const earlier = latest.get(session.id)
-      const holder = claims.get(session.id) ?? ''
-      if (earlier !== undefined && (earlier.device === holder || (device !== holder && earlier.lastActivity >= session.lastActivity))) continue
-      latest.set(session.id, { ...session, device, machine: known.get(device)?.name ?? device, holder: holder === '' ? '' : (known.get(holder)?.name ?? holder) })
+      const holder = claims.get(session.id)
+      if (earlier !== undefined && (earlier.device === holder?.id || (device !== holder?.id && earlier.lastActivity >= session.lastActivity))) continue
+      latest.set(session.id, { ...session, device, machine: known.get(device)?.name ?? device, holder: holder?.name ?? '' })
     }
   }
   return [...latest.values()].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
@@ -144,13 +142,13 @@ class Replay {
 }
 
 // Downloads a session's journal, the chain of frames from byte 0, and replays it into `into`.
-export async function downloadJournal(store: Store, session: string, into: string, identify: (header: RecordHeader) => string): Promise<Replayed> {
-  const { frames, sealedEnd } = framesOf(session, await store.list(journalPrefix(session)))
-  if (frames[0]?.start !== 0) throw new Error(`R2 holds no journal of the session ${session} from byte 0.`)
+export async function downloadJournal(relay: Relay, session: string, into: string, identify: (header: RecordHeader) => string): Promise<Replayed> {
+  const { frames, sealedEnd } = framesOf(session, await relay.list(journalPrefix(session)))
+  if (frames[0]?.start !== 0) throw new Error(`The bucket holds no journal of the session ${session} from byte 0.`)
   mkdirSync(into, { recursive: true })
   const replay = new Replay(into, identify)
   let end = 0
-  for await (const { frame, bytes } of chainOf(store, frames, 0)) {
+  for await (const { frame, bytes } of chainOf(relay, frames, 0)) {
     replay.push(bytes)
     end = frame.start + bytes.length
   }
