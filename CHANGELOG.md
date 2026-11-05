@@ -4,6 +4,11 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-05
+
+### Fixed
+- A session with a large file that compresses poorly, such as a big saved tool output, uploads on a slow connection, instead of failing at 2 minutes on every try and never reaching R2. Each upload now gets 2 minutes plus as long as its size takes at 100 KB/s, and an upload the network dropped still fails and tries again.
+
 ## [0.2.1] - 2026-11-05
 
 ### Changed

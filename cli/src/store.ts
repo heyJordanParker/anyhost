@@ -4,6 +4,12 @@ import { loadSharedConfigFiles } from '@smithy/core/config'
 export const PROFILE = 'r2'
 const CONNECT_MS = 10_000
 const REQUEST_MS = 120_000
+// A write gets REQUEST_MS and as long again as its bytes take at 100 KB/s. A Mac whose uploads to R2 moved at 0.4 to
+// 0.9 MB/s failed a frame holding a 67 MB tool result, 50 MB compressed, at 120 s on every try. A write the network
+// dropped still fails at its limit, which only a total limit gives: Bun never ends an upload that stopped moving for
+// the socket's inactivity.
+const SLOWEST_UPLOAD_BYTES_PER_MS = 100
+const writeTimeoutMs =(bytes: number): number => REQUEST_MS + Math.ceil(bytes / SLOWEST_UPLOAD_BYTES_PER_MS)
 
 export type Stored = { readonly body: Uint8Array; readonly etag: string; readonly modifiedAt: number }
 export type Listed = { readonly key: string; readonly size: number }
@@ -51,7 +57,9 @@ export function r2Store(bucket: string): Store {
     },
     async put(key, body, condition) {
       const answer = await (await s3())
-        .send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ...(condition === undefined ? {} : 'ifMatch' in condition ? { IfMatch: condition.ifMatch } : { IfNoneMatch: '*' }) }))
+        .send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ...(condition === undefined ? {} : 'ifMatch' in condition ? { IfMatch: condition.ifMatch } : { IfNoneMatch: '*' }) }), {
+          requestTimeout: writeTimeoutMs(typeof body === 'string' ? Buffer.byteLength(body) : body.length),
+        })
         .catch((error: unknown) => {
           if (condition !== undefined && statusOf(error) === 412) return undefined
           throw error
