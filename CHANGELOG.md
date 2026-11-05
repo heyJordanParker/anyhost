@@ -4,6 +4,9 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 
 ## [Unreleased]
 
+### Fixed
+- A session you worked in outside a repository and outside your home folder, such as a scratch folder under Claude Code's temp folder, resumes on another machine in that machine's matching folder, instead of in the first machine's own path, made anew there. A path macOS names with or without `/private`, such as `/private/tmp/notes` and `/tmp/notes`, now moves to the other machine's folders in both forms, for the home folder, Claude Code's and Codex's folders and the session's folder alike.
+
 ## [0.2.2] - 2026-11-05
 
 ### Fixed

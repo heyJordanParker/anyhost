@@ -183,6 +183,35 @@ test("restore onto another home rewrites the writer's paths, and a /rewind backu
   expect(readFileSync(here.transcript, 'utf8')).toContain(`"cwd":${JSON.stringify(join(second, 'work', 'shop'))}`)
 })
 
+// The other restore tests keep the working folder under the home, the one place restore moved a folder outside git to.
+test("a session that worked in macOS's temp root continues in this machine's, and every path in it names this machine's", async () => {
+  const store = memoryStore()
+  const session = '44444444-0000-4000-8000-000000000004'
+  const encoded = (path: string): string => path.replace(/[^a-zA-Z0-9]/g, '-')
+  const a = machine(mac, store)
+  // the temp root as rootsHere records it on macOS, where Claude Code writes it with /private and the model without
+  const roots: MachineRoots = { ...a.roots, claudeTmp: '/private/tmp/claude-501' }
+  const writer = openCapture(store, mac, roots, a.capture.db, noCode)
+  const scratchpad = (tmp: string, home: string): string => `${tmp}/${encoded(join(home, 'dotfiles'))}/${session}/scratchpad`
+  const line = (cwd: string, read: string): string => `{"type":"user","message":{"role":"user","content":"Sum up ${read}/notes.md"},"cwd":"${cwd}","sessionId":"${session}"}\n`
+  const there = scratchpad(roots.claudeTmp, roots.home)
+  const transcript = join(roots.claudeHome, 'projects', encoded(there), `${session}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, line(there, scratchpad('/tmp/claude-501', roots.home)))
+  await register(store, mac, roots)
+  await uploadSession(writer, session, 'claude', new Set([transcript]), failTest)
+  await writeIndex(writer)
+
+  const b = machine(server, store)
+  await register(store, server, b.roots)
+  const { cwd } = await restore(b.capture, session, { take: false, release: noRelease })
+
+  const here = scratchpad(b.roots.claudeTmp, b.roots.home)
+  expect(cwd).toBe(here)
+  expect(existsSync(here)).toBe(true)
+  expect(readFileSync(join(b.roots.claudeHome, 'projects', encoded(here), `${session}.jsonl`), 'utf8')).toBe(line(here, here))
+})
+
 test('a session restores on another machine byte for byte from R2 alone, and that machine continues its journal', async () => {
   const store = memoryStore()
   const session = 'cccccccc-0000-4000-8000-000000000003'

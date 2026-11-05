@@ -98,7 +98,8 @@ async function writersOf(store: Store, devices: ReadonlyMap<string, DeviceRecord
 }
 
 // Where the session's working folder goes on this machine: in the checkout of its repository found by remote, or
-// in the folder this machine keeps checkouts in; outside git, at its path under this machine's home.
+// in the folder this machine keeps checkouts in; outside git, where relocate moves its path from the writer's home,
+// temp root and other roots to this machine's.
 async function localFolder(capture: Capture, session: ListedSession, writer: Roots, chosen: string): Promise<string> {
   const { home } = capture.roots
   if (session.repo !== '') {
@@ -106,8 +107,8 @@ async function localFolder(capture: Capture, session: ListedSession, writer: Roo
     return join((await findCheckout(capture, session.repo, checkouts)) ?? join(checkouts, basename(repoSlug(session.repo))), session.repoFolder)
   }
   if (session.cwd === '') return home
-  const underHome = session.cwd === writer.home || session.cwd.startsWith(`${writer.home}/`)
-  return underHome ? `${home}${session.cwd.slice(writer.home.length)}` : session.cwd
+  // the folder is the writer's checkout itself, which no root of this machine names yet
+  return relocate(NOTHING, session.cwd, { ...writer, checkout: writer.home }, { ...capture.roots, checkout: home }).path
 }
 
 async function readStaged(file: ReplayedFile, offset: number, size: number): Promise<Uint8Array> {

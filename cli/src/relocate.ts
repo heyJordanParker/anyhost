@@ -61,8 +61,13 @@ const isText = (bytes: Uint8Array): boolean => !bytes.subarray(0, 8000).includes
 const jsonText = (text: string): string => JSON.stringify(text).slice(1, -1)
 // Claude Code names a folder after a path with every character but letters and digits as `-`
 const encode = (path: string): string => path.replace(/[^a-zA-Z0-9]/g, '-')
-// macOS keeps /tmp and /var under /private, and Claude Code writes both forms
-const forms = (path: string): string[] => (path.startsWith('/private/') ? [path, path.slice('/private'.length)] : [path])
+// macOS keeps /etc, /tmp and /var under /private, so a path names one folder in two forms: Claude Code writes the
+// resolved one, such as a working folder of /private/tmp/trwork, and prompts and tool calls hold the other too
+function forms(path: string): string[] {
+  if (/^\/private\/(?:etc|tmp|var)(?:\/|$)/.test(path)) return [path, path.slice('/private'.length)]
+  if (/^\/(?:etc|tmp|var)(?:\/|$)/.test(path)) return [path, `/private${path}`]
+  return [path]
+}
 
 const SLASH = 0x2f
 const BACKSLASH = 0x5c
@@ -82,20 +87,14 @@ class Relocation {
 
   constructor(from: Roots, to: Roots, form: (text: string) => string) {
     // a session in the home folder has no checkout of its own: the home maps it
-    const checkout = from.checkout !== from.home
-    const pairs: [string, string][] = [
-      [from.claudeHome, to.claudeHome],
-      [from.codexHome, to.codexHome],
-      ...forms(from.claudeTmp).map((tmp): [string, string] => [tmp, to.claudeTmp]),
-      [from.home, to.home],
-      ...(checkout ? [[from.checkout, to.checkout] as [string, string]] : []),
-    ]
-    this.roots = pairs.map(([a, b]) => ({ from: Buffer.from(form(a)), to: Buffer.from(form(b)) })).sort((a, b) => b.from.length - a.from.length)
-    this.encoded = [
-      ...(checkout ? [{ from: encode(from.checkout), to: encode(to.checkout) }] : []),
-      ...forms(from.claudeTmp).map((tmp) => ({ from: encode(tmp), to: encode(to.claudeTmp) })),
-      { from: encode(from.home), to: encode(to.home) },
-    ].sort((a, b) => b.from.length - a.from.length)
+    const checkout: [string, string][] = from.checkout === from.home ? [] : [[from.checkout, to.checkout]]
+    // the roots Claude Code names folders after
+    const namedAfter: [string, string][] = [...checkout, [from.claudeTmp, to.claudeTmp], [from.home, to.home]]
+    const pairs: [string, string][] = [[from.claudeHome, to.claudeHome], [from.codexHome, to.codexHome], ...namedAfter]
+    this.roots = pairs
+      .flatMap(([a, b]) => forms(a).map((alias) => ({ from: Buffer.from(form(alias)), to: Buffer.from(form(b)) })))
+      .sort((a, b) => b.from.length - a.from.length)
+    this.encoded = namedAfter.flatMap(([a, b]) => forms(a).map((alias) => ({ from: encode(alias), to: encode(b) }))).sort((a, b) => b.from.length - a.from.length)
     const starts = [...new Set([...this.roots.map((root) => root.from.toString()), ...this.encoded.map((name) => name.from)])]
     this.needles = starts.filter((start) => !starts.some((other) => other !== start && start.startsWith(other))).map((start) => Buffer.from(start))
   }

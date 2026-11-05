@@ -35,8 +35,13 @@ test('a root matches only at a path boundary', () => {
   expect(moved(content, '/Users/al/.claude/history.jsonl', from)).toBe('{"a":"/Users/alice /data/Users/al /Users/al.bak /Users/al-old -Users-alfred x-Users-al","b":"/home/al","c":"\\n/home/al/x","d":"file:///home/al/y","e":"(/home/al)"}\n')
 })
 
-test("macOS's temp root changes in both forms Claude Code writes", () => {
+test('every macOS root changes in both forms, with /private and without it', () => {
+  // macOS's root user lives in /var/root, and a session in /tmp/trwork records its folder as /private/tmp/trwork
+  const root: Roots = { home: '/var/root', claudeHome: '/var/root/.claude', claudeTmp: '/tmp/claude-0', codexHome: '/var/root/.codex', checkout: '/private/tmp/trwork' }
+  const content = '{"a":"/private/var/root/notes","b":"/private/var/root/.claude/plans/p.md","c":"/var/root/.codex/x","d":"/private/tmp/claude-0/y","e":"/tmp/trwork/a.ts","f":"projects/-tmp-trwork/s.jsonl","g":"/private/var/rooted","h":"/tmp/claude-01"}\n'
+
   expect(moved('{"a":"/private/tmp/claude-501/x","b":"/tmp/claude-501/y","c":"/tmp/claude-5012"}\n')).toBe('{"a":"/tmp/claude-1000/x","b":"/tmp/claude-1000/y","c":"/tmp/claude-5012"}\n')
+  expect(moved(content, '/var/root/.claude/history.jsonl', root)).toBe('{"a":"/home/al/notes","b":"/home/al/.claude/plans/p.md","c":"/home/al/.codex/x","d":"/tmp/claude-1000/y","e":"/home/al/src/app/a.ts","f":"projects/-home-al-src-app/s.jsonl","g":"/private/var/rooted","h":"/tmp/claude-01"}\n')
 })
 
 test("a project folder in the checkout's subfolder, in the temp root or under another project keeps naming the same folder", () => {
