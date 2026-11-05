@@ -7,7 +7,7 @@ import {
   type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
-import { UploadQueue } from '../src/serve.ts'
+import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
 import { downloadJournal } from '../src/sessions.ts'
 import type { Store } from '../src/store.ts'
 import { codexState, summarize } from '../src/transcript.ts'
@@ -586,6 +586,10 @@ test('the queue at N uploads each session once per N seconds while it writes', a
     ['/d', '/e'],
   ])
   expect(uploads.map(({ at }) => Math.round(at / 300))).toEqual([1, 2])
+})
+
+test('the queue drains every 5 seconds until the person sets Upload every, and their 0 uploads every write', () => {
+  expect([uploadEveryOf(undefined), uploadEveryOf(0), uploadEveryOf(30)]).toEqual([5, 0, 30])
 })
 
 test("the working folder is the session's own, never a folder a tool call names", () => {

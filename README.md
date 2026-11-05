@@ -1,6 +1,6 @@
 # anyhost
 
-**Every Claude Code and Codex session of every machine you work on, kept safe in Cloudflare R2 and resumed on any machine.** A dead or busy machine no longer holds your plans and ideas: each session's whole state is in R2 about a second after each write, every machine lists every session, and one command continues a session on the machine you are on, from R2 alone.
+**Every Claude Code and Codex session of every machine you work on, kept safe in Cloudflare R2 and resumed on any machine.** A dead or busy machine no longer holds your plans and ideas: each session's whole state is in R2 within about 5 seconds of each write, every machine lists every session, and one command continues a session on the machine you are on, from R2 alone.
 
 ```text
 $ anyhost list
@@ -63,7 +63,9 @@ A virtual machine cloned from another keeps its machine id, so both would write 
 
 anyhost uploads a session once one of its files changes while anyhost runs, every file from its first byte, so a running session, and an old one you resume, upload whole. It never reads the old sessions you leave alone.
 
-anyhost uploads each write as it happens. To upload less often, set **Upload every** in `/config` (the option `uploadEvery`) to the seconds between a session's uploads: each session then uploads once per period with everything it wrote. `0`, the default, uploads every write. The program reads a change within a minute.
+anyhost uploads each session at most once every 5 seconds, with everything it wrote since its last upload. **Upload every** in `/config` (the option `uploadEvery`) sets those seconds, and `0` uploads every write as it happens, about a second after it. The program reads a change within a minute.
+
+Every upload is one write request to R2, and R2's free tier holds 1,000,000 of them a month. On a Mac that runs Claude Code all day, uploading every write took 1,258,076 uploads in 30 days, about $1.16 over the free tier, and the 5-second default takes 411,952.
 
 ## How it works
 
@@ -78,8 +80,8 @@ journals/<session>/sealed/<start>-<end>.zst     the uploads of a session that we
 ```
 
 - A session's journal is every byte its files gained, in order, shared by every machine that holds the session in turn. Each upload is one zstd frame of records: the file's path, where in the file the record starts, its bytes, and the file's size and sha256 after it. A file the session deleted gets a record that says so. Replaying the records rebuilds every file, whether it grew, was written once, was rewritten, or is gone.
-- The program hears each write from the operating system, puts its session on the upload queue, and uploads what the session's files gained since its last upload, one upload in flight per session. A failed upload tries again after 1 second, then less often, up to once a minute. Every 60 seconds it also checks the files it captured for a change it missed, and at its start the files that changed since it last ran.
-- After an upload that changed a session, the program reads the session's working folder with git in the background and uploads its code in the uploads after, a large part in 128 KiB pieces, 4 at a time, between your lines, so a line never waits on git and reaches R2 in about a second while the code goes up. A working folder missing on the machine gets one line in the program's log, and the session's other files still upload.
+- The program hears each write from the operating system, puts its session on the upload queue, and every 5 seconds uploads what each queued session's files gained since its last upload, one upload in flight per session. A failed upload tries again at the next one. Every 60 seconds it also checks the files it captured for a change it missed, and at its start the files that changed since it last ran.
+- After an upload that changed a session, the program reads the session's working folder with git in the background and uploads its code in the uploads after, so an upload never waits on git. At **Upload every** `0` a large part goes up in 128 KiB pieces, 4 at a time, between your lines, so a line reaches R2 in about a second while the code goes up, and a failed upload tries again after 1 second, then less often, up to once a minute. A working folder missing on the machine gets one line in the program's log, and the session's other files still upload.
 - A session quiet for 10 minutes is sealed: its uploads become frames of up to 64 MiB, which are never written again.
 - `anyhost resume` downloads the session's frames 16 at a time, replays them, checks each file's size and sha256 against its last record, and only then puts the files in place, with each machine's paths rewritten to this machine's. This machine then continues the same journal.
 - Each upload claims its place in the journal. When two machines write the same place, one write wins, and the other machine stops uploading the session and logs that its lines from there are a fork.

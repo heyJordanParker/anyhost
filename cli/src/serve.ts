@@ -10,6 +10,11 @@ const BACKUP_MS = 60_000
 const REGISTER_MS = 5 * 60_000
 const RETRY_MS = 1000
 
+// The option `uploadEvery`, which `cmod options` leaves out until the person sets it. Replayed from a Mac's 30 days of
+// transcripts, 5 seconds takes 411,952 uploads, inside R2's free 1,000,000 writes a month, where every write takes
+// 1,258,076. A person's 0 stays 0.
+export const uploadEveryOf = (chosen: number | undefined): number => chosen ?? 5
+
 export type Status = {
   readonly device: Device
   readonly bucket: string
@@ -135,7 +140,7 @@ export async function serve(store: Store, device: Device): Promise<void> {
     }
   }
   const queue = new UploadQueue(
-    0,
+    uploadEveryOf(undefined),
     async (session, tool, paths) => {
       const left = await uploadSession(capture, session, tool, paths, problems, queue.uploadEvery === 0)
       problems.clear(`upload ${session}`)
@@ -193,7 +198,7 @@ export async function serve(store: Store, device: Device): Promise<void> {
     await Bun.write(heartbeat, '')
     await settle('options', async () => {
       const options = await personOptions()
-      queue.uploadEvery = options.uploadEvery ?? 0
+      queue.uploadEvery = uploadEveryOf(options.uploadEvery)
       // the database counts what one bucket holds, so a new bucket takes a new start, which the service gives the program
       if (bucketOf(options.bucket) === store.bucket) return
       console.error(`${new Date().toISOString()} The bucket is ${bucketOf(options.bucket)} now, not ${store.bucket}, so anyhost exits, and its service starts it again on that bucket.`)

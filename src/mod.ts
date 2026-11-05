@@ -19,7 +19,7 @@ export const anyhost = defineMod({
     uploadEvery: option.number({
       title: 'Upload every',
       description: 'Seconds between uploads of a session to R2. 0 uploads every write.',
-      default: 0,
+      default: 5,
       min: 0,
     }),
     checkouts: option.folder({

@@ -4,6 +4,11 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-05
+
+### Changed
+- **Upload every** defaults to 5 seconds instead of `0`: each session uploads at most once every 5 seconds, with everything it wrote, so a line reaches R2 within about 5 seconds. On a Mac that runs Claude Code all day, uploading every write took 1,258,076 uploads in 30 days, past R2's free 1,000,000 write requests a month, and 5 seconds takes 411,952. Set **Upload every** to `0` in `/config` to upload every write again.
+
 ## [0.2.0] - 2026-11-05
 
 ### Changed
