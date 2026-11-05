@@ -6,8 +6,8 @@
     "anyhost": "src/main.ts"
   },
   "scripts": {
-    "check": "tsc",
-    "build": "trap 'rm -f .*.bun-build' EXIT; bun install --frozen-lockfile || exit 1; for machine in ${CMOD_MACHINES:-darwin-arm64 darwin-x64 linux-arm64 linux-x64}; do bun build --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --target=bun-$machine src/main.ts --outfile dist/anyhost-$machine || exit 1; done"
+    "check": "bun run --cwd ../relay build && tsc",
+    "build": "trap 'rm -f .*.bun-build' EXIT; bun install --frozen-lockfile || exit 1; bun run --cwd ../relay build || exit 1; for machine in ${CMOD_MACHINES:-darwin-arm64 darwin-x64 linux-arm64 linux-x64}; do bun build --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --target=bun-$machine src/main.ts --outfile dist/anyhost-$machine || exit 1; done"
   },
   "cmod": {
     "build": "bun run build",
