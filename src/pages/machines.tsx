@@ -39,7 +39,7 @@ const FOLLOW_MS = 1000
 const programs = new WeakMap<object, Program>()
 export const reachProgram = (mod: Mod<AnyhostState>, program: Program): void => void programs.set(mod, program)
 
-// One answer of the program: a GET, or a POST of `body` as JSON, which a web page cannot send it.
+// One answer of the program, at the unix socket it listens on: a GET, or a POST of `body` as JSON.
 async function ask<T>(mod: Mod<AnyhostState>, path: string, body?: object): Promise<T> {
   const program = programs.get(mod)
   if (program === undefined) throw new Error('The anyhost mod has not started its program yet.')

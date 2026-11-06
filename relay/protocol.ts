@@ -93,13 +93,15 @@ export type Answer = { readonly id: number; readonly results: readonly Result[] 
 export type Released = { readonly t: 'released'; readonly session: string; readonly to: DeviceRef; readonly at: string }
 export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceRef; readonly waiting: readonly Released[] }
 
-// What a machine sends another: the Pool routes it to every socket of `to`, a device id, adding `from`. `resize` and
-// `detach` name only their stream, whose two machines the Pool knows from the `attach` that opened it.
+// What a machine sends another: the Pool routes it to every socket of `to`, a device id, adding `from`. `attached` and
+// `detach` name only their stream, whose two machines the Pool knows from the `attach` that opened it. `key` is the
+// base64 of the 32 random bytes that key the stream's direct connection, and `attached` is the host's answer, with the
+// port and the addresses that connection reaches it at.
 export type Routed =
   | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly t3: boolean }
   | { readonly t: 'moved'; readonly id: string; readonly to: string; readonly ok: boolean; readonly error?: string }
-  | { readonly t: 'attach'; readonly stream: number; readonly to: string; readonly session: string; readonly cols: number; readonly rows: number }
-  | { readonly t: 'resize'; readonly stream: number; readonly cols: number; readonly rows: number }
+  | { readonly t: 'attach'; readonly stream: number; readonly to: string; readonly session: string; readonly cols: number; readonly rows: number; readonly key: string }
+  | { readonly t: 'attached'; readonly stream: number; readonly port: number; readonly addresses: readonly string[] }
   | { readonly t: 'detach'; readonly stream: number }
 export type Delivered = Routed & { readonly from: DeviceRef }
 // The Pool's answer to a message for a machine with no open socket, or to one it cannot read.
@@ -137,7 +139,8 @@ export function decodeMessage(message: Uint8Array): { readonly header: unknown; 
   return { header: JSON.parse(decoder.decode(message.subarray(1, end))), bytes: message.subarray(end + 1) }
 }
 
-// An attach stream's bytes: the kind byte, the stream id as 4 bytes big-endian, then the terminal's bytes.
+// An attach stream's bytes: the kind byte, the stream id as 4 bytes big-endian, then one frame of the stream, which
+// `cli/src/stream.ts` numbers: its kind, the offset of its first byte, and its bytes.
 export function encodeStream(stream: number, bytes: Uint8Array): Uint8Array {
   const message = new Uint8Array(5 + bytes.length)
   message[0] = STREAM

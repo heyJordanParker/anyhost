@@ -1,9 +1,7 @@
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import plugin from '../../.claude-plugin/plugin.json'
 import { PROTOCOL_VERSION, type Health } from '../../relay/protocol.ts'
 import { cmodDevice, relayLogin } from './device.ts'
-import type { Status } from './serve.ts'
+import { serveSocket, type Status } from './serve.ts'
 
 type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
 
@@ -37,10 +35,8 @@ async function deviceCheck(): Promise<Check> {
 }
 
 async function programChecks(): Promise<Check[]> {
-  const instance = Bun.file(join(process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share'), 'cmod', 'instances', 'anyhost', 'anyhost.json'))
-  if (!(await instance.exists())) return [{ problem: 'The anyhost program is not running.', fix: START_CLAUDE }]
-  const { address } = (await instance.json()) as { address: string }
-  const status = await fetch(`http://${address}/status`, { signal: AbortSignal.timeout(3000) })
+  const address = serveSocket()
+  const status = await fetch('http://localhost/status', { unix: address, signal: AbortSignal.timeout(3000) })
     .then(async (response) => (await response.json()) as Status)
     .catch(() => undefined)
   if (status === undefined) return [{ problem: `The anyhost program does not answer at ${address}.`, fix: START_CLAUDE }]

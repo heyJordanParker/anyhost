@@ -16,16 +16,20 @@ function held(): HookStream<ProcessSpawnChunk, ProcessSpawnResult> {
   return Object.assign(read(), { result: Promise.resolve<ProcessSpawnResult>({ code: 0, signal: null }) }) as HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 }
 
+// The service listens on a unix socket in its state folder, and writes that address to its instance file.
+const SOCKET = '/test/home/.local/state/anyhost/serve.sock'
+const instance = { '/test/home/.local/share/cmod/instances/anyhost/anyhost.json': JSON.stringify({ address: `unix:${SOCKET}` }) }
+
 function withHolder(holder: { machine?: string; problem?: string; untold?: string }, status = 200) {
-  const tested = testMod(anyhost, { files: { '/test/home/.local/share/cmod/instances/anyhost/anyhost.json': '{"address":"127.0.0.1:4100"}' } })
+  const tested = testMod(anyhost, { files: instance })
   const spawned: ProcessSpawnRequest[] = []
   const fetched: string[] = []
   tested.fakes.process.spawn = (request) => {
     spawned.push(request)
     return held()
   }
-  tested.fakes.http.fetch = async (url) => {
-    fetched.push(url)
+  tested.fakes.http.fetch = async (url, init) => {
+    fetched.push(`${init?.socketPath ?? ''} ${url}`)
     return { status, ok: status === 200, headers: {}, text: status === 200 ? JSON.stringify(holder) : 'The relay refused the request.' }
   }
   return { tested, spawned, fetched }
@@ -51,7 +55,7 @@ test('a session whose claim another device holds refuses prompts', async () => {
   const { tested, fetched } = withHolder({ machine: 'anyhost-b' })
 
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session continues on anyhost-b.' })
-  expect(fetched).toEqual(['http://127.0.0.1:4100/claims/test-session'])
+  expect(fetched).toEqual([`${SOCKET} http://localhost/claims/test-session`])
 })
 
 test('a program that fails to answer the check lets the prompt through and says why, once a session', async () => {
@@ -76,7 +80,7 @@ test('a session resumed from a machine that was not connected names that machine
   const { tested, fetched } = withHolder({ untold: 'anyhost-a' })
 
   await tested.raise.onSessionStart({ source: 'resume' })
-  expect(fetched).toEqual(['http://127.0.0.1:4100/claims/test-session'])
+  expect(fetched).toEqual([`${SOCKET} http://localhost/claims/test-session`])
   expect(tested.shown.toasts.filter(({ type }) => type === 'warning')).toEqual([
     {
       type: 'warning',
@@ -108,7 +112,7 @@ function withProgram(answers: Record<string, Answer[]>) {
       mod.use(slashCommand({ name: 'step', description: 'Show the Step', reply: () => step.open({ focus: true }) }))
     },
   }
-  const tested = testMod(definition, { files: { '/test/home/.local/share/cmod/instances/anyhost/anyhost.json': '{"address":"127.0.0.1:4100"}' } })
+  const tested = testMod(definition, { files: instance })
   const asked: Asked[] = []
   const ticks: (() => unknown)[] = []
   const copied: string[] = []
@@ -122,7 +126,8 @@ function withProgram(answers: Record<string, Answer[]>) {
     return { isCopied: true }
   }
   tested.fakes.http.fetch = async (url, init) => {
-    const path = url.replace('http://127.0.0.1:4100', '')
+    if (init?.socketPath !== SOCKET) throw new Error(`The mod asked ${url} at ${init?.socketPath}, not at the service's socket.`)
+    const path = url.replace('http://localhost', '')
     const method = init?.method ?? 'GET'
     asked.push({ method, path, ...(init?.body === undefined ? {} : { body: JSON.parse(init.body) }) })
     const queue = answers[`${method} ${path}`] ?? []

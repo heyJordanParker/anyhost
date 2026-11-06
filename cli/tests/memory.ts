@@ -12,8 +12,10 @@ import {
   PROTOCOL_VERSION,
   RELAY_VERSION,
   REQUEST,
+  STREAM,
   decodeMessage,
   encodeMessage,
+  streamOf,
   type Condition,
   type DeviceRef,
   type Op,
@@ -31,10 +33,12 @@ import { connectRelay, type Relay } from '../src/relay.ts'
 export const noCode: Code = { captureCode: async () => undefined, restoreCode: async (_header, _readPart, folder) => folder }
 
 export type Stored = { readonly body: Uint8Array; readonly etag: string; readonly modified: string }
-type Socket = ServerWebSocket<{ readonly device: string; readonly name: string; readonly roots: Roots; readonly refuse?: { readonly code: number; readonly reason: string } }>
+// `streams` holds each attach stream the socket views, with the machine that hosts it.
+type Socket = ServerWebSocket<{ readonly device: string; readonly name: string; readonly roots: Roots; readonly streams: Map<number, string>; readonly refuse?: { readonly code: number; readonly reason: string } }>
 
 // The relay's API as `relay/pool.ts` and `relay/worker.ts` answer it, over real WebSockets and HTTP, with the bucket,
-// the machines, the claims and the messages waiting for an offline machine in memory. `refuse` fails the ops it names
+// the machines, the claims and the messages waiting for an offline machine in memory, and messages and attach streams
+// routed between machines as the Pool routes them. `refuse` fails the ops it names
 // as R2 would, `delayMs` answers each request that much later, `stalled` holds every answer back, `dropAnswers` runs
 // that many requests and drops the socket instead of answering them, and `cutDownloads` breaks that many GETs.
 export type MemoryRelay = {
@@ -208,6 +212,29 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
     }
   }
 
+  // The sockets at the other end of a stream: the host's, from its viewer, else the viewer socket that opened it.
+  const peersOf = (socket: Socket, stream: number): Socket[] => {
+    const host = socket.data.streams.get(stream)
+    if (host !== undefined) return socketsOf(host)
+    return [...sockets].filter((other) => other !== socket && other.data.streams.get(stream) === socket.data.device)
+  }
+  const send = (to: readonly Socket[], message: object | Uint8Array): void => {
+    for (const socket of to) socket.send(message instanceof Uint8Array ? message : JSON.stringify(message))
+  }
+  function route(socket: Socket, text: string): void {
+    const message = JSON.parse(text) as { t: string; to?: string; stream?: number; id?: string }
+    const routed = { ...message, from: refOf(socket.data.device) }
+    if (message.t === 'attached' || message.t === 'detach') {
+      const peers = peersOf(socket, message.stream ?? -1)
+      if (message.t === 'detach') for (const each of [socket, ...peers]) each.data.streams.delete(message.stream ?? -1)
+      return send(peers, routed)
+    }
+    const targets = socketsOf(message.to ?? '')
+    if (targets.length === 0) return send([socket], { t: 'offline', ...(message.id === undefined ? {} : { id: message.id }), ...(message.stream === undefined ? {} : { stream: message.stream }), to: message.to })
+    send(targets, routed)
+    if (message.t === 'attach' && message.stream !== undefined && message.to !== undefined) socket.data.streams.set(message.stream, message.to)
+  }
+
   async function object(request: globalThis.Request, key: string): Promise<Response> {
     const device = deviceOf(request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '')
     if (device === undefined) return Response.json({ error: 'unknown_token', message: 'The relay knows no machine with this token.' }, { status: 401 })
@@ -256,7 +283,7 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
             : live !== undefined
               ? { code: CLOSE_DEVICE_LIVE, reason: `${live.data.name} is connected with this machine's id.` }
               : undefined
-      if (server.upgrade(request, { data: { device: device?.id ?? '', name, roots, ...(refuse === undefined ? {} : { refuse }) } })) return undefined
+      if (server.upgrade(request, { data: { device: device?.id ?? '', name, roots, streams: new Map(), ...(refuse === undefined ? {} : { refuse }) } })) return undefined
       return new Response('no upgrade', { status: 400 })
     },
     websocket: {
@@ -273,12 +300,28 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
       },
       message(socket, message) {
         if (message === 'ping') return void socket.send('pong')
-        if (typeof message !== 'string' && message[0] === REQUEST) void answer(socket, new Uint8Array(message))
+        if (typeof message === 'string') return route(socket, message)
+        if (message[0] === REQUEST) void answer(socket, new Uint8Array(message))
+        if (message[0] !== STREAM) return
+        const peers = peersOf(socket, streamOf(message))
+        if (peers.length === 0) return send([socket], { t: 'detach', stream: streamOf(message) })
+        send(peers, new Uint8Array(message))
       },
+      // the streams the socket viewed end at their hosts, and a machine with no socket left ends the streams it hosted
       close(socket) {
         sockets.delete(socket)
         const device = devices.get(socket.data.device)
         if (device !== undefined) device.seenAt = new Date().toISOString()
+        const from = refOf(socket.data.device)
+        for (const [stream, host] of socket.data.streams) send(socketsOf(host), { t: 'detach', stream, from })
+        if (socketsOf(socket.data.device).length > 0) return
+        for (const viewer of sockets) {
+          for (const [stream, host] of viewer.data.streams) {
+            if (host !== socket.data.device) continue
+            viewer.data.streams.delete(stream)
+            send([viewer], { t: 'detach', stream, from })
+          }
+        }
       },
     },
   })

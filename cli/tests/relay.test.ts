@@ -1,12 +1,14 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import type { Subprocess } from 'bun'
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { MAX_MESSAGE_BYTES, cloneFixFor } from '../../relay/protocol.ts'
+import { MAX_MESSAGE_BYTES, cloneFixFor, encodeStream, streamOf } from '../../relay/protocol.ts'
 import { hotKey, journalOf, openCapture, openDatabase, uploadSession, type Problems } from '../src/capture.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device, type MachineRoots } from '../src/device.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
 import { listSessions } from '../src/sessions.ts'
-import { memoryRelay, noCode, stopRelays, temporaryFolder, welcomed } from './memory.ts'
+import { openStream, type Link, type Stream } from '../src/stream.ts'
+import { memoryRelay, noCode, stopRelays, temporaryFolder, welcomed, type MemoryRelay } from './memory.ts'
 
 afterEach(stopRelays)
 
@@ -146,4 +148,225 @@ test('an object over 1 MiB goes by HTTP, and a broken download goes on from the 
   expect(relay.ranges[0]).toBeNull()
   expect(relay.ranges[1]).toMatch(/^bytes=\d+-$/)
   expect(Number(relay.ranges[1]?.slice('bytes='.length, -1))).toBeGreaterThan(0)
+})
+
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
+const streams: Stream[] = []
+const opens = (): Stream => {
+  const stream = openStream()
+  streams.push(stream)
+  return stream
+}
+afterEach(() => {
+  for (const stream of streams.splice(0)) stream.close()
+})
+
+// A link to `to` that carries each frame while `isUp` says it is up, and drops it while it is down.
+const linkTo = (to: Stream, isUp: () => boolean = () => true): Link => ({ send: (frame) => (isUp() ? to.receive(frame) : undefined) })
+
+test('a stream whose link dropped frames sends again from the offset the other side names on the next link, so no byte is lost or doubled', () => {
+  const [host, viewer] = [opens(), opens()]
+  let [shown, typed, sizes] = ['', '', [] as string[]]
+  viewer.on('output', (bytes) => void (shown += decoder.decode(bytes)))
+  host.on('input', (bytes) => void (typed += decoder.decode(bytes)))
+  host.on('resize', ({ cols, rows }) => void sizes.push(`${cols}x${rows}`))
+  let isUp = true
+  viewer.use(linkTo(host, () => isUp))
+  host.use(linkTo(viewer, () => isUp))
+  host.write('output', encoder.encode('one '))
+  viewer.write('input', encoder.encode('a'))
+  viewer.write('resize', { cols: 90, rows: 28 })
+  isUp = false
+  host.write('output', encoder.encode('two '))
+  viewer.write('input', encoder.encode('b'))
+  viewer.write('resize', { cols: 120, rows: 40 })
+  expect([shown, typed, sizes]).toEqual(['one ', 'a', ['90x28']])
+
+  // each side's first frame on the new link names what it holds, and each sends again from the other's offset
+  host.use(linkTo(viewer))
+  viewer.use(linkTo(host))
+  host.write('output', encoder.encode('three'))
+  viewer.write('input', encoder.encode('c'))
+  expect([shown, typed, sizes]).toEqual(['one two three', 'abc', ['90x28', '120x40']])
+  // a link that comes back again sends nothing twice
+  host.use(linkTo(viewer))
+  viewer.use(linkTo(host))
+  expect([shown, typed, sizes]).toEqual(['one two three', 'abc', ['90x28', '120x40']])
+})
+
+test('a viewer whose host lost the stream, as a restarted host program does, takes the new one from its first byte', () => {
+  const [host, viewer] = [opens(), opens()]
+  let shown = ''
+  viewer.on('output', (bytes) => void (shown += decoder.decode(bytes)))
+  host.use(linkTo(viewer))
+  viewer.use(linkTo(host))
+  host.write('output', encoder.encode('before the restart. '))
+  viewer.write('input', encoder.encode('x'))
+  host.close()
+
+  const restarted = opens()
+  let typed = ''
+  restarted.on('input', (bytes) => void (typed += decoder.decode(bytes)))
+  restarted.use(linkTo(viewer))
+  viewer.use(linkTo(restarted))
+  restarted.write('output', encoder.encode('after it.'))
+  viewer.write('input', encoder.encode('y'))
+  expect(shown).toBe('before the restart. after it.')
+  expect(typed).toBe('y')
+})
+
+const HOST: Device = { id: 'device-host', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
+const VIEWER: Device = { id: 'device-viewer', name: 'anyhost-b', os: 'linux', arch: 'arm64' }
+const CLI = join(import.meta.dir, '..', 'src', 'main.ts')
+const children: Subprocess[] = []
+afterEach(async () => {
+  for (const child of children.splice(0)) {
+    child.kill()
+    await child.exited
+  }
+})
+
+const script = (path: string, text: string): string => {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, text)
+  chmodSync(path, 0o755)
+  return path
+}
+
+// A machine's folders, its relay login, the cmod that answers its device token and options, and the Claude Code that
+// runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen, prints the
+// terminal's size at its start, clears the screen and prints it again at each SIGWINCH, as Claude Code repaints, and
+// prints each line typed into it.
+function machineFor(relay: MemoryRelay, device: Device, isHost: boolean): { readonly env: Record<string, string>; readonly socket: string } {
+  const folder = temporaryFolder()
+  const home = join(folder, 'home')
+  mkdirSync(join(folder, 'tmp'), { recursive: true })
+  // where Claude Code keeps the record of each session it runs
+  mkdirSync(join(home, '.claude', 'sessions'), { recursive: true })
+  const env = {
+    PATH: process.env['PATH'] ?? '',
+    HOME: home,
+    XDG_STATE_HOME: join(folder, 'state'),
+    XDG_DATA_HOME: join(folder, 'data'),
+    CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    CLAUDE_CODE_TMPDIR: join(folder, 'tmp'),
+    CODEX_HOME: join(home, '.codex'),
+    ANYHOST_DEVICE_ID: device.id,
+    ANYHOST_DEVICE_NAME: device.name,
+    ANYHOST_DEVICE_OS: device.os,
+    ANYHOST_DEVICE_ARCH: device.arch,
+    CLAUDE_CODE_EXECPATH: script(
+      join(folder, 'bin', 'claude'),
+      `#!/bin/bash
+case "$1" in
+  agents) printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
+  attach)
+    printf '\\033[?1049h'
+    trap 'printf "\\033[2J"; echo "size $(stty size)"' WINCH
+    echo "size $(stty size)"
+    while :; do IFS= read -r line && echo "typed $line"; done ;;
+  *) exit 2 ;;
+esac
+`,
+    ),
+  }
+  const token = relay.join(device, roots(home))
+  script(join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'), `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") printf '{"person":{}}' ;;\n  *) exit 1 ;;\nesac\n`)
+  mkdirSync(join(env.XDG_STATE_HOME, 'anyhost'), { recursive: true })
+  writeFileSync(join(env.XDG_STATE_HOME, 'anyhost', 'relay.json'), JSON.stringify({ url: relay.url }))
+  return { env, socket: join(env.XDG_STATE_HOME, 'anyhost', 'serve.sock') }
+}
+
+// Runs `anyhost serve` on the machine and answers the first line it printed.
+async function serveOn(env: Record<string, string>): Promise<string> {
+  const child = Bun.spawn(['bun', CLI, 'serve'], { env, stdout: 'pipe', stderr: 'inherit' })
+  children.push(child)
+  const reader = child.stdout.getReader()
+  let printed = ''
+  while (!printed.includes('\n')) {
+    const { value, done } = await reader.read()
+    if (done) throw new Error(`anyhost serve exited, having printed ${JSON.stringify(printed)}.`)
+    printed += decoder.decode(value)
+  }
+  reader.releaseLock()
+  return printed.slice(0, printed.indexOf('\n'))
+}
+
+async function waitFor(what: string, isTrue: () => boolean, ms = 15_000): Promise<void> {
+  for (const started = Date.now(); !isTrue(); await Bun.sleep(10)) if (Date.now() - started > ms) throw new Error(`${what} did not happen within ${ms} ms.`)
+}
+
+// A viewer on its own machine, attached to SESSION on HOST through the relay as `anyhost serve` sends an attach.
+async function viewerOn(relay: MemoryRelay, device: Device, size: { cols: number; rows: number }) {
+  const client = relay.connect(device, roots(`/home/${device.name}`))
+  await welcomed(client)
+  const id = Math.floor(Math.random() * 2 ** 32)
+  const stream = opens()
+  const seen = { shown: '', states: [] as string[], attached: [] as unknown[] }
+  stream.on('output', (bytes) => void (seen.shown += decoder.decode(bytes)))
+  stream.on('state', ({ status }) => void seen.states.push(status))
+  client.on('attached', (message) => {
+    if (message.stream !== id) return
+    seen.attached.push(message)
+    stream.use({ send: (frame) => void client.send(encodeStream(id, frame)) })
+  })
+  client.on('stream', (bytes) => (streamOf(bytes) === id ? stream.receive(bytes.subarray(5)) : undefined))
+  client.send({ t: 'attach', stream: id, to: HOST.id, session: SESSION, ...size, key: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64') })
+  return { id, stream, seen, client }
+}
+
+test('serve answers at unix:<its state folder>/serve.sock, and two viewers of one session draw it at the smaller size of the two', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  expect(await serveOn(host.env)).toBe(`unix:${host.socket}`)
+  const status = (await (await fetch('http://localhost/status', { unix: host.socket })).json()) as { device: Device }
+  expect(status.device).toEqual(HOST)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+
+  const small = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the first viewer\'s screen', () => small.seen.shown.includes('size 24 80'))
+  expect(small.seen.attached).toEqual([{ t: 'attached', stream: small.id, port: 0, addresses: [], from: { id: HOST.id, name: HOST.name } }])
+  expect(small.seen.shown.startsWith('\x1b[?1049h')).toBe(true)
+  await waitFor('the session\'s status', () => small.seen.states.includes('busy'))
+
+  // a larger viewer gets the alternate screen and a redraw, a row less and back, at the size both draw whole
+  const large = await viewerOn(relay, { ...VIEWER, id: 'device-viewer-2', name: 'mac' }, { cols: 120, rows: 40 })
+  await waitFor('the redraw', () => large.seen.shown.includes('size 24 80'))
+  expect(large.seen.shown).toStartWith('\x1b[?1049h')
+  expect(large.seen.shown).toContain('size 23 80')
+  expect(small.seen.shown).toContain('size 23 80')
+
+  // a resize is a frame of the viewer's stream, and the smaller of each side wins
+  small.stream.write('resize', { cols: 100, rows: 50 })
+  await waitFor('the new smallest size', () => large.seen.shown.includes('size 40 100'))
+  large.stream.write('input', encoder.encode('from the mac\r'))
+  await waitFor('the typed line on both', () => small.seen.shown.includes('typed from the mac') && large.seen.shown.includes('typed from the mac'))
+
+  // a viewer that leaves counts no more, and the one left gets the whole of its own size
+  small.client.send({ t: 'detach', stream: small.id })
+  await waitFor('the larger viewer\'s size', () => large.seen.shown.includes('size 40 120'))
+})
+
+test('anyhost attach on another machine shows the session through its own program, and types and resizes into it', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  const viewer = machineFor(relay, VIEWER, false)
+  relay.claims.set(SESSION, HOST.id)
+  await Promise.all([serveOn(host.env), serveOn(viewer.env)])
+  await waitFor('both machines connecting', () => relay.isConnected(HOST.id) && relay.isConnected(VIEWER.id))
+
+  let shown = ''
+  const terminal = new Bun.Terminal({ cols: 90, rows: 28, data: (_terminal, bytes) => void (shown += decoder.decode(bytes)) })
+  // the 8 characters of the id `anyhost attach` takes, as Claude Code shows them
+  const attach = Bun.spawn(['bun', CLI, 'attach', SESSION.slice(0, 8)], { env: viewer.env, terminal })
+  children.push(attach)
+  await waitFor('the session on the viewer\'s terminal', () => shown.includes('size 28 90'))
+  terminal.write('hello there\r')
+  await waitFor('the typed line', () => shown.includes('typed hello there'))
+  terminal.resize(70, 20)
+  attach.kill('SIGWINCH')
+  await waitFor('the new size', () => shown.includes('size 20 70'))
+  expect(shown).toContain('typed hello there')
+  terminal.close()
 })

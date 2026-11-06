@@ -405,7 +405,7 @@ export class Pool extends DurableObject<Env> {
     if (!this.#deliver(own.device, bytes, peers)) ws.send(JSON.stringify({ t: 'detach', stream }))
   }
 
-  // A control message: routed to its `to` machine, or by its stream for `resize` and `detach`.
+  // A control message: routed to its `to` machine, or by its stream for `attached` and `detach`.
   #control(ws: WebSocket, text: string): void {
     const invalid = (message: string): void => ws.send(JSON.stringify({ t: 'invalid', message }))
     let message: unknown
@@ -418,7 +418,7 @@ export class Pool extends DurableObject<Env> {
     const own = ws.deserializeAttachment() as Attachment
     const from = { id: own.device, name: own.name }
     const { t, to, stream } = message
-    if (t === 'resize' || t === 'detach') {
+    if (t === 'attached' || t === 'detach') {
       if (typeof stream !== 'number') return invalid(`A ${t} message names its stream.`)
       const peers = this.#peersOf(ws, own, stream)
       if (t === 'detach') {

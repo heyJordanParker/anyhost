@@ -13,18 +13,22 @@ import {
   MAX_OPS,
   PROTOCOL_VERSION,
   REQUEST,
+  STREAM,
   cloneFixFor,
   decodeMessage,
   encodeMessage,
   type Answer,
   type Condition,
+  type Delivered,
   type DeviceRef,
   type FromPool,
   type Listed,
+  type Offline,
   type Op,
   type Released,
   type Result,
   type Roots,
+  type Routed,
   type Welcome,
 } from '../../relay/protocol.ts'
 
@@ -58,7 +62,11 @@ export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
   | { readonly is: 'unjoined' | 'offline' | 'refused' | 'removed' | 'outdated'; readonly message: string }
-type Events = { readonly welcome: Welcome; readonly released: Released }
+// What the Pool sends: its own messages, each message another machine routed here by its `t`, and each attach stream
+// message whole, its stream id in its first bytes.
+type Events = { readonly welcome: Welcome; readonly released: Released; readonly offline: Offline; readonly stream: Uint8Array } & {
+  readonly [T in Delivered['t']]: Extract<Delivered, { readonly t: T }>
+}
 
 export type Relay = {
   readonly state: RelayState
@@ -71,6 +79,9 @@ export type Relay = {
   list(prefix: string): Promise<Listed[]>
   // one object by HTTP, which a broken download's next try goes on with from the byte it reached
   getObject(key: string): Promise<Got | undefined>
+  // A message for another machine, or an attach stream's bytes, on the socket the relay welcomed. Answers false while
+  // no socket is, and the message goes nowhere.
+  send(message: Routed | Uint8Array): boolean
   on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): void
   // connects at once instead of after the wait, as after this machine joined
   reconnect(): void
@@ -126,7 +137,10 @@ const rootsHeader = (roots: Roots): string => JSON.stringify(roots).replace(/[^\
 type Pending = { readonly message: Uint8Array; wasSent: boolean; readonly resolve: (answer: { results: readonly Result[]; bytes: Uint8Array }) => void; readonly reject: (error: Error) => void }
 
 export function connectRelay(options: RelayOptions): Relay {
-  const listeners: { [K in keyof Events]: ((message: Events[K]) => void)[] } = { welcome: [], released: [] }
+  const listeners: Partial<Record<keyof Events, ((message: never) => void)[]>> = {}
+  const emit = <K extends keyof Events>(kind: K, message: Events[K]): void => {
+    for (const listener of listeners[kind] ?? []) (listener as (message: Events[K]) => void)(message)
+  }
   const pending = new Map<number, Pending>()
   // the object requests waiting for a relay that welcomed this machine, whose login they use
   const waiting = new Set<{ readonly resolve: (login: Login) => void; readonly reject: (error: Error) => void }>()
@@ -206,7 +220,7 @@ export function connectRelay(options: RelayOptions): Relay {
       // The listeners take the sessions another machine took meanwhile from the welcome's `waiting` before anything
       // goes up, and may end the program first. A request sent since is in `pending` too, and none goes twice.
       const unanswered = [...pending.values()]
-      for (const listener of listeners.welcome) listener(message)
+      emit('welcome', message)
       const again = unanswered.filter((request) => request.wasSent).length
       if (again > 0) console.error(`${new Date().toISOString()} anyhost sends again ${again === 1 ? 'the request' : `the ${again} requests`} the relay had not answered.`)
       for (const request of unanswered) send(request)
@@ -214,8 +228,8 @@ export function connectRelay(options: RelayOptions): Relay {
       waiting.clear()
       return
     }
-    if (message.t === 'released') for (const listener of listeners.released) listener(message)
-    else if (message.t === 'invalid') console.error(`${new Date().toISOString()} The relay read no message of this program: ${message.message}`)
+    if (message.t === 'invalid') console.error(`${new Date().toISOString()} The relay read no message of this program: ${message.message}`)
+    else emit(message.t, message as never)
   }
 
   const open = async (): Promise<void> => {
@@ -239,8 +253,10 @@ export function connectRelay(options: RelayOptions): Relay {
     ws.addEventListener('message', (event) => {
       if (socket !== ws) return
       try {
-        if (typeof event.data === 'string') heard(event.data)
-        else if (new Uint8Array(event.data as ArrayBuffer)[0] === ANSWER) answered(new Uint8Array(event.data as ArrayBuffer))
+        if (typeof event.data === 'string') return heard(event.data)
+        const bytes = new Uint8Array(event.data as ArrayBuffer)
+        if (bytes[0] === ANSWER) answered(bytes)
+        else if (bytes[0] === STREAM) emit('stream', bytes)
       } catch (error) {
         console.error(`${new Date().toISOString()} anyhost read no message of the relay: ${messageOf(error)}`)
       }
@@ -409,8 +425,13 @@ export function connectRelay(options: RelayOptions): Relay {
       return listed
     },
     getObject,
+    send(message) {
+      if (state.is !== 'connected' || socket === undefined) return false
+      socket.send(message instanceof Uint8Array ? message : JSON.stringify(message))
+      return true
+    },
     on(kind, listener) {
-      listeners[kind].push(listener)
+      listeners[kind] = [...(listeners[kind] ?? []), listener]
     },
     // a state with a message waits to open again, and a connecting or connected socket needs nothing
     reconnect() {

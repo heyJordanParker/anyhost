@@ -2,6 +2,7 @@ import { homedir } from 'node:os'
 import { parseArgs } from 'node:util'
 import plugin from '../../.claude-plugin/plugin.json'
 import type * as Protocol from '../../relay/protocol.ts'
+import { attach } from './attach.ts'
 import { openCapture, type Capture } from './capture.ts'
 import { connectCloudflare, join, type Progress } from './connect.ts'
 import { cmodDevice, deviceFromEnvironment, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
@@ -15,6 +16,7 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
 
   anyhost list [--json]              list every session of every machine
   anyhost resume <session> [--take]  continue a Claude Code or Codex session on this machine
+  anyhost attach <session>           show a session the machine that holds it runs, and type into it
   anyhost connect                    set your relay up in your Cloudflare account and join this machine to it
   anyhost join <link>                join this machine with an invite link from another machine
   anyhost machines                   list every machine joined to your relay
@@ -140,6 +142,7 @@ async function main(argv: string[]): Promise<number> {
     const { session, cwd } = await connected(async (capture) => await restore(capture, id, { take: values.take === true, checkouts: checkouts ?? '' }))
     return await openSession(session, cwd)
   }
+  if (command === 'attach' && rest.length === 1 && rest[0] !== undefined) return await attach(rest[0])
   if (command === 'doctor') return await doctor()
   if (command === 'serve') {
     await serve(deviceFromEnvironment())
