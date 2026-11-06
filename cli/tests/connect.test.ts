@@ -1,8 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, setSystemTime, test } from 'bun:test'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { PROTOCOL_VERSION, RELAY_VERSION } from '../../relay/protocol.ts'
 import { connectCloudflare, connectForStep, join as joinRelay, joinWithOption, updateRelay, type Account, type Cloudflare, type Progress } from '../src/connect.ts'
+import { personOptions, relayLogin, saveRelayLogin } from '../src/device.ts'
 import { temporaryFolder } from './memory.ts'
 
 const NAMES = { worker: 'anyhost-test-connect', bucket: 'anyhost-test' }
@@ -15,15 +16,20 @@ let home = ''
 
 type CfEnvironment = Parameters<Cloudflare['cf']>[1]
 
-// cmod as the program runs it, from the cmod store's programs folder: `device` prints this machine, and `secret store`
-// keeps the value it reads from stdin beside itself.
+// cmod as the program runs it, from the cmod store's programs folder: `device` prints this machine, `secret store`
+// keeps the value it reads from stdin beside itself and `secret get` prints it, and `options` prints the person's
+// options as the `settings.json` beside it holds them. Each `secret get` and `options` adds a line to `calls`. A child
+// gets the environment the test process started with, not the one a test sets.
 beforeAll(() => {
   home = temporaryFolder()
   const cmod = join(home, 'data', 'cmod', 'programs', 'cmod')
   mkdirSync(dirname(cmod), { recursive: true })
-  writeFileSync(cmod, `#!/bin/sh\ncase "$1" in\n  device) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  secret) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  option) printf '%s=%s\\n' "$3" "$4" >> "$(dirname "$0")/option-$2" ;;\n  *) exit 2 ;;\nesac\n`)
+  writeFileSync(
+    cmod,
+    `#!/bin/sh\ncase "$1 $2" in\n  device*) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  "secret get") echo "secret get" >> "$(dirname "$0")/calls"; cat "$(dirname "$0")/secret-$3-$4" ;;\n  secret*) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  options*) echo options >> "$(dirname "$0")/calls"; printf '{"person":%s}' "$(cat "$(dirname "$0")/settings.json")" ;;\n  option*) printf '%s=%s\\n' "$3" "$4" >> "$(dirname "$0")/option-$2" ;;\n  *) exit 2 ;;\nesac\n`,
+  )
   chmodSync(cmod, 0o755)
-  for (const [name, value] of Object.entries({ XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: undefined, CLOUDFLARE_API_TOKEN: undefined })) {
+  for (const [name, value] of Object.entries({ XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: undefined, CLAUDE_CONFIG_DIR: undefined, CLOUDFLARE_API_TOKEN: undefined })) {
     kept[name] = process.env[name]
     if (value === undefined) delete process.env[name]
     else process.env[name] = value
@@ -41,11 +47,16 @@ const secretFile = (): string => join(home, 'data', 'cmod', 'programs', 'secret-
 // every `cmod option anyhost <key> <value>` the program ran, one `<key>=<value>` line each
 const optionsSet = (): string[] => (existsSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost')) ? readFileSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost'), 'utf8').split('\n').filter(Boolean) : [])
 
-// each test starts with an empty state folder, no token, and no option set
+// every `cmod secret get` and `cmod options` the program ran, in order
+const cmodCalls = (): string[] => (existsSync(join(home, 'data', 'cmod', 'programs', 'calls')) ? readFileSync(join(home, 'data', 'cmod', 'programs', 'calls'), 'utf8').split('\n').filter(Boolean) : [])
+
+// each test starts with an empty state folder and Claude Code folder, no token, no option set and no cmod call
 beforeEach(() => {
   process.env['XDG_STATE_HOME'] = temporaryFolder()
+  process.env['CLAUDE_CONFIG_DIR'] = temporaryFolder()
   rmSync(secretFile(), { force: true })
   rmSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost'), { force: true })
+  rmSync(join(home, 'data', 'cmod', 'programs', 'calls'), { force: true })
 })
 
 afterEach(() => setSystemTime())
@@ -393,6 +404,38 @@ test('the option join joins this machine at the program\'s start, then empties i
 
   await expect(joinWithOption(`${relayUrl}/v1/join#${code}`, cloudflare.cloudflare)).rejects.toThrow('The relay made no invite with that code.')
   expect(optionsSet()).toEqual(['join=', 'join='])
+})
+
+test("the options are read at the first ask, then again only after a write to Claude Code's settings.json, also through a symlink", async () => {
+  // the Architect's settings.json links into his dotfiles, which this stand-in cmod reads
+  const dotfiles = join(home, 'data', 'cmod', 'programs', 'settings.json')
+  writeFileSync(dotfiles, '{"uploadEvery":7}')
+  symlinkSync(dotfiles, join(process.env['CLAUDE_CONFIG_DIR'] ?? '', 'settings.json'))
+  expect(await personOptions()).toEqual({ uploadEvery: 7 })
+  // the service asks again each minute
+  expect(await personOptions()).toEqual({ uploadEvery: 7 })
+  expect(cmodCalls()).toEqual(['options'])
+
+  // cmod option anyhost join <link> writes the file the link names
+  writeFileSync(dotfiles, '{"uploadEvery":7,"join":"https://anyhost-test-connect.parker-labs.workers.dev/v1/join#code"}')
+  expect(await personOptions()).toEqual({ uploadEvery: 7, join: 'https://anyhost-test-connect.parker-labs.workers.dev/v1/join#code' })
+  expect(await personOptions()).toEqual({ uploadEvery: 7, join: 'https://anyhost-test-connect.parker-labs.workers.dev/v1/join#code' })
+  expect(cmodCalls()).toEqual(['options', 'options'])
+})
+
+test('the device token is read at the first connect, then again only after a join wrote relay.json', async () => {
+  const url = 'https://anyhost-test-connect.parker-labs.workers.dev'
+  await saveRelayLogin({ url, token: 'first-token' })
+  expect(await relayLogin()).toEqual({ url, token: 'first-token' })
+  // a service whose relay does not answer connects again each minute
+  expect(await relayLogin()).toEqual({ url, token: 'first-token' })
+  expect(cmodCalls()).toEqual(['secret get'])
+
+  // a join keeps the same address and a new token
+  await saveRelayLogin({ url, token: 'second-token' })
+  expect(await relayLogin()).toEqual({ url, token: 'second-token' })
+  expect(await relayLogin()).toEqual({ url, token: 'second-token' })
+  expect(cmodCalls()).toEqual(['secret get', 'secret get'])
 })
 
 test('Connect Cloudflare for the Step keeps every line, and waits on the account and on R2 for the person\'s answers', async () => {

@@ -307,7 +307,7 @@ async function upload(capture: Capture, session: string, tool: Tool, here: MoveH
     } else break
     if (failure !== undefined) throw new Error(`anyhost could not read the code of ${session.slice(0, 8)}: ${messageOf(failure)}`)
   }
-  await seal(capture.relay, session)
+  await seal(capture, session)
   // the machine it goes to finds the session and its folder in this machine's index
   await writeIndex(capture)
 }

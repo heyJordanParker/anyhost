@@ -1,4 +1,5 @@
 import { mkdirSync, realpathSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import plugin from '../../.claude-plugin/plugin.json'
@@ -40,24 +41,45 @@ export async function cmod(args: readonly string[], stdin?: string): Promise<str
 
 export const cmodDevice = async (): Promise<Device> => JSON.parse(await cmod(['device', '--json'])) as Device
 
-// The values the person set in /config. An option they never set is absent, and its default applies.
+// A file's path, modified time and size, which each write moves, or its path alone while it does not exist. stat
+// follows a symlink, as Claude Code's settings.json in a dotfiles checkout is, where a watch of its folder hears nothing.
+const lastWriteOf = async (path: string): Promise<string> => await stat(path).then(({ mtimeMs, size }) => `${path} ${mtimeMs} ${size}`, () => path)
+
+// The values the person set in /config, which cmod keeps in Claude Code's settings.json. An option they never set is
+// absent, and its default applies. One `cmod options` runs `claude plugin list` and a git for each project Claude Code
+// knows, 228 ms to 11 s of CPU on the Architect's Mac, so the options are read again only after a write to that file.
 type PersonOptions = { readonly uploadEvery?: number; readonly checkouts?: string; readonly join?: string }
-export const personOptions = async (): Promise<PersonOptions> => (JSON.parse(await cmod(['options', 'anyhost', '--json'])) as { person: PersonOptions }).person
+let optionsRead: { readonly write: string; readonly options: PersonOptions } | undefined
+export async function personOptions(): Promise<PersonOptions> {
+  const write = await lastWriteOf(join(rootsHere().claudeHome, 'settings.json'))
+  if (optionsRead?.write === write) return optionsRead.options
+  const options = (JSON.parse(await cmod(['options', 'anyhost', '--json'])) as { person: PersonOptions }).person
+  optionsRead = { write, options }
+  return options
+}
 
 const relayFile = (): string => join(stateFolder(), 'relay.json')
 
 // The relay this machine joined: its address in `relay.json` in the state folder, and the device token cmod keeps as
-// the secret `token`. A machine that never joined has neither.
+// the secret `token`. A machine that never joined has neither. Each `cmod secret get` starts a process, and a service
+// whose relay does not answer connects again every minute, so the token is read again only after a write to
+// relay.json, which saveRelayLogin makes after it stores a new token.
+let loginRead: { readonly write: string; readonly login: Login | undefined } | undefined
 export async function relayLogin(): Promise<Login | undefined> {
   const file = Bun.file(relayFile())
   if (!(await file.exists())) return undefined
+  const write = await lastWriteOf(relayFile())
+  if (loginRead?.write === write) return loginRead.login
   const { url } = (await file.json()) as { url?: unknown }
   if (typeof url !== 'string' || url === '') throw new Error(`${file.name} names no relay address in url.`)
   const token = await cmod(['secret', 'get', 'anyhost', 'token'])
-  return token === '' ? undefined : { url: url.replace(/\/+$/, ''), token }
+  const login = token === '' ? undefined : { url: url.replace(/\/+$/, ''), token }
+  loginRead = { write, login }
+  return login
 }
 
-// Keeps the login a join gave, for relayLogin to read at the next connect.
+// Keeps the login a join gave, for relayLogin to read at the next connect: the token first, then relay.json, whose
+// write tells relayLogin to read the token again.
 export async function saveRelayLogin({ url, token }: Login): Promise<void> {
   await cmod(['secret', 'store', 'anyhost', 'token'], token)
   mkdirSync(stateFolder(), { recursive: true })

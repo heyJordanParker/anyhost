@@ -6,7 +6,7 @@
 //   journals/<session>/hot/<start>.zst            one upload, written with If-None-Match: one writer wins each position
 //   journals/<session>/sealed/<start>-<end>.zst   the hot frames of a quiet session, up to 64 MiB each, never rewritten
 import { Database } from 'bun:sqlite'
-import { mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, statSync, type Stats } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -25,7 +25,11 @@ export const FRAME_BYTES = 64 * 2 ** 20
 // pieces fill the link, and lines wait past 2 s.
 export const CODE_PIECE_BYTES = 128 * 2 ** 10
 export const CODE_PIECES = 4
-const QUIET_MS = 10 * 60_000
+// A session written within QUIET_MS is active: the backup checks its files every minute, and seals it once it is not.
+export const QUIET_MS = 10 * 60_000
+// The full sweep yields to the program's other work every SWEEP_BATCH files: a stat of the Architect's Mac's 40,898
+// captured files took 0.53 to 0.63 s, so a batch holds a prompt's check for about 15 ms.
+const SWEEP_BATCH = 1000
 // A seal that fetched 1110 frames at once held every connection the machine had, so every upload on it timed out
 // connecting once a minute. Requests of up to MAX_MESSAGE_BYTES of frames go at most this many ahead of the one read.
 const REQUESTS_AHEAD = 16
@@ -775,22 +779,36 @@ export function startCode(capture: Capture, session: string, tool: Tool, problem
   capture.codeRuns.set(session, run)
 }
 
-// Every file of every session this machine captures whose size or modified time moved past its last record, or that
-// is gone since its last record: an event the watcher dropped, an upload that failed, or a folder the watcher was not
-// on yet.
-export async function changedFiles(capture: Capture): Promise<Map<string, Set<string>>> {
-  const rows = capture.db.query<{ session: string; path: string; local_size: number; mtime: number; sha256: string }, []>(
-    "select files.session, path, local_size, mtime, sha256 from files join journals using (session) where stopped = ''",
-  ).all()
+// A file's stat, or undefined when it is gone or cannot be read, as `stat` rejects.
+function statOf(path: string): Stats | undefined {
+  try {
+    return statSync(path, { throwIfNoEntry: false })
+  } catch {
+    return undefined
+  }
+}
+
+// Every file of every session this machine captures and wrote at `writtenSince` or later whose size or modified time
+// moved past its last record, or that is gone since its last record: an event the watcher dropped, an upload that
+// failed, or a folder the watcher was not on yet. It stats in this thread: 40,898 stats through libuv's thread pool
+// took 2.58 s of CPU on the Architect's Mac, and 0.21 s here.
+export async function changedFiles(capture: Capture, writtenSince = 0): Promise<Map<string, Set<string>>> {
+  const { db, roots } = capture
+  const rows = db.query<{ session: string; path: string; local_size: number; mtime: number; sha256: string }, [number]>(
+    "select files.session, path, local_size, mtime, sha256 from files join journals using (session) where stopped = '' and written_at >= ?",
+  ).all(writtenSince)
+  const lines = linesFiles(roots)
+  const codex = codexState(roots)
   const changed = new Map<string, Set<string>>()
-  for (const { session, path, local_size, mtime, sha256 } of rows) {
+  for (const [index, { session, path, local_size, mtime, sha256 }] of rows.entries()) {
+    if (index % SWEEP_BATCH === SWEEP_BATCH - 1) await new Promise((resolve) => setImmediate(resolve))
     // a code record is no file: a part only the journal holds, or a header at its working folder's path with a `/`
-    if (linesFiles(capture.roots).has(path) || path === codexState(capture.roots) || isCodePart(path) || path.endsWith('/')) continue
-    // a file this program captures no more, such as the job record `jobs/<8 hex>/state.json` earlier versions captured
-    if (ownerOf(path, capture.roots) === undefined) continue
-    const found = await stat(path).catch(() => undefined)
+    if (lines.has(path) || path === codex || isCodePart(path) || path.endsWith('/')) continue
+    const found = statOf(path)
     const isGone = found === undefined && sha256 !== ''
     if (!isGone && (found === undefined || !found.isFile() || (found.size === local_size && found.mtimeMs === mtime))) continue
+    // a file this program captures no more, such as the job record `jobs/<8 hex>/state.json` earlier versions captured
+    if (ownerOf(path, roots) === undefined) continue
     changed.set(session, (changed.get(session) ?? new Set()).add(path))
   }
   return changed
@@ -798,10 +816,15 @@ export async function changedFiles(capture: Capture): Promise<Map<string, Set<st
 
 // Turns a session's hot frames into sealed frames of up to 64 MiB each, then deletes them. The claim holder seals,
 // after 10 quiet minutes or before a move. Sealed frames hold whole hot frames, so the journal never splits a
-// position another machine may still write at.
-export async function seal(relay: Relay, session: string): Promise<number> {
+// position another machine may still write at. A seal reaches no further than the journal's end: a frame past it is
+// one this machine put up and never counted, as before a crash, which its next upload writes over, so sealing it would
+// hide that upload from every restore. Answers where the chain from byte 0 ends, short of the journal's end where R2
+// holds no frame at a position this machine counted.
+export async function seal(capture: Capture, session: string): Promise<number> {
+  const { relay, db } = capture
+  const end = journalOf(db, session)?.end ?? 0
   const { frames, sealedEnd, stale } = framesOf(session, await relay.list(journalPrefix(session)))
-  const hot = frames.filter((frame) => frame.key.includes('/hot/'))
+  const hot = frames.filter((frame) => frame.key.includes('/hot/') && frame.start < end)
   let at = sealedEnd
   let run: Uint8Array[] = []
   let runBytes = 0
@@ -817,28 +840,64 @@ export async function seal(relay: Relay, session: string): Promise<number> {
     runBytes += bytes.length
   }
   await flush()
-  // the chain's frames, and the frames off it inside its span, which no restore reads
-  const sealed = [...stale, ...hot.filter((frame) => frame.start < at).map(({ key }) => key)]
+  // the chain's frames, the frames off it inside the journal, and the ones after a position R2 lacks, which no restore
+  // reads
+  const sealed = [...stale, ...hot.map(({ key }) => key)]
   const deletes: Call[] = []
   for (let from = 0; from < sealed.length; from += MAX_KEYS) deletes.push({ op: 'delete', keys: sealed.slice(from, from + MAX_KEYS) })
   await Promise.all(relay.run(deletes))
   return at
 }
 
-export async function sealQuiet(capture: Capture, problems: Problems, now = Date.now()): Promise<void> {
-  const { db, relay, device } = capture
+// The journal goes on from `at`, where its chain in R2 ends, with every file of the session whole, as a new session's
+// files go up from byte 0, and with every part of its code again, since a code header past `at` may name a part only
+// the lost frames held. Answers the session's files, for the upload queue.
+function captureAgainFrom(capture: Capture, session: string, tool: Tool, at: number): Set<string> {
+  const { db } = capture
+  const paths = db
+    .query<{ path: string }, [string]>('select path from files where session = ?')
+    .all(session)
+    .map(({ path }) => path)
+    .filter((path) => !isCodePart(path) && !path.endsWith('/'))
+  continueJournal(db, { session, tool, end: at, sealed: at }, paths.map((path) => ({ session, path, journalSize: 0, localSize: 0, tail: new Uint8Array(), sha256: '', mtime: 0 })))
+  rmSync(join(dirname(db.filename), 'code', session), { recursive: true, force: true })
+  capture.codeWaiting.delete(session)
+  return new Set(paths)
+}
+
+// Seals every session quiet for QUIET_MS that this machine holds. A journal whose chain in R2 ends elsewhere than this
+// machine counted goes on from where the chain ends, with every file whole, once, so it is not read again each minute.
+// Answers the files of those sessions, for the upload queue. A session whose transcript is gone here leaves a problem
+// that names the span a restore lacks.
+export async function sealQuiet(capture: Capture, problems: Problems, now = Date.now()): Promise<Map<string, Set<string>>> {
+  const { db, relay, device, roots } = capture
   const quiet = db.query<{ session: string; tool: Tool; end: number }, [number]>("select session, tool, end from journals where stopped = '' and end > sealed and written_at < ?").all(now - QUIET_MS)
+  const again = new Map<string, Set<string>>()
   for (const { session, tool, end } of quiet) {
     try {
       // a session another machine holds is that machine's to seal
       const claim = await relay.run([{ op: 'claim', session, take: false }])[0]
       if (claim?.status === 409) holdElsewhere(db, session, claim.holder.name, `${new Date().toISOString()} ${claim.holder.name} holds the session ${session}, so ${device.name} stops capturing it.`, tool)
-      db.query('update journals set sealed = ? where session = ?').run(claim?.status === 200 ? await seal(relay, session) : end, session)
+      const at = claim?.status === 200 ? await seal(capture, session) : end
       problems.clear(`seal ${session}`)
+      if (at === end) {
+        db.query('update journals set sealed = ? where session = ?').run(at, session)
+        continue
+      }
+      const files = captureAgainFrom(capture, session, tool, at)
+      again.set(session, files)
+      const reached = `The journal of ${session} in R2 reaches byte ${at}, and ${device.name} counted ${end}`
+      const hasTranscript = [...files].some((path) => {
+        const owner = ownerOf(path, roots)
+        return owner !== undefined && 'isTranscript' in owner && owner.isTranscript && existsSync(path)
+      })
+      if (hasTranscript) console.error(`${new Date().toISOString()} ${reached}, so it uploads the session's files whole again from byte ${at}.`)
+      else problems.set(`seal ${session}`, `${reached}, and holds no transcript of the session to upload again, so a restore of the session lacks what the journal held from byte ${at}.`)
     } catch (error) {
       problems.set(`seal ${session}`, error)
     }
   }
+  return again
 }
 
 export async function checkoutOf(cwd: string): Promise<{ repo: string; folder: string }> {

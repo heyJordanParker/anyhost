@@ -266,7 +266,7 @@ test('a session restores on another machine byte for byte from the bucket alone,
   writeFileSync(silent, '')
   appendFileSync(transcript, line('Run the build'))
   await upload(transcript, toolResult, output, silent)
-  await seal(a.capture.relay, session)
+  await seal(a.capture, session)
   writeFileSync(task, '{"status":"done"}')
   appendFileSync(output, 'finished\n')
   writeFileSync(plan, '# Trip\n\n1. Book the 08:15 train\n')

@@ -1,12 +1,12 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, setSystemTime, test } from 'bun:test'
 import type { Subprocess } from 'bun'
 import { createDecipheriv, hkdfSync } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { connect as dialTcp, createServer, type Socket } from 'node:net'
 import type { NetworkInterfaceInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES, cloneFixFor, encodeStream, streamOf } from '../../relay/protocol.ts'
-import { hotKey, journalOf, openCapture, openDatabase, uploadSession, type Problems } from '../src/capture.ts'
+import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSession, type Problems } from '../src/capture.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device, type MachineRoots } from '../src/device.ts'
 import { cipherOf, dialDirect, listenDirect, offeredAddresses, type DirectLink, type DirectListener } from '../src/direct.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
@@ -679,6 +679,33 @@ test('a second serve on one state folder refuses to start, naming the one that r
   expect(answer.status).toBe(400)
   expect(((await answer.json()) as { message: string }).message).toStartWith('anyhost takes a JSON object at POST /machines/invite, and this body is none:')
 })
+
+test("the program's start stats every captured file, and uploads a line a quiet session gained while the program did not run", async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, false)
+  const home = host.env['HOME'] ?? ''
+  const transcript = join(home, '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  const line = (text: string): string => `{"type":"user","message":{"role":"user","content":"${text}"},"sessionId":"${SESSION}"}\n`
+  writeFileSync(transcript, line('Plan the trip'))
+  // an earlier run of the program captured the session an hour ago, and left no heartbeat to catch up from
+  const db = openDatabase(join(host.env['XDG_STATE_HOME'] ?? '', 'anyhost'))
+  const capture = openCapture(relay.connect(HOST, roots(home)), HOST, roots(home), db, noCode)
+  await welcomed(capture.relay)
+  setSystemTime(new Date(Date.now() - 60 * 60_000))
+  await uploadSession(capture, SESSION, 'claude', new Set([transcript]), failTest)
+  setSystemTime()
+  const end = journalOf(db, SESSION)?.end ?? 0
+  capture.relay.close()
+  db.close()
+  appendFileSync(transcript, line('Book the train'))
+
+  await serveOn(host.env)
+  await waitFor('the line uploaded', () => relay.puts.some(({ key }) => key === hotKey(SESSION, end)))
+  const frame = relay.puts.find(({ key }) => key === hotKey(SESSION, end))?.body ?? new Uint8Array()
+  expect(decoder.decode(decompress(frame))).toEndWith(line('Book the train'))
+  // the queue drains every 5 seconds
+}, 20_000)
 
 const LAPTOP: Device = { id: 'device-laptop', name: 'anyhost-b', os: 'linux', arch: 'arm64' }
 const WORKER: Device = { id: 'device-worker', name: 'anyhost-a', os: 'linux', arch: 'arm64' }

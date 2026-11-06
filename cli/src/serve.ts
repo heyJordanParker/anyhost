@@ -4,7 +4,7 @@ import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { encodeStream, streamOf, type Routed } from '../../relay/protocol.ts'
 import { attachTerminal, keptSessions, personEnvironment, runningSessions, startInBackground, type AttachedTerminal } from './background.ts'
-import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
+import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
 import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
@@ -15,6 +15,11 @@ import { openStream, type Exit, type Link, type SessionState, type Size, type St
 import { codexState, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
+// The backup stats every file of every session it captures at the program's start and once an hour, for the writes no
+// event named: an inotify overflow, an FSEvents drop, a folder not watched yet, or a write while the program was down,
+// as Syncthing pairs its watcher with an hourly full rescan. Each other minute it stats the files of the sessions
+// written in the last QUIET_MS alone, so a quiet session costs nothing.
+const SWEEP_ALL_MS = 60 * 60_000
 const RETRY_MS = 1000
 // The relay carries a terminal's output at most once per OUTPUT_MS, so a full-screen redraw is one message, not
 // hundreds (relay-spec "Control messages"). A direct connection and this machine's own socket carry it at once.
@@ -209,6 +214,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   let localNetworkProblem: string | undefined
   let capturedAt = ''
   let lastIndex = ''
+  // when the backup last statted every file of every session, which the program's start has not yet
+  let sweptAllAt = 0
   // the person's `checkouts` option, read with the others, where a session moved or started here clones its repository
   let checkouts = ''
 
@@ -307,6 +314,13 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       relay.reconnect()
     })
   }
+  // each session's files on the upload queue, with the session's tool
+  const queueFiles = (files: ReadonlyMap<string, ReadonlySet<string>>): void => {
+    for (const [session, paths] of files) {
+      const tool = journalOf(capture.db, session)?.tool ?? 'claude'
+      for (const path of paths) queue.add(session, tool, path)
+    }
+  }
   const backup = async (): Promise<void> => {
     await watchFolders()
     await Bun.write(heartbeat, '')
@@ -320,17 +334,18 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
         joined()
       })
     })
+    // the queue keeps what the sweep finds until the relay welcomes this machine
+    await settle('backup', async () => {
+      const started = Date.now()
+      const isAll = started - sweptAllAt >= SWEEP_ALL_MS
+      queueFiles(await changedFiles(capture, isAll ? 0 : started - QUIET_MS))
+      if (isAll) sweptAllAt = started
+    })
     await keepRelayCurrent()
     if (relay.state.is !== 'connected') return
-    await settle('backup', async () => {
-      for (const [session, paths] of await changedFiles(capture)) {
-        const tool = capture.db.query<{ tool: Tool }, [string]>('select tool from journals where session = ?').get(session)?.tool ?? 'claude'
-        for (const path of paths) queue.add(session, tool, path)
-      }
-    })
     if (queue.uploadEvery === 0) queue.drain()
     await settle('index', async () => void (lastIndex = await writeIndex(capture, lastIndex)))
-    await sealQuiet(capture, problems)
+    queueFiles(await sealQuiet(capture, problems))
   }
   // Each move this program ran since it started, by its whole session id, which its session and `anyhost move` follow.
   const moves = new Map<string, Moving>()

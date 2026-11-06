@@ -1,11 +1,12 @@
 import { Database } from 'bun:sqlite'
 import { afterEach, expect, spyOn, test } from 'bun:test'
+import * as fs from 'node:fs'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import {
-  changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, decompress, encodeRecord, hotKey, isCodePart, journalOf, openCapture, openDatabase, seal, sessionsOf, startLineOffsets, uploadSession,
-  uploadSessions, type Problems, type RecordHeader,
+  changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, hotKey, isCodePart, journalOf, openCapture, openDatabase, QUIET_MS, seal, sealQuiet, sessionsOf,
+  startLineOffsets, uploadSession, uploadSessions, type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
@@ -470,7 +471,7 @@ test('a quiet session seals its hot frames into one sealed frame, and the journa
   }
   const before = journalBytes(relay)
 
-  expect(await seal(capture.relay, SESSION)).toBe(before.length)
+  expect(await seal(capture, SESSION)).toBe(before.length)
   expect([...relay.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/`))).toEqual([`journals/${SESSION}/sealed/${'0'.padStart(16, '0')}-${String(before.length).padStart(16, '0')}.zst`])
   appendFileSync(transcript, lines[0] ?? '')
   await upload(transcript)
@@ -500,11 +501,13 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
     bodies.push(body)
   }
   const before = Buffer.concat(bodies)
+  // this machine counted every frame
+  continueJournal(capture.db, { session: SESSION, tool: 'claude', end: before.length, sealed: 0 }, [])
   await welcomed(capture.relay)
   relay.delayMs = 20
   const asked = relay.requests.length
 
-  expect(await seal(capture.relay, SESSION)).toBe(before.length)
+  expect(await seal(capture, SESSION)).toBe(before.length)
   expect(relay.mostAtOnce).toBe(16)
   // the last large frame leaves room for the 40 lines
   expect(relay.requests.slice(asked).filter((ops) => ops[0]?.op === 'get').map((ops) => ops.length)).toEqual([...Array.from({ length: 39 }, () => 1), 41])
@@ -546,6 +549,98 @@ test('the backup finds a file that grew without an event', async () => {
   expect(await changedFiles(capture)).toEqual(new Map())
   appendFileSync(transcript, lines[1] ?? '')
   expect(await changedFiles(capture)).toEqual(new Map([[SESSION, new Set([transcript])]]))
+})
+
+test('the minute sweep stats no file of a session quiet for QUIET_MS, and the full sweep finds the write no event named and uploads it', async () => {
+  const relay = memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
+  writeFileSync(transcript, lines[0] ?? '')
+  await upload(transcript)
+  appendFileSync(transcript, lines[1] ?? '')
+  const writtenAt = journalOf(capture.db, SESSION)?.writtenAt ?? 0
+  // the minute sweep at `now`, as the service runs it
+  const minuteSweep = (now: number): Promise<Map<string, Set<string>>> => changedFiles(capture, now - QUIET_MS)
+  const statted = spyOn(fs, 'statSync')
+
+  expect(await minuteSweep(writtenAt + 60_000)).toEqual(new Map([[SESSION, new Set([transcript])]]))
+  expect(statted).toHaveBeenCalled()
+  statted.mockClear()
+  expect(await minuteSweep(writtenAt + QUIET_MS + 60_000)).toEqual(new Map())
+  expect(statted).not.toHaveBeenCalled()
+  statted.mockRestore()
+
+  // the sweep of every session, at the program's start and once an hour
+  const missed = await changedFiles(capture)
+  expect(missed).toEqual(new Map([[SESSION, new Set([transcript])]]))
+  await upload(...(missed.get(SESSION) ?? []))
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
+  expect(readFileSync(replayed.files.get(transcript)?.staged ?? '', 'utf8')).toBe(`${lines[0]}${lines[1]}`)
+})
+
+// A session of three uploads, the transcript and a tool result each time, whose second frame R2 lost, and the time
+// QUIET_MS and a minute after its last upload.
+async function lostFrame(relay: MemoryRelay) {
+  const { roots, transcript, upload, capture } = machine(deviceA, relay)
+  const toolResult = join(dirname(transcript), SESSION, 'tool-results', 'b1.txt')
+  mkdirSync(dirname(toolResult), { recursive: true })
+  for (const line of lines) {
+    appendFileSync(transcript, line)
+    appendFileSync(toolResult, `ran ${line.length}\n`)
+    await upload(transcript, toolResult)
+  }
+  const [, lost] = hotFrames(relay)
+  relay.objects.delete(lost ?? '')
+  const end = journalOf(capture.db, SESSION)?.end ?? 0
+  const quiet = (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000
+  return { roots, transcript, toolResult, upload, capture, lostAt: Number(/(\d+)\.zst$/.exec(lost ?? '')?.[1]), end, quiet }
+}
+
+test("a seal of a journal R2 lost a frame of seals up to the lost frame, and the journal goes on from there with every file whole, once", async () => {
+  const relay = memoryRelay()
+  const { roots, transcript, toolResult, upload, capture, lostAt, end, quiet } = await lostFrame(relay)
+  const problems: string[] = []
+  const recording: Problems = { set: (key, error) => void problems.push(`${key}: ${String(error)}`), clear: () => undefined }
+  const logged = spyOn(console, 'error').mockImplementation(() => undefined)
+
+  const again = await sealQuiet(capture, recording, quiet)
+  expect(again).toEqual(new Map([[SESSION, new Set([transcript, toolResult, join(roots.claudeHome, 'history.jsonl')])]]))
+  expect(logged.mock.calls.map(([message]) => String(message).slice(25))).toEqual([
+    `The journal of ${SESSION} in R2 reaches byte ${lostAt}, and anyhost-a counted ${end}, so it uploads the session's files whole again from byte ${lostAt}.`,
+  ])
+  logged.mockRestore()
+  expect(problems).toEqual([])
+  expect(journalOf(capture.db, SESSION)).toMatchObject({ end: lostAt, sealed: lostAt })
+  expect([...relay.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/`))).toEqual([`journals/${SESSION}/sealed/${'0'.padStart(16, '0')}-${String(lostAt).padStart(16, '0')}.zst`])
+
+  // the queue uploads the files the seal answered, and a restore reads every byte of them
+  await upload(...(again.get(SESSION) ?? []))
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
+  for (const path of [transcript, toolResult]) expect(readFileSync(replayed.files.get(path)?.staged ?? '', 'utf8')).toBe(readFileSync(path, 'utf8'))
+  expect(replayed.end).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
+
+  // once quiet again, it seals to its end, and a minute later reads nothing
+  const later = Date.now() + QUIET_MS + 60_000
+  expect(await sealQuiet(capture, recording, later)).toEqual(new Map())
+  expect(journalOf(capture.db, SESSION)?.sealed).toBe(replayed.end)
+  const asked = relay.requests.length
+  expect(await sealQuiet(capture, recording, later + 60_000)).toEqual(new Map())
+  expect(relay.requests.length).toBe(asked)
+})
+
+test('a journal R2 lost a frame of, whose transcript is gone here, names the lost span once as a problem, and no seal reads it each minute', async () => {
+  const relay = memoryRelay()
+  const { transcript, toolResult, capture, lostAt, end, quiet } = await lostFrame(relay)
+  rmSync(transcript)
+  const problems: string[] = []
+  const recording: Problems = { set: (key, error) => void problems.push(`${key}: ${String(error)}`), clear: () => undefined }
+
+  expect((await sealQuiet(capture, recording, quiet)).get(SESSION)).toContain(toolResult)
+  expect(problems).toEqual([
+    `seal ${SESSION}: The journal of ${SESSION} in R2 reaches byte ${lostAt}, and anyhost-a counted ${end}, and holds no transcript of the session to upload again, so a restore of the session lacks what the journal held from byte ${lostAt}.`,
+  ])
+  const asked = relay.requests.length
+  for (const minute of [1, 2, 3]) expect(await sealQuiet(capture, recording, quiet + minute * 60_000)).toEqual(new Map())
+  expect([relay.requests.length, problems.length]).toEqual([asked, 1])
 })
 
 test('a lines file names the sessions that wrote new lines, and never the lines before the first start', async () => {
