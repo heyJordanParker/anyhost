@@ -671,7 +671,7 @@ test('anyhost attach on another machine and on the host share the host\'s one cl
   here.close()
 })
 
-test('a session that stops running ends its claude attach at once, and its viewer with the reason', async () => {
+test('a session Claude Code lists no more, whose record stays gone 10 s, ends its claude attach, and its viewer with the reason', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
   await serveOn(host.env)
@@ -679,13 +679,16 @@ test('a session that stops running ends its claude attach at once, and its viewe
   const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
   await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
   await waitFor('the session\'s status', () => viewer.seen.states.includes('busy'))
-  // the session stops, and Claude Code's record of it changes
+  // the session stops, and Claude Code removes its record
   writeFileSync(join(host.folder, 'stopped'), '')
-  writeFileSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', '1.json'), '{}')
-  await waitFor('the viewer\'s end', () => viewer.seen.exits.length > 0)
+  const stopped = Date.now()
+  rmSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', `${process.pid}.json`))
+  await waitFor('the viewer\'s end', () => viewer.seen.exits.length > 0, 20_000)
   expect(viewer.seen.exits).toEqual([`The session ${SESSION} stopped running on ${HOST.name}.`])
+  // as Claude Code respawns a session within 10 s
+  expect(Date.now() - stopped).toBeGreaterThanOrEqual(10_000)
   await waitFor('no claude attach left', () => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim() === '')
-})
+}, 30_000)
 
 test('a claude attach SIGKILL ended while its session runs starts again, and its viewer gets no exit', async () => {
   const relay = memoryRelay()
@@ -732,6 +735,55 @@ test('a claude attach a signal ended once its session\'s process is gone ends it
   expect(Date.now() - signalled).toBeLessThan(3000)
   expect(Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()).toBe('')
 })
+
+test('a claude attach that ended by itself while Claude Code respawns its session starts again once the session\'s record is back, and its viewer gets no exit', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  const home = host.env['HOME'] ?? ''
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
+  const attaches = (): string => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()
+  const before = viewer.seen.shown.length
+  // the session's process ends, so its record goes, and its attach ends with it
+  rmSync(join(home, '.claude', 'sessions', `${process.pid}.json`))
+  viewer.stream.write('input', encoder.encode('leave\r'))
+  await waitFor('the attach ending', () => attaches() === '')
+  // Claude Code's respawn of the session writes its record again
+  await Bun.sleep(1000)
+  recordSession(home, process.pid)
+  await waitFor('a new claude attach on the viewer\'s screen', () => viewer.seen.shown.slice(before).includes('size 24 80'))
+  viewer.stream.write('input', encoder.encode('after the respawn\r'))
+  await waitFor('typing into the new one', () => viewer.seen.shown.includes('typed after the respawn'))
+  expect(viewer.seen.exits).toEqual([])
+}, 30_000)
+
+test('a session Claude Code\'s list leaves out while it respawns it keeps its claude attach and its viewer once its record is back', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  const home = host.env['HOME'] ?? ''
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
+  await waitFor('the session\'s status', () => viewer.seen.states.includes('busy'))
+  const attaches = (): string => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()
+  const attach = attaches()
+  // the session's process crashed: its record goes, and Claude Code's list leaves it out for a moment
+  writeFileSync(join(host.folder, 'stopped'), '')
+  rmSync(join(home, '.claude', 'sessions', `${process.pid}.json`))
+  await Bun.sleep(1000)
+  // the respawned process writes its record, and the list holds it again
+  recordSession(home, process.pid)
+  rmSync(join(host.folder, 'stopped'))
+  // past the 10 s a gone record is followed
+  await Bun.sleep(11_000)
+  expect(viewer.seen.exits).toEqual([])
+  expect(attaches()).toBe(attach)
+  viewer.stream.write('input', encoder.encode('after the respawn\r'))
+  await waitFor('typing into the same attach', () => viewer.seen.shown.includes('typed after the respawn'))
+}, 30_000)
 
 test('a claude attach a signal ended once Claude Code\'s daemon went ends its viewer with the reason, though the session\'s record is still there', async () => {
   const relay = memoryRelay()
@@ -790,11 +842,11 @@ test('anyhost attach on the host shows a session its Claude Code runs while the 
   // gives the terminal back as it was, and ends
   await Bun.sleep(1000)
   writeFileSync(join(host.folder, 'stopped'), '')
-  writeFileSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', '1.json'), '{}')
+  rmSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', `${process.pid}.json`))
   expect(await attach.exited).toBe(0)
   await waitFor('the reset and the reason', () => shown.includes('\x1b[?1049l\x1b[?25h') && shown.includes(`The session ${SESSION} stopped running on ${HOST.name}.`))
   terminal.close()
-})
+}, 30_000)
 
 test('a second serve on one state folder refuses to start, naming the one that runs, and a POST of no JSON answers 400', async () => {
   const relay = memoryRelay()

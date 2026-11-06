@@ -47,6 +47,11 @@ const QUICK_ENDS = 3
 // removed the session's record 0.35 to 0.53 s after the attach ended in 4 stops on anyhost-d, at a Mac load average of
 // 140 to 237.
 const STOPPING_MS = 3000
+// Claude Code 2.1.319 respawns a session whose process crashed 10 s later ("restarting this session in 10 seconds",
+// `ht` of its worker), and one it killed because a `claude attach` stalled 5 s at most 6 s after its signal (`Br`):
+// 2.2 and 3.1 s on anyhost-d at a Mac load average of 257. The new process writes the session's record as it starts:
+// 12.5 s after a crash at a load of 250, where the attach went on, and 41 s after one stalled respawn at 257.
+const RESPAWN_MS = 10_000
 // A running program answers /status in milliseconds over its socket.
 const RUNNING_MS = 2000
 // A redraw repaints the screen and sets every terminal mode again but the alternate screen.
@@ -477,6 +482,13 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   // a viewer whose size counts: one the relay, this machine's socket or a direct connection reaches now
   const isReached = (viewer: Viewer): boolean => viewer.isLinked || viewer.direct !== undefined
   const stoppedOn = (session: string): string => `The session ${session} stopped running on ${device.name}.`
+  // Whether Claude Code runs the session here: its record says so now, or again within RESPAWN_MS, as Claude Code
+  // respawns a session whose process crashed or that it killed.
+  const keepsRunning = (session: string): Promise<boolean> =>
+    whenSessions(roots.claudeHome, (sessions) => (sessions.some((entry) => entry.sessionId === session) ? true : undefined), RESPAWN_MS, '').then(
+      () => true,
+      () => false,
+    )
   const throughRelayTo = (stream: number, offer: DirectOffer): Carrier => ({
     attached: () => void relay.send({ t: 'attached', stream, ...offer }),
     link: { send: (frame) => void relay.send(encodeStream(stream, frame)) },
@@ -582,16 +594,17 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     // `claude attach` ends by itself when a viewer leaves Claude Code's agents view, which `←` opens, or once the
     // session ended, as after `claude stop`. A signal ends it from outside: the OOM killer, a `kill`, or systemd stopping
     // the daemon's scope, which signals the daemon and its sessions in the same moment, so the session still runs as its
-    // attach ends. So Claude Code's record of the session decides: read once for an attach that ended by itself, and
-    // followed for STOPPING_MS after a signal, then read once more. While the session runs, this program starts the
-    // attach again, which paints the whole screen for every viewer, so no viewer's keys end the others'.
+    // attach ends. So Claude Code's record of the session decides: followed for STOPPING_MS after a signal, then read
+    // once more, and for an attach that ended by itself, as `keepsRunning` reads it. While the session runs, this
+    // program starts the attach again, which paints the whole screen for every viewer, so no viewer's keys end the
+    // others'.
     const ended = async (id: string, cwd: string, started: number, signal: Subprocess['signalCode']): Promise<void> => {
       if (!isCurrent()) return
       const lived = Date.now() - started
       const current = await view
       const isGone = (sessions: readonly RunningSession[]): true | undefined => (sessions.some((entry) => entry.sessionId === session) ? undefined : true)
       const isRecorded = async (): Promise<boolean> => isGone(await recordedSessions(roots.claudeHome)) === undefined
-      const isRunning = signal === null ? await isRecorded() : await whenSessions(roots.claudeHome, isGone, STOPPING_MS, '').then(() => false, isRecorded)
+      const isRunning = signal === null ? await keepsRunning(session) : await whenSessions(roots.claudeHome, isGone, STOPPING_MS, '').then(() => false, isRecorded)
       if (!isCurrent()) return
       const stop = (message: string, code: number): void => {
         shown.delete(session)
@@ -729,7 +742,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     for (const [session, showing] of shown) {
       const entry = running.find((listed) => listed.sessionId === session)
       void showing.then((view) => {
-        if (entry === undefined && view.isListed) return stoppedRunning(session, showing, view)
+        if (entry === undefined && view.isListed) return void stoppedRunning(session, showing, view)
         view.isListed ||= entry !== undefined
         const status = entry?.status ?? 'unknown'
         if (view.state.status === status) return
@@ -738,9 +751,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       }, () => undefined)
     }
   }
-  // A session that stopped running here, as when its daemon went, ends its `claude attach` at once. That one would
-  // otherwise start a daemon of its own within seconds, which starts again every session the last one ran.
-  const stoppedRunning = (session: string, showing: Promise<Shown>, view: Shown): void => {
+  // A session `claude agents --json` lists no more ends its `claude attach` and its viewers, unless its record says it
+  // keeps running: Claude Code's list leaves out a session for a moment as it respawns it.
+  const stoppedRunning = async (session: string, showing: Promise<Shown>, view: Shown): Promise<void> => {
+    if (await keepsRunning(session)) return
     if (shown.get(session) !== showing) return
     shown.delete(session)
     view.terminal.close()
