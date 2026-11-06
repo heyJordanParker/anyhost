@@ -3,7 +3,7 @@ import { rmSync, watch } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { encodeStream, streamOf, type Routed } from '../../relay/protocol.ts'
-import { attachTerminal, keptSessions, personEnvironment, runningSessions, startInBackground, type AttachedTerminal } from './background.ts'
+import { attachTerminal, keptSessions, personEnvironment, recordedSessions, runningSessions, startInBackground, whenSessions, type AttachedTerminal, type RunningSession } from './background.ts'
 import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
 import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
@@ -43,6 +43,10 @@ const CLEAR = '\x1b[2J'
 // host stops starting it again. A person who presses `←` and leaves the agents view takes longer than that.
 const QUICK_END_MS = 2000
 const QUICK_ENDS = 3
+// systemd stopping a session's scope signals its `claude attach` and the session in the same moment, and Claude Code
+// removed the session's record 0.35 to 0.53 s after the attach ended in 4 stops on anyhost-d, at a Mac load average of
+// 140 to 237.
+const STOPPING_MS = 3000
 // A running program answers /status in milliseconds over its socket.
 const RUNNING_MS = 2000
 // A redraw repaints the screen and sets every terminal mode again but the alternate screen.
@@ -571,30 +575,35 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       terminals.add(terminal)
       void terminal.exited.then((signal) => {
         terminals.delete(terminal)
-        return ended(started, signal)
+        return ended(id, cwd, started, signal)
       })
       return terminal
     }
-    // `claude attach` ends by itself when a viewer leaves Claude Code's agents view, which `←` opens, or when the
-    // session ends. While the session runs, this program starts a new one, which paints the whole screen for every
-    // viewer, so no viewer's keys end the others'. One a signal ended was stopped from outside, as with the session's
-    // scope, while `claude agents` may still list the session for a moment, so it is not started again.
-    const ended = async (started: number, signal: Subprocess['signalCode']): Promise<void> => {
+    // `claude attach` ends by itself when a viewer leaves Claude Code's agents view, which `←` opens, or once the
+    // session ended, as after `claude stop`. A signal ends it from outside: the OOM killer, a `kill`, or systemd stopping
+    // the session's scope, which signals the session in the same moment, so the session still runs as its attach ends.
+    // So Claude Code's record of the session decides: read once for an attach that ended by itself, and followed for
+    // STOPPING_MS after a signal. While the session runs, this program starts the attach again, which paints the whole
+    // screen for every viewer, so no viewer's keys end the others'.
+    const ended = async (id: string, cwd: string, started: number, signal: Subprocess['signalCode']): Promise<void> => {
       if (!isCurrent()) return
+      const lived = Date.now() - started
       const current = await view
-      const running = signal === null ? (await runningSessions().catch(() => [])).find((entry) => entry.sessionId === session && entry.id !== undefined) : undefined
+      const isGone = (sessions: readonly RunningSession[]): true | undefined => (sessions.some((entry) => entry.sessionId === session) ? undefined : true)
+      // a session whose record stays for STOPPING_MS still runs
+      const isRunning = signal === null ? isGone(await recordedSessions(roots.claudeHome)) === undefined : await whenSessions(roots.claudeHome, isGone, STOPPING_MS, '').then(() => false, () => true)
       if (!isCurrent()) return
-      quickEnds = Date.now() - started < QUICK_END_MS ? quickEnds + 1 : 0
-      if (running?.id !== undefined && quickEnds < QUICK_ENDS) {
-        console.error(`${new Date().toISOString()} claude attach ${running.id} ended while ${session} runs, so anyhost starts it again for its viewers.`)
-        Object.assign(current, { isAlternateScreen: false, terminal: open(running.id, running.cwd, await environment, current.size) })
+      quickEnds = lived < QUICK_END_MS ? quickEnds + 1 : 0
+      if (isRunning && quickEnds < QUICK_ENDS) {
+        console.error(`${new Date().toISOString()} claude attach ${id} ended${signal === null ? '' : ` by ${signal}`} while ${session} runs, so anyhost starts it again for its viewers.`)
+        Object.assign(current, { isAlternateScreen: false, terminal: open(id, cwd, await environment, current.size) })
         tail = ''
         return
       }
       shown.delete(session)
-      const message = running === undefined ? stoppedOn(session) : `claude attach ${running.id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.`
+      const message = isRunning ? `claude attach ${id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.` : stoppedOn(session)
       console.error(`${new Date().toISOString()} ${message}`)
-      endViewers(session, { code: running === undefined ? 0 : 1, message })
+      endViewers(session, { code: isRunning ? 1 : 0, message })
     }
     const view = (async (): Promise<Shown> => {
       const { id, cwd } = await runHere(session)

@@ -4,11 +4,10 @@
 // the claim, restores the session and starts it in `receiveMove`. A move that fails leaves the session running where it
 // was, with its claim taken back. `startNew` and `receiveStart` start a new session on another machine in the same
 // repository.
-import { watch, type FSWatcher } from 'node:fs'
-import { mkdir, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Delivered, Offline, Routed } from '../../relay/protocol.ts'
-import { attachTerminal, keptSessions, run, runningSessions, startInBackground, stopInBackground, type RunningSession } from './background.ts'
+import { attachTerminal, isAlive, keptSessions, run, runningSessions, startInBackground, stopInBackground, whenSessions, type RunningSession } from './background.ts'
 import { captureAgainFrom, changedFiles, checkoutOf, holdHere, journalOf, seal, startCode, writeIndex, type Capture, type Problems } from './capture.ts'
 import { HeldElsewhere, takeClaim } from './claims.ts'
 import { devicesOf, machinesOf } from './device.ts'
@@ -16,12 +15,6 @@ import type { Relay } from './relay.ts'
 import { cloneMissing, localFolder, restore } from './resume.ts'
 import type { Tool } from './transcript.ts'
 
-// Claude Code rewrites a session's record in `sessions/` under its folder at each change of its status, so the
-// records are read again STATE_MS after the folder changed, and every READ_MS while the folder is missing. A move reads
-// the records themselves, as `claude agents --json` does, which took 1.2 to 4 s a read on anyhost-b while a session
-// started there, on the CPU that session needs.
-const STATE_MS = 200
-const READ_MS = 1000
 // The longest wait measured for a session's record after its start was 18.4 s: a kept job `claude attach` reopened on
 // anyhost-a with no daemon running, while the Mac that runs the machines had a load average of 45. It took 8.6 s on
 // anyhost-b, and a new `claude --bg` session's record came 12 s after `claude --bg` returned. So a session with no
@@ -88,94 +81,6 @@ function ask(relay: Relay, message: Extract<Routed, { readonly t: 'move' | 'star
     if (relay.send(message)) return
     answers.delete(message.id)
     reject(new Error(`This machine is not connected to the relay at ${relay.url}, so anyhost sent nothing.`))
-  })
-}
-
-// The sessions Claude Code runs here, from the record each one keeps in `sessions/<pid>.json` while it runs: its
-// `jobId` is the id `claude attach` takes, and a record whose process ended, or that Claude Code is writing, is none.
-type SessionRecord = { readonly pid?: number; readonly sessionId?: string; readonly jobId?: string; readonly cwd?: string; readonly status?: string; readonly kind?: string }
-async function recordedSessions(capture: Capture): Promise<RunningSession[]> {
-  const folder = join(capture.roots.claudeHome, 'sessions')
-  const names = await readdir(folder).catch(() => [])
-  const records = await Promise.all(names.filter((name) => /^\d+\.json$/.test(name)).map((name) => Bun.file(join(folder, name)).json().catch(() => undefined) as Promise<SessionRecord | undefined>))
-  return records.flatMap((record) => {
-    if (record?.pid === undefined || record.sessionId === undefined || !isAlive(record.pid)) return []
-    const job = record.jobId === undefined ? {} : { id: record.jobId }
-    return [{ pid: record.pid, ...job, sessionId: record.sessionId, kind: record.kind === 'bg' ? 'background' : 'interactive', cwd: record.cwd ?? '', ...(record.status === undefined ? {} : { status: record.status }) } as const]
-  })
-}
-
-const isAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
-// Answers the first time `found` finds what it looks for in the sessions Claude Code runs here, read again at each
-// change of their records, or rejects once `limitMs` passed.
-function whenSessions<T>(capture: Capture, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number, late: string): Promise<T> {
-  const folder = join(capture.roots.claudeHome, 'sessions')
-  return new Promise((resolve, reject) => {
-    let watcher: FSWatcher | undefined
-    let next: ReturnType<typeof setTimeout> | undefined
-    let isReading = false
-    let isStale = false
-    let isDone = false
-    const end = (): void => {
-      isDone = true
-      watcher?.close()
-      clearTimeout(next)
-      clearTimeout(limit)
-    }
-    const limit = Number.isFinite(limitMs)
-      ? setTimeout(() => {
-          end()
-          reject(new Error(late))
-        }, limitMs)
-      : undefined
-    const read = async (): Promise<void> => {
-      if (isDone) return
-      if (isReading) {
-        isStale = true
-        return
-      }
-      isReading = true
-      const value = await recordedSessions(capture).then(found, (error: unknown) => {
-        end()
-        reject(error)
-        return undefined
-      })
-      isReading = false
-      if (isDone) return
-      if (value !== undefined) {
-        end()
-        resolve(value)
-        return
-      }
-      if (isStale) {
-        isStale = false
-        return void read()
-      }
-      if (!watchRecords()) next = setTimeout(() => void read(), READ_MS)
-    }
-    // A change during a read reads again once it ended. Claude Code makes the folder as its first session starts
-    // here, so with no folder yet the sessions are read every READ_MS until it is there.
-    const watchRecords = (): boolean => {
-      try {
-        watcher ??= watch(folder, () => {
-          clearTimeout(next)
-          next = setTimeout(() => void read(), STATE_MS)
-        })
-        return true
-      } catch {
-        return false
-      }
-    }
-    watchRecords()
-    void read()
   })
 }
 
@@ -383,7 +288,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
   void (async () => {
     const env = await here.environment
     if (isBusy) {
-      await whenSessions(capture, (sessions) => (sessions.find((listed) => listed.sessionId === session)?.status ?? 'idle') === 'idle' || undefined, Infinity, '')
+      await whenSessions(capture.roots.claudeHome, (sessions) => (sessions.find((listed) => listed.sessionId === session)?.status ?? 'idle') === 'idle' || undefined, Infinity, '')
       say('uploading', `Uploading ${id}.`)
     }
     await upload(capture, session, tool, here)
@@ -422,7 +327,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
 async function runInBackground(capture: Capture, session: string, kept: RunningSession | undefined, cwd: string, env: Record<string, string>): Promise<void> {
   // a session that never ran says what Claude Code lists of its job
   const running = (): Promise<RunningSession> =>
-    whenSessions(capture, (sessions) => sessions.find((entry) => entry.sessionId === session && entry.pid !== undefined), RUNNING_MS, `Claude Code listed the session ${session.slice(0, 8)} running on ${capture.device.name} no ${RUNNING_MS / 1000} s after its start`).catch(async (error: unknown) => {
+    whenSessions(capture.roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session && entry.pid !== undefined), RUNNING_MS, `Claude Code listed the session ${session.slice(0, 8)} running on ${capture.device.name} no ${RUNNING_MS / 1000} s after its start`).catch(async (error: unknown) => {
       const job = (await keptSessions().catch(() => [])).find((entry) => entry.sessionId === session)
       throw new Error(`${messageOf(error)}, and ${job === undefined ? 'lists no job of it' : `lists its job ${job.id ?? ''} as ${job.state ?? 'neither running nor stopped'}`}`)
     })
@@ -502,7 +407,7 @@ export async function receiveStart(capture: Capture, asked: Extract<Delivered, {
     await mkdir(cwd, { recursive: true })
     if (asked.trusted) await trustHere(capture, cwd, asked.from.name)
     const id = await startInBackground(undefined, cwd, await here.environment)
-    const { sessionId } = await whenSessions(capture, (sessions) => sessions.find((entry) => entry.id === id && entry.pid !== undefined), RUNNING_MS, `Claude Code listed the new session ${id} running on ${device.name} no ${RUNNING_MS / 1000} s after its start.`)
+    const { sessionId } = await whenSessions(capture.roots.claudeHome, (sessions) => sessions.find((entry) => entry.id === id && entry.pid !== undefined), RUNNING_MS, `Claude Code listed the new session ${id} running on ${device.name} no ${RUNNING_MS / 1000} s after its start.`)
     await takeClaim(relay, sessionId, { take: false })
     console.error(`${stamp()} ${device.name} started ${sessionId} in ${cwd} for ${asked.from.name}.`)
     return { t: 'started', id: asked.id, to: asked.from.id, session: sessionId }

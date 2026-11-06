@@ -1,7 +1,7 @@
 import { afterEach, expect, setSystemTime, test } from 'bun:test'
 import type { Subprocess } from 'bun'
 import { createDecipheriv, hkdfSync } from 'node:crypto'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { connect as dialTcp, createServer, type Socket } from 'node:net'
 import type { NetworkInterfaceInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -440,12 +440,17 @@ const script = (path: string, text: string): string => {
   return path
 }
 
+// Claude Code's record of SESSION running in its background as the process `pid`, as Claude Code keeps it while it runs.
+const recordSession = (home: string, pid: number): void =>
+  writeFileSync(join(home, '.claude', 'sessions', `${pid}.json`), JSON.stringify({ pid, sessionId: SESSION, cwd: '/', kind: 'bg', jobId: SESSION.slice(0, 8), status: 'busy' }))
+
 // A machine's folders, its relay login, the cmod that answers its device token and options, and the Claude Code that
 // runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen, prints the
 // terminal's size at its start, clears the screen and prints it again at each SIGWINCH in one write, as Claude Code
 // paints a frame, prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
 // when its terminal closes. `stopped` in the machine's folder stops the session: `claude agents` lists it no more.
-// `claude` replaces that Claude Code with a script of the machine's folder.
+// Its record in `sessions/` names the test's own process, which runs as long as the test. `claude` replaces that
+// Claude Code with a script of the machine's folder.
 function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, claude?: (folder: string) => string): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
   const folder = temporaryFolder()
   const home = join(folder, 'home')
@@ -482,6 +487,7 @@ esac
 `,
     ),
   }
+  if (isHost && claude === undefined) recordSession(home, process.pid)
   const token = relay.join(device, roots(home))
   script(
     join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'),
@@ -629,19 +635,70 @@ test('a session that stops running ends its claude attach at once, and its viewe
   await waitFor('no claude attach left', () => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim() === '')
 })
 
-test('a claude attach a signal ended, as its session\'s scope stopping ends it, is not started again', async () => {
+test('a claude attach SIGKILL ended while its session runs starts again, and its viewer gets no exit', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
   await serveOn(host.env)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
   const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
   await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
-  // `claude agents` still lists the session, as for a moment after its scope stopped
   const attaches = (): string => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()
+  const killed = attaches()
+  const before = viewer.seen.shown.length
+  // as the OOM killer or a kill -9 ends it, while Claude Code's record of the session stays
+  Bun.spawnSync(['pkill', '-KILL', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`])
+  await waitFor('a new claude attach on the viewer\'s screen', () => viewer.seen.shown.slice(before).includes('size 24 80'))
+  expect(attaches()).not.toBe('')
+  expect(attaches()).not.toBe(killed)
+  viewer.stream.write('input', encoder.encode('after the kill\r'))
+  await waitFor('typing into the new one', () => viewer.seen.shown.includes('typed after the kill'))
+  expect(viewer.seen.exits).toEqual([])
+})
+
+test('a claude attach a signal ended once its session\'s process is gone ends its viewer with the reason', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  const home = host.env['HOME'] ?? ''
+  // the session runs as a process of its own
+  const session = Bun.spawn(['sleep', '600'])
+  children.push(session)
+  rmSync(join(home, '.claude', 'sessions', `${process.pid}.json`))
+  recordSession(home, session.pid)
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
+  // as when systemd stops the session's scope: the session's process ends, and its attach by a signal, while
+  // `claude agents` still lists the session
+  session.kill('SIGKILL')
+  await session.exited
+  const signalled = Date.now()
   Bun.spawnSync(['pkill', '-TERM', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`])
   await waitFor('the viewer\'s end', () => viewer.seen.exits.length > 0)
   expect(viewer.seen.exits).toEqual([`The session ${SESSION} stopped running on ${HOST.name}.`])
-  expect(attaches()).toBe('')
+  // at its first read of the records, not after the 3 s a running session's record is followed
+  expect(Date.now() - signalled).toBeLessThan(3000)
+  expect(Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()).toBe('')
+})
+
+test('the program\'s own stop ends its viewers\' streams and starts no claude attach', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  const served = await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
+  const detached: number[] = []
+  viewer.client.on('detach', ({ stream }) => void detached.push(stream))
+  const attaches = (): string => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()
+  expect(attaches()).not.toBe('')
+  // the session still runs, so only the stop keeps its closed attach from starting again
+  served.child.kill('SIGTERM')
+  await served.child.exited
+  expect(served.child.signalCode).toBe('SIGTERM')
+  await waitFor('the viewer\'s stream ending', () => detached.includes(viewer.id))
+  await waitFor('no claude attach left', () => attaches() === '')
+  expect(viewer.seen.exits).toEqual([])
 })
 
 test('anyhost attach on the host shows a session its Claude Code runs while the relay is down', async () => {
