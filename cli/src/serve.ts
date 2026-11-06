@@ -8,14 +8,15 @@ import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, seal
 import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
+import { listenDirect, type DirectLink, type DirectOffer } from './direct.ts'
 import { connectRelay, type RelayState } from './relay.ts'
-import { openStream, type Link, type SessionState, type Size, type Stream } from './stream.ts'
+import { openStream, type Exit, type Link, type SessionState, type Size, type Stream } from './stream.ts'
 import { codexState, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
 const RETRY_MS = 1000
 // The relay carries a terminal's output at most once per OUTPUT_MS, so a full-screen redraw is one message, not
-// hundreds (relay-spec "Control messages").
+// hundreds (relay-spec "Control messages"). A direct connection and this machine's own socket carry it at once.
 const OUTPUT_MS = 20
 // A viewer whose link is gone keeps its place for the longest wait between its tries to attach again.
 const LINGER_MS = 60_000
@@ -26,8 +27,11 @@ const STATE_MS = 200
 // A new viewer of a session already shown gets a redraw: the terminal a row shorter until Claude Code clears the screen
 // to paint it at that size, then back. On a test machine Claude Code set only its modes again when the size came back
 // within 50 ms, and 1 of 7 redraws with the size back after 300 ms painted nothing, so the size comes back once the
-// screen was cleared, or after REDRAW_MS when it never is.
+// screen was cleared, or after REDRAW_MS when it never is. The paint goes on after the clear, which can come in a read
+// of its own, so the size comes back PAINT_MS after the clear, the longest a clear waited while every viewer's output
+// went out once per OUTPUT_MS.
 const REDRAW_MS = 2000
+const PAINT_MS = 20
 const CLEAR = '\x1b[2J'
 // A `claude attach` that ends QUICK_ENDS times in a row within QUICK_END_MS of its start fails at its start, and the
 // host stops starting it again. A person who presses `←` and leaves the agents view takes longer than that.
@@ -57,6 +61,8 @@ export type Status = {
   readonly problems: readonly string[]
   // why Claude Code starts with the program's own environment, not the person's shell's, until the program restarts
   readonly shellProblem?: string
+  // why macOS refused the last anyhost attach here a dial to the local network, until one goes through
+  readonly localNetworkProblem?: string
   // the Connect Cloudflare the mod's Step started, while the program runs
   readonly connecting?: Connecting
 }
@@ -177,6 +183,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   const watched = new Set<string>()
   const current = new Map<string, string>()
   let shellProblem: string | undefined
+  let localNetworkProblem: string | undefined
   let capturedAt = ''
   let lastIndex = ''
 
@@ -319,6 +326,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       capturedAt,
       problems: [...current.values()],
       ...(shellProblem === undefined ? {} : { shellProblem }),
+      ...(localNetworkProblem === undefined ? {} : { localNetworkProblem }),
       ...(connecting === undefined ? {} : { connecting: connecting.view }),
     }
   }
@@ -371,9 +379,21 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   // its output goes to every viewer's stream. A second `claude attach` would draw the session at its own size and break
   // the other viewers' screens (worker-spec W9). A viewer whose link is gone keeps its stream for LINGER_MS, so its next
   // attach with the same stream goes on where both sides' bytes reached, and one forgotten attaches as a new viewer.
-  // `carrier` reaches the viewer: through the relay, or the WebSocket of an `anyhost attach` on this machine.
+  // `carrier` reaches the viewer: through the relay, or the WebSocket of an `anyhost attach` on this machine. A viewer
+  // on another machine that reaches this one directly has its stream on `direct` while that connection lasts, and
+  // `pending` holds the output that waits for the relay's next message.
   type Carrier = { readonly attached: () => void; readonly link: Link; readonly isRelay: boolean }
-  type Viewer = { readonly session: string; readonly stream: Stream; size: Size; isLinked: boolean; carrier: Carrier; forget?: ReturnType<typeof setTimeout> }
+  type Viewer = {
+    readonly session: string
+    readonly stream: Stream
+    size: Size
+    isLinked: boolean
+    carrier: Carrier
+    direct?: DirectLink | undefined
+    pending: Uint8Array[]
+    flush?: ReturnType<typeof setTimeout> | undefined
+    forget?: ReturnType<typeof setTimeout>
+  }
   // `cleared` runs at the next screen Claude Code clears, while a redraw waits for it. `isListed` says `claude agents
   // --json` listed the session running since this program showed it, as a stopped one it opens is not at first.
   type Shown = { terminal: AttachedTerminal; size: Size; isAlternateScreen: boolean; state: SessionState; isListed: boolean; cleared?: (() => void) | undefined }
@@ -389,19 +409,50 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     })
   }
   const viewersOf = (session: string): Viewer[] => [...viewers.values()].filter((viewer) => viewer.session === session)
+  // a viewer whose size counts: one the relay, this machine's socket or a direct connection reaches now
+  const isReached = (viewer: Viewer): boolean => viewer.isLinked || viewer.direct !== undefined
   const stoppedOn = (session: string): string => `The session ${session} stopped running on ${device.name}.`
-  const throughRelayTo = (stream: number): Carrier => ({
-    attached: () => void relay.send({ t: 'attached', stream, port: 0, addresses: [] }),
+  const throughRelayTo = (stream: number, offer: DirectOffer): Carrier => ({
+    attached: () => void relay.send({ t: 'attached', stream, ...offer }),
     link: { send: (frame) => void relay.send(encodeStream(stream, frame)) },
     isRelay: true,
   })
+  // The port and addresses viewers on other machines reach this machine at directly. A machine whose listener failed
+  // offers none, and its viewers stay on the relay.
+  const direct = listenDirect(stateFolder(), problems).catch((error: unknown) => void problems.set('direct', error))
+  const noOffer: DirectOffer = { port: 0, addresses: [] }
+  // A viewer's output goes at once over a direct connection or this machine's own socket, and at most once per
+  // OUTPUT_MS through the relay.
+  const flushOutput = (viewer: Viewer): void => {
+    clearTimeout(viewer.flush)
+    viewer.flush = undefined
+    if (viewer.pending.length === 0) return
+    const bytes = Buffer.concat(viewer.pending)
+    viewer.pending = []
+    viewer.stream.write('output', bytes)
+  }
+  const output = (viewer: Viewer, bytes: Uint8Array): void => {
+    if (viewer.direct === undefined && viewer.carrier.isRelay) {
+      viewer.pending.push(bytes)
+      viewer.flush ??= setTimeout(() => flushOutput(viewer), OUTPUT_MS)
+      return
+    }
+    flushOutput(viewer)
+    viewer.stream.write('output', bytes)
+  }
+  const endViewers = (session: string, exit: Exit): void => {
+    for (const viewer of viewersOf(session)) {
+      flushOutput(viewer)
+      viewer.stream.write('exit', exit)
+    }
+  }
   // the environment Claude Code starts with, the person's own, read once at the program's start
   const environment = personEnvironment().then(({ environment: found, problem }) => {
     shellProblem = problem
     return found
   })
   const fit = (session: string, view: Shown): boolean => {
-    const sizes = viewersOf(session).filter(({ isLinked }) => isLinked).map(({ size }) => size)
+    const sizes = viewersOf(session).filter(isReached).map(({ size }) => size)
     if (sizes.length === 0) return false
     const size = { cols: Math.min(...sizes.map(({ cols }) => cols)), rows: Math.min(...sizes.map(({ rows }) => rows)) }
     if (size.cols === view.size.cols && size.rows === view.size.rows) return false
@@ -438,33 +489,24 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     return { id: await startInBackground(session, cwd, await environment), cwd }
   }
   const startShowing = (session: string, size: Size): Promise<Shown> => {
-    let pending: Uint8Array[] = []
-    let flush: ReturnType<typeof setTimeout> | undefined
     let tail = ''
     let quickEnds = 0
     const isCurrent = (): boolean => shown.get(session) === view
-    const send = (): void => {
-      clearTimeout(flush)
-      flush = undefined
-      const bytes = Buffer.concat(pending)
-      pending = []
-      if (bytes.length === 0 || !isCurrent()) return
+    const took = (bytes: Uint8Array): void => {
+      if (!isCurrent()) return
       void view.then((current) => {
-        const seen = tail + bytes.toString('latin1')
+        const seen = tail + Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('latin1')
         const [on, off] = [seen.lastIndexOf(ALTERNATE_SCREEN), seen.lastIndexOf(MAIN_SCREEN)]
         if (on !== off) current.isAlternateScreen = on > off
         tail = seen.slice(1 - ALTERNATE_SCREEN.length)
-        for (const viewer of viewersOf(session)) viewer.stream.write('output', bytes)
-        if (seen.includes(CLEAR)) current.cleared?.()
+        for (const viewer of viewersOf(session)) output(viewer, bytes)
+        if (seen.includes(CLEAR)) setTimeout(() => current.cleared?.(), PAINT_MS)
       })
     }
     // in the session's folder, where Claude Code's agents view, which `←` opens in it, has the folder's trust
     const open = (id: string, cwd: string, env: Record<string, string>, at: Size): AttachedTerminal => {
       const started = Date.now()
-      const terminal = attachTerminal(id, cwd, env, at, (bytes) => {
-        pending.push(bytes)
-        flush ??= setTimeout(send, OUTPUT_MS)
-      })
+      const terminal = attachTerminal(id, cwd, env, at, took)
       terminals.add(terminal)
       void terminal.exited.then((signal) => {
         terminals.delete(terminal)
@@ -477,7 +519,6 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     // viewer, so no viewer's keys end the others'. One a signal ended was stopped from outside, as with the session's
     // scope, while `claude agents` may still list the session for a moment, so it is not started again.
     const ended = async (started: number, signal: Subprocess['signalCode']): Promise<void> => {
-      send()
       if (!isCurrent()) return
       const current = await view
       const running = signal === null ? (await runningSessions().catch(() => [])).find((entry) => entry.sessionId === session && entry.id !== undefined) : undefined
@@ -492,7 +533,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       shown.delete(session)
       const message = running === undefined ? stoppedOn(session) : `claude attach ${running.id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.`
       console.error(`${new Date().toISOString()} ${message}`)
-      for (const viewer of viewersOf(session)) viewer.stream.write('exit', { code: running === undefined ? 0 : 1, message })
+      endViewers(session, { code: running === undefined ? 0 : 1, message })
     }
     const view = (async (): Promise<Shown> => {
       const { id, cwd } = await runHere(session)
@@ -513,20 +554,50 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     if (viewer === undefined) return
     viewers.delete(stream)
     clearTimeout(viewer.forget)
+    clearTimeout(viewer.flush)
+    const link = viewer.direct
+    viewer.direct = undefined
+    link?.close()
+    void direct.then((listener) => listener?.release(stream))
     viewer.stream.close()
     if (viewersOf(viewer.session).length > 0) return fitShown(viewer.session)
     const showing = shown.get(viewer.session)
     shown.delete(viewer.session)
     void showing?.then((view) => view.terminal.close(), () => undefined)
   }
-  // The viewer's link is gone, so its size counts no more and its stream waits for it.
+  // No way reaches the viewer, so its size counts no more and its stream waits for it.
+  const linkGone = (stream: number, viewer: Viewer): void => {
+    viewer.stream.use(undefined)
+    viewer.forget = setTimeout(() => forget(stream), LINGER_MS)
+    fitShown(viewer.session)
+  }
+  // The viewer's relay or socket is gone, and a direct connection still carries its stream.
   const unlink = (stream: number): void => {
     const viewer = viewers.get(stream)
     if (viewer === undefined || !viewer.isLinked) return
     viewer.isLinked = false
-    viewer.stream.use(undefined)
-    viewer.forget = setTimeout(() => forget(stream), LINGER_MS)
+    if (viewer.direct === undefined) linkGone(stream, viewer)
+  }
+  // A viewer on another machine reached this one directly: the connection carries its stream from now on, and the
+  // relay again once the connection ends.
+  const reached = (stream: number, link: DirectLink): void => {
+    const viewer = viewers.get(stream)
+    if (viewer === undefined) return link.close()
+    viewer.direct?.close()
+    flushOutput(viewer)
+    viewer.direct = link
+    clearTimeout(viewer.forget)
+    viewer.stream.use(link)
     fitShown(viewer.session)
+    console.error(`${new Date().toISOString()} A viewer of ${viewer.session} reaches ${device.name} directly at ${link.address}.`)
+    void link.ended.then((why) => {
+      if (viewer.direct !== link) return
+      viewer.direct = undefined
+      console.error(`${new Date().toISOString()} The direct connection of a viewer of ${viewer.session} at ${link.address} ended, as ${why}, so its stream goes through the relay.`)
+      if (viewers.get(stream) !== viewer) return
+      if (viewer.isLinked) viewer.stream.use(viewer.carrier.link)
+      else linkGone(stream, viewer)
+    })
   }
   const show = async ({ stream, session, cols, rows }: Pick<Extract<Routed, { readonly t: 'attach' }>, 'stream' | 'session' | 'cols' | 'rows'>, carrier: Carrier): Promise<void> => {
     const known = viewers.get(stream)
@@ -534,10 +605,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       clearTimeout(known.forget)
       Object.assign(known, { size: { cols, rows }, isLinked: true, carrier })
       carrier.attached()
-      known.stream.use(carrier.link)
+      if (known.direct === undefined) known.stream.use(carrier.link)
       return fitShown(known.session)
     }
-    const viewer: Viewer = { session, stream: openStream(), size: { cols, rows }, isLinked: true, carrier }
+    const viewer: Viewer = { session, stream: openStream(), size: { cols, rows }, isLinked: true, carrier, pending: [] }
     viewers.set(stream, viewer)
     viewer.stream.on('input', (bytes) => void shown.get(session)?.then((view) => view.terminal.write(bytes), () => undefined))
     viewer.stream.on('resize', (size) => {
@@ -551,7 +622,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     const isShown = shown.has(session)
     const view = await (shown.get(session) ?? startShowing(session, { cols, rows })).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
     viewer.carrier.attached()
-    viewer.stream.use(viewer.carrier.link)
+    if (viewer.direct === undefined) viewer.stream.use(viewer.carrier.link)
     if (view instanceof Error) return viewer.stream.write('exit', { code: 1, message: view.message })
     viewer.stream.write('state', view.state)
     if (!isShown) return
@@ -598,24 +669,24 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     shown.delete(session)
     view.terminal.close()
     console.error(`${new Date().toISOString()} ${stoppedOn(session)}`)
-    for (const viewer of viewersOf(session)) viewer.stream.write('exit', { code: 0, message: stoppedOn(session) })
+    endViewers(session, { code: 0, message: stoppedOn(session) })
   }
 
   // Each `anyhost attach` on this machine. Its first text message is its attach, and so is each later one, with the
-  // same stream. A session this machine holds, this program shows it as it shows any viewer. Any other goes through
+  // same stream, but `localNetwork`, which says what its last direct dial found of its terminal app's Local Network
+  // access. A session this machine holds, this program shows it as it shows any viewer. Any other goes through
   // this program's one socket to the relay, to the machine that holds the session, and what the relay answers about
   // the stream goes back as it came. `isHere` says this program shows the leg's stream.
   type Leg = ServerWebSocket<{ stream?: number; isHere?: boolean }>
   const legs = new Map<number, Leg>()
   const toLeg = (stream: number, message: object | Uint8Array): void => void legs.get(stream)?.send(message instanceof Uint8Array ? message : JSON.stringify(message))
-  const attachFrom = async (leg: Leg, text: string): Promise<void> => {
-    const asked = JSON.parse(text) as Omit<Extract<Routed, { readonly t: 'attach' }>, 'to'>
+  const attachFrom = async (leg: Leg, asked: Omit<Extract<Routed, { readonly t: 'attach' }>, 'to'>): Promise<void> => {
     const { stream } = asked
     leg.data = { stream, isHere: false }
     legs.set(stream, leg)
     const showHere = async (session: string): Promise<void> => {
       leg.data.isHere = true
-      const carrier: Carrier = { attached: () => toLeg(stream, { t: 'attached', stream, port: 0, addresses: [] }), link: { send: (frame) => toLeg(stream, frame) }, isRelay: false }
+      const carrier: Carrier = { attached: () => toLeg(stream, { t: 'attached', stream, ...noOffer }), link: { send: (frame) => toLeg(stream, frame) }, isRelay: false }
       await show({ ...asked, session }, carrier)
     }
     // With no relay to say which machine holds the session, one Claude Code runs in this machine's background still
@@ -647,7 +718,15 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     if (!relay.send({ ...asked, session, to: holder.id })) toLeg(stream, { t: 'offline', stream, to: holder.id })
   }
 
-  relay.on('attach', (message) => void show(message, throughRelayTo(message.stream)))
+  // A viewer on another machine: a direct connection under its key becomes its stream's link, and `attached` offers the
+  // addresses it dials. The viewer dials only once that came, so the stream is held before.
+  relay.on('attach', (message) => {
+    const { stream, key } = message
+    void direct.then(async (listener) => {
+      listener?.hold(stream, key, (frame) => viewers.get(stream)?.stream.receive(frame), (link) => reached(stream, link))
+      await show(message, throughRelayTo(stream, (await listener?.offer()) ?? noOffer))
+    })
+  })
   relay.on('attached', (message) => toLeg(message.stream, message))
   relay.on('offline', (message) => (message.stream === undefined ? undefined : toLeg(message.stream, message)))
   relay.on('detach', (message) => {
@@ -684,7 +763,12 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     },
     websocket: {
       message(leg, message) {
-        if (typeof message === 'string') return void attachFrom(leg, message)
+        if (typeof message === 'string') {
+          const sent = JSON.parse(message) as Omit<Extract<Routed, { readonly t: 'attach' }>, 'to'> | { readonly t: 'localNetwork'; readonly problem: string }
+          if (sent.t !== 'localNetwork') return void attachFrom(leg, sent)
+          localNetworkProblem = sent.problem === '' ? undefined : sent.problem
+          return
+        }
         const { stream, isHere } = leg.data
         if (stream === undefined) return
         if (isHere === true) viewers.get(stream)?.stream.receive(new Uint8Array(message))

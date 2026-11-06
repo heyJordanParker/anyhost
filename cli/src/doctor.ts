@@ -55,7 +55,12 @@ async function programChecks(): Promise<Check[]> {
             : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
   // the program reads the shell's environment once at its start, so a fix takes a restart
   const shell: Check = status.shellProblem === undefined ? { ok: 'The sessions the program starts get the environment your login shell sets up.' } : { problem: status.shellProblem, fix: 'Make your login shell start with no terminal and no input, then log out and in again, which starts the program anew.' }
-  return [connection, shell, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' }))]
+  // a stream macOS keeps off the local network still runs, through the relay
+  const localNetwork: Check[] =
+    status.localNetworkProblem === undefined
+      ? []
+      : [{ problem: `${status.localNetworkProblem} Its stream goes through the relay, a few times slower.`, fix: 'Turn your terminal app on in System Settings > Privacy & Security > Local Network, then quit it and open it again. A tmux or herdr server keeps the access of the terminal app that started it, so start it again from there.' }]
+  return [connection, shell, ...localNetwork, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' }))]
 }
 
 export async function doctor(): Promise<number> {

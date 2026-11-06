@@ -1,10 +1,14 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { Subprocess } from 'bun'
-import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
+import { createDecipheriv, hkdfSync } from 'node:crypto'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { connect as dialTcp, createServer, type Socket } from 'node:net'
+import type { NetworkInterfaceInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES, cloneFixFor, encodeStream, streamOf } from '../../relay/protocol.ts'
 import { hotKey, journalOf, openCapture, openDatabase, uploadSession, type Problems } from '../src/capture.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device, type MachineRoots } from '../src/device.ts'
+import { cipherOf, dialDirect, listenDirect, offeredAddresses, type DirectLink, type DirectListener } from '../src/direct.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
 import { listSessions } from '../src/sessions.ts'
 import { openStream, type Link, type Stream } from '../src/stream.ts'
@@ -216,6 +220,151 @@ test('a viewer whose host lost the stream, as a restarted host program does, tak
   expect(typed).toBe('y')
 })
 
+const randomKey = (): string => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
+// every listener, server and connection a test opened, closed after it
+const closers: (() => void)[] = []
+afterEach(() => {
+  for (const close of closers.splice(0)) close()
+})
+const closing = <T extends { close(): void } | Socket>(opened: T): T => {
+  closers.push(() => ('destroy' in opened ? opened.destroy() : opened.close()))
+  return opened
+}
+// a host's direct listener on loopback, which a test machine has whatever its network
+const listensHere = async (): Promise<DirectListener> => closing(await listenDirect(temporaryFolder(), failTest, () => ['127.0.0.1']))
+
+test('a direct frame is its length and AES-256-GCM under an HKDF-SHA256 key of the stream key, id and salt, one per direction, its nonce a counter', () => {
+  const key = crypto.getRandomValues(new Uint8Array(32))
+  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const stream = 1388413289
+  const viewer = cipherOf(key, stream, salt, 'viewer to host')
+  const sealed = [viewer.seal(encoder.encode('first')), viewer.seal(encoder.encode('second'))]
+  const id = Buffer.alloc(4)
+  id.writeUInt32BE(stream)
+  const derived = Buffer.from(hkdfSync('sha256', key, Buffer.concat([id, salt]), 'anyhost viewer to host', 32))
+  const opened = sealed.map((framed, count) => {
+    expect(framed.readUInt32BE(0)).toBe(framed.length - 4)
+    const nonce = Buffer.alloc(12)
+    nonce.writeBigUInt64BE(BigInt(count), 4)
+    const decipher = createDecipheriv('aes-256-gcm', derived, nonce)
+    decipher.setAuthTag(framed.subarray(framed.length - 16))
+    return decoder.decode(Buffer.concat([decipher.update(framed.subarray(4, framed.length - 16)), decipher.final()]))
+  })
+  expect(opened).toEqual(['first', 'second'])
+  // the host opens them in their order, and the other direction's key or another salt opens nothing
+  const host = cipherOf(key, stream, salt, 'viewer to host')
+  expect(sealed.map((framed) => decoder.decode(host.open(framed.subarray(4))))).toEqual(['first', 'second'])
+  const first = sealed[0]?.subarray(4) ?? new Uint8Array()
+  expect(() => cipherOf(key, stream, salt, 'host to viewer').open(first)).toThrow()
+  expect(() => cipherOf(key, stream, crypto.getRandomValues(new Uint8Array(16)), 'viewer to host').open(first)).toThrow()
+})
+
+test('the host closes a connection whose first frame opens under the key of no stream it holds, and sends it nothing', async () => {
+  const listener = await listensHere()
+  const key = randomKey()
+  listener.hold(7, key, () => undefined, () => undefined)
+  const { port, addresses } = await listener.offer()
+  expect(addresses).toEqual(['127.0.0.1'])
+  // the bytes the host sent a connection that opened with `stream` and a hello sealed under `sealedWith`, until it
+  // closed the connection or 500 ms passed
+  const answerTo = (stream: number, sealedWith: string): Promise<{ readonly bytes: number; readonly isClosed: boolean }> =>
+    new Promise((resolve) => {
+      const salt = crypto.getRandomValues(new Uint8Array(16))
+      const opening = Buffer.alloc(4)
+      opening.writeUInt32BE(stream)
+      const socket = closing(dialTcp({ host: '127.0.0.1', port }))
+      let bytes = 0
+      socket.on('connect', () => socket.write(Buffer.concat([opening, salt, cipherOf(Buffer.from(sealedWith, 'base64'), stream, salt, 'viewer to host').seal(new Uint8Array())])))
+      socket.on('data', (chunk) => void (bytes += chunk.length))
+      socket.on('close', () => resolve({ bytes, isClosed: true }))
+      setTimeout(() => resolve({ bytes, isClosed: false }), 500)
+    })
+  expect(await answerTo(7, randomKey())).toEqual({ bytes: 0, isClosed: true })
+  expect(await answerTo(8, key)).toEqual({ bytes: 0, isClosed: true })
+  // the key of the stream it holds gets the host's hello, an empty frame sealed: its length and the 16-byte tag
+  expect(await answerTo(7, key)).toEqual({ bytes: 4 + 16, isClosed: false })
+})
+
+test('a host offers its Tailscale addresses first, then the private LAN addresses of its physical interfaces, and never a public, loopback, link-local or bridge address', () => {
+  const info = (address: string, internal = false): NetworkInterfaceInfo =>
+    (address.includes(':') ? { address, family: 'IPv6', internal, netmask: '', mac: '', cidr: null, scopeid: 0 } : { address, family: 'IPv4', internal, netmask: '', mac: '', cidr: null })
+  // devbox's interfaces, a home LAN, a Docker host and a Mac running OrbStack, in one machine
+  const offered = offeredAddresses({
+    lo: [info('127.0.0.1', true), info('::1', true)],
+    eth0: [info('178.104.119.159'), info('fe80::9000:6ff:fe4b:1a2c')],
+    tailscale0: [info('100.65.43.38'), info('fd7a:115c:a1e0::e801:2b26')],
+    docker0: [info('172.17.0.1')],
+    'br-5c3b1f0a9e2d': [info('172.19.0.1')],
+    veth1a2b3c4: [info('fe80::a0de:2fff:fe4d:11')],
+    wlan0: [info('192.168.1.20'), info('fd07:b51a:cc66:0:a617:db5e:ab7:e9f1')],
+    en1: [info('10.0.0.5'), info('172.32.0.9'), info('100.128.0.1')],
+    bridge100: [info('192.168.139.3')],
+  })
+  expect(offered).toEqual(['100.65.43.38', 'fd7a:115c:a1e0::e801:2b26', '192.168.1.20', '10.0.0.5'])
+})
+
+// A TCP proxy to `port` on loopback that carries nothing once cut, and closes neither side, as a firewall that drops
+// every packet does.
+async function cutterTo(port: number): Promise<{ readonly port: number; cut(): void }> {
+  let isCut = false
+  const server = closing(
+    createServer((inbound) => {
+      const outbound = closing(dialTcp({ host: '127.0.0.1', port }))
+      closing(inbound)
+      for (const [from, to] of [[inbound, outbound], [outbound, inbound]] as const) {
+        from.on('data', (chunk) => void (isCut || to.write(chunk)))
+        from.on('close', () => void (isCut || to.destroy()))
+        from.on('error', () => undefined)
+      }
+    }),
+  )
+  await new Promise<void>((resolve) => server.listen({ port: 0, host: '127.0.0.1' }, () => resolve()))
+  return { port: (server.address() as { port: number }).port, cut: () => void (isCut = true) }
+}
+
+test('a 200-character line typed while its direct link is cut arrives once and in order over the relay', async () => {
+  const listener = await listensHere()
+  const [host, viewer] = [opens(), opens()]
+  let typed = ''
+  host.on('input', (bytes) => void (typed += decoder.decode(bytes)))
+  const [toHost, toViewer] = [linkTo(host), linkTo(viewer)]
+  host.use(toViewer)
+  viewer.use(toHost)
+  // each end as serve.ts and attach.ts run it: the direct link carries the stream while it lasts, then the relay
+  const stream = 1388413289
+  const key = randomKey()
+  let hostLink: DirectLink | undefined
+  listener.hold(stream, key, (frame) => host.receive(frame), (link) => {
+    hostLink = link
+    host.use(link)
+    void link.ended.then(() => host.use(toViewer))
+  })
+  const cutter = await cutterTo((await listener.offer()).port)
+  const viewerLink = await dialDirect({ port: cutter.port, addresses: ['127.0.0.1'] }, stream, key, (frame) => viewer.receive(frame))
+  viewer.use(viewerLink)
+  // what the host took before the viewer went back to the relay, which only the direct link brought
+  let typedOverDirect = -1
+  void viewerLink.ended.then(() => {
+    typedOverDirect = typed.length
+    viewer.use(toHost)
+  })
+  await until(() => hostLink !== undefined)
+
+  const line = Array.from({ length: 200 }, (_, at) => String.fromCharCode(33 + (at % 94))).join('')
+  for (const [at, character] of [...line].entries()) {
+    if (at === 50) cutter.cut()
+    viewer.write('input', encoder.encode(character))
+    await Bun.sleep(5)
+  }
+  // both ends heard nothing for 3 s and went back to the relay, which brought the rest
+  expect(await viewerLink.ended).toBe('it brought nothing for 3 s')
+  expect(await hostLink?.ended).toBe('it brought nothing for 3 s')
+  await until(() => typed.length >= line.length)
+  expect(typedOverDirect).toBeGreaterThan(0)
+  expect(typedOverDirect).toBeLessThanOrEqual(50)
+  expect(typed).toBe(line)
+}, 20_000)
+
 const HOST: Device = { id: 'device-host', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
 const VIEWER: Device = { id: 'device-viewer', name: 'anyhost-b', os: 'linux', arch: 'arm64' }
 const CLI = join(import.meta.dir, '..', 'src', 'main.ts')
@@ -329,7 +478,9 @@ test('serve answers at unix:<its state folder>/serve.sock, and two viewers of on
 
   const small = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
   await waitFor('the first viewer\'s screen', () => small.seen.shown.includes('size 24 80'))
-  expect(small.seen.attached).toEqual([{ t: 'attached', stream: small.id, port: 0, addresses: [], from: { id: HOST.id, name: HOST.name } }])
+  // the host offers the port it picked at its first start and every address of this machine it may be dialed at
+  const { port } = JSON.parse(readFileSync(join(host.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'direct.json'), 'utf8')) as { port: number }
+  expect(small.seen.attached).toEqual([{ t: 'attached', stream: small.id, port, addresses: offeredAddresses(), from: { id: HOST.id, name: HOST.name } }])
   expect(small.seen.shown.startsWith('\x1b[?1049h')).toBe(true)
   await waitFor('the session\'s status', () => small.seen.states.includes('busy'))
 
