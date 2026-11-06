@@ -67,7 +67,7 @@ function follow(mod: Mod<AnyhostState>): void {
   mod.state.memory.isFollowing = true
   const timer = mod.every(FOLLOW_MS, async () => {
     // a program that restarts answers at a later tick
-    const status = await askProgram<Status>(mod, '/status').catch((error: unknown) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`))
+    const status = await askProgram<Status>(mod, '/status').catch((error: unknown) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`, { level: 'warning' }))
     if (status === undefined) return
     const { connecting } = status
     mod.state.memory.connecting = connecting ?? null

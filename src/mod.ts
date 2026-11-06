@@ -128,7 +128,7 @@ export const anyhost = defineMod({
       let drawn = ''
       const timer = mod.every(FOLLOW_MS, async () => {
         const holder = await askProgram<Holder>(mod, `/claims/${session}`).catch((error: unknown) => {
-          mod.log(`anyhost could not follow the move of ${session}: ${messageOf(error)}`)
+          mod.log(`anyhost could not follow the move of ${session}: ${messageOf(error)}`, { level: 'warning' })
           return undefined
         })
         // a failed ask is asked again at the next tick
