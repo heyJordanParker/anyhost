@@ -237,8 +237,9 @@ const script = (path: string, text: string): string => {
 // A machine's folders, its relay login, the cmod that answers its device token and options, and the Claude Code that
 // runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen, prints the
 // terminal's size at its start, clears the screen and prints it again at each SIGWINCH, as Claude Code repaints,
-// prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view.
-function machineFor(relay: MemoryRelay, device: Device, isHost: boolean): { readonly env: Record<string, string>; readonly socket: string } {
+// prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
+// when its terminal closes. `stopped` in the machine's folder stops the session: `claude agents` lists it no more.
+function machineFor(relay: MemoryRelay, device: Device, isHost: boolean): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
   const folder = temporaryFolder()
   const home = join(folder, 'home')
   mkdirSync(join(folder, 'tmp'), { recursive: true })
@@ -260,12 +261,12 @@ function machineFor(relay: MemoryRelay, device: Device, isHost: boolean): { read
       join(folder, 'bin', 'claude'),
       `#!/bin/bash
 case "$1" in
-  agents) printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
+  agents) [ -e '${join(folder, 'stopped')}' ] && printf '[]' || printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
   attach)
     printf '\\033[?1049h'
     trap 'printf "\\033[2J"; echo "size $(stty size)"' WINCH
     echo "size $(stty size)"
-    while :; do IFS= read -r line && { [ "$line" = leave ] && exit 0; echo "typed $line"; }; done ;;
+    while IFS= read -r line; do [ "$line" = leave ] && exit 0; echo "typed $line"; done ;;
   *) exit 2 ;;
 esac
 `,
@@ -275,11 +276,11 @@ esac
   script(join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'), `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") printf '{"person":{}}' ;;\n  *) exit 1 ;;\nesac\n`)
   mkdirSync(join(env.XDG_STATE_HOME, 'anyhost'), { recursive: true })
   writeFileSync(join(env.XDG_STATE_HOME, 'anyhost', 'relay.json'), JSON.stringify({ url: relay.url }))
-  return { env, socket: join(env.XDG_STATE_HOME, 'anyhost', 'serve.sock') }
+  return { env, socket: join(env.XDG_STATE_HOME, 'anyhost', 'serve.sock'), folder }
 }
 
-// Runs `anyhost serve` on the machine and answers the first line it printed.
-async function serveOn(env: Record<string, string>): Promise<string> {
+// Runs `anyhost serve` on the machine and answers the first line it printed, and the program.
+async function serveOn(env: Record<string, string>): Promise<{ readonly address: string; readonly child: Subprocess }> {
   const child = Bun.spawn(['bun', CLI, 'serve'], { env, stdout: 'pipe', stderr: 'inherit' })
   children.push(child)
   const reader = child.stdout.getReader()
@@ -290,7 +291,7 @@ async function serveOn(env: Record<string, string>): Promise<string> {
     printed += decoder.decode(value)
   }
   reader.releaseLock()
-  return printed.slice(0, printed.indexOf('\n'))
+  return { address: printed.slice(0, printed.indexOf('\n')), child }
 }
 
 async function waitFor(what: string, isTrue: () => boolean, ms = 15_000): Promise<void> {
@@ -303,9 +304,10 @@ async function viewerOn(relay: MemoryRelay, device: Device, size: { cols: number
   await welcomed(client)
   const id = Math.floor(Math.random() * 2 ** 32)
   const stream = opens()
-  const seen = { shown: '', states: [] as string[], attached: [] as unknown[] }
+  const seen = { shown: '', states: [] as string[], attached: [] as unknown[], exits: [] as string[] }
   stream.on('output', (bytes) => void (seen.shown += decoder.decode(bytes)))
   stream.on('state', ({ status }) => void seen.states.push(status))
+  stream.on('exit', ({ message }) => void seen.exits.push(message))
   client.on('attached', (message) => {
     if (message.stream !== id) return
     seen.attached.push(message)
@@ -319,7 +321,8 @@ async function viewerOn(relay: MemoryRelay, device: Device, size: { cols: number
 test('serve answers at unix:<its state folder>/serve.sock, and two viewers of one session draw it at the smaller size of the two', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
-  expect(await serveOn(host.env)).toBe(`unix:${host.socket}`)
+  const served = await serveOn(host.env)
+  expect(served.address).toBe(`unix:${host.socket}`)
   const status = (await (await fetch('http://localhost/status', { unix: host.socket })).json()) as { device: Device }
   expect(status.device).toEqual(HOST)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
@@ -353,6 +356,13 @@ test('serve answers at unix:<its state folder>/serve.sock, and two viewers of on
   // a viewer that leaves counts no more, and the one left gets the whole of its own size
   small.client.send({ t: 'detach', stream: small.id })
   await waitFor('the larger viewer\'s size', () => large.seen.shown.includes('size 40 120'))
+
+  // a stopped program leaves no claude attach of its own behind
+  const attaches = (): string => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()
+  expect(attaches()).not.toBe('')
+  served.child.kill('SIGTERM')
+  await served.child.exited
+  await waitFor('no claude attach left', () => attaches() === '')
 })
 
 test('anyhost attach on another machine and on the host share the host\'s one claude attach, at the smaller size', async () => {
@@ -388,6 +398,37 @@ test('anyhost attach on another machine and on the host share the host\'s one cl
   here.close()
 })
 
+test('a session that stops running ends its claude attach at once, and its viewer with the reason', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
+  await waitFor('the session\'s status', () => viewer.seen.states.includes('busy'))
+  // the session stops, and Claude Code's record of it changes
+  writeFileSync(join(host.folder, 'stopped'), '')
+  writeFileSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', '1.json'), '{}')
+  await waitFor('the viewer\'s end', () => viewer.seen.exits.length > 0)
+  expect(viewer.seen.exits).toEqual([`The session ${SESSION} stopped running on ${HOST.name}.`])
+  await waitFor('no claude attach left', () => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim() === '')
+})
+
+test('a claude attach a signal ended, as its session\'s scope stopping ends it, is not started again', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
+  // `claude agents` still lists the session, as for a moment after its scope stopped
+  const attaches = (): string => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()
+  Bun.spawnSync(['pkill', '-TERM', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`])
+  await waitFor('the viewer\'s end', () => viewer.seen.exits.length > 0)
+  expect(viewer.seen.exits).toEqual([`The session ${SESSION} stopped running on ${HOST.name}.`])
+  expect(attaches()).toBe('')
+})
+
 test('anyhost attach on the host shows a session its Claude Code runs while the relay is down', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
@@ -400,6 +441,13 @@ test('anyhost attach on the host shows a session its Claude Code runs while the 
   await waitFor('the session on the host\'s terminal', () => shown.includes('size 22 72'))
   terminal.write('no relay\r')
   await waitFor('the typed line', () => shown.includes('typed no relay'))
+  // the session stops once the host read it listed, 200 ms after it started showing it: anyhost attach says why,
+  // gives the terminal back as it was, and ends
+  await Bun.sleep(1000)
+  writeFileSync(join(host.folder, 'stopped'), '')
+  writeFileSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', '1.json'), '{}')
+  expect(await attach.exited).toBe(0)
+  await waitFor('the reset and the reason', () => shown.includes('\x1b[?1049l\x1b[?25h') && shown.includes(`The session ${SESSION} stopped running on ${HOST.name}.`))
   terminal.close()
 })
 

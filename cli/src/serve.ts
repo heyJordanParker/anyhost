@@ -1,9 +1,9 @@
-import type { ServerWebSocket } from 'bun'
+import type { ServerWebSocket, Subprocess } from 'bun'
 import { rmSync, watch } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { encodeStream, streamOf, type Routed } from '../../relay/protocol.ts'
-import { attachTerminal, personEnvironment, runningSessions, startInBackground, type AttachedTerminal } from './background.ts'
+import { attachTerminal, keptSessions, personEnvironment, runningSessions, startInBackground, type AttachedTerminal } from './background.ts'
 import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
 import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
@@ -56,7 +56,7 @@ export type Status = {
   readonly capturedAt: string
   readonly problems: readonly string[]
   // why Claude Code starts with the program's own environment, not the person's shell's, until the program restarts
-  readonly shell?: string
+  readonly shellProblem?: string
   // the Connect Cloudflare the mod's Step started, while the program runs
   readonly connecting?: Connecting
 }
@@ -176,7 +176,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   const heartbeat = join(stateFolder(), 'heartbeat')
   const watched = new Set<string>()
   const current = new Map<string, string>()
-  let shell: string | undefined
+  let shellProblem: string | undefined
   let capturedAt = ''
   let lastIndex = ''
 
@@ -318,7 +318,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       uploadEvery: queue.uploadEvery,
       capturedAt,
       problems: [...current.values()],
-      ...(shell === undefined ? {} : { shell }),
+      ...(shellProblem === undefined ? {} : { shellProblem }),
       ...(connecting === undefined ? {} : { connecting: connecting.view }),
     }
   }
@@ -374,11 +374,22 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   // `carrier` reaches the viewer: through the relay, or the WebSocket of an `anyhost attach` on this machine.
   type Carrier = { readonly attached: () => void; readonly link: Link; readonly isRelay: boolean }
   type Viewer = { readonly session: string; readonly stream: Stream; size: Size; isLinked: boolean; carrier: Carrier; forget?: ReturnType<typeof setTimeout> }
-  // `cleared` runs at the next screen Claude Code clears, while a redraw waits for it
-  type Shown = { terminal: AttachedTerminal; size: Size; isAlternateScreen: boolean; state: SessionState; cleared?: (() => void) | undefined }
+  // `cleared` runs at the next screen Claude Code clears, while a redraw waits for it. `isListed` says `claude agents
+  // --json` listed the session running since this program showed it, as a stopped one it opens is not at first.
+  type Shown = { terminal: AttachedTerminal; size: Size; isAlternateScreen: boolean; state: SessionState; isListed: boolean; cleared?: (() => void) | undefined }
   const viewers = new Map<number, Viewer>()
   const shown = new Map<string, Promise<Shown>>()
+  // Every `claude attach` this program runs. Bun's terminal gives them no controlling terminal, so no hangup ends them
+  // when this program goes, and a stopped program closes each first, then ends by the signal that stopped it.
+  const terminals = new Set<AttachedTerminal>()
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
+    process.once(signal, () => {
+      for (const terminal of terminals) terminal.close()
+      process.kill(process.pid, signal)
+    })
+  }
   const viewersOf = (session: string): Viewer[] => [...viewers.values()].filter((viewer) => viewer.session === session)
+  const stoppedOn = (session: string): string => `The session ${session} stopped running on ${device.name}.`
   const throughRelayTo = (stream: number): Carrier => ({
     attached: () => void relay.send({ t: 'attached', stream, port: 0, addresses: [] }),
     link: { send: (frame) => void relay.send(encodeStream(stream, frame)) },
@@ -386,7 +397,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   })
   // the environment Claude Code starts with, the person's own, read once at the program's start
   const environment = personEnvironment().then(({ environment: found, problem }) => {
-    shell = problem
+    shellProblem = problem
     return found
   })
   const fit = (session: string, view: Shown): boolean => {
@@ -412,14 +423,16 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     view.cleared = back
     view.terminal.resize(view.size.cols, view.size.rows - 1)
   }
-  // The id `claude attach` takes for a session this machine holds, and the folder it runs in, started in Claude Code's
-  // background when it does not run, in the folder this machine knows it in.
+  // The id `claude attach` takes for a session this machine holds, and the folder it runs in. A background session
+  // Claude Code ran here, running or stopped, opens with `claude attach`, which starts a stopped one again under its own
+  // id, as `claude --bg --resume` would start a copy of it under a new one. Any other starts in Claude Code's
+  // background, in the folder this machine knows it in.
   const runHere = async (session: string): Promise<{ readonly id: string; readonly cwd: string }> => {
     const holder = journalOf(capture.db, session)?.holder ?? ''
     if (holder !== '') throw new Error(`The session ${session} continues on ${holder}.`)
-    const running = (await runningSessions()).find((entry) => entry.sessionId === session)
-    if (running?.kind === 'interactive') throw new Error(`${device.name} runs the session ${session} in a terminal of its own, so only that terminal shows it.`)
-    if (running?.id !== undefined) return { id: running.id, cwd: running.cwd }
+    const kept = (await keptSessions()).find((entry) => entry.sessionId === session)
+    if (kept?.kind === 'interactive') throw new Error(`${device.name} runs the session ${session} in a terminal of its own, so only that terminal shows it.`)
+    if (kept?.id !== undefined) return { id: kept.id, cwd: kept.cwd }
     const cwd = capture.db.query<{ cwd: string }, [string]>('select cwd from sessions where id = ?').get(session)?.cwd ?? ''
     if (cwd === '') throw new Error(`${device.name} knows no folder of the session ${session}, so it cannot start it.`)
     return { id: await startInBackground(session, cwd, await environment), cwd }
@@ -452,17 +465,22 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
         pending.push(bytes)
         flush ??= setTimeout(send, OUTPUT_MS)
       })
-      void terminal.exited.then(() => ended(started))
+      terminals.add(terminal)
+      void terminal.exited.then((signal) => {
+        terminals.delete(terminal)
+        return ended(started, signal)
+      })
       return terminal
     }
-    // `claude attach` ends when a viewer leaves Claude Code's agents view, which `←` opens, or when the session ends.
-    // While the session runs, this program starts a new one, which paints the whole screen for every viewer, so no
-    // viewer's keys end the others'.
-    const ended = async (started: number): Promise<void> => {
+    // `claude attach` ends by itself when a viewer leaves Claude Code's agents view, which `←` opens, or when the
+    // session ends. While the session runs, this program starts a new one, which paints the whole screen for every
+    // viewer, so no viewer's keys end the others'. One a signal ended was stopped from outside, as with the session's
+    // scope, while `claude agents` may still list the session for a moment, so it is not started again.
+    const ended = async (started: number, signal: Subprocess['signalCode']): Promise<void> => {
       send()
       if (!isCurrent()) return
       const current = await view
-      const running = (await runningSessions().catch(() => [])).find((entry) => entry.sessionId === session && entry.id !== undefined)
+      const running = signal === null ? (await runningSessions().catch(() => [])).find((entry) => entry.sessionId === session && entry.id !== undefined) : undefined
       if (!isCurrent()) return
       quickEnds = Date.now() - started < QUICK_END_MS ? quickEnds + 1 : 0
       if (running?.id !== undefined && quickEnds < QUICK_ENDS) {
@@ -472,9 +490,9 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
         return
       }
       shown.delete(session)
-      const message = running === undefined ? '' : `claude attach ${running.id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.`
-      if (message !== '') console.error(`${new Date().toISOString()} ${message}`)
-      for (const viewer of viewersOf(session)) viewer.stream.write('exit', { code: message === '' ? 0 : 1, message })
+      const message = running === undefined ? stoppedOn(session) : `claude attach ${running.id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.`
+      console.error(`${new Date().toISOString()} ${message}`)
+      for (const viewer of viewersOf(session)) viewer.stream.write('exit', { code: running === undefined ? 0 : 1, message })
     }
     const view = (async (): Promise<Shown> => {
       const { id, cwd } = await runHere(session)
@@ -482,7 +500,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       // a running session has its record in `sessions/`, so the folder is there to watch
       watchStates()
       statesChanged()
-      return { terminal, size, isAlternateScreen: false, state: { session, status: 'unknown' } }
+      return { terminal, size, isAlternateScreen: false, state: { session, status: 'unknown' }, isListed: false }
     })()
     shown.set(session, view)
     view.catch(() => {
@@ -562,13 +580,25 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     if (running === undefined) return
     problems.clear('claude agents')
     for (const [session, showing] of shown) {
-      const status = running.find((entry) => entry.sessionId === session)?.status ?? 'unknown'
+      const entry = running.find((listed) => listed.sessionId === session)
       void showing.then((view) => {
+        if (entry === undefined && view.isListed) return stoppedRunning(session, showing, view)
+        view.isListed ||= entry !== undefined
+        const status = entry?.status ?? 'unknown'
         if (view.state.status === status) return
         view.state = { session, status }
         for (const viewer of viewersOf(session)) viewer.stream.write('state', view.state)
       }, () => undefined)
     }
+  }
+  // A session that stopped running here, as when its daemon went, ends its `claude attach` at once. That one would
+  // otherwise start a daemon of its own within seconds, which starts again every session the last one ran.
+  const stoppedRunning = (session: string, showing: Promise<Shown>, view: Shown): void => {
+    if (shown.get(session) !== showing) return
+    shown.delete(session)
+    view.terminal.close()
+    console.error(`${new Date().toISOString()} ${stoppedOn(session)}`)
+    for (const viewer of viewersOf(session)) viewer.stream.write('exit', { code: 0, message: stoppedOn(session) })
   }
 
   // Each `anyhost attach` on this machine. Its first text message is its attach, and so is each later one, with the

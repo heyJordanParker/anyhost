@@ -1,6 +1,7 @@
 // Claude Code's background sessions on this machine. Claude Code's daemon runs each one in a terminal of its own, so the
 // session outlives anyhost and every viewer, and `claude attach <id>` shows it in any terminal, `id` being the first 8
 // characters of the session's id.
+import type { Subprocess } from 'bun'
 
 // A service gets the person's Claude Code in CLAUDE_CODE_EXECPATH, which cmod sets, and a command finds it on PATH.
 const claude = (): string => process.env['CLAUDE_CODE_EXECPATH'] || 'claude'
@@ -29,9 +30,10 @@ async function loginShell(): Promise<string> {
   return shell
 }
 
-// A session Claude Code runs here, as `claude agents --json` lists it. Only a background session has `id`.
+// A session Claude Code runs here, as `claude agents --json` lists it, or a background session it ran, as `--all` adds
+// it. Only a background session has `id`, and only a running one `pid`.
 export type RunningSession = {
-  readonly pid: number
+  readonly pid?: number
   readonly id?: string
   readonly sessionId: string
   readonly kind: 'background' | 'interactive'
@@ -41,11 +43,12 @@ export type RunningSession = {
 }
 
 // `claude attach` under a terminal of this program's. Bun's terminal gives its child no controlling terminal, so a
-// resize signals nobody, and `resize` sends the child SIGWINCH itself (worker-spec W2).
+// resize signals nobody, and `resize` sends the child SIGWINCH itself (worker-spec W2). `exited` answers the signal
+// that ended it, or null when it ended by itself.
 export type AttachedTerminal = {
   write(bytes: Uint8Array): void
   resize(cols: number, rows: number): void
-  readonly exited: Promise<number>
+  readonly exited: Promise<Subprocess['signalCode']>
   close(): void
 }
 
@@ -57,6 +60,10 @@ async function run(argv: readonly string[], options: { readonly cwd?: string; re
 }
 
 export const runningSessions = async (): Promise<RunningSession[]> => JSON.parse(await run([claude(), 'agents', '--json'])) as RunningSession[]
+
+// The running sessions and every background session Claude Code ran here and keeps, stopped, done or failed. `claude
+// attach <id>` opens a stopped one again under its own id, where `claude --bg --resume` would start a copy of it.
+export const keptSessions = async (): Promise<RunningSession[]> => JSON.parse(await run([claude(), 'agents', '--json', '--all'])) as RunningSession[]
 
 const ownEnvironment = (): Record<string, string> => Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
 
@@ -124,34 +131,43 @@ async function between(stream: ReadableStream<Uint8Array>, mark: string): Promis
   return undefined
 }
 
+// On Linux every Claude Code process this program starts runs in a systemd scope of its own, because systemd stops
+// every process of a service's cgroup when the service restarts, and Claude Code's daemon, which the first background
+// session or a `claude attach` that finds no daemon starts, would go with it (worker-spec W5). systemd-run runs the
+// command itself in the scope, so its process is the command's. A scope `partOf` another stops when that one stops.
+const inScope = (unit: string, command: readonly string[], partOf?: string): string[] =>
+  process.platform === 'linux' && Bun.which('systemd-run') !== null
+    ? ['systemd-run', '--user', '--scope', '--quiet', '--collect', ...(partOf === undefined ? [] : ['-p', `PartOf=${partOf}`]), '--unit', unit, ...command]
+    : [...command]
+const sessionScope = (id: string): string => `anyhost-claude-${id}.scope`
+
 // Starts the session in Claude Code's background in `cwd`, the folder it continues in, and answers the id `claude
-// attach` takes. On Linux it starts in a systemd scope of its own, because systemd stops every process of a service's
-// cgroup when the service restarts, and Claude Code's daemon, which the first background session starts, would go
-// with it (worker-spec W5). A scope of that name that is still there holds the daemon, which a bare start reaches.
+// attach` takes. A scope of that name that is still there holds the daemon, which a bare start reaches.
 export async function startInBackground(session: string, cwd: string, env: Record<string, string>): Promise<string> {
   const id = session.slice(0, 8)
   const command = [claude(), '--bg', '--resume', session]
-  if (process.platform !== 'linux' || Bun.which('systemd-run') === null) await run(command, { cwd, env })
-  else {
-    await run(['systemd-run', '--user', '--scope', '--quiet', '--collect', '--unit', `anyhost-claude-${id}`, ...command], { cwd, env }).catch(async (error: unknown) => {
-      if (!String(error).includes('already loaded')) throw error
-      await run(command, { cwd, env })
-    })
-  }
+  await run(inScope(sessionScope(id), command), { cwd, env }).catch(async (error: unknown) => {
+    if (!String(error).includes('already loaded')) throw error
+    await run(command, { cwd, env })
+  })
   return id
 }
 
+// Each `claude attach` gets a scope of a new name, as the scope of an earlier one stays while a daemon it started runs,
+// and its scope stops with the session's. A `claude attach` whose daemon went starts a new one within seconds, which
+// starts again every session the last one ran, so the session's scope stopping takes it down at the same moment.
 export function attachTerminal(id: string, cwd: string, env: Record<string, string>, { cols, rows }: { readonly cols: number; readonly rows: number }, onOutput: (bytes: Uint8Array) => void): AttachedTerminal {
   const terminal = new Bun.Terminal({ cols, rows, name: 'xterm-256color', data: (_terminal, bytes) => onOutput(bytes) })
+  const command = inScope(`anyhost-attach-${id}-${crypto.randomUUID().slice(0, 8)}.scope`, [claude(), 'attach', id], sessionScope(id))
   // Claude Code draws truecolor for a terminal that says it takes it, as the viewer's does
-  const child = Bun.spawn([claude(), 'attach', id], { cwd, terminal, env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } })
+  const child = Bun.spawn(command, { cwd, terminal, env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } })
   return {
     write: (bytes) => void terminal.write(bytes),
     resize(columns, lines) {
       terminal.resize(columns, lines)
       child.kill('SIGWINCH')
     },
-    exited: child.exited.finally(() => terminal.close()),
+    exited: child.exited.then(() => child.signalCode).finally(() => terminal.close()),
     close: () => child.kill(),
   }
 }

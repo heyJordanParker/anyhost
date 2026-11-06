@@ -14,6 +14,12 @@ const HERDR_STATES: Readonly<Record<string, string>> = { busy: 'working', waitin
 
 const sizeHere = (): Size => ({ cols: process.stdout.columns ?? 80, rows: process.stdout.rows ?? 24 })
 
+// The terminal modes Claude Code sets, off again: the alternate screen, a hidden cursor, the modes Claude Code's
+// daemon records for a session (bracketed paste, color scheme reports, focus, mouse), the kitty keyboard flags it pushes
+// and modifyOtherKeys. Claude Code turns them off as its own `claude attach` ends, which a viewer whose session ended
+// on the host never sees.
+const RESET_TERMINAL = '\x1b[?1049l\x1b[?25h\x1b[?2004l\x1b[?2031l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[<u\x1b[>4m\x1b[0m'
+
 // herdr knows the agent of a pane by its foreground program, which is anyhost here, so each state the host sends is
 // reported for the pane, with the command that shows the session again after herdr restarts.
 async function reportToHerdr(session: string, status: string): Promise<string | undefined> {
@@ -46,6 +52,7 @@ export function attach(asked: string): Promise<number> {
       clearTimeout(retry)
       frames.close()
       socket?.close()
+      if (wasAttached) process.stdout.write(RESET_TERMINAL)
       if (process.stdin.isTTY) process.stdin.setRawMode(false)
       process.stdin.pause()
       for (const problem of [...problems, ...(message === '' ? [] : [message])]) console.error(problem)
@@ -95,6 +102,8 @@ export function attach(asked: string): Promise<number> {
     frames.on('lost', (why) => finish(1, why))
     if (process.stdin.isTTY) process.stdin.setRawMode(true)
     process.stdin.on('data', (chunk: Buffer) => frames.write('input', new Uint8Array(chunk)))
+    // a terminal that closed ends its input, and the viewer with it
+    process.stdin.on('end', () => finish(0))
     process.stdout.on('resize', () => frames.write('resize', sizeHere()))
     connect()
   })
