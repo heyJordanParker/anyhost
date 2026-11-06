@@ -1,8 +1,7 @@
 // The pane's side of a session: `anyhost attach <session>` shows it in this terminal and types into it, as if it ran
-// here. A session Claude Code runs in this machine's background opens with `claude attach` in this terminal. Any other
-// streams through this machine's program, which reaches the machine that holds the session, and attaches again by
-// itself after the link or either machine's program went away, until the session's `claude attach` ends there.
-import { runningSessions } from './background.ts'
+// here. It streams through this machine's program, which shows a session this machine holds itself and reaches the
+// machine that holds any other, so every viewer of a session shares its one `claude attach` there. It attaches again by
+// itself after the link or either machine's program went away, until that `claude attach` ends for good.
 import { serveSocket } from './serve.ts'
 import { openStream, type Size } from './stream.ts'
 
@@ -15,8 +14,6 @@ const HERDR_STATES: Readonly<Record<string, string>> = { busy: 'working', waitin
 
 const sizeHere = (): Size => ({ cols: process.stdout.columns ?? 80, rows: process.stdout.rows ?? 24 })
 
-const attachHere = async (session: string): Promise<number> => await Bun.spawn(['claude', 'attach', session.slice(0, 8)], { stdio: ['inherit', 'inherit', 'inherit'] }).exited
-
 // herdr knows the agent of a pane by its foreground program, which is anyhost here, so each state the host sends is
 // reported for the pane, with the command that shows the session again after herdr restarts.
 async function reportToHerdr(session: string, status: string): Promise<string | undefined> {
@@ -28,8 +25,8 @@ async function reportToHerdr(session: string, status: string): Promise<string | 
   return code === 0 ? undefined : `herdr pane report-agent exited with ${code}: ${error.trim()}`
 }
 
-// Streams the session through this machine's program, whose WebSocket at /attach takes the attach and sends it on.
-function stream(asked: string): Promise<number> {
+// The session through this machine's program, whose WebSocket at /attach takes the attach.
+export function attach(asked: string): Promise<number> {
   const frames = openStream()
   const id = new DataView(crypto.getRandomValues(new Uint8Array(4)).buffer).getUint32(0)
   const key = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
@@ -42,8 +39,8 @@ function stream(asked: string): Promise<number> {
   let wasAttached = false
   let isDone = false
   return new Promise((resolve) => {
-    // ends the stream and gives the terminal back, then answers `code`, or what `then` answers once it ran in it
-    const finish = (code: number, message = '', then?: () => Promise<number>): void => {
+    // ends the stream, gives the terminal back and answers `code`
+    const finish = (code: number, message = ''): void => {
       if (isDone) return
       isDone = true
       clearTimeout(retry)
@@ -52,7 +49,7 @@ function stream(asked: string): Promise<number> {
       if (process.stdin.isTTY) process.stdin.setRawMode(false)
       process.stdin.pause()
       for (const problem of [...problems, ...(message === '' ? [] : [message])]) console.error(problem)
-      resolve(then === undefined ? code : then())
+      resolve(code)
     }
     const attachMessage = (): string => JSON.stringify({ t: 'attach', stream: id, session, ...sizeHere(), key })
     const again = (): void => {
@@ -74,13 +71,12 @@ function stream(asked: string): Promise<number> {
       ws.addEventListener('message', (event) => {
         if (socket !== ws) return
         if (typeof event.data !== 'string') return frames.receive(new Uint8Array(event.data as ArrayBuffer))
-        const message = JSON.parse(event.data) as { readonly t: string; readonly session?: string; readonly message?: string }
+        const message = JSON.parse(event.data) as { readonly t: string; readonly message?: string }
         if (message.t === 'attached') {
           wasAttached = true
           failures = 0
           frames.use({ send: (frame) => ws.send(frame) })
-        } else if (message.t === 'here') finish(0, '', () => attachHere(message.session ?? session))
-        else if (message.t === 'invalid') finish(1, message.message)
+        } else if (message.t === 'invalid') finish(1, message.message)
         // detach or offline: the link or the machine that holds the session is gone for now
         else again()
       })
@@ -102,11 +98,4 @@ function stream(asked: string): Promise<number> {
     process.stdout.on('resize', () => frames.write('resize', sizeHere()))
     connect()
   })
-}
-
-export async function attach(session: string): Promise<number> {
-  const running = (await runningSessions().catch(() => [])).find((entry) => entry.sessionId.startsWith(session))
-  if (running?.kind === 'interactive') throw new Error(`This machine runs the session ${running.sessionId} in a terminal of its own, so only that terminal shows it.`)
-  if (running?.id !== undefined) return await attachHere(running.sessionId)
-  return await stream(session)
 }

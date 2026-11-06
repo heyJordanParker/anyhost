@@ -236,8 +236,8 @@ const script = (path: string, text: string): string => {
 
 // A machine's folders, its relay login, the cmod that answers its device token and options, and the Claude Code that
 // runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen, prints the
-// terminal's size at its start, clears the screen and prints it again at each SIGWINCH, as Claude Code repaints, and
-// prints each line typed into it.
+// terminal's size at its start, clears the screen and prints it again at each SIGWINCH, as Claude Code repaints,
+// prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view.
 function machineFor(relay: MemoryRelay, device: Device, isHost: boolean): { readonly env: Record<string, string>; readonly socket: string } {
   const folder = temporaryFolder()
   const home = join(folder, 'home')
@@ -265,7 +265,7 @@ case "$1" in
     printf '\\033[?1049h'
     trap 'printf "\\033[2J"; echo "size $(stty size)"' WINCH
     echo "size $(stty size)"
-    while :; do IFS= read -r line && echo "typed $line"; done ;;
+    while :; do IFS= read -r line && { [ "$line" = leave ] && exit 0; echo "typed $line"; }; done ;;
   *) exit 2 ;;
 esac
 `,
@@ -343,12 +343,19 @@ test('serve answers at unix:<its state folder>/serve.sock, and two viewers of on
   large.stream.write('input', encoder.encode('from the mac\r'))
   await waitFor('the typed line on both', () => small.seen.shown.includes('typed from the mac') && large.seen.shown.includes('typed from the mac'))
 
+  // keys of one viewer that end `claude attach` while the session runs get every viewer a new one, which paints anew
+  const [smallBefore, largeBefore] = [small.seen.shown.length, large.seen.shown.length]
+  small.stream.write('input', encoder.encode('leave\r'))
+  await waitFor('a new claude attach on both', () => small.seen.shown.slice(smallBefore).includes('size 40 100') && large.seen.shown.slice(largeBefore).includes('size 40 100'))
+  large.stream.write('input', encoder.encode('still here\r'))
+  await waitFor('typing into the new one', () => small.seen.shown.includes('typed still here'))
+
   // a viewer that leaves counts no more, and the one left gets the whole of its own size
   small.client.send({ t: 'detach', stream: small.id })
   await waitFor('the larger viewer\'s size', () => large.seen.shown.includes('size 40 120'))
 })
 
-test('anyhost attach on another machine shows the session through its own program, and types and resizes into it', async () => {
+test('anyhost attach on another machine and on the host share the host\'s one claude attach, at the smaller size', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
   const viewer = machineFor(relay, VIEWER, false)
@@ -368,5 +375,44 @@ test('anyhost attach on another machine shows the session through its own progra
   attach.kill('SIGWINCH')
   await waitFor('the new size', () => shown.includes('size 20 70'))
   expect(shown).toContain('typed hello there')
+
+  // on the host itself, anyhost attach is one more viewer of the same claude attach, through the host's program
+  let shownHere = ''
+  const here = new Bun.Terminal({ cols: 60, rows: 18, data: (_terminal, bytes) => void (shownHere += decoder.decode(bytes)) })
+  const attachHere = Bun.spawn(['bun', CLI, 'attach', SESSION], { env: host.env, terminal: here })
+  children.push(attachHere)
+  await waitFor('the size both draw whole', () => shownHere.includes('size 18 60') && shown.includes('size 18 60'))
+  here.write('typed on the host\r')
+  await waitFor('the host\'s line on the other machine', () => shown.includes('typed typed on the host'))
   terminal.close()
+  here.close()
+})
+
+test('anyhost attach on the host shows a session its Claude Code runs while the relay is down', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  relay.stop()
+  await serveOn(host.env)
+  let shown = ''
+  const terminal = new Bun.Terminal({ cols: 72, rows: 22, data: (_terminal, bytes) => void (shown += decoder.decode(bytes)) })
+  const attach = Bun.spawn(['bun', CLI, 'attach', SESSION.slice(0, 8)], { env: host.env, terminal })
+  children.push(attach)
+  await waitFor('the session on the host\'s terminal', () => shown.includes('size 22 72'))
+  terminal.write('no relay\r')
+  await waitFor('the typed line', () => shown.includes('typed no relay'))
+  terminal.close()
+})
+
+test('a second serve on one state folder refuses to start, naming the one that runs, and a POST of no JSON answers 400', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  await serveOn(host.env)
+  const second = Bun.spawn(['bun', CLI, 'serve'], { env: host.env, stdout: 'pipe', stderr: 'pipe' })
+  children.push(second)
+  expect(await second.exited).toBe(1)
+  expect(await new Response(second.stderr).text()).toContain(`The anyhost program of ${HOST.name} already answers at ${host.socket}, so this one does not start.`)
+  // the first one still answers
+  const answer = await fetch('http://localhost/machines/invite', { unix: host.socket, method: 'POST', body: 'not json' })
+  expect(answer.status).toBe(400)
+  expect(((await answer.json()) as { message: string }).message).toStartWith('anyhost takes a JSON object at POST /machines/invite, and this body is none:')
 })
