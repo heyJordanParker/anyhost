@@ -849,28 +849,38 @@ export async function seal(capture: Capture, session: string): Promise<number> {
   return at
 }
 
-// The journal goes on from `at`, where its chain in R2 ends, with every file of the session whole, as a new session's
-// files go up from byte 0, and with every part of its code again, since a code header past `at` may name a part only
-// the lost frames held. Answers the session's files, for the upload queue.
-function captureAgainFrom(capture: Capture, session: string, tool: Tool, at: number): Set<string> {
-  const { db } = capture
+// The journal goes on from `at`, where its chain in R2 ends, short of the `end` this machine counted, as after R2 lost a
+// frame: with every file of the session whole, as a new session's files go up from byte 0, and with every part of its
+// code again, since a code header past `at` may name a part only the lost frames held. The warning a takeover left for
+// the session's next prompt stays. Answers the session's files, which the caller uploads. A session whose transcript
+// is gone here leaves the problem `journal <session>`, which names the span a restore lacks.
+export function captureAgainFrom(capture: Capture, session: string, tool: Tool, at: number, end: number, problems: Problems): Set<string> {
+  const { db, device, roots } = capture
   const paths = db
     .query<{ path: string }, [string]>('select path from files where session = ?')
     .all(session)
     .map(({ path }) => path)
     .filter((path) => !isCodePart(path) && !path.endsWith('/'))
+  const untold = db.query<{ untold: string }, [string]>('select untold from journals where session = ?').get(session)?.untold ?? ''
   continueJournal(db, { session, tool, end: at, sealed: at }, paths.map((path) => ({ session, path, journalSize: 0, localSize: 0, tail: new Uint8Array(), sha256: '', mtime: 0 })))
+  if (untold !== '') markUntold(db, session, untold)
   rmSync(join(dirname(db.filename), 'code', session), { recursive: true, force: true })
   capture.codeWaiting.delete(session)
+  const reached = `The journal of ${session} in R2 reaches byte ${at}, and ${device.name} counted ${end}`
+  const hasTranscript = paths.some((path) => {
+    const owner = ownerOf(path, roots)
+    return owner !== undefined && 'isTranscript' in owner && owner.isTranscript && existsSync(path)
+  })
+  if (hasTranscript) console.error(`${new Date().toISOString()} ${reached}, so it uploads the session's files whole again from byte ${at}.`)
+  else problems.set(`journal ${session}`, `${reached}, and holds no transcript of the session to upload again, so a restore of the session lacks what the journal held from byte ${at}.`)
   return new Set(paths)
 }
 
 // Seals every session quiet for QUIET_MS that this machine holds. A journal whose chain in R2 ends elsewhere than this
 // machine counted goes on from where the chain ends, with every file whole, once, so it is not read again each minute.
-// Answers the files of those sessions, for the upload queue. A session whose transcript is gone here leaves a problem
-// that names the span a restore lacks.
+// Answers the files of those sessions, for the upload queue.
 export async function sealQuiet(capture: Capture, problems: Problems, now = Date.now()): Promise<Map<string, Set<string>>> {
-  const { db, relay, device, roots } = capture
+  const { db, relay, device } = capture
   const quiet = db.query<{ session: string; tool: Tool; end: number }, [number]>("select session, tool, end from journals where stopped = '' and end > sealed and written_at < ?").all(now - QUIET_MS)
   const again = new Map<string, Set<string>>()
   for (const { session, tool, end } of quiet) {
@@ -880,19 +890,8 @@ export async function sealQuiet(capture: Capture, problems: Problems, now = Date
       if (claim?.status === 409) holdElsewhere(db, session, claim.holder.name, `${new Date().toISOString()} ${claim.holder.name} holds the session ${session}, so ${device.name} stops capturing it.`, tool)
       const at = claim?.status === 200 ? await seal(capture, session) : end
       problems.clear(`seal ${session}`)
-      if (at === end) {
-        db.query('update journals set sealed = ? where session = ?').run(at, session)
-        continue
-      }
-      const files = captureAgainFrom(capture, session, tool, at)
-      again.set(session, files)
-      const reached = `The journal of ${session} in R2 reaches byte ${at}, and ${device.name} counted ${end}`
-      const hasTranscript = [...files].some((path) => {
-        const owner = ownerOf(path, roots)
-        return owner !== undefined && 'isTranscript' in owner && owner.isTranscript && existsSync(path)
-      })
-      if (hasTranscript) console.error(`${new Date().toISOString()} ${reached}, so it uploads the session's files whole again from byte ${at}.`)
-      else problems.set(`seal ${session}`, `${reached}, and holds no transcript of the session to upload again, so a restore of the session lacks what the journal held from byte ${at}.`)
+      if (at === end) db.query('update journals set sealed = ? where session = ?').run(at, session)
+      else again.set(session, captureAgainFrom(capture, session, tool, at, end, problems))
     } catch (error) {
       problems.set(`seal ${session}`, error)
     }

@@ -845,6 +845,27 @@ test('a move waits for the turn to end, uploads and seals the session, the worke
   expect(await claimOn(laptop.socket)).toMatchObject({ machine: WORKER.name, move: { step: 'moved' } })
 }, 60_000)
 
+test('a move of a session whose first frame R2 lost uploads its files whole again, and the worker restores every byte', async () => {
+  const relay = memoryRelay()
+  const laptop = await runningOn(relay)
+  const hot = (): string[] => [...relay.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/hot/`))
+  writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Book the train"}}\n`, { flag: 'a' })
+  await waitFor('the second line uploading', () => relay.puts.some(({ key, body }) => key.includes('/hot/') && decoder.decode(decompress(body)).includes('Book the train')), 15_000)
+  relay.objects.delete(hotKey(SESSION, 0))
+  const worker = await workerOn(relay)
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(last.step).toBe('moved')
+  expect(hot()).toEqual([])
+  const workerHome = worker.env['HOME'] ?? ''
+  const workerCwd = join(workerHome, 'work')
+  const restored = readFileSync(join(workerHome, '.claude', 'projects', workerCwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`), 'utf8')
+  expect(restored).toBe(readFileSync(laptop.transcript, 'utf8').replaceAll(laptop.env['HOME'] ?? '', workerHome))
+  expect(readFileSync(join(workerCwd, 'notes.txt'), 'utf8')).toBe('the plan for the trip\n')
+}, 60_000)
+
 test('a move to a machine that is offline keeps the session running here, with its claim', async () => {
   const relay = memoryRelay()
   const laptop = await runningOn(relay)

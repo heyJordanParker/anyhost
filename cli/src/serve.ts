@@ -65,6 +65,9 @@ export type Status = {
   readonly uploadEvery: number
   readonly capturedAt: string
   readonly problems: readonly string[]
+  // each span of a session's journal R2 lost while this machine had no transcript of the session to upload again, which
+  // no try brings back, until the program restarts
+  readonly journalGaps: readonly string[]
   // why Claude Code starts with the program's own environment, not the person's shell's, until the program restarts
   readonly shellProblem?: string
   // why macOS refused the last anyhost attach here a dial to the local network, until one goes through
@@ -369,7 +372,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       pending: queue.pending,
       uploadEvery: queue.uploadEvery,
       capturedAt,
-      problems: [...current.values()],
+      problems: [...current].filter(([key]) => !key.startsWith('journal ')).map(([, line]) => line),
+      journalGaps: [...current].filter(([key]) => key.startsWith('journal ')).map(([, line]) => line),
       ...(shellProblem === undefined ? {} : { shellProblem }),
       ...(localNetworkProblem === undefined ? {} : { localNetworkProblem }),
       ...(connecting === undefined ? {} : { connecting: connecting.view }),

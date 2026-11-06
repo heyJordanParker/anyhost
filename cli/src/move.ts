@@ -9,7 +9,7 @@ import { mkdir, readdir, realpath, rename, rm, rmdir, stat, writeFile } from 'no
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Delivered, Offline, Routed } from '../../relay/protocol.ts'
 import { attachTerminal, keptSessions, run, runningSessions, startInBackground, stopInBackground, type RunningSession } from './background.ts'
-import { changedFiles, checkoutOf, holdHere, journalOf, seal, startCode, writeIndex, type Capture, type Problems } from './capture.ts'
+import { captureAgainFrom, changedFiles, checkoutOf, holdHere, journalOf, seal, startCode, writeIndex, type Capture, type Problems } from './capture.ts'
 import { HeldElsewhere, takeClaim } from './claims.ts'
 import { devicesOf, machinesOf } from './device.ts'
 import type { Relay } from './relay.ts'
@@ -280,34 +280,47 @@ async function trustHere(capture: Capture, cwd: string, from: string): Promise<v
 }
 
 // Every file of the session up, its working folder's code read once more and up, and its journal sealed, so the
-// machine it goes to restores all of it.
+// machine it goes to restores all of it. A journal whose chain in R2 ends short of the end this machine counted, as
+// after R2 lost a frame, goes on from there with every file whole, as `sealQuiet` does, and is sealed again. A journal
+// still short after that fails the move, as the other machine would restore the session without the lost span.
 async function upload(capture: Capture, session: string, tool: Tool, here: MoveHere): Promise<void> {
-  for (const [changed, paths] of await changedFiles(capture)) if (changed === session) for (const path of paths) here.queue(session, tool, path)
-  await here.flush(session)
-  let failure: unknown
-  const reading: Problems = {
-    set(key, error) {
-      failure = error
-      here.problems.set(key, error)
-    },
-    clear: (key) => here.problems.clear(key),
+  // the paths up, then the working folder's code read once more and up
+  const send = async (paths: Iterable<string>): Promise<void> => {
+    for (const path of paths) here.queue(session, tool, path)
+    await here.flush(session)
+    let failure: unknown
+    const reading: Problems = {
+      set(key, error) {
+        failure = error
+        here.problems.set(key, error)
+      },
+      clear: (key) => here.problems.clear(key),
+    }
+    let isRead = false
+    for (;;) {
+      const running = capture.codeRuns.get(session)
+      const waiting = capture.codeWaiting.get(session)
+      if (running !== undefined) await running
+      else if (waiting !== undefined) {
+        here.queue(session, tool, `${waiting.folder}/`)
+        await here.flush(session)
+      } else if (!isRead || capture.codeStale.has(session)) {
+        isRead = true
+        startCode(capture, session, tool, reading)
+        if (!capture.codeRuns.has(session)) break
+      } else break
+      if (failure !== undefined) throw new Error(`anyhost could not read the code of ${session.slice(0, 8)}: ${messageOf(failure)}`)
+    }
   }
-  let isRead = false
-  for (;;) {
-    const running = capture.codeRuns.get(session)
-    const waiting = capture.codeWaiting.get(session)
-    if (running !== undefined) await running
-    else if (waiting !== undefined) {
-      here.queue(session, tool, `${waiting.folder}/`)
-      await here.flush(session)
-    } else if (!isRead || capture.codeStale.has(session)) {
-      isRead = true
-      startCode(capture, session, tool, reading)
-      if (!capture.codeRuns.has(session)) break
-    } else break
-    if (failure !== undefined) throw new Error(`anyhost could not read the code of ${session.slice(0, 8)}: ${messageOf(failure)}`)
+  await send((await changedFiles(capture)).get(session) ?? [])
+  const end = journalOf(capture.db, session)?.end ?? 0
+  const at = await seal(capture, session)
+  if (at !== end) {
+    await send(captureAgainFrom(capture, session, tool, at, end, here.problems))
+    const healed = journalOf(capture.db, session)?.end ?? 0
+    const again = await seal(capture, session)
+    if (again !== healed) throw new Error(`the journal of ${session} in R2 reaches byte ${again} after ${capture.device.name} uploaded its files again from byte ${at}, and it counted ${healed}`)
   }
-  await seal(capture, session)
   // the machine it goes to finds the session and its folder in this machine's index
   await writeIndex(capture)
 }

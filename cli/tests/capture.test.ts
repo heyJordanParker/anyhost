@@ -5,8 +5,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import {
-  changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, hotKey, isCodePart, journalOf, openCapture, openDatabase, QUIET_MS, seal, sealQuiet, sessionsOf,
-  startLineOffsets, uploadSession, uploadSessions, type Problems, type RecordHeader,
+  changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, hotKey, isCodePart, journalOf, markUntold, openCapture, openDatabase, QUIET_MS, seal, sealQuiet, sessionsOf,
+  startLineOffsets, takeUntold, uploadSession, uploadSessions, type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
@@ -636,11 +636,23 @@ test('a journal R2 lost a frame of, whose transcript is gone here, names the los
 
   expect((await sealQuiet(capture, recording, quiet)).get(SESSION)).toContain(toolResult)
   expect(problems).toEqual([
-    `seal ${SESSION}: The journal of ${SESSION} in R2 reaches byte ${lostAt}, and anyhost-a counted ${end}, and holds no transcript of the session to upload again, so a restore of the session lacks what the journal held from byte ${lostAt}.`,
+    `journal ${SESSION}: The journal of ${SESSION} in R2 reaches byte ${lostAt}, and anyhost-a counted ${end}, and holds no transcript of the session to upload again, so a restore of the session lacks what the journal held from byte ${lostAt}.`,
   ])
   const asked = relay.requests.length
   for (const minute of [1, 2, 3]) expect(await sealQuiet(capture, recording, quiet + minute * 60_000)).toEqual(new Map())
   expect([relay.requests.length, problems.length]).toEqual([asked, 1])
+})
+
+test('the repair of a journal R2 lost a frame of keeps the warning a takeover left for the next prompt', async () => {
+  const relay = memoryRelay()
+  const { capture, quiet } = await lostFrame(relay)
+  // this machine took the session from anyhost-b while anyhost-b had no connection to the relay
+  markUntold(capture.db, SESSION, 'anyhost-b')
+  const logged = spyOn(console, 'error').mockImplementation(() => undefined)
+
+  expect((await sealQuiet(capture, failTest, quiet)).has(SESSION)).toBe(true)
+  logged.mockRestore()
+  expect(takeUntold(capture.db, SESSION)).toBe('anyhost-b')
 })
 
 test('a lines file names the sessions that wrote new lines, and never the lines before the first start', async () => {

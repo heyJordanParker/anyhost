@@ -60,7 +60,12 @@ async function programChecks(): Promise<Check[]> {
     status.localNetworkProblem === undefined
       ? []
       : [{ problem: `${status.localNetworkProblem} Its stream goes through the relay, a few times slower.`, fix: 'Turn your terminal app on in System Settings > Privacy & Security > Local Network, then quit it and open it again. A tmux or herdr server keeps the access of the terminal app that started it, so start it again from there.' }]
-  return [connection, shell, ...localNetwork, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' }))]
+  // a program older than journalGaps answers none
+  const gaps = (status.journalGaps ?? []).map((problem): Check => ({
+    problem,
+    fix: "Put the session's transcript back at its path, as from a backup, and the program uploads it whole within an hour. Else a restore of the session goes on without that span. This line goes when the program restarts.",
+  }))
+  return [connection, shell, ...localNetwork, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' })), ...gaps]
 }
 
 export async function doctor(): Promise<number> {

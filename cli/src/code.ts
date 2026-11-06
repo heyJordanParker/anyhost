@@ -401,7 +401,9 @@ export async function captureCode(folder: string, session: string): Promise<Code
   const keep = repo.kind === 'repo' ? await keepCommits(repo, session, tips) : null
   const record = { session, kind: repo.kind, subfolder: repo.subfolder, ...refs, trees: { index: trees.index, worktree: trees.worktree }, conflicts: trees.conflicts, keep }
   const fingerprint = sha256(JSON.stringify([record, operation.map(([name, bytes]) => [name, sha256(bytes)])]))
-  if (recorded.get(session) === fingerprint) return undefined
+  // the journal holds this state already, unless anyhost forgot what the journal holds, as a repair of a journal R2 lost
+  // part of does, which needs every part and the header again
+  if (recorded.get(session) === fingerprint && (await exists(journaledPath(repo, session)))) return undefined
 
   const journaled = await journaledOf(repo, session)
   const held = new Set(journaled.parts)
