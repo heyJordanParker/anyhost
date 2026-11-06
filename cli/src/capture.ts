@@ -9,6 +9,7 @@ import { Database } from 'bun:sqlite'
 import { mkdirSync, rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type Listed } from '../../relay/protocol.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
@@ -168,8 +169,11 @@ export const sealedKey = (session: string, start: number, end: number): string =
 const C = zlib.constants
 // Every frame carries zstd's content checksum, so a damaged frame fails to decode instead of placing wrong bytes.
 export const compressHot = (body: Uint8Array): Uint8Array => zlib.zstdCompressSync(body, { params: { [C.ZSTD_c_compressionLevel]: 3, [C.ZSTD_c_checksumFlag]: 1 } })
-const compressSealed = (body: Uint8Array): Uint8Array =>
-  zlib.zstdCompressSync(body, { params: { [C.ZSTD_c_compressionLevel]: 9, [C.ZSTD_c_windowLog]: 27, [C.ZSTD_c_enableLongDistanceMatching]: 1, [C.ZSTD_c_checksumFlag]: 1 } })
+// A sealed frame compresses on libuv's thread pool: 64 MiB of transcript took 7.5 s at level 9 on the Architect's Mac,
+// and the program answers each prompt's /claims ask meanwhile.
+const zstdCompress = promisify(zlib.zstdCompress)
+const compressSealed = (body: Uint8Array): Promise<Uint8Array> =>
+  zstdCompress(body, { params: { [C.ZSTD_c_compressionLevel]: 9, [C.ZSTD_c_windowLog]: 27, [C.ZSTD_c_enableLongDistanceMatching]: 1, [C.ZSTD_c_checksumFlag]: 1 } })
 export const decompress = (frame: Uint8Array): Uint8Array => zlib.zstdDecompressSync(frame, { params: { [C.ZSTD_d_windowLogMax]: 27 } })
 
 export const encodeRecord = (header: RecordHeader, bytes: Uint8Array): Uint8Array[] => [new TextEncoder().encode(`${JSON.stringify(header)}\n`), bytes]
@@ -270,6 +274,12 @@ export function stopJournal(db: Database, session: string, tool: Tool, reason: s
 export function holdElsewhere(db: Database, session: string, holder: string, reason: string, tool: Tool = 'claude'): void {
   db.query(`insert into journals (session, tool, stopped, holder) values (?, ?, ?, ?)
     on conflict (session) do update set stopped = excluded.stopped, holder = excluded.holder`).run(session, tool, reason, holder)
+}
+
+// This machine took back a session another machine took a moment ago, as after a move that failed: it captures the
+// session again from its own journal's end, and the session's prompts go through.
+export function holdHere(db: Database, session: string): void {
+  db.query("update journals set stopped = '', holder = '' where session = ?").run(session)
 }
 
 // After a restore: this machine continues the journal from its end, with the files it placed.
@@ -727,7 +737,8 @@ function codeRecord(capture: Capture, session: string, path: string, bytes: Uint
 
 // Reads the working folder's code after the files' upload, never before it: what changed waits for the next drain. One
 // read runs per session, and none while the last one's records still go up; a change meanwhile reads it again after.
-function startCode(capture: Capture, session: string, tool: Tool, problems: Problems): void {
+// A move reads it once more, for a change nothing the session wrote names.
+export function startCode(capture: Capture, session: string, tool: Tool, problems: Problems): void {
   const folder = capture.db.query<{ cwd: string }, [string]>('select cwd from sessions where id = ?').get(session)?.cwd ?? ''
   if (folder === '') return
   if (capture.codeRuns.has(session) || capture.codeWaiting.has(session)) {
@@ -775,6 +786,8 @@ export async function changedFiles(capture: Capture): Promise<Map<string, Set<st
   for (const { session, path, local_size, mtime, sha256 } of rows) {
     // a code record is no file: a part only the journal holds, or a header at its working folder's path with a `/`
     if (linesFiles(capture.roots).has(path) || path === codexState(capture.roots) || isCodePart(path) || path.endsWith('/')) continue
+    // a file this program captures no more, such as the job record `jobs/<8 hex>/state.json` earlier versions captured
+    if (ownerOf(path, capture.roots) === undefined) continue
     const found = await stat(path).catch(() => undefined)
     const isGone = found === undefined && sha256 !== ''
     if (!isGone && (found === undefined || !found.isFile() || (found.size === local_size && found.mtimeMs === mtime))) continue
@@ -795,7 +808,7 @@ export async function seal(relay: Relay, session: string): Promise<number> {
   // a sealed frame already there holds these bytes, from a seal that failed before its delete
   const flush = async (): Promise<void> => {
     if (runBytes === 0) return
-    await relay.run([{ op: 'put', key: sealedKey(session, at, at + runBytes), bytes: compressSealed(Buffer.concat(run)), if: { none: '*' } }])[0]
+    await relay.run([{ op: 'put', key: sealedKey(session, at, at + runBytes), bytes: await compressSealed(Buffer.concat(run)), if: { none: '*' } }])[0]
     ;[at, run, runBytes] = [at + runBytes, [], 0]
   }
   for await (const { bytes } of chainOf(relay, hot, sealedEnd)) {

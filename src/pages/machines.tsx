@@ -40,7 +40,7 @@ const programs = new WeakMap<object, Program>()
 export const reachProgram = (mod: Mod<AnyhostState>, program: Program): void => void programs.set(mod, program)
 
 // One answer of the program, at the unix socket it listens on: a GET, or a POST of `body` as JSON.
-async function ask<T>(mod: Mod<AnyhostState>, path: string, body?: object): Promise<T> {
+export async function askProgram<T>(mod: Mod<AnyhostState>, path: string, body?: object): Promise<T> {
   const program = programs.get(mod)
   if (program === undefined) throw new Error('The anyhost mod has not started its program yet.')
   const { url, socketPath } = await program.ready()
@@ -67,7 +67,7 @@ function follow(mod: Mod<AnyhostState>): void {
   mod.state.memory.isFollowing = true
   const timer = mod.every(FOLLOW_MS, async () => {
     // a program that restarts answers at a later tick
-    const status = await ask<Status>(mod, '/status').catch((error: unknown) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`))
+    const status = await askProgram<Status>(mod, '/status').catch((error: unknown) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`))
     if (status === undefined) return
     const { connecting } = status
     mod.state.memory.connecting = connecting ?? null
@@ -79,13 +79,13 @@ function follow(mod: Mod<AnyhostState>): void {
 
 // Asks the program what a press on the Step asks, and shows the Connect Cloudflare it answers, or why it failed.
 async function connectAsk(mod: Mod<AnyhostState>, path: string, body: object): Promise<void> {
-  const answered = await ask<Connecting>(mod, path, body).catch((error: unknown): Connecting => ({ is: 'failed', lines: mod.state.memory.connecting?.lines ?? [], error: messageOf(error) }))
+  const answered = await askProgram<Connecting>(mod, path, body).catch((error: unknown): Connecting => ({ is: 'failed', lines: mod.state.memory.connecting?.lines ?? [], error: messageOf(error) }))
   mod.state.memory.connecting = answered
   if (answered.is === 'running') follow(mod)
 }
 
 async function joinWith(mod: Mod<AnyhostState>, link: string): Promise<void> {
-  mod.state.memory.joined = await ask<{ url: string }>(mod, '/join', { link }).catch((error: unknown) => ({ problem: messageOf(error) }))
+  mod.state.memory.joined = await askProgram<{ url: string }>(mod, '/join', { link }).catch((error: unknown) => ({ problem: messageOf(error) }))
 }
 
 // Done once this machine is joined to a relay that answers the program's protocol. A program that just started
@@ -93,7 +93,7 @@ async function joinWith(mod: Mod<AnyhostState>, link: string): Promise<void> {
 async function needsStep(mod: Mod<AnyhostState>): Promise<boolean> {
   const started = Date.now()
   for (;;) {
-    const { relay, connecting } = await ask<Status>(mod, '/status')
+    const { relay, connecting } = await askProgram<Status>(mod, '/status')
     if (connecting?.is === 'running') follow(mod)
     if (relay.state === 'connecting' && Date.now() - started < CONNECT_WAIT_MS) {
       await pause(mod, 250)
@@ -182,7 +182,7 @@ async function act(mod: Mod<AnyhostState>, work: () => Promise<void>): Promise<v
 }
 
 export async function showMachines(mod: Mod<AnyhostState>): Promise<void> {
-  await act(mod, async () => void (mod.state.memory.machines = await ask<Machines>(mod, '/machines')))
+  await act(mod, async () => void (mod.state.memory.machines = await askProgram<Machines>(mod, '/machines')))
 }
 
 // Opens or closes /machines, reading the machines as it opens.
@@ -195,11 +195,11 @@ export async function toggleMachines(mod: Mod<AnyhostState>, page: Page): Promis
   await page.toggle({ focus: true })
 }
 
-const addMachine = (mod: Mod<AnyhostState>): Promise<void> => act(mod, async () => void (mod.state.memory.invite = await ask<Invite>(mod, '/machines/invite', {})))
+const addMachine = (mod: Mod<AnyhostState>): Promise<void> => act(mod, async () => void (mod.state.memory.invite = await askProgram<Invite>(mod, '/machines/invite', {})))
 
 const remove = (mod: Mod<AnyhostState>, id: string): Promise<void> =>
   act(mod, async () => {
-    await ask(mod, '/machines/remove', { id })
+    await askProgram(mod, '/machines/remove', { id })
     mod.state.memory.removing = null
     await showMachines(mod)
   })

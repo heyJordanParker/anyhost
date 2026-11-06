@@ -7,9 +7,10 @@ import { openCapture, type Capture } from './capture.ts'
 import { connectCloudflare, join, type Progress } from './connect.ts'
 import { cmodDevice, deviceFromEnvironment, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
+import { startNew } from './move.ts'
 import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, restore } from './resume.ts'
-import { serve } from './serve.ts'
+import { serve, serveSocket } from './serve.ts'
 import { listSessions, type ListedSession } from './sessions.ts'
 
 const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex session of every machine in your own Cloudflare account.
@@ -17,6 +18,8 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost list [--json]              list every session of every machine
   anyhost resume <session> [--take]  continue a Claude Code or Codex session on this machine
   anyhost attach <session>           show a session the machine that holds it runs, and type into it
+  anyhost move <session> <machine>   move a session this machine runs to another machine, which runs it from then on
+  anyhost new <machine> <folder>     start a session on another machine in the same repository, and show it here
   anyhost connect                    set your relay up in your Cloudflare account and join this machine to it
   anyhost join <link>                join this machine with an invite link from another machine
   anyhost machines                   list every machine joined to your relay
@@ -56,6 +59,30 @@ const machineTable = (machines: readonly Protocol.Device[], here: string): strin
     ['MACHINE', 'OS', 'STATE'],
     machines.map((machine) => [machine.id === here ? `${machine.name} (this machine)` : machine.name, `${machine.os}-${machine.arch}`, machine.connected ? 'connected' : `last seen ${minute(machine.seenAt)}`]),
   )
+
+// The program's answer about a move it runs, from its /claims/<session>, as serve.ts serves it.
+type Followed = { readonly move?: { readonly step: string; readonly line: string } }
+// how often anyhost move reads the step of the move, as the mod's /move does
+const FOLLOW_MS = 1000
+
+// Asks this machine's program to move the session, as /move in the session does, since only the program holds the
+// session's upload queue, and prints each step of the move until it ends.
+async function moveThroughProgram(session: string, machine: string): Promise<number> {
+  const unix = serveSocket()
+  const asked = await fetch('http://localhost/move', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, machine }) }).catch(() => undefined)
+  if (asked === undefined) throw new Error(`The anyhost program does not answer at ${unix}. Start Claude Code on this machine, and the anyhost mod starts it.`)
+  const started = (await asked.json()) as { readonly session: string; readonly message?: string }
+  if (!asked.ok) throw new Error(started.message)
+  let said = ''
+  for (;;) {
+    const { move } = (await (await fetch(`http://localhost/claims/${started.session}`, { unix })).json()) as Followed
+    if (move === undefined) throw new Error(`The anyhost program at ${unix} restarted during the move, so it no longer knows where ${session} is.`)
+    if (move.line !== said) (move.step === 'failed' ? console.error : console.log)(move.line)
+    said = move.line
+    if (move.step === 'moved' || move.step === 'failed') return move.step === 'moved' ? 0 : 1
+    await Bun.sleep(FOLLOW_MS)
+  }
+}
 
 // The person answers each question Connect Cloudflare asks on the terminal, one line each.
 let lines: AsyncIterator<string> | undefined
@@ -143,6 +170,14 @@ async function main(argv: string[]): Promise<number> {
     return await openSession(session, cwd)
   }
   if (command === 'attach' && rest.length === 1 && rest[0] !== undefined) return await attach(rest[0])
+  if (command === 'move' && rest.length === 2 && rest[0] !== undefined && rest[1] !== undefined) return await moveThroughProgram(rest[0], rest[1])
+  if (command === 'new' && rest.length === 2 && rest[0] !== undefined && rest[1] !== undefined) {
+    const [machine, folder] = rest
+    // the session shows here once the connection is closed, as it runs for as long as the person works in it
+    const session = await connected(async (capture) => await startNew(capture, machine, folder))
+    console.log(`${machine} started ${session.slice(0, 8)}.`)
+    return await attach(session)
+  }
   if (command === 'doctor') return await doctor()
   if (command === 'serve') {
     await serve(deviceFromEnvironment())

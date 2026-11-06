@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { Subprocess } from 'bun'
 import { createDecipheriv, hkdfSync } from 'node:crypto'
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { connect as dialTcp, createServer, type Socket } from 'node:net'
 import type { NetworkInterfaceInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -445,14 +445,17 @@ const script = (path: string, text: string): string => {
 // terminal's size at its start, clears the screen and prints it again at each SIGWINCH in one write, as Claude Code
 // paints a frame, prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
 // when its terminal closes. `stopped` in the machine's folder stops the session: `claude agents` lists it no more.
-function machineFor(relay: MemoryRelay, device: Device, isHost: boolean): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
+// `claude` replaces that Claude Code with a script of the machine's folder.
+function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, claude?: (folder: string) => string): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
   const folder = temporaryFolder()
   const home = join(folder, 'home')
   mkdirSync(join(folder, 'tmp'), { recursive: true })
-  // where Claude Code keeps the record of each session it runs
+  // where Claude Code keeps the record of each session it runs, and its transcripts
   mkdirSync(join(home, '.claude', 'sessions'), { recursive: true })
+  mkdirSync(join(home, '.claude', 'projects'), { recursive: true })
   const env = {
-    PATH: process.env['PATH'] ?? '',
+    // the machine's own programs, such as its herdr, come first
+    PATH: `${join(folder, 'bin')}:${process.env['PATH'] ?? ''}`,
     HOME: home,
     XDG_STATE_HOME: join(folder, 'state'),
     XDG_DATA_HOME: join(folder, 'data'),
@@ -465,7 +468,8 @@ function machineFor(relay: MemoryRelay, device: Device, isHost: boolean): { read
     ANYHOST_DEVICE_ARCH: device.arch,
     CLAUDE_CODE_EXECPATH: script(
       join(folder, 'bin', 'claude'),
-      `#!/bin/bash
+      claude?.(folder) ??
+        `#!/bin/bash
 case "$1" in
   agents) [ -e '${join(folder, 'stopped')}' ] && printf '[]' || printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
   attach)
@@ -479,7 +483,10 @@ esac
     ),
   }
   const token = relay.join(device, roots(home))
-  script(join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'), `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") printf '{"person":{}}' ;;\n  *) exit 1 ;;\nesac\n`)
+  script(
+    join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'),
+    `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") printf '{"person":{}}' ;;\n  "device --json") printf '%s' '${JSON.stringify(device)}' ;;\n  *) exit 1 ;;\nesac\n`,
+  )
   mkdirSync(join(env.XDG_STATE_HOME, 'anyhost'), { recursive: true })
   writeFileSync(join(env.XDG_STATE_HOME, 'anyhost', 'relay.json'), JSON.stringify({ url: relay.url }))
   return { env, socket: join(env.XDG_STATE_HOME, 'anyhost', 'serve.sock'), folder }
@@ -500,8 +507,8 @@ async function serveOn(env: Record<string, string>): Promise<{ readonly address:
   return { address: printed.slice(0, printed.indexOf('\n')), child }
 }
 
-async function waitFor(what: string, isTrue: () => boolean, ms = 15_000): Promise<void> {
-  for (const started = Date.now(); !isTrue(); await Bun.sleep(10)) if (Date.now() - started > ms) throw new Error(`${what} did not happen within ${ms} ms.`)
+async function waitFor(what: string, isTrue: () => boolean | Promise<boolean>, ms = 15_000): Promise<void> {
+  for (const started = Date.now(); !(await isTrue()); await Bun.sleep(10)) if (Date.now() - started > ms) throw new Error(`${what} did not happen within ${ms} ms.`)
 }
 
 // A viewer on its own machine, attached to SESSION on HOST through the relay as `anyhost serve` sends an attach.
@@ -672,3 +679,329 @@ test('a second serve on one state folder refuses to start, naming the one that r
   expect(answer.status).toBe(400)
   expect(((await answer.json()) as { message: string }).message).toStartWith('anyhost takes a JSON object at POST /machines/invite, and this body is none:')
 })
+
+const LAPTOP: Device = { id: 'device-laptop', name: 'anyhost-b', os: 'linux', arch: 'arm64' }
+const WORKER: Device = { id: 'device-worker', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
+// the id the Claude Code of a test machine gives the session `claude --bg` starts new
+const NEW_SESSION = 'abcdef12-0000-4000-8000-000000000001'
+
+// A Claude Code that runs sessions in its background: `claude agents --json` lists what `agents.json` in the machine's
+// folder holds, and with `--all` what `kept.json` holds, the background jobs it keeps, when there is one. `claude --bg`
+// fails with the text of `fail` when there is one, and else starts the session `--resume` names, or a new one, which it
+// lists running from then on, with its record in `sessions/`, as Claude Code writes one for each session it runs.
+// `claude attach` starts a kept job again, and shows the terminal's size and each line typed. Every call goes into
+// `claude.log`: the time, the folder it ran in, and its arguments. A session it runs has the pid of the program that
+// asked for it, which runs as long as the test.
+const backgroundClaude = (folder: string): string => `#!/bin/bash
+F='${folder}'
+echo "$(date +%s%N) $PWD $*" >> "$F/claude.log"
+running() {
+  printf '[{"pid":%s,"id":"%s","sessionId":"%s","kind":"background","cwd":"%s","status":"idle","state":"blocked"}]' $PPID "\${1:0:8}" "$1" "$PWD" > "$F/agents.json"
+  printf '{"pid":%s,"sessionId":"%s","jobId":"%s","kind":"bg","cwd":"%s","status":"idle"}' $PPID "$1" "\${1:0:8}" "$PWD" > "$CLAUDE_CONFIG_DIR/sessions/$PPID.json"
+}
+case "$1" in
+  agents)
+    if [ "$3" = --all ] && [ -e "$F/kept.json" ]; then cat "$F/kept.json"; elif [ -e "$F/agents.json" ]; then cat "$F/agents.json"; else printf '[]'; fi ;;
+  --bg)
+    if [ -e "$F/fail" ]; then cat "$F/fail" >&2; exit 1; fi
+    session="\${3:-${NEW_SESSION}}"
+    running "$session"
+    echo "backgrounded · \${session:0:8} · test (idle — send a prompt to start)" ;;
+  attach)
+    if [ -e "$F/kept.json" ]; then rm "$F/kept.json"; running '${SESSION}'; fi
+    printf '\\033[?1049h'
+    echo "size $(stty size)"
+    while IFS= read -r line; do echo "typed $line"; done ;;
+  stop) rm -f "$F/agents.json" "$CLAUDE_CONFIG_DIR"/sessions/*.json; echo "stopped $2" ;;
+  *) exit 2 ;;
+esac
+`
+const logOf = (folder: string, name: string): string[] => readFileSync(join(folder, name), { encoding: 'utf8', flag: 'a+' }).split('\n').filter((line) => line !== '')
+
+type Moved = { readonly to: string; readonly step: string; readonly line: string }
+type Claimed = { readonly machine?: string; readonly move?: Moved }
+const claimOn = async (socket: string, session = SESSION): Promise<Claimed> => (await (await fetch(`http://localhost/claims/${session}`, { unix: socket })).json()) as Claimed
+const postTo = async (socket: string, path: string, body: object): Promise<{ readonly status: number; readonly body: Record<string, unknown> }> => {
+  const answer = await fetch(`http://localhost${path}`, { unix: socket, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  return { status: answer.status, body: (await answer.json()) as Record<string, unknown> }
+}
+// Each step the laptop's program showed of the session's move, in order, until it reached `until`.
+async function stepsOf(socket: string, until: ReadonlySet<string> = new Set(['moved', 'failed'])): Promise<{ readonly steps: string[]; readonly last: Moved }> {
+  const steps: string[] = []
+  for (const started = Date.now(); Date.now() - started < 30_000; await Bun.sleep(10)) {
+    const { move } = await claimOn(socket)
+    if (move === undefined) continue
+    if (steps.at(-1) !== move.step) steps.push(move.step)
+    if (until.has(move.step)) return { steps, last: move }
+  }
+  throw new Error(`The move showed ${steps.join(', ')} and reached none of ${[...until].join(', ')} within 30 s.`)
+}
+
+// The machine SESSION runs on, in a terminal of its own in a herdr pane, or in Claude Code's background, as `kind`
+// says, its Claude Code's process `claude`, and its program captured it. The session works in `work` in the machine's
+// home, which holds one file.
+async function runningOn(relay: MemoryRelay, device = LAPTOP, kind: 'interactive' | 'background' = 'interactive') {
+  const laptop = machineFor(relay, device, false, backgroundClaude)
+  const home = laptop.env['HOME'] ?? ''
+  script(
+    join(laptop.folder, 'bin', 'herdr'),
+    `#!/bin/bash
+echo "$(date +%s%N) $*" >> '${laptop.folder}/herdr.log'
+[ "$1 $2" = 'agent list' ] && printf '%s' '{"id":"cli:agent:list","result":{"agents":[{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"${SESSION}"},"pane_id":"w1:p1"}],"type":"agent_list"}}'
+exit 0
+`,
+  )
+  const cwd = join(home, 'work')
+  mkdirSync(cwd, { recursive: true })
+  writeFileSync(join(cwd, 'notes.txt'), 'the plan for the trip\n')
+  await serveOn(laptop.env)
+  await waitFor('the machine connecting', () => relay.isConnected(device.id))
+  const transcript = join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Plan the trip"}}\n`)
+  const claude = Bun.spawn(['sleep', '600'])
+  children.push(claude)
+  const status = (value: string): void => {
+    const id = kind === 'background' ? { id: SESSION.slice(0, 8) } : {}
+    writeFileSync(join(laptop.folder, 'agents.json'), JSON.stringify([{ pid: claude.pid, ...id, sessionId: SESSION, kind, cwd, status: value }]))
+    // Claude Code rewrites the session's record at each change of its status
+    const job = kind === 'background' ? { jobId: SESSION.slice(0, 8), kind: 'bg' } : { kind: 'interactive' }
+    writeFileSync(join(home, '.claude', 'sessions', `${claude.pid}.json`), JSON.stringify({ pid: claude.pid, sessionId: SESSION, ...job, cwd, status: value }))
+  }
+  status('idle')
+  // the first drain at the default 5 seconds claims the session
+  await waitFor('the machine claiming the session', () => relay.claims.get(SESSION) === device.id, 15_000)
+  return { ...laptop, cwd, transcript, claude, status }
+}
+
+async function workerOn(relay: MemoryRelay, prepare: (folder: string) => void = () => undefined, device = WORKER) {
+  const worker = machineFor(relay, device, false, backgroundClaude)
+  prepare(worker.folder)
+  await serveOn(worker.env)
+  await waitFor('the machine connecting', () => relay.isConnected(device.id))
+  return worker
+}
+
+test('a move waits for the turn to end, uploads and seals the session, the worker restores and runs it, and only then the laptop\'s Claude Code ends and its herdr pane shows the session there', async () => {
+  const relay = memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+  laptop.status('busy')
+
+  const asked = await postTo(laptop.socket, '/move', { session: SESSION.slice(0, 8), machine: WORKER.name })
+  expect(asked.status).toBe(200)
+  expect(asked.body).toMatchObject({ session: SESSION, to: WORKER.name })
+  // the turn runs on, and the move waits for it
+  await Bun.sleep(500)
+  expect((await claimOn(laptop.socket)).move).toEqual({ to: WORKER.name, step: 'waiting', line: `Waiting for ${SESSION.slice(0, 8)} to finish its turn.` })
+  laptop.status('idle')
+  const { steps, last } = await stepsOf(laptop.socket)
+
+  expect(steps).toEqual(['waiting', 'uploading', 'moving', 'moved'])
+  expect(last.line).toMatch(new RegExp(`^${WORKER.name} restored ${SESSION.slice(0, 8)} in \\d+\\.\\d s and runs it\\.$`))
+  expect(relay.claims.get(SESSION)).toBe(WORKER.id)
+  expect([...relay.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/`)).every((key) => key.includes('/sealed/'))).toBe(true)
+  // the worker continues the session in its own home, with its transcript and its working folder's file
+  const workerHome = worker.env['HOME'] ?? ''
+  const workerCwd = join(workerHome, 'work')
+  expect(readFileSync(join(workerCwd, 'notes.txt'), 'utf8')).toBe('the plan for the trip\n')
+  expect(readFileSync(join(workerHome, '.claude', 'projects', workerCwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`), 'utf8')).toContain(`"cwd":"${workerCwd}"`)
+  const started = logOf(worker.folder, 'claude.log').find((line) => line.endsWith(`--bg --resume ${SESSION}`))
+  expect(started?.split(' ')[1]).toBe(realpathSync(workerCwd))
+  // the laptop's Claude Code ended after the worker ran the session, and the pane attaches to it there
+  await laptop.claude.exited
+  expect(laptop.claude.signalCode).toBe('SIGTERM')
+  await waitFor('the pane run', () => logOf(laptop.folder, 'herdr.log').some((line) => line.includes('pane run')))
+  const run = logOf(laptop.folder, 'herdr.log').find((line) => line.includes('pane run')) ?? ''
+  expect(run.slice(run.indexOf(' ') + 1)).toBe(`pane run w1:p1 anyhost attach ${SESSION.slice(0, 8)}`)
+  expect(Number(run.split(' ')[0])).toBeGreaterThan(Number(started?.split(' ')[0]))
+  expect(await claimOn(laptop.socket)).toMatchObject({ machine: WORKER.name, move: { step: 'moved' } })
+}, 60_000)
+
+test('a move to a machine that is offline keeps the session running here, with its claim', async () => {
+  const relay = memoryRelay()
+  const laptop = await runningOn(relay)
+  relay.join(WORKER, roots('/home/worker'))
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(last.line).toBe(`${WORKER.name} is offline, so the session keeps running here.`)
+  expect(relay.claims.get(SESSION)).toBe(LAPTOP.id)
+  expect((await claimOn(laptop.socket)).machine).toBeUndefined()
+  expect(laptop.claude.exitCode).toBeNull()
+}, 60_000)
+
+test('a move the worker cannot take takes the claim back, and the laptop captures the session again', async () => {
+  const relay = memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay, (folder) => writeFileSync(join(folder, 'fail'), 'Claude Code is not logged in.'))
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(last.line).toStartWith(`${WORKER.name} could not take the session: `)
+  expect(last.line).toContain('Claude Code is not logged in.')
+  expect(last.line).toEndWith('. It keeps running here.')
+  expect(relay.claims.get(SESSION)).toBe(LAPTOP.id)
+  expect((await claimOn(laptop.socket)).machine).toBeUndefined()
+  await waitFor('the worker hearing it lost the session', async () => (await claimOn(worker.socket)).machine === LAPTOP.name)
+  expect(laptop.claude.exitCode).toBeNull()
+  // the session's next line goes up from the laptop
+  const frames = relay.puts.filter(({ key }) => key.startsWith(`journals/${SESSION}/hot/`)).length
+  writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"And the hotel"}}\n`, { flag: 'a' })
+  await waitFor('the next line uploading', () => relay.puts.filter(({ key }) => key.startsWith(`journals/${SESSION}/hot/`)).length > frames, 15_000)
+}, 60_000)
+
+test('a move to a worker that took the claim and answers nothing waits for it, and Keep it here takes the session back', async () => {
+  const relay = memoryRelay()
+  const laptop = await runningOn(relay)
+  const silent = relay.connect(WORKER, roots('/home/worker'))
+  silent.on('move', ({ session }) => void silent.run([{ op: 'claim', session, take: true }]))
+  await welcomed(silent)
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  await stepsOf(laptop.socket, new Set(['moving']))
+  await waitFor('the worker taking the claim', () => relay.claims.get(SESSION) === WORKER.id)
+  await waitFor('the laptop hearing it', async () => (await claimOn(laptop.socket)).machine === WORKER.name)
+  expect((await claimOn(laptop.socket)).move?.step).toBe('moving')
+  expect((await postTo(laptop.socket, '/move/keep', { session: SESSION })).status).toBe(200)
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(last).toEqual({ to: WORKER.name, step: 'failed', line: `${WORKER.name} did not answer, so the session keeps running here.` })
+  expect(relay.claims.get(SESSION)).toBe(LAPTOP.id)
+  expect((await claimOn(laptop.socket)).machine).toBeUndefined()
+  expect(laptop.claude.exitCode).toBeNull()
+}, 60_000)
+
+test('a session the worker keeps a background job of starts again with claude attach, never as a copy from claude --bg --resume', async () => {
+  const relay = memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay, (folder) =>
+    writeFileSync(join(folder, 'kept.json'), JSON.stringify([{ id: SESSION.slice(0, 8), sessionId: SESSION, kind: 'background', cwd: join(folder, 'home', 'work'), state: 'stopped' }])),
+  )
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(last.step).toBe('moved')
+  const calls = logOf(worker.folder, 'claude.log').map((line) => line.split(' ').slice(2).join(' '))
+  expect(calls).toContain(`attach ${SESSION.slice(0, 8)}`)
+  expect(calls.filter((call) => call.startsWith('--bg'))).toEqual([])
+}, 60_000)
+
+test('a session moved back from the worker\'s background tells its viewers where it went, so anyhost attach on the laptop shows it there with no command typed', async () => {
+  const relay = memoryRelay()
+  const worker = await runningOn(relay, WORKER, 'background')
+  const laptop = await workerOn(relay, () => undefined, LAPTOP)
+  let shown = ''
+  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: (_terminal, bytes) => void (shown += decoder.decode(bytes)) })
+  const attach = Bun.spawn(['bun', CLI, 'attach', SESSION.slice(0, 8)], { env: laptop.env, terminal })
+  children.push(attach)
+  await waitFor('the session from the worker on the laptop\'s terminal', () => shown.includes('size 24 80'))
+  expect(logOf(worker.folder, 'claude.log').some((line) => line.endsWith(`attach ${SESSION.slice(0, 8)}`))).toBe(true)
+
+  await postTo(worker.socket, '/move', { session: SESSION, machine: LAPTOP.name })
+  const { last } = await stepsOf(worker.socket)
+
+  expect(last.step).toBe('moved')
+  // the worker stopped its copy, and the laptop's anyhost attach shows the session in the laptop's own background
+  await waitFor('the worker stopping its copy', () => logOf(worker.folder, 'claude.log').some((line) => line.endsWith(`stop ${SESSION.slice(0, 8)}`)))
+  await waitFor('the laptop showing it', () => logOf(laptop.folder, 'claude.log').some((line) => line.endsWith(`attach ${SESSION.slice(0, 8)}`)))
+  expect(logOf(laptop.folder, 'claude.log').some((line) => line.endsWith(`--bg --resume ${SESSION}`))).toBe(true)
+  terminal.write('typed on the laptop\r')
+  await waitFor('the typed line', () => shown.includes('typed typed on the laptop'))
+  expect(attach.exitCode).toBeNull()
+  terminal.close()
+}, 60_000)
+
+// Claude Code's global config on a machine, where it keeps each folder's trust
+const configOf = (machine: { readonly env: Record<string, string> }): string => join(machine.env['CLAUDE_CONFIG_DIR'] ?? '', '.claude.json')
+const trustedIn = (machine: { readonly env: Record<string, string> }): string[] => {
+  const { projects = {} } = JSON.parse(readFileSync(configOf(machine), { encoding: 'utf8', flag: 'a+' }) || '{}') as { projects?: Record<string, { hasTrustDialogAccepted?: boolean }> }
+  return Object.entries(projects).filter(([, project]) => project.hasTrustDialogAccepted === true).map(([folder]) => folder)
+}
+const trust = (machine: { readonly env: Record<string, string> }, folder: string): void => writeFileSync(configOf(machine), JSON.stringify({ projects: { [realpathSync(folder)]: { hasTrustDialogAccepted: true } } }))
+
+test('a move carries the trust of the session\'s folder: the worker trusts the folder it continues in, keeping the rest of its config and its config\'s symlink', async () => {
+  const relay = memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+  // outside git, Claude Code trusts a folder below a trusted one
+  trust(laptop, laptop.env['HOME'] ?? '')
+  // the worker keeps its config in dotfiles, and Claude Code's folder links to it
+  const kept = { numStartups: 3, projects: { '/elsewhere': { allowedTools: [], hasTrustDialogAccepted: true } } }
+  const dotfile = join(temporaryFolder(), 'dotfiles', 'claude.json')
+  mkdirSync(dirname(dotfile), { recursive: true })
+  writeFileSync(dotfile, JSON.stringify(kept))
+  symlinkSync(dotfile, configOf(worker))
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(last.step).toBe('moved')
+  const workerCwd = realpathSync(join(worker.env['HOME'] ?? '', 'work'))
+  expect(JSON.parse(readFileSync(dotfile, 'utf8'))).toEqual({ ...kept, projects: { ...kept.projects, [workerCwd]: { hasTrustDialogAccepted: true } } })
+  expect(readlinkSync(configOf(worker))).toBe(dotfile)
+  expect(readdirSync(dirname(dotfile))).toEqual(['claude.json'])
+  expect(existsSync(`${configOf(worker)}.lock`)).toBe(false)
+}, 60_000)
+
+// A checkout on the laptop of a repository whose remote the worker reaches too, with a plan in `plans/`.
+function tripOn(laptop: { readonly env: Record<string, string> }): string {
+  const origin = join(temporaryFolder(), 'trip.git')
+  const checkout = join(laptop.env['HOME'] ?? '', 'trip')
+  const git = (...args: string[]): void => void Bun.spawnSync(['git', '-c', 'user.name=Ada', '-c', 'user.email=ada@example.com', ...args], { stderr: 'ignore' })
+  git('init', '--bare', '-b', 'main', origin)
+  git('clone', origin, checkout)
+  mkdirSync(join(checkout, 'plans'), { recursive: true })
+  writeFileSync(join(checkout, 'plans', 'route.md'), 'Lisbon, then Porto\n')
+  git('-C', checkout, 'add', '.')
+  git('-C', checkout, 'commit', '-m', 'Plan the route')
+  git('-C', checkout, 'push', 'origin', 'main')
+  return checkout
+}
+
+test('anyhost new trusts nothing on the worker when the laptop trusts only a folder above the checkout, which Claude Code never counts', async () => {
+  const relay = memoryRelay()
+  const laptop = machineFor(relay, LAPTOP, false, backgroundClaude)
+  const worker = await workerOn(relay)
+  await serveOn(laptop.env)
+  await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))
+  const checkout = tripOn(laptop)
+  trust(laptop, laptop.env['HOME'] ?? '')
+
+  const started = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
+  children.push(started)
+  await waitFor('the session starting on the worker', () => relay.claims.get(NEW_SESSION) === WORKER.id, 30_000)
+
+  expect(trustedIn(worker)).toEqual([])
+}, 60_000)
+
+test('anyhost new starts a session on the worker in its clone of the same repository, routed by start and started, and shows it', async () => {
+  const relay = memoryRelay()
+  const laptop = machineFor(relay, LAPTOP, false, backgroundClaude)
+  const worker = await workerOn(relay)
+  await serveOn(laptop.env)
+  await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))
+  const checkout = tripOn(laptop)
+  // Claude Code records a checkout's trust at its root
+  trust(laptop, checkout)
+
+  let shown = ''
+  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: (_terminal, bytes) => void (shown += decoder.decode(bytes)) })
+  const started = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, terminal })
+  children.push(started)
+  await waitFor('the new session on the laptop\'s terminal', () => shown.includes('size 24 80'), 30_000)
+
+  expect(shown).toContain(`${WORKER.name} started ${NEW_SESSION.slice(0, 8)}.`)
+  expect(relay.claims.get(NEW_SESSION)).toBe(WORKER.id)
+  const workerCwd = join(worker.env['HOME'] ?? '', 'trip', 'plans')
+  expect(readFileSync(join(workerCwd, 'route.md'), 'utf8')).toBe('Lisbon, then Porto\n')
+  expect(logOf(worker.folder, 'claude.log').find((line) => line.endsWith(' --bg'))?.split(' ')[1]).toBe(realpathSync(workerCwd))
+  // the worker trusts its clone at its root, where Claude Code looks for the trust of the folder inside it
+  expect(trustedIn(worker)).toEqual([realpathSync(join(worker.env['HOME'] ?? '', 'trip'))])
+  terminal.write('hello from the laptop\r')
+  await waitFor('the typed line', () => shown.includes('typed hello from the laptop'))
+  terminal.close()
+}, 60_000)

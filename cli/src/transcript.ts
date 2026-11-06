@@ -15,7 +15,7 @@ export type Summary = {
 
 // Who a file belongs to:
 // - `session`: the path names its session, and `isTranscript` says it is the session's own transcript
-// - `prefix`: `tasks/session-<8 hex>/` and `jobs/<8 hex>/state.json` name the first 8 hex digits of the session id
+// - `prefix`: `tasks/session-<8 hex>/` names the first 8 hex digits of the session id
 // - `lines`: a file every session writes lines to, each naming its session in the key `lines`
 // - `named`: a plan or a pasted text, which belongs to the sessions whose files name it
 export type Owner =
@@ -40,8 +40,8 @@ export const linesFiles = (roots: MachineRoots): Map<string, { readonly lines: s
     [join(roots.codexHome, 'session_index.jsonl'), { lines: 'id', tool: 'codex' }],
   ])
 
-// The folders the program watches. `jobs/` is left out because each job keeps a scratch tree in `jobs/<id>/tmp/`:
-// the 60-second backup stats `jobs/<id>/state.json` instead.
+// The folders the program watches. `jobs/` holds no file of a session: `jobs/<8 hex>/state.json` is the record of a job
+// this machine's Claude Code daemon ran, which names a job that never ran on any other machine.
 export const watchedFolders = (roots: MachineRoots): { readonly folder: string; readonly isRecursive: boolean }[] => [
   { folder: claudeFolder(roots), isRecursive: false },
   ...['projects', 'file-history', 'tasks', 'session-env', 'plans', 'paste-cache'].map((name) => ({ folder: claudeFolder(roots, name), isRecursive: true })),
@@ -69,8 +69,6 @@ export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
     const prefix = /^session-([0-9a-f]{8})$/.exec(folder)?.[1]
     if (name === 'tasks' && prefix !== undefined) return { prefix }
   }
-  const [job = '', file] = under(claudeFolder(roots, 'jobs'))
-  if (/^[0-9a-f]{8}$/.test(job) && file === 'state.json') return { prefix: job }
   if (under(claudeFolder(roots, 'plans')).length > 0 || under(claudeFolder(roots, 'paste-cache')).length === 1) return { named: true }
   // background output: <temp root>/<encoded working folder>/<session>/tasks/<task>.output
   const output = under(roots.claudeTmp)
@@ -101,7 +99,7 @@ export async function filesOf(session: string, tool: Tool, roots: MachineRoots):
     ...[claudeFolder(roots, 'file-history', session), claudeFolder(roots, 'tasks', session), claudeFolder(roots, 'tasks', `session-${short}`), claudeFolder(roots, 'session-env', session)].map(filesUnder),
     ...temporary.map(async (folder) => (await filesUnder(join(folder, session, 'tasks'))).filter((path) => path.endsWith('.output'))),
   ])
-  return [...found.flat(), ...lines, claudeFolder(roots, 'jobs', short, 'state.json')]
+  return [...found.flat(), ...lines]
 }
 
 // The plans and pasted texts a session's bytes name: Claude Code's `planFilePath` and history's `contentHash`.

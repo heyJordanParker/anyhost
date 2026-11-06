@@ -96,7 +96,8 @@ test('a session this device holds, or no device claims, takes prompts', async ()
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
 })
 
-type Answer = { readonly status?: number; readonly body: unknown }
+// `delayMs` is how long the program takes to answer, as one busy with other work does
+type Answer = { readonly status?: number; readonly body: unknown; readonly delayMs?: number }
 type Asked = { readonly method: string; readonly path: string; readonly body?: unknown }
 
 // The anyhost program as the Step and /machines ask it: each answer is the next one `answers` has for its method and
@@ -115,10 +116,13 @@ function withProgram(answers: Record<string, Answer[]>) {
   const tested = testMod(definition, { files: instance })
   const asked: Asked[] = []
   const ticks: (() => unknown)[] = []
+  // the tick of the newest timer of each period
+  const every = new Map<number, () => unknown>()
   const copied: string[] = []
   tested.fakes.process.spawn = () => held()
-  tested.fakes.clock.every = (_ms, tick) => {
+  tested.fakes.clock.every = (ms, tick) => {
     ticks.push(tick)
+    every.set(ms, tick)
     return { cancel: () => undefined }
   }
   tested.fakes.ui.copy = async ({ text }) => {
@@ -133,6 +137,7 @@ function withProgram(answers: Record<string, Answer[]>) {
     const queue = answers[`${method} ${path}`] ?? []
     const answer = (queue.length > 1 ? queue.shift() : queue[0]) ?? { status: 404, body: { message: `No answer for ${method} ${path}.` } }
     const status = answer.status ?? 200
+    await Bun.sleep(answer.delayMs ?? 0)
     return { status, ok: status === 200, headers: {}, text: JSON.stringify(answer.body) }
   }
   const mod = async (): Promise<Mod<AnyhostState>> => {
@@ -140,7 +145,7 @@ function withProgram(answers: Record<string, Answer[]>) {
     if (started === undefined) throw new Error('The mod did not start.')
     return started
   }
-  return { tested, asked, ticks, copied, mod }
+  return { tested, asked, ticks, every, copied, mod }
 }
 
 const relayIs = (state: string): Answer => ({ body: { relay: { state, message: '' } } })
@@ -258,6 +263,102 @@ test('/machines lists every machine, gives the install command with a fresh invi
   await tested.shown.page.press('remove-yes-b-id')
   expect(asked.filter(({ method }) => method === 'POST').at(-1)).toEqual({ method: 'POST', path: '/machines/remove', body: { id: 'b-id' } })
   expect((await tested.shown.page.lines()).some((line) => line.startsWith('anyhost-b'))).toBe(false)
+})
+
+const moveIs = (step: string, line: string, machine?: string): Answer => ({ body: { ...(machine === undefined ? {} : { machine }), move: { to: 'anyhost-a', step, line } } })
+// the toasts of the move, without the one of the mod's first start
+const moveToasts = (tested: ReturnType<typeof withProgram>['tested']) => tested.shown.toasts.filter(({ message }) => message !== 'Installed')
+
+test('/move asks the program to move the session, refuses prompts while it moves, and follows each step in its toast', async () => {
+  const { tested, asked, every } = withProgram({
+    'POST /move': [{ body: { session: 'test-session', to: 'anyhost-a', step: 'waiting', line: 'Waiting for test-ses to finish its turn.' } }],
+    'GET /claims/test-session': [
+      moveIs('uploading', 'Uploading test-ses.'),
+      moveIs('uploading', 'Uploading test-ses.'),
+      moveIs('moving', 'Uploaded and sealed test-ses. anyhost-a restores it.', 'anyhost-a'),
+      moveIs('moving', 'Uploaded and sealed test-ses. anyhost-a restores it.', 'anyhost-a'),
+      moveIs('moved', 'anyhost-a restored test-ses in 2.4 s and runs it.', 'anyhost-a'),
+    ],
+  })
+  await tested.type('/move anyhost-a')
+  expect(asked.filter(({ method }) => method === 'POST')).toEqual([{ method: 'POST', path: '/move', body: { session: 'test-session', machine: 'anyhost-a' } }])
+  expect(moveToasts(tested)).toEqual([{ type: 'loading', message: 'Moving to anyhost-a…' }])
+
+  // the toast follows the move once a second, and the timer runs its tick without waiting for it
+  const follow = async (): Promise<void> => {
+    await every.get(1000)?.()
+    await tested.settle()
+  }
+  await follow()
+  expect(moveToasts(tested)).toEqual([{ type: 'loading', message: 'Moving to anyhost-a…', description: 'Uploading test-ses.' }])
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
+  // the machine took the claim, and the move still runs
+  await follow()
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
+
+  // the session runs there, and outside herdr this Claude Code stays open and says how to go on with it
+  await follow()
+  const continues = 'This session continues on anyhost-a. Run anyhost attach test-ses here to keep working on it.'
+  expect(moveToasts(tested)).toEqual([{ type: 'info', message: continues, description: 'anyhost-a restored test-ses in 2.4 s and runs it.' }])
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: continues })
+})
+
+// The program answers a prompt's ask 3 s late, past the 1.5 s a prompt waits for it.
+const SLOW_MS = 3000
+
+test('a program slow to answer holds no prompt: it goes through within the 1.5 s bound, with no toast', async () => {
+  const { tested } = withProgram({ 'GET /claims/test-session': [{ body: { machine: 'anyhost-b' }, delayMs: SLOW_MS }] })
+  await tested.start()
+
+  const started = Date.now()
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
+  expect(Date.now() - started).toBeLessThan(2000)
+  expect(moveToasts(tested)).toEqual([])
+})
+
+test('a prompt during a move is refused while the program is too slow to answer it', async () => {
+  const { tested } = withProgram({
+    'POST /move': [{ body: { session: 'test-session', to: 'anyhost-a', step: 'uploading', line: 'Uploading test-ses.' } }],
+    'GET /claims/test-session': [{ ...moveIs('uploading', 'Uploading test-ses.'), delayMs: SLOW_MS }],
+  })
+  await tested.type('/move anyhost-a')
+
+  const started = Date.now()
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
+  expect(Date.now() - started).toBeLessThan(2000)
+})
+
+test('a move that failed shows why in its toast, and the session takes prompts again', async () => {
+  const { tested, every } = withProgram({
+    'POST /move': [{ body: { session: 'test-session', to: 'anyhost-a', step: 'waiting', line: 'Waiting for test-ses to finish its turn.' } }],
+    'GET /claims/test-session': [moveIs('failed', 'anyhost-a is offline, so the session keeps running here.')],
+  })
+  await tested.type('/move anyhost-a')
+  await every.get(1000)?.()
+  await tested.settle()
+
+  expect(moveToasts(tested)).toEqual([{ type: 'error', message: 'anyhost-a is offline, so the session keeps running here.' }])
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
+})
+
+test('a move the program forgot, as it restarted, says so and stops following it', async () => {
+  const { tested, every } = withProgram({
+    'POST /move': [{ body: { session: 'test-session', to: 'anyhost-a', step: 'uploading', line: 'Uploading test-ses.' } }],
+    'GET /claims/test-session': [{ body: {} }],
+  })
+  await tested.type('/move anyhost-a')
+  await every.get(1000)?.()
+  await tested.settle()
+
+  expect(moveToasts(tested)).toEqual([{ type: 'error', message: 'anyhost lost track of the move, as its program restarted', description: 'anyhost list shows which machine holds the session now.' }])
+})
+
+test('/move names the machine to move to, and shows why the program refused the move', async () => {
+  const { tested } = withProgram({ 'POST /move': [{ status: 400, body: { message: 'No machine joined to your relay is named devbx. anyhost machines lists them.' } }] })
+
+  expect(await tested.type('/move')).toEqual({ text: 'Name the one machine to move this session to, as in /move devbox. /machines lists your machines.' })
+  expect(await tested.type('/move devbx')).toEqual({ text: '/move failed: No machine joined to your relay is named devbx. anyhost machines lists them.' })
+  expect(moveToasts(tested)).toEqual([])
 })
 
 test('/machines says why it lists nothing while this machine is not joined', async () => {

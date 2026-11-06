@@ -9,6 +9,7 @@ import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { listenDirect, type DirectLink, type DirectOffer } from './direct.ts'
+import { move, receiveMove, receiveStart, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, type RelayState } from './relay.ts'
 import { openStream, type Exit, type Link, type SessionState, type Size, type Stream } from './stream.ts'
 import { codexState, watchedFolders, type Tool } from './transcript.ts'
@@ -78,6 +79,8 @@ export class UploadQueue {
   private readonly queued = new Map<string, { tool: Tool; paths: Set<string> }>()
   private readonly uploading = new Set<string>()
   private readonly retryMs = new Map<string, number>()
+  // what waits for each session's upload in flight to end, with its failure
+  private readonly ended = new Map<string, ((failure: { readonly error: unknown } | undefined) => void)[]>()
   private timer: ReturnType<typeof setInterval> | undefined
   private every: number
   private readonly upload: Upload
@@ -117,6 +120,24 @@ export class UploadQueue {
     this.drainSessions([...this.queued.keys()])
   }
 
+  // Drains the session now, and again for as long as its uploads leave paths for the next drain. Answers once nothing
+  // of the session waits or goes up, or rejects with the failure of its upload.
+  async flush(session: string): Promise<void> {
+    while (this.queued.has(session) || this.uploading.has(session)) {
+      if (!this.isReady()) throw new Error('anyhost is not connected to the relay, so it uploads nothing.')
+      const ended = new Promise<{ readonly error: unknown } | undefined>((resolve) => this.ended.set(session, [...(this.ended.get(session) ?? []), resolve]))
+      if (!this.uploading.has(session)) this.drainSessions([session])
+      const failure = await ended
+      if (failure !== undefined) throw failure.error
+    }
+  }
+
+  private uploaded(session: string, failure?: { readonly error: unknown }): void {
+    const waiting = this.ended.get(session) ?? []
+    this.ended.delete(session)
+    for (const resolve of waiting) resolve(failure)
+  }
+
   private schedule(): void {
     clearInterval(this.timer)
     this.timer = this.every > 0 ? setInterval(() => this.drain(), this.every * 1000) : undefined
@@ -141,6 +162,7 @@ export class UploadQueue {
           this.retryMs.delete(session)
           for (const path of left) this.add(session, queued.tool, path)
           if (this.every === 0) this.drainSessions([session])
+          this.uploaded(session)
         },
         (error: unknown) => {
           // the paths wait for the next drain: the retry at 0, the next write, the timer, or the 60-second backup
@@ -151,6 +173,7 @@ export class UploadQueue {
           const wait = this.retryMs.get(session) ?? RETRY_MS
           this.retryMs.set(session, Math.min(2 * wait, BACKUP_MS))
           if (this.every === 0) setTimeout(() => this.drainSessions([session]), wait)
+          this.uploaded(session, { error })
         },
       )
     }
@@ -186,6 +209,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   let localNetworkProblem: string | undefined
   let capturedAt = ''
   let lastIndex = ''
+  // the person's `checkouts` option, read with the others, where a session moved or started here clones its repository
+  let checkouts = ''
 
   // a problem names what failed, such as `seal <session>` or a file's path, so a timeout says which call it ended
   const problems: Problems = {
@@ -286,8 +311,9 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     await watchFolders()
     await Bun.write(heartbeat, '')
     await settle('options', async () => {
-      const { uploadEvery, join: link } = await personOptions()
+      const { uploadEvery, join: link, checkouts: chosen } = await personOptions()
       queue.uploadEvery = uploadEveryOf(uploadEvery)
+      checkouts = chosen ?? ''
       if (link === undefined || link === '') return
       await settle('join', async () => {
         await joinWithOption(link)
@@ -306,15 +332,19 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     await settle('index', async () => void (lastIndex = await writeIndex(capture, lastIndex)))
     await sealQuiet(capture, problems)
   }
+  // Each move this program ran since it started, by its whole session id, which its session and `anyhost move` follow.
+  const moves = new Map<string, Moving>()
   // What a prompt waits for: this machine's own record of who holds the session, which the relay's `released` and each
-  // upload keep, so the answer never waits on the relay. `untold` names, once, the machine this machine took the
-  // session from while that machine had no connection to the relay.
-  const holderOf = (session: string): { machine?: string; problem?: string; untold?: string } => {
+  // upload keep, so the answer never waits on the relay, and the move of it this program runs or ran. `untold` names,
+  // once, the machine this machine took the session from while that machine had no connection to the relay.
+  const holderOf = (session: string): { machine?: string; problem?: string; untold?: string; move?: Pick<Moving, 'to' | 'step' | 'line'> } => {
+    const moving = moves.get(session)
+    const move = moving === undefined ? {} : { move: { to: moving.to, step: moving.step, line: moving.line } }
     const { state } = relay
-    if (state.is === 'refused' || state.is === 'removed' || state.is === 'outdated') return { problem: state.message }
+    if (state.is === 'refused' || state.is === 'removed' || state.is === 'outdated') return { problem: state.message, ...move }
     const holder = journalOf(capture.db, session)?.holder ?? ''
     const untold = takeUntold(capture.db, session)
-    return { ...(holder === '' ? {} : { machine: holder }), ...(untold === '' ? {} : { untold }) }
+    return { ...(holder === '' ? {} : { machine: holder }), ...(untold === '' ? {} : { untold }), ...move }
   }
   const statusOf = (): Status => {
     const { state, url } = relay
@@ -341,8 +371,9 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     if (connecting === undefined) throw new Error('No Connect Cloudflare runs on this machine.')
     return connecting
   }
-  // What the mod's Step and /machines send, as JSON.
-  const act = async (pathname: string, { id = '', link = '' }: { readonly id?: string; readonly link?: string }): Promise<Response> => {
+  // What the mod's Step, /machines and /move send, and anyhost move, as JSON.
+  type Asked = { readonly id?: string; readonly link?: string; readonly session?: string; readonly machine?: string }
+  const act = async (pathname: string, { id = '', link = '', session = '', machine = '' }: Asked): Promise<Response> => {
     switch (pathname) {
       case '/connect': {
         if (connecting?.view.is === 'running') return Response.json(connecting.view)
@@ -369,6 +400,17 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       case '/machines/remove':
         if (id === device.id) return failed(400, `${device.name} is this machine. Remove it from another machine's /machines.`)
         return await throughRelay(() => removeMachine(relay, id))
+      case '/move': {
+        const moving = await move(capture, session, machine, mover).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
+        if (moving instanceof Error) return failed(400, moving)
+        return Response.json({ session: moving.session, to: moving.to, step: moving.step, line: moving.line })
+      }
+      case '/move/keep': {
+        const moving = moves.get(session)
+        if (moving?.step !== 'moving') return failed(400, `No move of ${session} waits for its machine.`)
+        moving.keep()
+        return Response.json({})
+      }
       default:
         return new Response(`anyhost takes no ${pathname}.`, { status: 404 })
     }
@@ -671,6 +713,21 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     console.error(`${new Date().toISOString()} ${stoppedOn(session)}`)
     endViewers(session, { code: 0, message: stoppedOn(session) })
   }
+  // The session moved to `to` and stops here: each viewer hears where it went, and attaches to it there, before its
+  // `claude attach` here closes, so none of them sees it end.
+  const movedAway = (session: string, to: string): void => {
+    const showing = shown.get(session)
+    shown.delete(session)
+    for (const viewer of viewersOf(session)) {
+      flushOutput(viewer)
+      viewer.stream.write('moved', { to })
+    }
+    void showing?.then((view) => view.terminal.close(), () => undefined)
+  }
+  const mover: MoveHere = { moves, problems, environment, queue: (session, tool, path) => queue.add(session, tool, path), flush: (session) => queue.flush(session), movedAway }
+  // Another machine moves a session here, or starts a new one here, and hears whether it runs.
+  relay.on('move', (message) => void receiveMove(capture, message, { environment, checkouts }).then((answer) => relay.send(answer)))
+  relay.on('start', (message) => void receiveStart(capture, message, { environment, checkouts }).then((answer) => relay.send(answer)))
 
   // Each `anyhost attach` on this machine. Its first text message is its attach, and so is each later one, with the
   // same stream, but `localNetwork`, which says what its last direct dial found of its terminal app's Local Network
@@ -682,6 +739,13 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   const toLeg = (stream: number, message: object | Uint8Array): void => void legs.get(stream)?.send(message instanceof Uint8Array ? message : JSON.stringify(message))
   const attachFrom = async (leg: Leg, asked: Omit<Extract<Routed, { readonly t: 'attach' }>, 'to'>): Promise<void> => {
     const { stream } = asked
+    // a viewer whose session moved attaches again with a new stream, and the old one ends where it was
+    const previous = leg.data.stream
+    if (previous !== undefined && previous !== stream && legs.get(previous) === leg) {
+      legs.delete(previous)
+      if (leg.data.isHere === true) unlink(previous)
+      else relay.send({ t: 'detach', stream: previous })
+    }
     leg.data = { stream, isHere: false }
     legs.set(stream, leg)
     const showHere = async (session: string): Promise<void> => {
@@ -756,10 +820,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       if (request.method === 'GET' && pathname === '/machines') return await throughRelay(async () => ({ here: device.id, machines: await machinesOf(relay) }))
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]
       if (request.method === 'GET' && claim !== undefined) return Response.json(holderOf(claim))
-      if (request.method !== 'POST') return failed(404, `anyhost serves GET /status, /claims/<session> and /machines, POST /connect, /join and /machines, and a WebSocket at /attach, not ${request.method} ${pathname}.`)
+      if (request.method !== 'POST') return failed(404, `anyhost serves GET /status, /claims/<session> and /machines, POST /connect, /join, /machines and /move, and a WebSocket at /attach, not ${request.method} ${pathname}.`)
       const body = await request.json().catch((error: unknown) => new Error(`anyhost takes a JSON object at POST ${pathname}, and this body is none: ${error instanceof Error ? error.message : String(error)}`))
       if (body instanceof Error) return failed(400, body)
-      return await act(pathname, body as { id?: string; link?: string })
+      return await act(pathname, body as Asked)
     },
     websocket: {
       message(leg, message) {

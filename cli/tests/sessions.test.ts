@@ -80,6 +80,37 @@ test('a session another machine resumed refuses resume without --take, and --tak
   expect(relay.claims.get(session)).toBe(mac.id)
 })
 
+test("a session's upload holds no job record of Claude Code's, and a restore places, checks or deletes none an earlier version uploaded", async () => {
+  const relay = memoryRelay()
+  const session = 'abababab-0000-4000-8000-00000000000a'
+  const jobOf = (roots: MachineRoots): string => join(roots.claudeHome, 'jobs', session.slice(0, 8), 'state.json')
+  const writer = machine(mac, relay)
+  const transcript = join(writer.roots.claudeHome, 'projects', '-work', `${session}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  mkdirSync(dirname(jobOf(writer.roots)), { recursive: true })
+  const cwd = join(writer.roots.home, 'work')
+  mkdirSync(cwd, { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"cwd":"${cwd}","sessionId":"${session}"}\n`)
+  writeFileSync(jobOf(writer.roots), `{"state":"done","cwd":"${cwd}"}`)
+  // the first upload of a session takes every file it has
+  await uploadSession(writer.capture, session, 'claude', new Set([transcript]), failTest)
+  const paths = async (): Promise<string[]> => [...(await downloadJournal(relay.connect(server, writer.roots), session, temporaryFolder(), ({ path }) => path)).files.keys()]
+  expect(await paths()).toEqual([transcript])
+
+  // what an earlier version uploaded: the job record, then its deletion
+  await uploadSession(writer.capture, session, 'claude', new Set([jobOf(writer.roots)]), failTest)
+  rmSync(jobOf(writer.roots))
+  await uploadSession(writer.capture, session, 'claude', new Set([jobOf(writer.roots)]), failTest)
+  await writeIndex(writer.capture)
+  const restorer = machine(server, relay)
+  mkdirSync(dirname(jobOf(restorer.roots)), { recursive: true })
+  writeFileSync(jobOf(restorer.roots), '{"state":"stopped"}')
+  await restore(restorer.capture, session, { take: true })
+
+  expect(readFileSync(jobOf(restorer.roots), 'utf8')).toBe('{"state":"stopped"}')
+  expect(existsSync(join(restorer.roots.claudeHome, 'projects', '-work', `${session}.jsonl`))).toBe(true)
+})
+
 test('restore gives restoreCode the last code header and its parts, places no part as a file, and continues in the folder it answers', async () => {
   const relay = memoryRelay()
   const session = 'eeeeeeee-0000-4000-8000-000000000005'

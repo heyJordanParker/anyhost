@@ -52,7 +52,8 @@ export type AttachedTerminal = {
   close(): void
 }
 
-async function run(argv: readonly string[], options: { readonly cwd?: string; readonly env?: Record<string, string> } = {}): Promise<string> {
+// Runs a program to its end and answers what it printed, or rejects with its exit code and its errors.
+export async function run(argv: readonly string[], options: { readonly cwd?: string; readonly env?: Record<string, string> } = {}): Promise<string> {
   const child = Bun.spawn([...argv], { ...options, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
   const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   if (code !== 0) throw new Error(`${argv.join(' ')} exited with ${code}: ${error.trim() || output.trim()}`)
@@ -141,16 +142,25 @@ const inScope = (unit: string, command: readonly string[], partOf?: string): str
     : [...command]
 const sessionScope = (id: string): string => `anyhost-claude-${id}.scope`
 
-// Starts the session in Claude Code's background in `cwd`, the folder it continues in, and answers the id `claude
-// attach` takes. A scope of that name that is still there holds the daemon, which a bare start reaches.
-export async function startInBackground(session: string, cwd: string, env: Record<string, string>): Promise<string> {
-  const id = session.slice(0, 8)
-  const command = [claude(), '--bg', '--resume', session]
-  await run(inScope(sessionScope(id), command), { cwd, env }).catch(async (error: unknown) => {
+// Starts the session in Claude Code's background in `cwd`, the folder it continues in, or a new session there with no
+// `session`, and answers the id `claude attach` takes. A scope of that name that is still there holds the daemon, which
+// a bare start reaches. `claude --bg` picks a new session's id itself and ignores `--session-id`, so the id is the one
+// it prints, and the scope gets a name of its own.
+export async function startInBackground(session: string | undefined, cwd: string, env: Record<string, string>): Promise<string> {
+  const command = session === undefined ? [claude(), '--bg'] : [claude(), '--bg', '--resume', session]
+  const printed = await run(inScope(sessionScope((session ?? crypto.randomUUID()).slice(0, 8)), command), { cwd, env }).catch(async (error: unknown) => {
     if (!String(error).includes('already loaded')) throw error
-    await run(command, { cwd, env })
+    return await run(command, { cwd, env })
   })
+  if (session !== undefined) return session.slice(0, 8)
+  const id = /backgrounded · ([0-9a-f]{8})/.exec(printed)?.[1]
+  if (id === undefined) throw new Error(`claude --bg printed no session id: ${printed.trim()}`)
   return id
+}
+
+// Stops a background session Claude Code runs here. Claude Code keeps its job, which `claude attach` starts again.
+export async function stopInBackground(id: string, env: Record<string, string>): Promise<void> {
+  await run([claude(), 'stop', id], { env })
 }
 
 // Each `claude attach` gets a scope of a new name, as the scope of an earlier one stays while a daemon it started runs,

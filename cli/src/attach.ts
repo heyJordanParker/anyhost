@@ -43,11 +43,14 @@ async function reportToHerdr(session: string, status: string): Promise<string | 
   return code === 0 ? undefined : `herdr pane report-agent exited with ${code}: ${error.trim()}`
 }
 
+const newStream = (): number => new DataView(crypto.getRandomValues(new Uint8Array(4)).buffer).getUint32(0)
+const newKey = (): string => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
+
 // The session through this machine's program, whose WebSocket at /attach takes the attach.
 export function attach(asked: string): Promise<number> {
   const frames = openStream()
-  const id = new DataView(crypto.getRandomValues(new Uint8Array(4)).buffer).getUint32(0)
-  const key = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
+  let id = newStream()
+  let key = newKey()
   // what went wrong while the terminal was the session's, said once it is this terminal's again
   const problems = new Set<string>()
   let session = asked
@@ -92,10 +95,12 @@ export function attach(asked: string): Promise<number> {
       isDialing = true
       const started = Date.now()
       const addresses = addressesHere()
+      const dialed = id
       dialDirect(offer, id, key, (frame) => frames.receive(frame)).then(
         (link) => {
           isDialing = false
-          if (isDone) return link.close()
+          // a session that moved meanwhile runs on another machine, which the next attach's offer names
+          if (isDone || dialed !== id) return link.close()
           direct = link
           dials = 0
           frames.use(link)
@@ -173,6 +178,20 @@ export function attach(asked: string): Promise<number> {
       void reportToHerdr(whole, status).then((problem) => (problem === undefined ? undefined : problems.add(problem)))
     })
     frames.on('exit', ({ code, message }) => finish(code, message))
+    // The session moved to another machine, which holds it now: this machine's program attaches it again where it went,
+    // on a new stream, whose host starts it over from its first byte.
+    frames.on('moved', () => {
+      clearTimeout(redial)
+      offer = undefined
+      leg = undefined
+      const link = direct
+      direct = undefined
+      link?.close()
+      frames.use(undefined)
+      id = newStream()
+      key = newKey()
+      if (socket?.readyState === WebSocket.OPEN) socket.send(attachMessage())
+    })
     frames.on('lost', (why) => finish(1, why))
     if (process.stdin.isTTY) process.stdin.setRawMode(true)
     process.stdin.on('data', (chunk: Buffer) => frames.write('input', new Uint8Array(chunk)))

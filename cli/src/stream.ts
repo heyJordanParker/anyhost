@@ -10,9 +10,12 @@ export type Size = { readonly cols: number; readonly rows: number }
 export type SessionState = { readonly session: string; readonly status: string }
 // The host ended the stream: code 0 once `claude attach` ended, or 1 with the reason it shows nothing.
 export type Exit = { readonly code: number; readonly message: string }
+// The session runs on the machine `to` names from now on, and the viewer attaches to it there.
+export type Moved = { readonly to: string }
 
-// What each kind of frame carries: the viewer sends `input` and `resize`, and the host `output`, `state` and `exit`.
-type Values = { readonly input: Uint8Array; readonly resize: Size; readonly output: Uint8Array; readonly state: SessionState; readonly exit: Exit }
+// What each kind of frame carries: the viewer sends `input` and `resize`, and the host `output`, `state`, `exit` and
+// `moved`.
+type Values = { readonly input: Uint8Array; readonly resize: Size; readonly output: Uint8Array; readonly state: SessionState; readonly exit: Exit; readonly moved: Moved }
 export type Kind = keyof Values
 // `lost` says why the stream ended on this side, as when its peer acknowledged nothing for MAX_WAITING bytes.
 type Events = Values & { readonly lost: string }
@@ -30,10 +33,10 @@ export type Stream = {
   close(): void
 }
 
-const KINDS: readonly Kind[] = ['input', 'resize', 'output', 'state', 'exit']
+const KINDS: readonly Kind[] = ['input', 'resize', 'output', 'state', 'exit', 'moved']
 // A side's first frame on each link: `start` on its first one, as it holds nothing yet, and `ack` on every later one.
-const ACK = 6
-const START = 7
+const ACK = 7
+const START = 8
 const HEADER = 9
 const ACK_MS = 100
 // A full 120×40 screen of Claude Code took 6,442 bytes (worker-spec W7), so 8 MiB holds over a thousand screens.
@@ -65,7 +68,7 @@ function valueOf(kind: Kind, bytes: Uint8Array): Values[Kind] {
     return { cols: view.getUint16(0), rows: view.getUint16(2) }
   }
   if (kind === 'exit') return { code: bytes[0] ?? 1, message: decoder.decode(bytes.subarray(1)) }
-  return JSON.parse(decoder.decode(bytes)) as SessionState
+  return JSON.parse(decoder.decode(bytes)) as SessionState | Moved
 }
 
 function frameOf(code: number, offset: number, bytes: Uint8Array = new Uint8Array()): Uint8Array {

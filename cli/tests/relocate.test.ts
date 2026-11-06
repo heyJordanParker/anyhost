@@ -103,7 +103,7 @@ test('a plan and saved output name this machine, while file backups and binary f
 test('every byte outside a path stays as the writer wrote it', () => {
   const content = '{\n  "cwd": "/Users/alice/code/app",\n  "note": "\\u00e9t\\u00e9 🚆 \\"/Users/alice\\"\\t",\n  "n": 1.50\n}\nnot json /Users/alice\n'
 
-  expect(moved(content, '/Users/alice/.claude/jobs/j/state.json')).toBe('{\n  "cwd": "/home/al/src/app",\n  "note": "\\u00e9t\\u00e9 🚆 \\"/home/al\\"\\t",\n  "n": 1.50\n}\nnot json /home/al\n')
+  expect(moved(content, '/Users/alice/.claude/projects/-Users-alice-code-app/s/subagents/agent-a1.meta.json')).toBe('{\n  "cwd": "/home/al/src/app",\n  "note": "\\u00e9t\\u00e9 🚆 \\"/home/al\\"\\t",\n  "n": 1.50\n}\nnot json /home/al\n')
 })
 
 test('a session run in the home folder moves with the home', () => {

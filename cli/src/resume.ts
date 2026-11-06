@@ -82,7 +82,7 @@ function writersOf(devices: ReadonlyMap<string, Protocol.Device>, indexes: Reado
 // Where the session's working folder goes on this machine: in the checkout of its repository found by remote, or
 // in the folder this machine keeps checkouts in; outside git, where relocate moves its path from the writer's home,
 // temp root and other roots to this machine's.
-async function localFolder(capture: Capture, session: ListedSession, writer: Roots, chosen: string): Promise<string> {
+export async function localFolder(capture: Capture, session: Pick<IndexedSession, 'repo' | 'repoFolder' | 'cwd'>, writer: Roots, chosen: string): Promise<string> {
   const { home } = capture.roots
   if (session.repo !== '') {
     const checkouts = checkoutsOf(capture, chosen)
@@ -91,6 +91,15 @@ async function localFolder(capture: Capture, session: ListedSession, writer: Roo
   if (session.cwd === '') return home
   // the folder is the writer's checkout itself, which no root of this machine names yet
   return relocate(NOTHING, session.cwd, { ...writer, checkout: writer.home }, { ...capture.roots, checkout: home }).path
+}
+
+// Clones the repository a session works in when this machine has no checkout of it where the session continues in
+// `cwd`, on `branch` when one is named.
+export async function cloneMissing(session: Pick<IndexedSession, 'repo' | 'repoFolder'>, cwd: string, home: string, branch = ''): Promise<void> {
+  const checkout = checkoutOfEntry({ ...session, cwd }, home)
+  if (session.repo === '' || (await isFolder(checkout))) return
+  console.log(`Cloning ${session.repo} into ${checkout}`)
+  await run(['git', 'clone', ...(branch === '' ? [] : ['--branch', branch]), session.repo, checkout])
 }
 
 async function readStaged(file: ReplayedFile, offset: number, size: number): Promise<Uint8Array> {
@@ -253,10 +262,15 @@ export async function restore(capture: Capture, id: string, options: { take: boo
     return named.get(key) ?? path
   })
   const writers: Writers = { rootsOf, tracked: await trackedFilesOf(replayed, id) }
+  // Journals earlier versions uploaded hold Claude Code's job record `jobs/<8 hex>/state.json`, which names a job only
+  // the writer's daemon ran, so nothing under `jobs/` is checked, placed or deleted here.
+  const jobs = `${join(roots.claudeHome, 'jobs')}/`
+  const files = [...replayed.files].filter(([path]) => !path.startsWith(jobs))
+  const deleted = [...replayed.deleted].filter((path) => !path.startsWith(jobs))
   // A lines file is shared by every session, and its writer's view of the session's lines can hold lines the journal
   // never got, such as the prompts that machine refused while another one held the session. So nothing checks it, and
   // placing it appends the session's lines this machine lacks.
-  for (const [path, file] of replayed.files) if (!linesFiles(roots).has(path)) await checkFile(file, writers)
+  for (const [path, file] of files) if (!linesFiles(roots).has(path)) await checkFile(file, writers)
   const code = [...replayed.code.values()].at(-1)
   if (code !== undefined && sha256(code.bytes) !== code.header.after?.sha256) throw new Error(`The code record of ${code.header.path} does not hash to the sha256 its header says.`)
   const readPart = async (path: string): Promise<Uint8Array> => {
@@ -266,21 +280,18 @@ export async function restore(capture: Capture, id: string, options: { take: boo
   }
   let cwd = folder
   if (code !== undefined) cwd = await capture.restoreCode(code.bytes, readPart, folder)
-  else if (session.repo !== '' && !(await isFolder(provisional.checkout))) {
-    console.log(`Cloning ${session.repo} into ${provisional.checkout}`)
-    await run(['git', 'clone', session.repo, provisional.checkout])
-  }
+  else await cloneMissing(session, folder, roots.home)
   await mkdir(cwd, { recursive: true })
   const here: Roots = { ...roots, checkout: checkoutOfEntry({ ...session, cwd }, roots.home) }
   stopJournal(db, id, session.tool, `anyhost resume is placing the files of ${id}, and stopped there.`)
   const placed: FileState[] = []
-  for (const [path, file] of replayed.files) {
+  for (const [path, file] of files) {
     // a code part stays in the journal: this machine holds it, so capture never uploads it again
     if (isCodePart(path)) placed.push({ session: id, path, journalSize: file.size, localSize: file.size, tail: NOTHING, sha256: file.last.after.sha256, mtime: 0 })
     else placed.push(await placeFile(id, file, writers, here))
   }
   // a file the session deleted is gone here too, and capture knows it, so it uploads the file whole if it comes back
-  for (const path of replayed.deleted) {
+  for (const path of deleted) {
     await rm(path, { force: true })
     placed.push({ session: id, path, journalSize: 0, localSize: 0, tail: NOTHING, sha256: '', mtime: 0 })
   }
