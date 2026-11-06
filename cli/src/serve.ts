@@ -43,7 +43,7 @@ const CLEAR = '\x1b[2J'
 // host stops starting it again. A person who presses `←` and leaves the agents view takes longer than that.
 const QUICK_END_MS = 2000
 const QUICK_ENDS = 3
-// systemd stopping a session's scope signals its `claude attach` and the session in the same moment, and Claude Code
+// systemd stopping the daemon's scope signals each `claude attach` and session in the same moment, and Claude Code
 // removed the session's record 0.35 to 0.53 s after the attach ended in 4 stops on anyhost-d, at a Mac load average of
 // 140 to 237.
 const STOPPING_MS = 3000
@@ -551,7 +551,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     if (kept?.id !== undefined) return { id: kept.id, cwd: kept.cwd }
     const cwd = capture.db.query<{ cwd: string }, [string]>('select cwd from sessions where id = ?').get(session)?.cwd ?? ''
     if (cwd === '') throw new Error(`${device.name} knows no folder of the session ${session}, so it cannot start it.`)
-    return { id: await startInBackground(session, cwd, await environment), cwd }
+    return { id: await startInBackground(roots.claudeHome, session, cwd, await environment), cwd }
   }
   const startShowing = (session: string, size: Size): Promise<Shown> => {
     let tail = ''
@@ -569,9 +569,9 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       })
     }
     // in the session's folder, where Claude Code's agents view, which `←` opens in it, has the folder's trust
-    const open = (id: string, cwd: string, env: Record<string, string>, at: Size): AttachedTerminal => {
+    const open = async (id: string, cwd: string, env: Record<string, string>, at: Size): Promise<AttachedTerminal> => {
+      const terminal = await attachTerminal(roots.claudeHome, id, cwd, env, at, took)
       const started = Date.now()
-      const terminal = attachTerminal(id, cwd, env, at, took)
       terminals.add(terminal)
       void terminal.exited.then((signal) => {
         terminals.delete(terminal)
@@ -581,33 +581,39 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     }
     // `claude attach` ends by itself when a viewer leaves Claude Code's agents view, which `←` opens, or once the
     // session ended, as after `claude stop`. A signal ends it from outside: the OOM killer, a `kill`, or systemd stopping
-    // the session's scope, which signals the session in the same moment, so the session still runs as its attach ends.
-    // So Claude Code's record of the session decides: read once for an attach that ended by itself, and followed for
-    // STOPPING_MS after a signal. While the session runs, this program starts the attach again, which paints the whole
-    // screen for every viewer, so no viewer's keys end the others'.
+    // the daemon's scope, which signals the daemon and its sessions in the same moment, so the session still runs as its
+    // attach ends. So Claude Code's record of the session decides: read once for an attach that ended by itself, and
+    // followed for STOPPING_MS after a signal, then read once more. While the session runs, this program starts the
+    // attach again, which paints the whole screen for every viewer, so no viewer's keys end the others'.
     const ended = async (id: string, cwd: string, started: number, signal: Subprocess['signalCode']): Promise<void> => {
       if (!isCurrent()) return
       const lived = Date.now() - started
       const current = await view
       const isGone = (sessions: readonly RunningSession[]): true | undefined => (sessions.some((entry) => entry.sessionId === session) ? undefined : true)
-      // a session whose record stays for STOPPING_MS still runs
-      const isRunning = signal === null ? isGone(await recordedSessions(roots.claudeHome)) === undefined : await whenSessions(roots.claudeHome, isGone, STOPPING_MS, '').then(() => false, () => true)
+      const isRecorded = async (): Promise<boolean> => isGone(await recordedSessions(roots.claudeHome)) === undefined
+      const isRunning = signal === null ? await isRecorded() : await whenSessions(roots.claudeHome, isGone, STOPPING_MS, '').then(() => false, isRecorded)
       if (!isCurrent()) return
+      const stop = (message: string, code: number): void => {
+        shown.delete(session)
+        console.error(`${new Date().toISOString()} ${message}`)
+        endViewers(session, { code, message })
+      }
       quickEnds = lived < QUICK_END_MS ? quickEnds + 1 : 0
       if (isRunning && quickEnds < QUICK_ENDS) {
         console.error(`${new Date().toISOString()} claude attach ${id} ended${signal === null ? '' : ` by ${signal}`} while ${session} runs, so anyhost starts it again for its viewers.`)
-        Object.assign(current, { isAlternateScreen: false, terminal: open(id, cwd, await environment, current.size) })
+        const terminal = await open(id, cwd, await environment, current.size).catch((error: unknown) => new Error(`anyhost could not start claude attach ${id} again: ${error instanceof Error ? error.message : String(error)}`))
+        if (terminal instanceof Error) return isCurrent() ? stop(terminal.message, 1) : undefined
+        // the viewers left meanwhile
+        if (!isCurrent()) return terminal.close()
+        Object.assign(current, { isAlternateScreen: false, terminal })
         tail = ''
         return
       }
-      shown.delete(session)
-      const message = isRunning ? `claude attach ${id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.` : stoppedOn(session)
-      console.error(`${new Date().toISOString()} ${message}`)
-      endViewers(session, { code: isRunning ? 1 : 0, message })
+      stop(isRunning ? `claude attach ${id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.` : stoppedOn(session), isRunning ? 1 : 0)
     }
     const view = (async (): Promise<Shown> => {
       const { id, cwd } = await runHere(session)
-      const terminal = open(id, cwd, await environment, size)
+      const terminal = await open(id, cwd, await environment, size)
       // a running session has its record in `sessions/`, so the folder is there to watch
       watchStates()
       statesChanged()

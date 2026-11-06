@@ -332,12 +332,12 @@ async function runInBackground(capture: Capture, session: string, kept: RunningS
       throw new Error(`${messageOf(error)}, and ${job === undefined ? 'lists no job of it' : `lists its job ${job.id ?? ''} as ${job.state ?? 'neither running nor stopped'}`}`)
     })
   if (kept?.id === undefined) {
-    await startInBackground(session, cwd, env)
+    await startInBackground(capture.roots.claudeHome, session, cwd, env)
     await running()
     return
   }
   console.error(`${stamp()} ${capture.device.name} starts the job Claude Code keeps of ${session} again with claude attach ${kept.id}.`)
-  const terminal = attachTerminal(kept.id, kept.cwd, env, { cols: 80, rows: 24 }, () => undefined)
+  const terminal = await attachTerminal(capture.roots.claudeHome, kept.id, kept.cwd, env, { cols: 80, rows: 24 }, () => undefined)
   try {
     await running()
   } finally {
@@ -406,7 +406,7 @@ export async function receiveStart(capture: Capture, asked: Extract<Delivered, {
     await cloneMissing(place, cwd, roots.home, asked.branch)
     await mkdir(cwd, { recursive: true })
     if (asked.trusted) await trustHere(capture, cwd, asked.from.name)
-    const id = await startInBackground(undefined, cwd, await here.environment)
+    const id = await startInBackground(roots.claudeHome, undefined, cwd, await here.environment)
     const { sessionId } = await whenSessions(capture.roots.claudeHome, (sessions) => sessions.find((entry) => entry.id === id && entry.pid !== undefined), RUNNING_MS, `Claude Code listed the new session ${id} running on ${device.name} no ${RUNNING_MS / 1000} s after its start.`)
     await takeClaim(relay, sessionId, { take: false })
     console.error(`${stamp()} ${device.name} started ${sessionId} in ${cwd} for ${asked.from.name}.`)

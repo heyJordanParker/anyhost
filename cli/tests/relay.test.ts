@@ -450,8 +450,9 @@ const recordSession = (home: string, pid: number): void =>
 // terminal's size at its start, clears the screen and prints it again at each SIGWINCH in one write, as Claude Code
 // paints a frame, prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
 // when its terminal closes. `stopped` in the machine's folder stops the session: `claude agents` lists it no more.
-// Its record in `sessions/` names the test's own process, which runs as long as the test. `claude` replaces that
-// Claude Code with a script of the machine's folder.
+// Its record in `sessions/` names the test's own process, which runs as long as the test, and so does the lock of
+// Claude Code's daemon, which a background session needs to run. `claude` replaces that Claude Code with a script of
+// the machine's folder.
 function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, claude?: (folder: string) => string): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
   const folder = temporaryFolder()
   const home = join(folder, 'home')
@@ -459,6 +460,7 @@ function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, claude?
   // where Claude Code keeps the record of each session it runs, and its transcripts
   mkdirSync(join(home, '.claude', 'sessions'), { recursive: true })
   mkdirSync(join(home, '.claude', 'projects'), { recursive: true })
+  writeFileSync(join(home, '.claude', 'daemon.lock'), JSON.stringify({ pid: process.pid }))
   const env = {
     // the machine's own programs, such as its herdr, come first
     PATH: `${join(folder, 'bin')}:${process.env['PATH'] ?? ''}`,
@@ -731,6 +733,27 @@ test('a claude attach a signal ended once its session\'s process is gone ends it
   expect(Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()).toBe('')
 })
 
+test('a claude attach a signal ended once Claude Code\'s daemon went ends its viewer with the reason, though the session\'s record is still there', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  const home = host.env['HOME'] ?? ''
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
+  // as when systemd stops the daemon's scope: the daemon removes its lock as it ends, and its attaches end by a signal,
+  // while the session's process still ends, so its record is still there
+  rmSync(join(home, '.claude', 'daemon.lock'))
+  const signalled = Date.now()
+  Bun.spawnSync(['pkill', '-TERM', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`])
+  await waitFor('the viewer\'s end', () => viewer.seen.exits.length > 0)
+  expect(viewer.seen.exits).toEqual([`The session ${SESSION} stopped running on ${HOST.name}.`])
+  // at its first read of the records, not after the 3 s a running session's record is followed
+  expect(Date.now() - signalled).toBeLessThan(3000)
+  expect(existsSync(join(home, '.claude', 'sessions', `${process.pid}.json`))).toBe(true)
+  expect(Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()).toBe('')
+})
+
 test('the program\'s own stop ends its viewers\' streams and starts no claude attach', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
@@ -823,9 +846,10 @@ const NEW_SESSION = 'abcdef12-0000-4000-8000-000000000001'
 // folder holds, and with `--all` what `kept.json` holds, the background jobs it keeps, when there is one. `claude --bg`
 // fails with the text of `fail` when there is one, and else starts the session `--resume` names, or a new one, which it
 // lists running from then on, with its record in `sessions/`, as Claude Code writes one for each session it runs.
-// `claude attach` starts a kept job again, and shows the terminal's size and each line typed. Every call goes into
-// `claude.log`: the time, the folder it ran in, and its arguments. A session it runs has the pid of the program that
-// asked for it, which runs as long as the test.
+// `claude attach` starts a kept job again, and shows the terminal's size and each line typed. `claude daemon run` takes
+// the daemon's lock and runs as long as the program that started it. Every call goes into `claude.log`: the time, the
+// folder it ran in, and its arguments. A session it runs has the pid of the program that asked for it, which runs as
+// long as the test.
 const backgroundClaude = (folder: string): string => `#!/bin/bash
 F='${folder}'
 echo "$(date +%s%N) $PWD $*" >> "$F/claude.log"
@@ -847,6 +871,9 @@ case "$1" in
     echo "size $(stty size)"
     while IFS= read -r line; do echo "typed $line"; done ;;
   stop) rm -f "$F/agents.json" "$CLAUDE_CONFIG_DIR"/sessions/*.json; echo "stopped $2" ;;
+  daemon)
+    printf '{"pid":%s}' $$ > "$CLAUDE_CONFIG_DIR/daemon.lock"
+    while kill -0 $PPID 2>/dev/null; do sleep 0.2; done ;;
   *) exit 2 ;;
 esac
 `
@@ -1158,5 +1185,51 @@ test('anyhost new starts a session on the worker in its clone of the same reposi
   expect(trustedIn(worker)).toEqual([realpathSync(join(worker.env['HOME'] ?? '', 'trip'))])
   terminal.write('hello from the laptop\r')
   await waitFor('the typed line', () => shown.includes('typed hello from the laptop'))
+  terminal.close()
+}, 60_000)
+
+// systemd's systemd-run, which logs each call into `systemd-run.log` in the machine's folder and runs the command in it
+const systemdOn = (folder: string): void =>
+  void script(
+    join(folder, 'bin', 'systemd-run'),
+    `#!/bin/bash
+echo "$*" >> '${folder}/systemd-run.log'
+while [ "$1" != --unit ]; do shift; done
+shift 2
+exec "$@"
+`,
+  )
+
+test('on Linux the program starts Claude Code\'s daemon in anyhost-claude.scope before the first claude --bg, every later claude --bg bare, and each claude attach PartOf that scope', async () => {
+  const relay = memoryRelay()
+  const laptop = machineFor(relay, LAPTOP, false, backgroundClaude)
+  const worker = await workerOn(relay, (folder) => {
+    systemdOn(folder)
+    // no daemon runs on the worker yet
+    rmSync(join(folder, 'home', '.claude', 'daemon.lock'))
+  })
+  await serveOn(laptop.env)
+  await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))
+  const checkout = tripOn(laptop)
+  trust(laptop, checkout)
+
+  let shown = ''
+  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: (_terminal, bytes) => void (shown += decoder.decode(bytes)) })
+  const first = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, terminal })
+  children.push(first)
+  await waitFor('the new session on the laptop\'s terminal', () => shown.includes('size 24 80'), 30_000)
+  // a later session reaches the daemon that runs
+  const later = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
+  children.push(later)
+  const calls = (): string[] => logOf(worker.folder, 'claude.log').map((line) => line.split(' ').slice(2).join(' ')).filter((call) => !call.startsWith('agents'))
+  await waitFor('the later claude --bg', () => calls().filter((call) => call === '--bg').length === 2, 30_000)
+
+  const claude = worker.env['CLAUDE_CODE_EXECPATH']
+  const id = NEW_SESSION.slice(0, 8)
+  expect(calls()).toEqual(['daemon run --origin transient', '--bg', `attach ${id}`, '--bg'])
+  const scoped = logOf(worker.folder, 'systemd-run.log')
+  expect(scoped).toHaveLength(2)
+  expect(scoped[0]).toBe(`--user --scope --quiet --collect --unit anyhost-claude.scope ${claude} daemon run --origin transient`)
+  expect(scoped[1]).toMatch(new RegExp(`^--user --scope --quiet --collect -p PartOf=anyhost-claude\\.scope --unit anyhost-attach-${id}-[0-9a-f]{8}\\.scope ${claude} attach ${id}$`))
   terminal.close()
 }, 60_000)
