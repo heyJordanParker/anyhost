@@ -233,15 +233,15 @@ const closing = <T extends { close(): void } | Socket>(opened: T): T => {
 // a host's direct listener on loopback, which a test machine has whatever its network
 const listensHere = async (): Promise<DirectListener> => closing(await listenDirect(temporaryFolder(), failTest, () => ['127.0.0.1']))
 
-test('a direct frame is its length and AES-256-GCM under an HKDF-SHA256 key of the stream key, id and salt, one per direction, its nonce a counter', () => {
+test('a direct frame is its length and AES-256-GCM under an HKDF-SHA256 key of the stream key, id and both salts, one per direction, its nonce a counter', () => {
   const key = crypto.getRandomValues(new Uint8Array(32))
-  const salt = crypto.getRandomValues(new Uint8Array(16))
+  const [viewerSalt, hostSalt] = [crypto.getRandomValues(new Uint8Array(16)), crypto.getRandomValues(new Uint8Array(16))]
   const stream = 1388413289
-  const viewer = cipherOf(key, stream, salt, 'viewer to host')
+  const viewer = cipherOf(key, stream, viewerSalt, hostSalt, 'viewer to host')
   const sealed = [viewer.seal(encoder.encode('first')), viewer.seal(encoder.encode('second'))]
   const id = Buffer.alloc(4)
   id.writeUInt32BE(stream)
-  const derived = Buffer.from(hkdfSync('sha256', key, Buffer.concat([id, salt]), 'anyhost viewer to host', 32))
+  const derived = Buffer.from(hkdfSync('sha256', key, Buffer.concat([id, viewerSalt, hostSalt]), 'anyhost viewer to host', 32))
   const opened = sealed.map((framed, count) => {
     expect(framed.readUInt32BE(0)).toBe(framed.length - 4)
     const nonce = Buffer.alloc(12)
@@ -251,38 +251,95 @@ test('a direct frame is its length and AES-256-GCM under an HKDF-SHA256 key of t
     return decoder.decode(Buffer.concat([decipher.update(framed.subarray(4, framed.length - 16)), decipher.final()]))
   })
   expect(opened).toEqual(['first', 'second'])
-  // the host opens them in their order, and the other direction's key or another salt opens nothing
-  const host = cipherOf(key, stream, salt, 'viewer to host')
+  // the host opens them in their order, and the other direction's key or another salt of either side opens nothing
+  const host = cipherOf(key, stream, viewerSalt, hostSalt, 'viewer to host')
   expect(sealed.map((framed) => decoder.decode(host.open(framed.subarray(4))))).toEqual(['first', 'second'])
   const first = sealed[0]?.subarray(4) ?? new Uint8Array()
-  expect(() => cipherOf(key, stream, salt, 'host to viewer').open(first)).toThrow()
-  expect(() => cipherOf(key, stream, crypto.getRandomValues(new Uint8Array(16)), 'viewer to host').open(first)).toThrow()
+  expect(() => cipherOf(key, stream, viewerSalt, hostSalt, 'host to viewer').open(first)).toThrow()
+  expect(() => cipherOf(key, stream, crypto.getRandomValues(new Uint8Array(16)), hostSalt, 'viewer to host').open(first)).toThrow()
+  expect(() => cipherOf(key, stream, viewerSalt, crypto.getRandomValues(new Uint8Array(16)), 'viewer to host').open(first)).toThrow()
 })
 
-test('the host closes a connection whose first frame opens under the key of no stream it holds, and sends it nothing', async () => {
+// What the host sends a connection that opens with `opening`, then `after(host salt)` once the host's salt came: its
+// salt, and every byte after it until it closed the connection or 500 ms passed.
+const answerOf = (port: number, opening: Uint8Array, after: (hostSalt: Buffer) => Uint8Array): Promise<{ readonly salt: number; readonly after: number; readonly isClosed: boolean }> =>
+  new Promise((resolve) => {
+    const socket = closing(dialTcp({ host: '127.0.0.1', port }))
+    let got = Buffer.alloc(0)
+    const answer = (isClosed: boolean) => ({ salt: Math.min(got.length, 16), after: Math.max(got.length - 16, 0), isClosed })
+    socket.on('connect', () => socket.write(opening))
+    socket.on('data', (chunk: Buffer) => {
+      const isFirst = got.length < 16
+      got = Buffer.concat([got, chunk])
+      if (isFirst && got.length >= 16) socket.write(after(got.subarray(0, 16)))
+    })
+    socket.on('error', () => undefined)
+    socket.on('close', () => resolve(answer(true)))
+    setTimeout(() => resolve(answer(false)), 500)
+  })
+const openingOf = (stream: number, viewerSalt: Uint8Array): Buffer => {
+  const id = Buffer.alloc(4)
+  id.writeUInt32BE(stream)
+  return Buffer.concat([id, viewerSalt])
+}
+
+test('the host answers every opening with its salt, and closes a connection whose hello opens under the key of no stream it holds, with nothing sealed sent', async () => {
   const listener = await listensHere()
   const key = randomKey()
   listener.hold(7, key, () => undefined, () => undefined)
   const { port, addresses } = await listener.offer()
   expect(addresses).toEqual(['127.0.0.1'])
-  // the bytes the host sent a connection that opened with `stream` and a hello sealed under `sealedWith`, until it
-  // closed the connection or 500 ms passed
-  const answerTo = (stream: number, sealedWith: string): Promise<{ readonly bytes: number; readonly isClosed: boolean }> =>
-    new Promise((resolve) => {
-      const salt = crypto.getRandomValues(new Uint8Array(16))
-      const opening = Buffer.alloc(4)
-      opening.writeUInt32BE(stream)
-      const socket = closing(dialTcp({ host: '127.0.0.1', port }))
-      let bytes = 0
-      socket.on('connect', () => socket.write(Buffer.concat([opening, salt, cipherOf(Buffer.from(sealedWith, 'base64'), stream, salt, 'viewer to host').seal(new Uint8Array())])))
-      socket.on('data', (chunk) => void (bytes += chunk.length))
-      socket.on('close', () => resolve({ bytes, isClosed: true }))
-      setTimeout(() => resolve({ bytes, isClosed: false }), 500)
-    })
-  expect(await answerTo(7, randomKey())).toEqual({ bytes: 0, isClosed: true })
-  expect(await answerTo(8, key)).toEqual({ bytes: 0, isClosed: true })
+  // a hello sealed under `sealedWith` and the salts of this connection
+  const helloOf = (stream: number, sealedWith: string) => async () => {
+    const viewerSalt = crypto.getRandomValues(new Uint8Array(16))
+    return await answerOf(port, openingOf(stream, viewerSalt), (hostSalt) => cipherOf(Buffer.from(sealedWith, 'base64'), stream, viewerSalt, hostSalt, 'viewer to host').seal(new Uint8Array()))
+  }
+  expect(await helloOf(7, randomKey())()).toEqual({ salt: 16, after: 0, isClosed: true })
+  expect(await helloOf(8, key)()).toEqual({ salt: 16, after: 0, isClosed: true })
   // the key of the stream it holds gets the host's hello, an empty frame sealed: its length and the 16-byte tag
-  expect(await answerTo(7, key)).toEqual({ bytes: 4 + 16, isClosed: false })
+  expect(await helloOf(7, key)()).toEqual({ salt: 16, after: 4 + 16, isClosed: false })
+})
+
+test('an opening and hello an observer replays get a new salt from the host, so the replay closes with nothing sealed and the viewer\'s link goes on', async () => {
+  const listener = await listensHere()
+  const [host, viewer] = [opens(), opens()]
+  let [shown, typed, links] = ['', '', 0]
+  host.on('input', (bytes) => void (typed += decoder.decode(bytes)))
+  viewer.on('output', (bytes) => void (shown += decoder.decode(bytes)))
+  const stream = 1388413289
+  const key = randomKey()
+  listener.hold(stream, key, (frame) => host.receive(frame), (link) => {
+    links += 1
+    host.use(link)
+  })
+  const { port } = await listener.offer()
+  // a proxy that keeps what the viewer sent first: its opening and its hello
+  let captured = Buffer.alloc(0)
+  const recorder = closing(
+    createServer((inbound) => {
+      const outbound = closing(dialTcp({ host: '127.0.0.1', port }))
+      closing(inbound)
+      inbound.on('data', (chunk: Buffer) => {
+        captured = Buffer.concat([captured, chunk])
+        outbound.write(chunk)
+      })
+      outbound.on('data', (chunk) => inbound.write(chunk))
+      for (const socket of [inbound, outbound]) socket.on('error', () => undefined)
+    }),
+  )
+  await new Promise<void>((resolve) => recorder.listen({ port: 0, host: '127.0.0.1' }, () => resolve()))
+  const link = closing(await dialDirect({ port: (recorder.address() as { port: number }).port, addresses: ['127.0.0.1'] }, stream, key, (frame) => viewer.receive(frame)))
+  viewer.use(link)
+  await until(() => links === 1)
+  // the opening, 20 bytes, then the hello, its length and the 16-byte tag
+  const [opening, hello] = [captured.subarray(0, 20), captured.subarray(20, 40)]
+  expect(hello.readUInt32BE(0)).toBe(16)
+
+  expect(await answerOf(port, opening, () => hello)).toEqual({ salt: 16, after: 0, isClosed: true })
+  expect(links).toBe(1)
+  host.write('output', encoder.encode('still the viewer\'s'))
+  viewer.write('input', encoder.encode('typed after the replay'))
+  await until(() => shown === 'still the viewer\'s' && typed === 'typed after the replay')
 })
 
 test('a host offers its Tailscale addresses first, then the private LAN addresses of its physical interfaces, and never a public, loopback, link-local or bridge address', () => {
@@ -385,8 +442,8 @@ const script = (path: string, text: string): string => {
 
 // A machine's folders, its relay login, the cmod that answers its device token and options, and the Claude Code that
 // runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen, prints the
-// terminal's size at its start, clears the screen and prints it again at each SIGWINCH, as Claude Code repaints,
-// prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
+// terminal's size at its start, clears the screen and prints it again at each SIGWINCH in one write, as Claude Code
+// paints a frame, prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
 // when its terminal closes. `stopped` in the machine's folder stops the session: `claude agents` lists it no more.
 function machineFor(relay: MemoryRelay, device: Device, isHost: boolean): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
   const folder = temporaryFolder()
@@ -413,7 +470,7 @@ case "$1" in
   agents) [ -e '${join(folder, 'stopped')}' ] && printf '[]' || printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
   attach)
     printf '\\033[?1049h'
-    trap 'printf "\\033[2J"; echo "size $(stty size)"' WINCH
+    trap 'printf "\\033[2Jsize %s\\n" "$(stty size)"' WINCH
     echo "size $(stty size)"
     while IFS= read -r line; do [ "$line" = leave ] && exit 0; echo "typed $line"; done ;;
   *) exit 2 ;;

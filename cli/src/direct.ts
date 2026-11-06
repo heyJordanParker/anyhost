@@ -5,13 +5,15 @@
 // never a public address and never 0.0.0.0, on one port it keeps in `direct.json` in its state folder, so a firewall
 // can allow it. Only the viewer dials, so the viewer's machine opens no port.
 //
-// A connection opens with the stream id and a random salt in the clear. Every frame after is `u32 length` and the
-// stream's frame sealed with AES-256-GCM, under a key per direction that HKDF-SHA256 derives from the one-time key the
-// viewer sent in the relay's `attach`, its nonce a counter. A new salt per connection gives new keys, so no nonce
-// repeats under a key. The host takes a connection only when its first frame opens under the key of a stream it holds,
-// and closes any other with nothing sent back, so only the machine that sent the attach connects (worker-spec "The
-// cipher"). The first frame each way, the hello, is empty, and so is a ping: each side sends one every PING_MS, and a
-// link that hears nothing for SILENCE_MS ends, so its stream goes back to the relay.
+// A connection opens with the stream id and the viewer's random salt in the clear, and the host answers every opening
+// with a random salt of its own, whether it holds that stream or not, so the answer tells nothing of the streams it
+// holds. Every frame after is `u32 length` and the stream's frame sealed with AES-256-GCM, its nonce a counter, under a
+// key per direction that HKDF-SHA256 derives from the one-time key the viewer sent in the relay's `attach`, the stream
+// id and both salts. Both sides' randoms make each connection's keys new, as TLS's do, so no nonce repeats under a key,
+// even for an opening an observer replays. The viewer's first frame, its hello, proves the key: the host links the
+// connection only once the hello opens, and closes any other with nothing sealed sent, so only the machine that sent
+// the attach connects. The hello each way is empty, and so is a ping: each side sends one every PING_MS, and a link
+// that hears nothing for SILENCE_MS ends, so its stream goes back to the relay.
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { connect, createServer, type Server, type Socket } from 'node:net'
@@ -89,10 +91,12 @@ export function offeredAddresses(interfaces: NodeJS.Dict<NetworkInterfaceInfo[]>
 
 const at = (address: string, port: number): string => (address.includes(':') ? `[${address}]:${port}` : `${address}:${port}`)
 
-export function cipherOf(key: Uint8Array, stream: number, salt: Uint8Array, direction: Direction): Cipher {
+// The cipher of one direction of the connection whose opening named `stream` and `viewerSalt`, and whose host answered
+// `hostSalt`.
+export function cipherOf(key: Uint8Array, stream: number, viewerSalt: Uint8Array, hostSalt: Uint8Array, direction: Direction): Cipher {
   const id = Buffer.alloc(4)
   id.writeUInt32BE(stream)
-  const secret = Buffer.from(hkdfSync('sha256', key, Buffer.concat([id, salt]), `anyhost ${direction}`, 32))
+  const secret = Buffer.from(hkdfSync('sha256', key, Buffer.concat([id, viewerSalt, hostSalt]), `anyhost ${direction}`, 32))
   const nonceOf = (count: bigint): Buffer => {
     const nonce = Buffer.alloc(12)
     nonce.writeBigUInt64BE(count, 4)
@@ -212,7 +216,7 @@ export async function listenDirect(folder: string, problems: Problems, addresses
   const accept = (socket: Socket): void => {
     sockets.add(socket)
     socket.setNoDelay(true)
-    // a connection that names no stream this machine holds, under its key, within SILENCE_MS gets nothing back
+    // a connection whose hello does not open under the key of the stream it named within SILENCE_MS gets nothing sealed
     const late = setTimeout(() => socket.destroy(), SILENCE_MS)
     socket.on('error', () => undefined)
     socket.on('close', () => {
@@ -227,10 +231,11 @@ export async function listenDirect(folder: string, problems: Problems, addresses
       () => (heard === undefined ? TAG_BYTES : MAX_SEALED_BYTES),
       (opening) => {
         const stream = opening.readUInt32BE(0)
+        const [viewerSalt, hostSalt] = [opening.subarray(4), randomBytes(SALT_BYTES)]
+        socket.write(hostSalt)
         const holding = held.get(stream)
-        if (holding === undefined) return false
-        const salt = opening.subarray(4)
-        opened = { stream, seal: cipherOf(holding.key, stream, salt, 'host to viewer'), open: cipherOf(holding.key, stream, salt, 'viewer to host') }
+        // a stream this machine does not hold gets the salt too, and its hello opens under no key here
+        if (holding !== undefined) opened = { stream, seal: cipherOf(holding.key, stream, viewerSalt, hostSalt, 'host to viewer'), open: cipherOf(holding.key, stream, viewerSalt, hostSalt, 'viewer to host') }
         return true
       },
       (body) => {
@@ -326,9 +331,10 @@ export function dialDirect(offer: DirectOffer, stream: number, key: string, rece
     }
     const dial = (address: string): void => {
       if (isWon) return
-      const salt = randomBytes(SALT_BYTES)
-      const seal = cipherOf(secret, stream, salt, 'viewer to host')
-      const open = cipherOf(secret, stream, salt, 'host to viewer')
+      const viewerSalt = randomBytes(SALT_BYTES)
+      // both directions' ciphers, once the host's salt came
+      let seal: Cipher | undefined
+      let open: Cipher | undefined
       const socket = connect({ host: address, port: offer.port })
       sockets.add(socket)
       let isOver = false
@@ -347,17 +353,24 @@ export function dialDirect(offer: DirectOffer, stream: number, key: string, rece
       socket.on('connect', () => {
         const opening = Buffer.alloc(OPENING_BYTES)
         opening.writeUInt32BE(stream)
-        salt.copy(opening, 4)
-        socket.write(Buffer.concat([opening, seal.seal(EMPTY)]))
+        viewerSalt.copy(opening, 4)
+        socket.write(opening)
       })
       let heard: ((body: Buffer) => boolean) | undefined
       readFrames(
         socket,
-        0,
+        SALT_BYTES,
         () => (heard === undefined ? TAG_BYTES : MAX_SEALED_BYTES),
-        () => true,
+        // the host's salt: this side's hello, sealed under the keys both salts give, proves it holds the stream's key
+        (hostSalt) => {
+          seal = cipherOf(secret, stream, viewerSalt, hostSalt, 'viewer to host')
+          open = cipherOf(secret, stream, viewerSalt, hostSalt, 'host to viewer')
+          socket.write(seal.seal(EMPTY))
+          return true
+        },
         (body) => {
           if (heard !== undefined) return heard(body)
+          if (seal === undefined || open === undefined) return false
           try {
             if (open.open(body).length > 0) throw new Error('a hello is empty')
           } catch {
