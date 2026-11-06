@@ -358,7 +358,7 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
     },
     connect(device, roots) {
       const token = relay.join(device, roots)
-      const client = connectRelay({ login: async () => ({ url, token }), device, roots, isPatient: true })
+      const client = connectRelay({ login: async () => ({ url, token }), forget: async () => undefined, device, roots, isPatient: true })
       clients.push(client)
       return client
     },

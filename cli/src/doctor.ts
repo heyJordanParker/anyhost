@@ -50,7 +50,7 @@ async function programChecks(): Promise<Check[]> {
         ? { wait: `The anyhost program at ${address} connects to the relay, and ${status.pending} files wait for it.` }
         : state === 'refused' || state === 'outdated'
           ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Do what the line says. The program connects again within a minute.' }
-          : state === 'unjoined' || state === 'removed'
+          : state === 'unjoined'
             ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
             : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
   // the program reads the shell's environment once at its start, so a fix takes a restart

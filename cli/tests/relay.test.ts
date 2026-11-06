@@ -9,7 +9,7 @@ import { MAX_MESSAGE_BYTES, cloneFixFor, encodeStream, streamOf } from '../../re
 import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSession, type Problems } from '../src/capture.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device, type MachineRoots } from '../src/device.ts'
 import { cipherOf, dialDirect, listenDirect, offeredAddresses, type DirectLink, type DirectListener } from '../src/direct.ts'
-import { connectRelay, type Relay } from '../src/relay.ts'
+import { connectRelay, type Relay, type RelayOptions } from '../src/relay.ts'
 import { listSessions } from '../src/sessions.ts'
 import { openStream, type Link, type Stream } from '../src/stream.ts'
 import { memoryRelay, noCode, stopRelays, temporaryFolder, welcomed, type MemoryRelay } from './memory.ts'
@@ -29,8 +29,9 @@ const opened: Relay[] = []
 afterEach(() => {
   for (const relay of opened.splice(0)) relay.close()
 })
-const connect = (...options: Parameters<typeof connectRelay>): Relay => {
-  const relay = connectRelay(...options)
+// a relay whose login nothing keeps, so a login the relay refused has nothing to forget
+const connect = (options: Omit<RelayOptions, 'forget'>): Relay => {
+  const relay = connectRelay({ ...options, forget: async () => undefined })
   opened.push(relay)
   return relay
 }
@@ -71,9 +72,9 @@ test('a removed machine is refused, and a command of it fails with the reason', 
   await welcomed(service)
   relay.remove(device.id)
 
-  await until(() => service.state.is === 'removed')
+  await until(() => service.state.is === 'unjoined')
   const message = 'This machine was removed from your machines. Join it again with a link from Add a machine.'
-  expect(service.state).toEqual({ is: 'removed', message })
+  expect(service.state).toEqual({ is: 'unjoined', message })
   const command = connect({ login: async () => ({ url: relay.url, token }), device, roots: roots('/home/ada'), isPatient: false })
   await expect(Promise.all(command.run([{ op: 'claims' }]))).rejects.toThrow(message)
 })
@@ -117,7 +118,7 @@ test('a removed machine leaves the machines list and stays in devicesOf, so its 
   relay.put(`sessions/${other.id}/index.json`, new TextEncoder().encode(JSON.stringify([{ id: SESSION, tool: 'claude', cwd: '/home/bob/work', lastActivity: '2026-11-06T00:00:00.000Z' }])))
 
   await removeMachine(here, other.id)
-  await until(() => gone.state.is === 'removed')
+  await until(() => gone.state.is === 'unjoined')
   expect((await machinesOf(here)).map(({ name }) => name)).toEqual(['anyhost-a'])
   expect((await devicesOf(here)).get(other.id)).toMatchObject({ name: 'anyhost-b', roots: roots('/home/bob') })
   expect((await devicesOf(here)).get(other.id)?.removedAt).toBeString()
@@ -516,6 +517,55 @@ async function serveOn(env: Record<string, string>): Promise<{ readonly address:
 async function waitFor(what: string, isTrue: () => boolean | Promise<boolean>, ms = 15_000): Promise<void> {
   for (const started = Date.now(); !(await isTrue()); await Bun.sleep(10)) if (Date.now() - started > ms) throw new Error(`${what} did not happen within ${ms} ms.`)
 }
+
+// Runs `anyhost join <link>` on the machine, and answers its exit code and what it printed.
+async function joinOn(env: Record<string, string>, link: string): Promise<{ readonly code: number; readonly out: string; readonly err: string }> {
+  const child = Bun.spawn(['bun', CLI, 'join', link], { env, stdout: 'pipe', stderr: 'pipe' })
+  children.push(child)
+  const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+  return { code, out, err }
+}
+
+test('anyhost join asks the program that answers on this machine, which joins in turn with its forgets', async () => {
+  const { env, socket } = machineFor(memoryRelay(), HOST, false)
+  const asked: unknown[] = []
+  // the program's /join as serve.ts answers it, at the program's own socket
+  const program = Bun.serve({
+    unix: socket,
+    async fetch(request) {
+      asked.push({ method: request.method, path: new URL(request.url).pathname, body: await request.json() })
+      return Response.json({ url: 'https://anyhost-test-join.parker-labs.workers.dev' })
+    },
+  })
+  try {
+    // no relay answers at this link, so only the program's answer joins
+    const link = "cmod install heyJordanParker/anyhost --option 'join=http://127.0.0.1:9/v1/join#K7QX2M4W9TPR6ZC3'"
+    expect(await joinOn(env, link)).toEqual({ code: 0, out: 'Joined this machine to https://anyhost-test-join.parker-labs.workers.dev\n', err: '' })
+    expect(asked).toEqual([{ method: 'POST', path: '/join', body: { link } }])
+  } finally {
+    await program.stop(true)
+  }
+})
+
+test('anyhost join joins in its own process when no program answers on this machine', async () => {
+  const { env } = machineFor(memoryRelay(), HOST, false)
+  const asked: string[] = []
+  const relay = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch(request) {
+      asked.push(`${request.method} ${new URL(request.url).pathname}`)
+      return Response.json({ error: 'invite_unknown', message: 'The relay made no invite with that code. Make a new one with Add a machine.' }, { status: 403 })
+    },
+  })
+  try {
+    const { code, err } = await joinOn(env, `http://127.0.0.1:${relay.port}/v1/join#K7QX2M4W9TPR6ZC3`)
+    expect({ code, err }).toEqual({ code: 1, err: `http://127.0.0.1:${relay.port} refused to join anyhost-a: The relay made no invite with that code. Make a new one with Add a machine.\n` })
+    expect(asked).toEqual(['POST /v1/join'])
+  } finally {
+    await relay.stop(true)
+  }
+})
 
 // A viewer on its own machine, attached to SESSION on HOST through the relay as `anyhost serve` sends an attach.
 async function viewerOn(relay: MemoryRelay, device: Device, size: { cols: number; rows: number }) {

@@ -5,7 +5,7 @@ import type * as Protocol from '../../relay/protocol.ts'
 import { attach } from './attach.ts'
 import { openCapture, type Capture } from './capture.ts'
 import { connectCloudflare, join, type Progress } from './connect.ts'
-import { cmodDevice, deviceFromEnvironment, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
+import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
 import { startNew } from './move.ts'
 import { connectRelay } from './relay.ts'
@@ -84,6 +84,17 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
   }
 }
 
+// Asks this machine's program to join, as the Step does, since the program saves the login in turn with its forget of
+// a login the relay refused. With no program answering, no forget runs, and the join runs here.
+async function joinThroughProgram(link: string): Promise<string> {
+  const unix = serveSocket()
+  const asked = await fetch('http://localhost/join', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ link }) }).catch(() => undefined)
+  if (asked === undefined) return await join(link)
+  const joined = (await asked.json()) as { readonly url?: string; readonly message?: string }
+  if (!asked.ok || joined.url === undefined) throw new Error(joined.message ?? `The anyhost program at ${unix} answered the join with ${asked.status}.`)
+  return joined.url
+}
+
 // The person answers each question Connect Cloudflare asks on the terminal, one line each.
 let lines: AsyncIterator<string> | undefined
 async function answer(question: string): Promise<string> {
@@ -121,7 +132,7 @@ async function main(argv: string[]): Promise<number> {
   const connected = async <T>(work: (capture: Capture) => Promise<T>): Promise<T> => {
     const device = await cmodDevice()
     const roots = rootsHere()
-    const relay = connectRelay({ login: relayLogin, device, roots, isPatient: false })
+    const relay = connectRelay({ login: relayLogin, forget: forgetRelayLogin, device, roots, isPatient: false })
     try {
       return await work(openCapture(relay, device, roots))
     } finally {
@@ -133,7 +144,7 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (command === 'join' && rest.length === 1 && rest[0] !== undefined) {
-    console.log(`Joined this machine to ${await join(rest[0])}`)
+    console.log(`Joined this machine to ${await joinThroughProgram(rest[0])}`)
     return 0
   }
   if (command === 'machines' && rest.length === 0 && values.invite === true && values.remove === undefined) {

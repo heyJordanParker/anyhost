@@ -7,7 +7,7 @@ import { attachTerminal, keptSessions, personEnvironment, recordedSessions, runn
 import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
 import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
-import { inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
+import { forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { listenDirect, type DirectLink, type DirectOffer } from './direct.ts'
 import { move, receiveMove, receiveStart, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, type RelayState } from './relay.ts'
@@ -209,7 +209,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   )
   if (running !== undefined) throw new Error(`The anyhost program of ${running.device.name} already answers at ${socket}, so this one does not start. Two programs on one state folder would both write its database.`)
   const roots = rootsHere()
-  const relay = connectRelay({ login: relayLogin, device, roots, isPatient: true })
+  const relay = connectRelay({ login: relayLogin, forget: forgetRelayLogin, device, roots, isPatient: true })
   const db = openDatabase()
   const counted = countedBucket(db)
   // a session's code that captureCode read after an upload goes up in the session's next drains
@@ -363,7 +363,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     const moving = moves.get(session)
     const move = moving === undefined ? {} : { move: { to: moving.to, step: moving.step, line: moving.line } }
     const { state } = relay
-    if (state.is === 'refused' || state.is === 'removed' || state.is === 'outdated') return { problem: state.message, ...move }
+    if (state.is === 'refused' || state.is === 'outdated') return { problem: state.message, ...move }
     const holder = journalOf(capture.db, session)?.holder ?? ''
     const untold = takeUntold(capture.db, session)
     return { ...(holder === '' ? {} : { machine: holder }), ...(untold === '' ? {} : { untold }), ...move }

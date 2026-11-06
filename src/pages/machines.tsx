@@ -28,9 +28,9 @@ export const initialState: AnyhostState = {
   memory: { connecting: null, isFollowing: false, joined: null, machines: null, invite: null, removing: null, problem: null },
 }
 
-// The relay states in which this machine needs the Step: never joined, removed, or joined to a relay older than the
-// program needs.
-const NEEDS_STEP = new Set(['unjoined', 'removed', 'outdated'])
+// The relay states in which this machine needs the Step: not joined, as before a join or once the program forgot a
+// removed machine's login, or joined to a relay older than the program needs.
+const NEEDS_STEP = new Set(['unjoined', 'outdated'])
 // The relay welcomes a joined machine within CONNECT_MS, 10 seconds, of the program asking (cli/src/relay.ts).
 const CONNECT_WAIT_MS = 15_000
 const FOLLOW_MS = 1000

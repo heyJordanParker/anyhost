@@ -3,8 +3,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, wr
 import { dirname, join } from 'node:path'
 import { PROTOCOL_VERSION, RELAY_VERSION } from '../../relay/protocol.ts'
 import { connectCloudflare, connectForStep, join as joinRelay, joinWithOption, updateRelay, type Account, type Cloudflare, type Progress } from '../src/connect.ts'
-import { personOptions, relayLogin, saveRelayLogin } from '../src/device.ts'
-import { temporaryFolder } from './memory.ts'
+import { forgetRelayLogin, personOptions, relayLogin, saveRelayLogin } from '../src/device.ts'
+import { connectRelay, type Relay } from '../src/relay.ts'
+import { memoryRelay, stopRelays, temporaryFolder, welcomed } from './memory.ts'
 
 const NAMES = { worker: 'anyhost-test-connect', bucket: 'anyhost-test' }
 const ACCOUNT: Account = { id: '0534ffa9', name: 'Parker Labs' }
@@ -17,16 +18,16 @@ let home = ''
 type CfEnvironment = Parameters<Cloudflare['cf']>[1]
 
 // cmod as the program runs it, from the cmod store's programs folder: `device` prints this machine, `secret store`
-// keeps the value it reads from stdin beside itself and `secret get` prints it, and `options` prints the person's
-// options as the `settings.json` beside it holds them. Each `secret get` and `options` adds a line to `calls`. A child
-// gets the environment the test process started with, not the one a test sets.
+// keeps the value it reads from stdin beside itself, `secret get` prints it and `secret delete` removes it, and
+// `options` prints the person's options as the `settings.json` beside it holds them. Each `secret get` and `options`
+// adds a line to `calls`. A child gets the environment the test process started with, not the one a test sets.
 beforeAll(() => {
   home = temporaryFolder()
   const cmod = join(home, 'data', 'cmod', 'programs', 'cmod')
   mkdirSync(dirname(cmod), { recursive: true })
   writeFileSync(
     cmod,
-    `#!/bin/sh\ncase "$1 $2" in\n  device*) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  "secret get") echo "secret get" >> "$(dirname "$0")/calls"; cat "$(dirname "$0")/secret-$3-$4" ;;\n  secret*) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  options*) echo options >> "$(dirname "$0")/calls"; printf '{"person":%s}' "$(cat "$(dirname "$0")/settings.json")" ;;\n  option*) printf '%s=%s\\n' "$3" "$4" >> "$(dirname "$0")/option-$2" ;;\n  *) exit 2 ;;\nesac\n`,
+    `#!/bin/sh\ncase "$1 $2" in\n  device*) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  "secret get") echo "secret get" >> "$(dirname "$0")/calls"; cat "$(dirname "$0")/secret-$3-$4" ;;\n  "secret delete") rm -f "$(dirname "$0")/secret-$3-$4" ;;\n  secret*) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  options*) echo options >> "$(dirname "$0")/calls"; printf '{"person":%s}' "$(cat "$(dirname "$0")/settings.json")" ;;\n  option*) printf '%s=%s\\n' "$3" "$4" >> "$(dirname "$0")/option-$2" ;;\n  *) exit 2 ;;\nesac\n`,
   )
   chmodSync(cmod, 0o755)
   for (const [name, value] of Object.entries({ XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: undefined, CLAUDE_CONFIG_DIR: undefined, CLOUDFLARE_API_TOKEN: undefined })) {
@@ -436,6 +437,60 @@ test('the device token is read at the first connect, then again only after a joi
   expect(await relayLogin()).toEqual({ url, token: 'second-token' })
   expect(await relayLogin()).toEqual({ url, token: 'second-token' })
   expect(cmodCalls()).toEqual(['secret get', 'secret get'])
+})
+
+const ROOTS = { home: '/home/ada', claudeHome: '/home/ada/.claude', claudeTmp: '/tmp/claude-1000', codexHome: '/home/ada/.codex' }
+const services: Relay[] = []
+afterEach(() => {
+  for (const relay of services.splice(0)) relay.close()
+  stopRelays()
+})
+// the service's connection, with the login relay.json and the token hold
+function service(): Relay {
+  const relay = connectRelay({ login: relayLogin, forget: forgetRelayLogin, device: DEVICE, roots: ROOTS, isPatient: true })
+  services.push(relay)
+  return relay
+}
+
+test('a machine its relay removed forgets relay.json and the token, and is unjoined with the reason', async () => {
+  const relay = memoryRelay()
+  await saveRelayLogin({ url: relay.url, token: relay.join(DEVICE, ROOTS) })
+  const here = service()
+  await welcomed(here)
+
+  relay.remove(DEVICE.id)
+  // the connect after the removal read no login
+  await until(() => here.url === '')
+  expect(here.state).toEqual({ is: 'unjoined', message: 'This machine was removed from your machines. Join it again with a link from Add a machine.' })
+  expect(existsSync(stateFile('relay.json'))).toBe(false)
+  expect(existsSync(secretFile())).toBe(false)
+})
+
+test('a token the relay knows no machine with is forgotten too, and the machine is unjoined with the reason', async () => {
+  const relay = memoryRelay()
+  await saveRelayLogin({ url: relay.url, token: 'token-the-relay-never-gave' })
+  const here = service()
+
+  await until(() => here.state.is === 'unjoined' && here.url === '')
+  expect(here.state).toEqual({ is: 'unjoined', message: 'The relay knows no machine with this token. Join it again with a link from Add a machine.' })
+  expect(existsSync(stateFile('relay.json'))).toBe(false)
+  expect(existsSync(secretFile())).toBe(false)
+})
+
+test('a removal that arrives after a newer join saved its login keeps that login, and the machine connects with it', async () => {
+  const old = memoryRelay()
+  await saveRelayLogin({ url: old.url, token: old.join(DEVICE, ROOTS) })
+  const here = service()
+  await welcomed(here)
+  // a join to another relay saves its login while the socket the old login opened is still connected
+  const newer = memoryRelay()
+  const token = newer.join(DEVICE, ROOTS)
+  await saveRelayLogin({ url: newer.url, token })
+
+  old.remove(DEVICE.id)
+  await until(() => here.state.is === 'connected' && here.url === newer.url)
+  expect(JSON.parse(readFileSync(stateFile('relay.json'), 'utf8'))).toEqual({ url: newer.url })
+  expect(storedToken()).toBe(token)
 })
 
 test('Connect Cloudflare for the Step keeps every line, and waits on the account and on R2 for the person\'s answers', async () => {

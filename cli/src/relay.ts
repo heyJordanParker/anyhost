@@ -56,12 +56,12 @@ export type Call = Exclude<Op, { readonly op: 'put' }> | { readonly op: 'put'; r
 export type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string; readonly bytes: Uint8Array }
 // An op's answer, a get's with its bytes. A result that names an error, as a failed R2 call does, rejects instead.
 export type Ran = Exclude<Result, { readonly error: string } | { readonly status: 200; readonly size: number; readonly modified: string } | { readonly status: 413 }> | Got
-// `connected` once the welcome came. `removed` is a token the relay no longer knows or took back, which a join replaces,
-// `outdated` a relay older than this program needs, and `refused` a clone of a connected machine.
+// `connected` once the welcome came. `unjoined` is no login, as before a join or after the relay refused the login for
+// good, `outdated` a relay older than this program needs, and `refused` a clone of a connected machine.
 export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
-  | { readonly is: 'unjoined' | 'offline' | 'refused' | 'removed' | 'outdated'; readonly message: string }
+  | { readonly is: 'unjoined' | 'offline' | 'refused' | 'outdated'; readonly message: string }
 // What the Pool sends: its own messages, each message another machine routed here by its `t`, and each attach stream
 // message whole, its stream id in its first bytes.
 type Events = { readonly welcome: Welcome; readonly released: Released; readonly offline: Offline; readonly stream: Uint8Array } & {
@@ -91,6 +91,8 @@ export type Relay = {
 export type RelayOptions = {
   // relay.json and the device token, read again at each connect, so a machine joined meanwhile connects
   readonly login: () => Promise<Login | undefined>
+  // drops a login the relay refused for good, as a removed machine's, so the next connect reads none
+  readonly forget: (refused: Login) => Promise<void>
   readonly device: { readonly name: string; readonly os: string }
   // sent at each connect, so another machine relocates this machine's sessions from where its folders are now
   readonly roots: Roots
@@ -124,9 +126,11 @@ async function failureOf(answer: Response): Promise<undefined> {
   throw new Refused(body.message ?? `The relay answered ${answer.status}.`)
 }
 
+// The state a refusal no try fixes leaves. A removed machine's token and one the relay never knew are the relay's final
+// answer for that login, so the machine forgets it and is unjoined.
 function refusedBy(code: number, reason: string, device: RelayOptions['device']): RelayState | undefined {
-  if (code === CLOSE_REMOVED) return { is: 'removed', message: 'This machine was removed from your machines. Join it again with a link from Add a machine.' }
-  if (code === CLOSE_UNKNOWN_TOKEN) return { is: 'removed', message: 'The relay knows no machine with this token. Join it again with a link from Add a machine.' }
+  if (code === CLOSE_REMOVED) return { is: 'unjoined', message: 'This machine was removed from your machines. Join it again with a link from Add a machine.' }
+  if (code === CLOSE_UNKNOWN_TOKEN) return { is: 'unjoined', message: 'The relay knows no machine with this token. Join it again with a link from Add a machine.' }
   if (code === CLOSE_DEVICE_LIVE) return { is: 'refused', message: `The relay refused ${device.name}: ${reason} A machine cloned from another keeps its id, so anyhost captures nothing here. ${cloneFixFor(device.os)}` }
   return undefined
 }
@@ -146,6 +150,10 @@ export function connectRelay(options: RelayOptions): Relay {
   const waiting = new Set<{ readonly resolve: (login: Login) => void; readonly reject: (error: Error) => void }>()
   let state: RelayState = { is: 'connecting' }
   let login: Login | undefined
+  // why this machine has no login: never joined, or the refusal of the login it forgot, until it reads a login again
+  let unjoined = NOT_JOINED
+  // the forget of a refused login, which the next connect waits for, so it never reads that login again
+  let forgetting: Promise<void> = Promise.resolve()
   let socket: WebSocket | undefined
   let nextId = 1
   let failures = 0
@@ -184,7 +192,7 @@ export function connectRelay(options: RelayOptions): Relay {
     const wasConnected = state.is === 'connected'
     state = next
     if (isClosed) return
-    if (wasConnected && 'message' in next) console.error(`${new Date().toISOString()} ${next.message} anyhost connects again.`)
+    if (wasConnected && 'message' in next) console.error(`${new Date().toISOString()} ${next.message}${next.is === 'unjoined' ? '' : ' anyhost connects again.'}`)
     if (!wasConnected) failures += 1
     if (!wasConnected && !options.isPatient && 'message' in next) failPending(next.message)
     reopen = setTimeout(() => void open(), wasConnected ? 0 : (RETRY_MS[Math.min(failures, RETRY_MS.length) - 1] ?? 0))
@@ -234,12 +242,15 @@ export function connectRelay(options: RelayOptions): Relay {
 
   const open = async (): Promise<void> => {
     state = { is: 'connecting' }
+    await forgetting
     login = await options.login().catch((error: unknown) => {
       console.error(`${new Date().toISOString()} anyhost could not read this machine's relay login: ${messageOf(error)}`)
       return undefined
     })
     if (isClosed) return
-    if (login === undefined) return drop({ is: 'unjoined', message: NOT_JOINED })
+    if (login === undefined) return drop({ is: 'unjoined', message: unjoined })
+    unjoined = NOT_JOINED
+    const used = login
     const url = login.url
     const ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, {
       headers: { authorization: `Bearer ${login.token}`, 'x-anyhost-name': options.device.name, 'x-anyhost-version': plugin.version, 'x-anyhost-roots': rootsHeader(options.roots) },
@@ -276,7 +287,12 @@ export function connectRelay(options: RelayOptions): Relay {
       clearTimeout(late)
       if (socket !== ws) return
       const why = event.reason || failed
-      drop(refusedBy(event.code, event.reason, options.device) ?? { is: 'offline', message: `The relay at ${url} closed the connection with ${event.code}${why === '' ? '' : `: ${why}`}.` })
+      const refusal = refusedBy(event.code, event.reason, options.device)
+      if (refusal?.is === 'unjoined') {
+        unjoined = refusal.message
+        forgetting = options.forget(used).catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not forget the relay login the relay refused: ${messageOf(error)}`))
+      }
+      drop(refusal ?? { is: 'offline', message: `The relay at ${url} closed the connection with ${event.code}${why === '' ? '' : `: ${why}`}.` })
     })
   }
 

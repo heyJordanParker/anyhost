@@ -1,5 +1,5 @@
 import { mkdirSync, realpathSync } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import plugin from '../../.claude-plugin/plugin.json'
@@ -61,9 +61,9 @@ export async function personOptions(): Promise<PersonOptions> {
 const relayFile = (): string => join(stateFolder(), 'relay.json')
 
 // The relay this machine joined: its address in `relay.json` in the state folder, and the device token cmod keeps as
-// the secret `token`. A machine that never joined has neither. Each `cmod secret get` starts a process, and a service
-// whose relay does not answer connects again every minute, so the token is read again only after a write to
-// relay.json, which saveRelayLogin makes after it stores a new token.
+// the secret `token`. A machine that never joined, or whose login forgetRelayLogin forgot, has neither. Each `cmod
+// secret get` starts a process, and a service whose relay does not answer connects again every minute, so the token is
+// read again only after a write to relay.json, which saveRelayLogin makes after it stores a new token.
 let loginRead: { readonly write: string; readonly login: Login | undefined } | undefined
 export async function relayLogin(): Promise<Login | undefined> {
   const file = Bun.file(relayFile())
@@ -78,12 +78,33 @@ export async function relayLogin(): Promise<Login | undefined> {
   return login
 }
 
+// saveRelayLogin and forgetRelayLogin run one at a time, so a forget never deletes the token a join is saving.
+let loginWrites: Promise<void> = Promise.resolve()
+const inTurn = (write: () => Promise<void>): Promise<void> => {
+  const turn = loginWrites.then(write)
+  loginWrites = turn.catch(() => undefined)
+  return turn
+}
+
 // Keeps the login a join gave, for relayLogin to read at the next connect: the token first, then relay.json, whose
 // write tells relayLogin to read the token again.
 export async function saveRelayLogin({ url, token }: Login): Promise<void> {
-  await cmod(['secret', 'store', 'anyhost', 'token'], token)
-  mkdirSync(stateFolder(), { recursive: true })
-  await Bun.write(relayFile(), `${JSON.stringify({ url })}\n`)
+  await inTurn(async () => {
+    await cmod(['secret', 'store', 'anyhost', 'token'], token)
+    mkdirSync(stateFolder(), { recursive: true })
+    await Bun.write(relayFile(), `${JSON.stringify({ url })}\n`)
+  })
+}
+
+// Forgets the login the relay refused for good, as a removed machine's, so the machine reads as never joined: relay.json
+// first, which relayLogin then reads as no login, then the token. A join that saved a newer login since relayLogin read
+// the refused one moved relay.json's write, and that login stays.
+export async function forgetRelayLogin(refused: Login): Promise<void> {
+  await inTurn(async () => {
+    if (loginRead?.login?.token !== refused.token || loginRead.write !== (await lastWriteOf(relayFile()))) return
+    await rm(relayFile(), { force: true })
+    await cmod(['secret', 'delete', 'anyhost', 'token'])
+  })
 }
 
 // Every machine that ever joined the relay, by its device id, with its roots as it last connected. A removed machine

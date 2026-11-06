@@ -150,8 +150,8 @@ function withProgram(answers: Record<string, Answer[]>) {
 
 const relayIs = (state: string): Answer => ({ body: { relay: { state, message: '' } } })
 
-test('the Step is left to do on a machine never joined, removed, or on a relay too old, and done once joined', async () => {
-  for (const state of ['unjoined', 'removed', 'outdated']) {
+test('the Step is left to do on a machine not joined or on a relay too old, and done once joined', async () => {
+  for (const state of ['unjoined', 'outdated']) {
     const { mod } = withProgram({ 'GET /status': [relayIs(state)] })
     expect(await connectStep.isDone(await mod())).toBe(false)
   }
@@ -196,7 +196,8 @@ test('Connect Cloudflare on the Step shows each line, asks for the account, and 
 
 test('a machine removed after Connect Cloudflare joined it gets the Step afresh, with Connect Cloudflare to press', async () => {
   const joined = { is: 'joined', lines: ['Joined this machine to https://anyhost.parker-labs.workers.dev'] }
-  const { tested, mod } = withProgram({ 'GET /status': [{ body: { relay: { state: 'removed', message: '' }, connecting: joined } }] })
+  const removed = 'This machine was removed from your machines. Join it again with a link from Add a machine.'
+  const { tested, mod } = withProgram({ 'GET /status': [{ body: { relay: { state: 'unjoined', message: removed }, connecting: joined } }] })
   expect(await connectStep.isDone(await mod())).toBe(false)
   await tested.type('/step')
   const drawn = (await tested.shown.page.lines()).join('\n')
