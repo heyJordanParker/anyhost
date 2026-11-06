@@ -28,6 +28,7 @@ import {
   type Condition,
   type JoiningDevice,
   type Op,
+  type Roots,
 } from './protocol.ts'
 
 // A relay whose Pool never started, with `objects` in its bucket and the setup code's sha256 as its secret.
@@ -104,9 +105,10 @@ class Socket {
   #wake = (): void => undefined
   #id = 0
 
-  constructor(url: string, token: string, name: string) {
+  constructor(url: string, token: string, name: string, roots: Roots) {
     // Bun's WebSocket takes headers, which the Workers types' WebSocket, loaded beside Bun's, does not name
-    this.ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, { headers: { authorization: `Bearer ${token}`, 'x-anyhost-name': name, 'x-anyhost-version': '0.0.0-test' } } as any)
+    const headers = { authorization: `Bearer ${token}`, 'x-anyhost-name': name, 'x-anyhost-version': '0.0.0-test', 'x-anyhost-roots': JSON.stringify(roots) }
+    this.ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, { headers } as any)
     this.ws.binaryType = 'arraybuffer'
     this.ws.addEventListener('message', (event) => {
       this.#inbox.push(typeof event.data === 'string' ? (event.data === 'pong' ? { t: 'pong' } : (JSON.parse(event.data) as Json)) : new Uint8Array(event.data as ArrayBuffer))
@@ -190,8 +192,8 @@ async function json(response: Response): Promise<Json> {
   }
 }
 
-async function connect(token: string, name: string): Promise<Socket> {
-  const socket = new Socket(relay.url(), token, name)
+async function connect(token: string, name: string, roots: Roots): Promise<Socket> {
+  const socket = new Socket(relay.url(), token, name, roots)
   sockets.push(socket)
   await new Promise((resolve, reject) => {
     socket.ws.addEventListener('open', resolve)
@@ -205,7 +207,7 @@ type Joined = { device: JoiningDevice; token: string; socket: Socket }
 async function joinWith(code: string, device: JoiningDevice): Promise<Joined> {
   const answer = await json(await post('/v1/join', { invite: code, device }))
   expect(answer).toMatchObject({ status: 200, device: { id: device.id, name: device.name }, relay: RELAY_VERSION, protocol: PROTOCOL_VERSION, bucket: relay.bucket })
-  const socket = await connect(answer['token'], device.name)
+  const socket = await connect(answer['token'], device.name, device.roots)
   expect(await socket.message('welcome')).toMatchObject({ device: { id: device.id, name: device.name }, waiting: [] })
   return { device, token: answer['token'], socket }
 }
@@ -253,7 +255,7 @@ beforeAll(async () => {
 // The objects the tests wrote leave the bucket, as a deployed relay's bucket outlives the run.
 afterAll(async () => {
   if (mac !== undefined) {
-    const cleaner = await connect(mac.token, mac.device.name)
+    const cleaner = await connect(mac.token, mac.device.name, mac.device.roots)
     for (;;) {
       const [listed] = await cleaner.results({ op: 'list', prefix })
       const keys = (listed!['objects'] as Json[]).map((object) => object['key'] as string)
@@ -297,7 +299,7 @@ describe('joining', () => {
     const nextCode = hex(32)
     await relay.setSetupCode(nextCode)
     // the restart dropped the first machine's socket
-    mac.socket = await connect(mac.token, mac.device.name)
+    mac.socket = await connect(mac.token, mac.device.name, mac.device.roots)
     await joinWith(nextCode, machine('setup'))
     expect(await json(await post('/v1/join', { invite: nextCode, device: machine('third') }))).toMatchObject({ status: 403, error: 'invite_used' })
     expect(await json(await post('/v1/join', { invite: firstCode, device: machine('third') }))).toMatchObject({ status: 403, error: 'invite_used' })
@@ -334,7 +336,7 @@ describe('joining', () => {
     expect(refused).toMatchObject({ status: 409, error: 'device_live' })
     expect(refused['message']).toContain(original.device.name)
     expect(refused['message']).toContain(cloneFixFor('darwin'))
-    const cloned = await connect(original.token, clone.name)
+    const cloned = await connect(original.token, clone.name, clone.roots)
     expect(await cloned.closed).toMatchObject({ code: CLOSE_DEVICE_LIVE })
     // the original keeps working
     expect(await original.socket.results({ op: 'claims' })).toMatchObject([{ status: 200 }])
@@ -344,10 +346,23 @@ describe('joining', () => {
     const renamed = await joinNew(mac, 'before')
     renamed.socket.close()
     await renamed.socket.closed
-    const after = await connect(renamed.token, `after-${run}`)
+    const after = await connect(renamed.token, `after-${run}`, renamed.device.roots)
     expect(await after.message('welcome')).toMatchObject({ device: { id: renamed.device.id, name: `after-${run}` } })
     const [devices] = await mac.socket.results({ op: 'devices' })
     expect((devices!['devices'] as Json[]).find((device) => device['id'] === renamed.device.id)).toMatchObject({ name: `after-${run}`, connected: true })
+  })
+
+  test('each connect brings the machine\'s roots, which devices answers from then on, and a connect without them is refused', async () => {
+    const moved = await joinNew(mac, 'moved')
+    moved.socket.close()
+    await moved.socket.closed
+    const now = { ...moved.device.roots, claudeHome: '/srv/claude-config', claudeTmp: '/var/tmp/claude-1000' }
+    const back = await connect(moved.token, moved.device.name, now)
+    await back.message('welcome')
+    const [devices] = await mac.socket.results({ op: 'devices' })
+    expect((devices!['devices'] as Json[]).find((device) => device['id'] === moved.device.id)).toMatchObject({ roots: now, connected: true })
+    const bare = await fetch(url('/v1/connect'), { headers: { upgrade: 'websocket', authorization: `Bearer ${moved.token}`, 'x-anyhost-name': moved.device.name } })
+    expect(await json(bare)).toMatchObject({ status: 400, error: 'invalid', message: 'A connect names its machine\'s roots as JSON in X-Anyhost-Roots.' })
   })
 })
 
@@ -358,7 +373,7 @@ describe('the socket', () => {
   })
 
   test('closes an unknown token with 4401', async () => {
-    const stranger = await connect(hex(32), 'stranger')
+    const stranger = await connect(hex(32), 'stranger', roots('/home/stranger'))
     expect(await stranger.closed).toMatchObject({ code: CLOSE_UNKNOWN_TOKEN })
   })
 
@@ -606,11 +621,11 @@ describe('the holder', () => {
     // the Pool hears the close a moment after the machine does
     await Bun.sleep(500)
     expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, previous: { id: away.device.id, name: away.device.name }, told: false }])
-    const back = await connect(away.token, away.device.name)
+    const back = await connect(away.token, away.device.name, away.device.roots)
     expect(await back.message('welcome')).toMatchObject({ waiting: [{ t: 'released', session, to: { id: mac.device.id, name: mac.device.name }, at: expect.any(String) }] })
     back.close()
     await back.closed
-    const again = await connect(away.token, away.device.name)
+    const again = await connect(away.token, away.device.name, away.device.roots)
     expect(await again.message('welcome')).toMatchObject({ waiting: [] })
   })
 })
@@ -618,21 +633,33 @@ describe('the holder', () => {
 describe('remove', () => {
   test('closes the machine\'s sockets with 4403 and refuses its token on every route, until it joins again', async () => {
     const gone = await joinNew(mac, 'gone')
-    const second = await connect(gone.token, gone.device.name)
+    const second = await connect(gone.token, gone.device.name, gone.device.roots)
     await second.message('welcome')
     expect(await mac.socket.results({ op: 'remove', device: gone.device.id })).toEqual([{ status: 200 }])
     expect(await gone.socket.closed).toMatchObject({ code: CLOSE_REMOVED })
     expect(await second.closed).toMatchObject({ code: CLOSE_REMOVED })
     expect(await json(await getObject(gone.token, `${prefix}http/range.bin`))).toMatchObject({ status: 403, error: 'removed' })
     expect(await json(await putObject(gone.token, `${prefix}gone`, 'x'))).toMatchObject({ status: 403, error: 'removed' })
-    const refused = await connect(gone.token, gone.device.name)
+    const refused = await connect(gone.token, gone.device.name, gone.device.roots)
     expect(await refused.closed).toMatchObject({ code: CLOSE_REMOVED })
-    const [devices] = await mac.socket.results({ op: 'devices' })
-    expect((devices!['devices'] as Json[]).map((device) => device['id'])).not.toContain(gone.device.id)
     expect(await mac.socket.results({ op: 'remove', device: gone.device.id })).toMatchObject([{ status: 404, error: 'unknown_device' }])
     const rejoined = await joinWith(await invite(mac), gone.device)
     expect((await getObject(rejoined.token, `${prefix}http/range.bin`)).status).toBe(200)
     expect(await json(await getObject(gone.token, `${prefix}http/range.bin`))).toMatchObject({ status: 401 })
+  })
+
+  test('devices answers a removed machine with when it was removed and the roots its sessions were written at', async () => {
+    const gone = await joinNew(mac, 'removed')
+    const removedAt = Date.now()
+    expect(await mac.socket.results({ op: 'remove', device: gone.device.id })).toEqual([{ status: 200 }])
+    const [devices] = await mac.socket.results({ op: 'devices' })
+    const listed = (devices!['devices'] as Json[]).find((device) => device['id'] === gone.device.id)
+    expect(Math.abs(Date.parse(listed!['removedAt']) - removedAt)).toBeLessThan(120_000)
+    expect(listed).toMatchObject({ name: gone.device.name, roots: gone.device.roots, connected: false })
+    expect((devices!['devices'] as Json[]).find((device) => device['id'] === mac.device.id)).not.toHaveProperty('removedAt')
+    await joinWith(await invite(mac), gone.device)
+    const [again] = await mac.socket.results({ op: 'devices' })
+    expect((again!['devices'] as Json[]).find((device) => device['id'] === gone.device.id)).not.toHaveProperty('removedAt')
   })
 })
 
@@ -653,7 +680,7 @@ describe('messages between machines', () => {
 
   test('an attach stream carries bytes, resize and detach both ways, and ends when a side leaves', async () => {
     const host = await joinNew(mac, 'host')
-    const viewer = await connect(mac.token, mac.device.name)
+    const viewer = await connect(mac.token, mac.device.name, mac.device.roots)
     await viewer.message('welcome')
     const stream = 0xfeed1234
     const session = crypto.randomUUID()
@@ -679,7 +706,7 @@ describe('messages between machines', () => {
     viewer.close()
     expect(await host.socket.message('detach')).toMatchObject({ stream: 7, from: { id: mac.device.id } })
     // a host whose last socket closes ends every stream viewed on it
-    const second = await connect(mac.token, mac.device.name)
+    const second = await connect(mac.token, mac.device.name, mac.device.roots)
     await second.message('welcome')
     second.send({ t: 'attach', stream: 8, to: host.device.id, session, cols: 80, rows: 24 })
     second.send({ t: 'attach', stream: 9, to: host.device.id, session, cols: 80, rows: 24 })

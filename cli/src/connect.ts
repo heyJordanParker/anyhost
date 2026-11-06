@@ -2,12 +2,11 @@
 // keeps it current, and joins machines to it. anyhost reads the access token cf keeps and never refreshes or writes
 // cf's login: a refresh token works once, so two programs refreshing one login log the person out. anyhost creates no
 // API token. relay-spec section 4 holds the calls and what each Cloudflare answer means.
-import { mkdirSync, rmSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { rmSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { RELAY_VERSION, type Health, type JoinRequest, type Joined, type Refusal } from '../../relay/protocol.ts'
 import relayModule from '../../relay/dist/relay.js' with { type: 'text' }
-import { cmodDevice, rootsHere, stateFolder } from './device.ts'
+import { cmod, cmodDevice, rootsHere, saveRelayLogin, stateFolder } from './device.ts'
 
 // The Worker that runs the relay, and the R2 bucket it keeps every session in. Test relays pass their own.
 export type RelayNames = { readonly worker: string; readonly bucket: string }
@@ -306,6 +305,67 @@ export async function connectCloudflare(progress: Progress, names: RelayNames = 
   }
 }
 
+// Connect Cloudflare as the mod's Step shows it: `lines` holds every line said so far, and a question waits in
+// `accounts` or `r2Page` until the person answers it on the Step.
+export type Connecting = {
+  readonly is: 'running' | 'joined' | 'failed'
+  readonly lines: readonly string[]
+  readonly accounts?: readonly Account[]
+  readonly r2Page?: string
+  readonly error?: string
+}
+
+export type ConnectRun = {
+  readonly view: Connecting
+  pickAccount(id: string): void
+  turnedOnR2(): void
+  // resolves once the run joined this machine or failed
+  readonly done: Promise<void>
+}
+
+// Runs connectCloudflare in the program for the mod's Step, which reads `view` and answers each question.
+export function connectForStep(names: RelayNames = RELAY, cloudflare: Cloudflare = CLOUDFLARE): ConnectRun {
+  let view: Connecting = { is: 'running', lines: [] }
+  let answerAccount: ((account: Account) => void) | undefined
+  let answerR2: (() => void) | undefined
+  const progress: Progress = {
+    say: (line) => void (view = { ...view, lines: [...view.lines, line] }),
+    pickAccount: (accounts) =>
+      new Promise((resolve) => {
+        view = { ...view, accounts }
+        answerAccount = resolve
+      }),
+    enableR2: (page) =>
+      new Promise((resolve) => {
+        view = { ...view, r2Page: page }
+        answerR2 = resolve
+      }),
+  }
+  const done = connectCloudflare(progress, names, cloudflare).then(
+    () => void (view = { ...view, is: 'joined' }),
+    (error: unknown) => void (view = { ...view, is: 'failed', error: error instanceof Error ? error.message : String(error) }),
+  )
+  return {
+    get view() {
+      return view
+    },
+    pickAccount(id) {
+      const account = view.accounts?.find((each) => each.id === id)
+      if (account === undefined || answerAccount === undefined) throw new Error(`Connect Cloudflare asks for no account ${id} now.`)
+      const { accounts: _, ...rest } = view
+      view = rest
+      answerAccount(account)
+    },
+    turnedOnR2() {
+      if (view.r2Page === undefined || answerR2 === undefined) throw new Error('Connect Cloudflare waits for no R2 now.')
+      const { r2Page: _, ...rest } = view
+      view = rest
+      answerR2()
+    },
+    done,
+  }
+}
+
 // Uploads the relay this program carries over the one deployed, keeping its setup code secret, with the cf login this
 // machine has. It asks the person nothing: a machine without a usable login fails, and the caller shows Connect Cloudflare.
 export async function updateRelay(names: RelayNames = RELAY, cloudflare: Cloudflare = CLOUDFLARE): Promise<void> {
@@ -319,22 +379,11 @@ export async function updateRelay(names: RelayNames = RELAY, cloudflare: Cloudfl
   await deploy(cloudflare, login, account, names, false, undefined)
 }
 
-const cmodProgram = (): string => joinPath(process.env['XDG_DATA_HOME'] || joinPath(homedir(), '.local', 'share'), 'cmod', 'programs', 'cmod')
-
-// `cmod secret store` reads the value from stdin, so the token never shows in a process's arguments.
-async function storeToken(token: string): Promise<void> {
-  const program = (await Bun.file(cmodProgram()).exists()) ? cmodProgram() : Bun.which('cmod')
-  if (program === null) throw new Error(`anyhost keeps its token with cmod secret, and neither ${cmodProgram()} nor a cmod on PATH exists. Install cmod with npm install -g @cmodjs/cli.`)
-  const child = Bun.spawn([program, 'secret', 'store', 'anyhost', 'token'], { stdin: new Blob([token]), stdout: 'ignore', stderr: 'pipe' })
-  const [error, code] = await Promise.all([new Response(child.stderr).text(), child.exited])
-  if (code !== 0) throw new Error(`cmod secret store anyhost token exited with ${code}: ${error.trim()}`)
-}
-
-// Joins this machine with an invite link, or with the setup code in the same form, `https://<relay>/v1/join#<code>`:
-// the relay exchanges the code for a device token, which goes to `cmod secret` as `anyhost token`, and the relay's
-// address to `relay.json` in the state folder.
-export async function join(link: string, cloudflare: Cloudflare = CLOUDFLARE): Promise<void> {
-  const url = URL.parse(link)
+// Joins this machine with an invite link, or with the setup code in the same form, `https://<relay>/v1/join#<code>`,
+// alone or in the install command Add a machine gives: the relay exchanges the code for a device token, which
+// saveRelayLogin keeps. Answers the relay's address.
+export async function join(link: string, cloudflare: Cloudflare = CLOUDFLARE): Promise<string> {
+  const url = URL.parse(/https?:\/\/[^\s'"]+\/v1\/join#[\w-]+/.exec(link)?.[0] ?? link.trim())
   const code = url?.hash.slice(1) ?? ''
   if (url === null || url.pathname !== '/v1/join' || code === '') throw new Error(`${link} is no invite link, which reads https://<relay>/v1/join#<code>.`)
   const device = await cmodDevice()
@@ -348,7 +397,16 @@ export async function join(link: string, cloudflare: Cloudflare = CLOUDFLARE): P
     throw new Error(`${url.origin} answered the join with ${answer.status} and no relay answer: ${text.slice(0, 200)}`)
   }
   if (!answer.ok || body.token === undefined) throw new Error(`${url.origin} refused to join ${device.name}: ${body.message ?? `${answer.status} ${text.slice(0, 200)}`}`)
-  await storeToken(body.token)
-  mkdirSync(stateFolder(), { recursive: true })
-  await Bun.write(joinPath(stateFolder(), 'relay.json'), `${JSON.stringify({ url: url.origin })}\n`)
+  await saveRelayLogin({ url: url.origin, token: body.token })
+  return url.origin
+}
+
+// The link `cmod install … --option join=<link>` set: the program joins with it once at its start, then empties the
+// option, so a refused or expired invite is not tried again and the next machine's command needs nothing else.
+export async function joinWithOption(link: string, cloudflare: Cloudflare = CLOUDFLARE): Promise<string> {
+  try {
+    return await join(link, cloudflare)
+  } finally {
+    await cmod(['option', 'anyhost', 'join', ''])
+  }
 }

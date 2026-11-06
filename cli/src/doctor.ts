@@ -8,7 +8,7 @@ import type { Status } from './serve.ts'
 type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
 
 const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod makes the anyhost program a service of the machine, which records its sessions from each login on.'
-const JOIN = 'Connect Cloudflare in the anyhost mod on your first machine, and join every other machine with a link from Add a machine on a joined one.'
+const JOIN = 'Connect your machines in the anyhost mod: Connect Cloudflare on your first machine, and on every other machine paste the command Add a machine gives in /machines on a joined one.'
 // The relay answered /v1/health in under a second from the test machines (relay-spec R11).
 const HEALTH_MS = 10_000
 
@@ -25,7 +25,7 @@ async function relayChecks(): Promise<Check[]> {
     .catch((error: unknown) => new Error(messageOf(error)))
   if (health instanceof Error) return [joined, { problem: `The relay at ${login.url} did not answer: ${health.message}`, fix: 'Check this machine reaches the internet. The program keeps every change meanwhile and uploads it once the relay answers.' }]
   if (health.protocol < PROTOCOL_VERSION) {
-    return [joined, { problem: `The relay at ${login.url} answers protocol ${health.protocol}, and anyhost ${plugin.version} needs ${PROTOCOL_VERSION}.`, fix: 'Connect Cloudflare again in the anyhost mod, which updates the relay.' }]
+    return [joined, { problem: `The relay at ${login.url} answers protocol ${health.protocol}, and anyhost ${plugin.version} needs ${PROTOCOL_VERSION}.`, fix: 'Connect Cloudflare again in the anyhost mod, or run anyhost connect, which updates the relay.' }]
   }
   return [joined, { ok: `The relay answers protocol ${health.protocol} and keeps every session in the bucket ${health.bucket}.` }]
 }
@@ -52,9 +52,9 @@ async function programChecks(): Promise<Check[]> {
         }
       : state === 'connecting'
         ? { wait: `The anyhost program at ${address} connects to the relay, and ${status.pending} files wait for it.` }
-        : state === 'refused'
+        : state === 'refused' || state === 'outdated'
           ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Do what the line says. The program connects again within a minute.' }
-          : state === 'unjoined'
+          : state === 'unjoined' || state === 'removed'
             ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
             : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
   return [connection, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' }))]

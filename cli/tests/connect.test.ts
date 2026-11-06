@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, setSystemTime, test
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { PROTOCOL_VERSION, RELAY_VERSION } from '../../relay/protocol.ts'
-import { connectCloudflare, join as joinRelay, updateRelay, type Account, type Cloudflare, type Progress } from '../src/connect.ts'
+import { connectCloudflare, connectForStep, join as joinRelay, joinWithOption, updateRelay, type Account, type Cloudflare, type Progress } from '../src/connect.ts'
 import { temporaryFolder } from './memory.ts'
 
 const NAMES = { worker: 'anyhost-test-connect', bucket: 'anyhost-test' }
@@ -21,7 +21,7 @@ beforeAll(() => {
   home = temporaryFolder()
   const cmod = join(home, 'data', 'cmod', 'programs', 'cmod')
   mkdirSync(dirname(cmod), { recursive: true })
-  writeFileSync(cmod, `#!/bin/sh\ncase "$1" in\n  device) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  secret) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  *) exit 2 ;;\nesac\n`)
+  writeFileSync(cmod, `#!/bin/sh\ncase "$1" in\n  device) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  secret) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  option) printf '%s=%s\\n' "$3" "$4" >> "$(dirname "$0")/option-$2" ;;\n  *) exit 2 ;;\nesac\n`)
   chmodSync(cmod, 0o755)
   for (const [name, value] of Object.entries({ XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: undefined, CLOUDFLARE_API_TOKEN: undefined })) {
     kept[name] = process.env[name]
@@ -38,11 +38,14 @@ afterAll(() => {
 })
 
 const secretFile = (): string => join(home, 'data', 'cmod', 'programs', 'secret-anyhost-token')
+// every `cmod option anyhost <key> <value>` the program ran, one `<key>=<value>` line each
+const optionsSet = (): string[] => (existsSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost')) ? readFileSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost'), 'utf8').split('\n').filter(Boolean) : [])
 
-// each test starts with an empty state folder and no token
+// each test starts with an empty state folder, no token, and no option set
 beforeEach(() => {
   process.env['XDG_STATE_HOME'] = temporaryFolder()
   rmSync(secretFile(), { force: true })
+  rmSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost'), { force: true })
 })
 
 afterEach(() => setSystemTime())
@@ -56,7 +59,7 @@ type Envelope = { success: boolean; errors: { code: number; message: string }[];
 
 // Cloudflare as anyhost meets it: the API of one account, the relay each upload runs at its workers.dev address, and
 // cf, whose login is a JSON file of its access token or, under `keyring`, a file no other program reads.
-function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; buckets?: Record<string, string>; keyring?: boolean; loggedIn?: boolean; expired?: 403 | 401; notFoundHealth?: number; resets?: number } = { r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' } }) {
+function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; buckets?: Record<string, string>; keyring?: boolean; loggedIn?: boolean; expired?: 403 | 401; notFoundHealth?: number; resets?: number; others?: Account[] } = { r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' } }) {
   const loginFile = join(temporaryFolder(), 'default.json')
   writeFileSync(loginFile, JSON.stringify({ oauth_token: account.expired === undefined ? 'fresh' : 'expired' }))
   let isLoggedIn = account.loggedIn ?? true
@@ -170,7 +173,7 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
       writeFileSync(loginFile, JSON.stringify({ oauth_token: 'fresh' }))
       isExpired = false
     }
-    return JSON.stringify({ authenticated: true, authSource: `OAuth token from ${account.keyring === true ? loginFile.replace('.json', '.enc') : loginFile}`, accounts: [ACCOUNT] })
+    return JSON.stringify({ authenticated: true, authSource: `OAuth token from ${account.keyring === true ? loginFile.replace('.json', '.enc') : loginFile}`, accounts: [...(account.others ?? []), ACCOUNT] })
   }
 
   const cloudflare: Cloudflare = {
@@ -206,9 +209,17 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
       r2 = true
     },
   }
-  return { cloudflare, progress, calls, cfRuns, said, enabled, workers, buckets, loginFile, get subdomain() {
+  return { cloudflare, progress, calls, cfRuns, said, enabled, workers, buckets, loginFile, turnOnR2: () => void (r2 = true), get subdomain() {
     return subdomain
   } }
+}
+
+// The stand-in moves the clock as the setup waits, so this counts its own tries.
+async function until(isTrue: () => boolean): Promise<void> {
+  for (let tries = 0; !isTrue(); tries += 1) {
+    if (tries > 2500) throw new Error('It did not happen within 5 s.')
+    await Bun.sleep(2)
+  }
 }
 
 test('deploys the relay from nothing into the bucket it finds in the EU, waits for it, and joins this machine', async () => {
@@ -362,6 +373,56 @@ test('updateRelay asks nothing: with cf logged out, or no relay to update, it fa
   expect(keyring.cfRuns.map(({ args }) => args.join(' '))).toEqual(['auth whoami'])
   const none = standIn()
   await expect(updateRelay(NAMES, none.cloudflare)).rejects.toThrow('0 accounts of your Cloudflare login hold the Worker anyhost-test-connect, so anyhost updates none. Connect Cloudflare deploys it.')
+})
+
+test('the option join joins this machine at the program\'s start, then empties itself, and a refused one empties too', async () => {
+  const cloudflare = standIn()
+  await connectCloudflare(cloudflare.progress, NAMES, cloudflare.cloudflare)
+  const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
+  rmSync(secretFile(), { force: true })
+  rmSync(stateFile('relay.json'), { force: true })
+  // a setup code is a join link in the same form, which the stand-in relay takes once
+  const code = 'second-setup-code'
+  const worker = cloudflare.workers.get('anyhost-test-connect')
+  if (worker !== undefined) worker.secret = sha256(code)
+
+  expect(await joinWithOption(`${relayUrl}/v1/join#${code}`, cloudflare.cloudflare)).toBe(relayUrl)
+  expect(storedToken()).toBe('token-of-macbook')
+  expect(JSON.parse(readFileSync(stateFile('relay.json'), 'utf8'))).toEqual({ url: relayUrl })
+  expect(optionsSet()).toEqual(['join='])
+
+  await expect(joinWithOption(`${relayUrl}/v1/join#${code}`, cloudflare.cloudflare)).rejects.toThrow('The relay made no invite with that code.')
+  expect(optionsSet()).toEqual(['join=', 'join='])
+})
+
+test('Connect Cloudflare for the Step keeps every line, and waits on the account and on R2 for the person\'s answers', async () => {
+  const other: Account = { id: 'f00dfeed', name: 'Side Project' }
+  const cloudflare = standIn({ r2: false, subdomain: 'parker-labs', others: [other] })
+  const run = connectForStep(NAMES, cloudflare.cloudflare)
+  await until(() => run.view.accounts !== undefined)
+  expect(run.view).toEqual({ is: 'running', lines: ['Checking your Cloudflare login'], accounts: [other, ACCOUNT] })
+  expect(() => run.turnedOnR2()).toThrow('Connect Cloudflare waits for no R2 now.')
+
+  run.pickAccount(ACCOUNT.id)
+  await until(() => run.view.r2Page !== undefined)
+  expect(run.view.accounts).toBeUndefined()
+  expect(run.view.r2Page).toBe(R2_PAGE)
+  expect(run.view.lines.at(-1)).toBe(`R2 is off in Parker Labs. Turn it on at ${R2_PAGE}, then go on.`)
+
+  cloudflare.turnOnR2()
+  run.turnedOnR2()
+  await run.done
+  expect(run.view).toMatchObject({ is: 'joined' })
+  expect(run.view.r2Page).toBeUndefined()
+  expect(run.view.lines.at(-1)).toBe('Joined this machine to https://anyhost-test-connect.parker-labs.workers.dev')
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
+test('Connect Cloudflare for the Step ends failed with the reason', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, resets: 6 })
+  const run = connectForStep(NAMES, cloudflare.cloudflare)
+  await run.done
+  expect(run.view).toMatchObject({ is: 'failed', error: expect.stringContaining('got no answer in 6 tries') })
 })
 
 test('join refuses a link that is no invite link, and says why the relay refused one', async () => {

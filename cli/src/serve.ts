@@ -2,7 +2,8 @@ import { watch } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
-import { personOptions, relayLogin, rootsHere, stateFolder, type Device } from './device.ts'
+import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
+import { inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { connectRelay, type RelayState } from './relay.ts'
 import { codexState, watchedFolders, type Tool } from './transcript.ts'
 
@@ -22,6 +23,8 @@ export type Status = {
   readonly uploadEvery: number
   readonly capturedAt: string
   readonly problems: readonly string[]
+  // the Connect Cloudflare the mod's Step started, while the program runs
+  readonly connecting?: Connecting
 }
 type Queued = { readonly tool: Tool; readonly paths: ReadonlySet<string> }
 type Upload = (sessions: ReadonlyMap<string, Queued>) => ReadonlyMap<string, Promise<Set<string>>>
@@ -119,9 +122,11 @@ async function filesUnder(folder: string, isRecursive: boolean): Promise<string[
   return entries.filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name))
 }
 
-export async function serve(device: Device): Promise<void> {
+// `names` is the relay Connect Cloudflare deploys and keeps current, the Worker and bucket anyhost unless a test names
+// its own.
+export async function serve(device: Device, names?: RelayNames): Promise<void> {
   const roots = rootsHere()
-  const relay = connectRelay({ login: relayLogin, device, isPatient: true })
+  const relay = connectRelay({ login: relayLogin, device, roots, isPatient: true })
   const db = openDatabase()
   const counted = countedBucket(db)
   // a session's code that captureCode read after an upload goes up in the session's next drains
@@ -209,10 +214,37 @@ export async function serve(device: Device): Promise<void> {
       }
     }
   }
+  // A join here takes effect at once: the relay connects with the new login, and the problems it solves leave.
+  const joined = (): void => {
+    problems.clear('join')
+    problems.clear('relay update')
+    relay.reconnect()
+  }
+  let connecting: ConnectRun | undefined
+  // A relay older than this program is updated once a run, with this machine's cf login, which only a person may
+  // refresh. Without a usable login the mod's Step shows Connect Cloudflare.
+  let isUpdateTried = false
+  const keepRelayCurrent = async (): Promise<void> => {
+    if (relay.state.is !== 'outdated' || isUpdateTried) return
+    isUpdateTried = true
+    await settle('relay update', async () => {
+      await updateRelay(names)
+      relay.reconnect()
+    })
+  }
   const backup = async (): Promise<void> => {
     await watchFolders()
     await Bun.write(heartbeat, '')
-    await settle('options', async () => void (queue.uploadEvery = uploadEveryOf((await personOptions()).uploadEvery)))
+    await settle('options', async () => {
+      const { uploadEvery, join: link } = await personOptions()
+      queue.uploadEvery = uploadEveryOf(uploadEvery)
+      if (link === undefined || link === '') return
+      await settle('join', async () => {
+        await joinWithOption(link)
+        joined()
+      })
+    })
+    await keepRelayCurrent()
     if (relay.state.is !== 'connected') return
     await settle('backup', async () => {
       for (const [session, paths] of await changedFiles(capture)) {
@@ -229,7 +261,7 @@ export async function serve(device: Device): Promise<void> {
   // session from while that machine had no connection to the relay.
   const holderOf = (session: string): { machine?: string; problem?: string; untold?: string } => {
     const { state } = relay
-    if (state.is === 'refused') return { problem: state.message }
+    if (state.is === 'refused' || state.is === 'removed' || state.is === 'outdated') return { problem: state.message }
     const holder = journalOf(capture.db, session)?.holder ?? ''
     const untold = takeUntold(capture.db, session)
     return { ...(holder === '' ? {} : { machine: holder }), ...(untold === '' ? {} : { untold }) }
@@ -243,6 +275,50 @@ export async function serve(device: Device): Promise<void> {
       uploadEvery: queue.uploadEvery,
       capturedAt,
       problems: [...current.values()],
+      ...(connecting === undefined ? {} : { connecting: connecting.view }),
+    }
+  }
+  const failed = (status: number, error: unknown): Response => Response.json({ message: error instanceof Error ? error.message : String(error) }, { status })
+  // The relay's answer to the mod's /machines, or at once why the relay gives none.
+  const throughRelay = async (work: () => Promise<unknown>): Promise<Response> => {
+    const { state } = relay
+    if (state.is !== 'connected') return failed(503, 'message' in state ? state.message : `anyhost connects to the relay at ${relay.url}.`)
+    return Response.json((await work()) ?? {})
+  }
+  const connectRun = (): ConnectRun => {
+    if (connecting === undefined) throw new Error('No Connect Cloudflare runs on this machine.')
+    return connecting
+  }
+  // What the mod's Step and /machines send, as JSON, which a web page cannot send to this address unasked.
+  const act = async (pathname: string, { id = '', link = '' }: { readonly id?: string; readonly link?: string }): Promise<Response> => {
+    switch (pathname) {
+      case '/connect': {
+        if (connecting?.view.is === 'running') return Response.json(connecting.view)
+        const started = connectForStep(names)
+        connecting = started
+        void started.done.then(() => {
+          if (started.view.is === 'joined') joined()
+        })
+        return Response.json(started.view)
+      }
+      case '/connect/account':
+        connectRun().pickAccount(id)
+        return Response.json(connectRun().view)
+      case '/connect/r2':
+        connectRun().turnedOnR2()
+        return Response.json(connectRun().view)
+      case '/join': {
+        const url = await joinRelay(link)
+        joined()
+        return Response.json({ url })
+      }
+      case '/machines/invite':
+        return await throughRelay(() => inviteMachine(relay))
+      case '/machines/remove':
+        if (id === device.id) return failed(400, `${device.name} is this machine. Remove it from another machine's /machines.`)
+        return await throughRelay(() => removeMachine(relay, id))
+      default:
+        return new Response(`anyhost takes no ${pathname}.`, { status: 404 })
     }
   }
 
@@ -252,14 +328,18 @@ export async function serve(device: Device): Promise<void> {
     port: 0,
     // Bun cuts a connection after 10 quiet seconds by default, a pending answer included.
     idleTimeout: 0,
-    fetch(request) {
+    // A web page whose name resolves to this address names its own host, as cmod's web app checks too.
+    async fetch(request, { port }) {
+      if (request.headers.get('host') !== `127.0.0.1:${port}`) return failed(403, `anyhost answers 127.0.0.1:${port} alone.`)
       const { pathname } = new URL(request.url)
-      if (pathname === '/status') return Response.json(statusOf())
+      if (request.method === 'GET' && pathname === '/status') return Response.json(statusOf())
+      if (request.method === 'GET' && pathname === '/machines') return await throughRelay(async () => ({ here: device.id, machines: await machinesOf(relay) }))
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]
-      if (claim !== undefined) return Response.json(holderOf(claim))
-      return new Response(`anyhost serves /status and /claims/<session>, not ${pathname}.`, { status: 404 })
+      if (request.method === 'GET' && claim !== undefined) return Response.json(holderOf(claim))
+      if (request.method !== 'POST' || request.headers.get('content-type') !== 'application/json') return failed(404, `anyhost serves GET /status, /claims/<session> and /machines, and takes JSON at POST /connect, /join and /machines, not ${request.method} ${pathname}.`)
+      return await act(pathname, (await request.json()) as { id?: string; link?: string })
     },
-    error: (error) => new Response(String(error), { status: 500 }),
+    error: (error) => failed(500, error),
   })
   console.log(`127.0.0.1:${server.port}`)
   await watchFolders(true)

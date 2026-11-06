@@ -31,7 +31,7 @@ import { connectRelay, type Relay } from '../src/relay.ts'
 export const noCode: Code = { captureCode: async () => undefined, restoreCode: async (_header, _readPart, folder) => folder }
 
 export type Stored = { readonly body: Uint8Array; readonly etag: string; readonly modified: string }
-type Socket = ServerWebSocket<{ readonly device: string; readonly name: string; readonly refuse?: { readonly code: number; readonly reason: string } }>
+type Socket = ServerWebSocket<{ readonly device: string; readonly name: string; readonly roots: Roots; readonly refuse?: { readonly code: number; readonly reason: string } }>
 
 // The relay's API as `relay/pool.ts` and `relay/worker.ts` answer it, over real WebSockets and HTTP, with the bucket,
 // the machines, the claims and the messages waiting for an offline machine in memory. `refuse` fails the ops it names
@@ -94,7 +94,7 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
   const puts: { key: string; body: Uint8Array }[] = []
   const requests: (readonly Op[])[] = []
   const claims = new Map<string, string>()
-  const devices = new Map<string, { readonly id: string; name: string; readonly os: string; readonly arch: string; readonly roots: Roots; readonly token: string; removed: boolean; readonly joinedAt: string; seenAt: string }>()
+  const devices = new Map<string, { readonly id: string; name: string; readonly os: string; readonly arch: string; roots: Roots; readonly token: string; removedAt?: string; readonly joinedAt: string; seenAt: string }>()
   const waiting = new Map<string, Released[]>()
   const sockets = new Set<Socket>()
   const clients: Relay[] = []
@@ -149,10 +149,26 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
       case 'devices':
         return {
           status: 200,
-          devices: [...devices.values()].filter(({ removed }) => !removed).map(({ id, name, os, arch, roots, joinedAt, seenAt }) => ({ id, name, os, arch, roots, connected: socketsOf(id).length > 0, joinedAt, seenAt })),
+          devices: [...devices.values()].map(({ id, name, os, arch, roots, joinedAt, seenAt, removedAt }) => ({
+            id,
+            name,
+            os,
+            arch,
+            roots,
+            connected: socketsOf(id).length > 0,
+            joinedAt,
+            seenAt,
+            ...(removedAt === undefined ? {} : { removedAt }),
+          })),
         }
-      default:
-        return { status: 400, error: 'invalid', message: `The memory relay runs no op ${op.op}.` }
+      case 'invite':
+        return { status: 200, link: `${url}/v1/join#${crypto.randomUUID()}`, expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() }
+      case 'remove': {
+        const known = devices.get(op.device)
+        if (known === undefined || known.removedAt !== undefined) return { status: 404, error: 'unknown_device', message: `No machine with the id ${op.device} is joined.` }
+        relay.remove(op.device)
+        return { status: 200 }
+      }
     }
   }
 
@@ -195,7 +211,7 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
   async function object(request: globalThis.Request, key: string): Promise<Response> {
     const device = deviceOf(request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '')
     if (device === undefined) return Response.json({ error: 'unknown_token', message: 'The relay knows no machine with this token.' }, { status: 401 })
-    if (device.removed) return Response.json({ error: 'removed', message: 'This machine was removed from your machines.' }, { status: 403 })
+    if (device.removedAt !== undefined) return Response.json({ error: 'removed', message: 'This machine was removed from your machines.' }, { status: 403 })
     const there = objects.get(key)
     if (request.method === 'PUT') {
       const holder = request.headers.get('x-anyhost-holder')
@@ -228,17 +244,19 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
       if (pathname.startsWith('/v1/objects/')) return await object(request, decodeURIComponent(pathname.slice('/v1/objects/'.length)))
       if (pathname !== '/v1/connect') return new Response('no route', { status: 404 })
       const name = request.headers.get('x-anyhost-name') ?? ''
+      const roots = JSON.parse(request.headers.get('x-anyhost-roots') ?? 'null') as Roots | null
+      if (roots === null) return Response.json({ error: 'invalid', message: 'A connect names its machine\'s roots as JSON in X-Anyhost-Roots.' }, { status: 400 })
       const device = deviceOf(request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '')
       const live = device === undefined ? undefined : socketsOf(device.id).find((socket) => socket.data.name !== name)
       const refuse =
         device === undefined
           ? { code: CLOSE_UNKNOWN_TOKEN, reason: 'The relay knows no machine with this token.' }
-          : device.removed
+          : device.removedAt !== undefined
             ? { code: CLOSE_REMOVED, reason: 'This machine was removed from your machines.' }
             : live !== undefined
               ? { code: CLOSE_DEVICE_LIVE, reason: `${live.data.name} is connected with this machine's id.` }
               : undefined
-      if (server.upgrade(request, { data: { device: device?.id ?? '', name, ...(refuse === undefined ? {} : { refuse }) } })) return undefined
+      if (server.upgrade(request, { data: { device: device?.id ?? '', name, roots, ...(refuse === undefined ? {} : { refuse }) } })) return undefined
       return new Response('no upgrade', { status: 400 })
     },
     websocket: {
@@ -247,6 +265,7 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
         const device = devices.get(socket.data.device)
         if (device === undefined) return
         device.name = socket.data.name
+        device.roots = socket.data.roots
         sockets.add(socket)
         const welcome: Welcome = { t: 'welcome', relay: RELAY_VERSION, protocol: PROTOCOL_VERSION, bucket, device: refOf(device.id), waiting: waiting.get(device.id) ?? [] }
         waiting.delete(device.id)
@@ -285,18 +304,18 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
       if (known !== undefined) return known.token
       const token = crypto.randomUUID()
       const now = new Date().toISOString()
-      devices.set(device.id, { ...device, roots, token, removed: false, joinedAt: now, seenAt: now })
+      devices.set(device.id, { ...device, roots, token, joinedAt: now, seenAt: now })
       return token
     },
     isConnected: (id) => socketsOf(id).length > 0,
     remove(id) {
       const device = devices.get(id)
-      if (device !== undefined) device.removed = true
+      if (device !== undefined) device.removedAt = new Date().toISOString()
       for (const socket of socketsOf(id)) socket.close(CLOSE_REMOVED, 'This machine was removed from your machines.')
     },
     connect(device, roots) {
       const token = relay.join(device, roots)
-      const client = connectRelay({ login: async () => ({ url, token }), device, isPatient: true })
+      const client = connectRelay({ login: async () => ({ url, token }), device, roots, isPatient: true })
       clients.push(client)
       return client
     },

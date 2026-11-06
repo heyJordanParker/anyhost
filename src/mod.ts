@@ -1,15 +1,21 @@
 import { defineMod, device, http, sessions } from '../node_modules/@cmodjs/core/mod.js'
 import { program } from '../node_modules/@cmodjs/core/jobs/program.js'
+import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
 import { option } from '../node_modules/@cmodjs/core/options.js'
+import { connectStep, initialState, machinesPage, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
 
 // The program's /claims/<session> answer: the machine that took the session over, or why this machine captures nothing.
 // `untold`, answered once, is the machine this one took the session from while that machine was not connected.
 type Holder = { readonly machine?: string; readonly problem?: string; readonly untold?: string }
 
+// The machines list reads again while /machines is open, as a machine connects or leaves.
+const MACHINES_EVERY_MS = 10_000
+
 export const anyhost = defineMod({
   name: 'anyhost',
+  state: initialState,
   // The anyhost program reads them with cmod options: uploadEvery within a minute of a change, since one program
-  // serves every session, and checkouts at each anyhost resume.
+  // serves every session, checkouts at each anyhost resume, and join at its start.
   options: {
     uploadEvery: option.number({
       title: 'Upload every',
@@ -22,7 +28,13 @@ export const anyhost = defineMod({
       description: 'Where anyhost resume clones a repository this machine lacks. Empty: the folder your checkouts share, else your home folder.',
       default: '',
     }),
+    join: option.text({
+      title: 'Join with',
+      description: 'An invite link from Add a machine in /machines on a joined machine. anyhost joins this machine with it at its next start, then empties it.',
+      default: '',
+    }),
   },
+  installer: [connectStep],
 
   async setup(mod) {
     const here = await device.read()
@@ -34,6 +46,16 @@ export const anyhost = defineMod({
         isService: true,
       }),
     )
+    reachProgram(mod, capture)
+    const page = mod.sidebar.add(machinesPage)
+    mod.use(
+      slashCommand({
+        name: 'machines',
+        description: 'Show every machine joined to your relay, add a machine, or remove one',
+        reply: () => toggleMachines(mod, page),
+      }),
+    )
+    mod.every(MACHINES_EVERY_MS, () => (page.isOpen ? showMachines(mod) : undefined))
     const shown = new Set<string>()
     const showOnce = (message: string, description: string): void => {
       if (shown.has(message)) return

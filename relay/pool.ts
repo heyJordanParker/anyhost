@@ -85,6 +85,13 @@ const encoder = new TextEncoder()
 const iso = (ms: number): string => new Date(ms).toISOString()
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const isText = (value: unknown): value is string => typeof value === 'string' && value !== ''
+function jsonOf(text: string | null): unknown {
+  try {
+    return JSON.parse(text ?? '')
+  } catch {
+    return undefined
+  }
+}
 const refuse = (status: number, error: ErrorCode, message: string, more: object = {}): Reply => ({ status, body: { error, message, ...more } satisfies Refusal })
 
 export const healthOf = (env: Env): Health => ({ relay: RELAY_VERSION, protocol: PROTOCOL_VERSION, bucket: env.BUCKET_NAME })
@@ -328,6 +335,9 @@ export class Pool extends DurableObject<Env> {
     }
     const name = request.headers.get('x-anyhost-name') ?? ''
     if (name === '') return Response.json({ error: 'invalid', message: 'A connect names its machine in X-Anyhost-Name.' } satisfies Refusal, { status: 400 })
+    // a machine's roots follow it, as a CLAUDE_CONFIG_DIR set since its join moves Claude Code's folder
+    const roots = rootsOf(jsonOf(request.headers.get('x-anyhost-roots')))
+    if (roots === undefined) return Response.json({ error: 'invalid', message: 'A connect names its machine\'s roots as JSON in X-Anyhost-Roots.' } satisfies Refusal, { status: 400 })
     const row = this.#deviceOf(await sha256(request.headers.get('authorization')?.replace(/^Bearer /, '') ?? ''))
     if (row === undefined) return closeWith(CLOSE_UNKNOWN_TOKEN, 'The relay knows no machine with this token.')
     if (row.removed_at !== null) return closeWith(CLOSE_REMOVED, 'This machine was removed from your machines.')
@@ -336,7 +346,7 @@ export class Pool extends DurableObject<Env> {
     if (live !== undefined) return closeWith(CLOSE_DEVICE_LIVE, `${live.slice(0, 64)} is connected with this machine's id.`)
     const now = Date.now()
     // a machine connected under a new name was renamed, as no machine with its id holds a socket under the old one
-    this.#sql.exec('update devices set name = ?, seen_at = ? where id = ?', name, now, row.id)
+    this.#sql.exec('update devices set name = ?, roots = ?, seen_at = ? where id = ?', name, JSON.stringify(roots), now, row.id)
     this.ctx.acceptWebSocket(server, [row.id])
     server.serializeAttachment({ device: row.id, name, origin: new URL(request.url).origin, streams: {} } satisfies Attachment)
     const waiting = this.#sql.exec<{ id: number; message: string }>('select id, message from waiting where device = ? order by id', row.id).toArray()
@@ -533,8 +543,8 @@ export class Pool extends DurableObject<Env> {
         return { status: 200, claims: Object.fromEntries(rows.map(({ session, id, name, at }) => [session, { id, name: name ?? id, at: iso(at) } satisfies Claim])) }
       }
       case 'devices': {
-        const rows = this.#sql.exec<DeviceRow>('select * from devices where removed_at is null order by name').toArray()
-        const devices = rows.map(({ id, name, os, arch, roots, joined_at, seen_at }) => ({
+        const rows = this.#sql.exec<DeviceRow>('select * from devices order by name').toArray()
+        const devices = rows.map(({ id, name, os, arch, roots, joined_at, seen_at, removed_at }) => ({
           id,
           name,
           os,
@@ -543,6 +553,7 @@ export class Pool extends DurableObject<Env> {
           connected: this.ctx.getWebSockets(id).length > 0,
           joinedAt: iso(joined_at),
           seenAt: iso(seen_at),
+          ...(removed_at === null ? {} : { removedAt: iso(removed_at) }),
         }))
         return { status: 200, devices }
       }

@@ -24,6 +24,7 @@ import {
   type Op,
   type Released,
   type Result,
+  type Roots,
   type Welcome,
 } from '../../relay/protocol.ts'
 
@@ -51,11 +52,12 @@ export type Call = Exclude<Op, { readonly op: 'put' }> | { readonly op: 'put'; r
 export type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string; readonly bytes: Uint8Array }
 // An op's answer, a get's with its bytes. A result that names an error, as a failed R2 call does, rejects instead.
 export type Ran = Exclude<Result, { readonly error: string } | { readonly status: 200; readonly size: number; readonly modified: string } | { readonly status: 413 }> | Got
-// `connected` once the welcome came. `refused` is a token the relay refuses, or a relay older than this program needs.
+// `connected` once the welcome came. `removed` is a token the relay no longer knows or took back, which a join replaces,
+// `outdated` a relay older than this program needs, and `refused` a clone of a connected machine.
 export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
-  | { readonly is: 'unjoined' | 'offline' | 'refused'; readonly message: string }
+  | { readonly is: 'unjoined' | 'offline' | 'refused' | 'removed' | 'outdated'; readonly message: string }
 type Events = { readonly welcome: Welcome; readonly released: Released }
 
 export type Relay = {
@@ -70,6 +72,8 @@ export type Relay = {
   // one object by HTTP, which a broken download's next try goes on with from the byte it reached
   getObject(key: string): Promise<Got | undefined>
   on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): void
+  // connects at once instead of after the wait, as after this machine joined
+  reconnect(): void
   close(): void
 }
 
@@ -77,6 +81,8 @@ export type RelayOptions = {
   // relay.json and the device token, read again at each connect, so a machine joined meanwhile connects
   readonly login: () => Promise<Login | undefined>
   readonly device: { readonly name: string; readonly os: string }
+  // sent at each connect, so another machine relocates this machine's sessions from where its folders are now
+  readonly roots: Roots
   // The service waits out any outage. A command fails its requests once a connect fails, so it never hangs.
   readonly isPatient: boolean
 }
@@ -107,12 +113,15 @@ async function failureOf(answer: Response): Promise<undefined> {
   throw new Refused(body.message ?? `The relay answered ${answer.status}.`)
 }
 
-function refusedBy(code: number, reason: string, device: RelayOptions['device']): string | undefined {
-  if (code === CLOSE_REMOVED) return 'This machine was removed from your machines. Join it again with a link from Add a machine.'
-  if (code === CLOSE_UNKNOWN_TOKEN) return 'The relay knows no machine with this token. Join it again with a link from Add a machine.'
-  if (code === CLOSE_DEVICE_LIVE) return `The relay refused ${device.name}: ${reason} A machine cloned from another keeps its id, so anyhost captures nothing here. ${cloneFixFor(device.os)}`
+function refusedBy(code: number, reason: string, device: RelayOptions['device']): RelayState | undefined {
+  if (code === CLOSE_REMOVED) return { is: 'removed', message: 'This machine was removed from your machines. Join it again with a link from Add a machine.' }
+  if (code === CLOSE_UNKNOWN_TOKEN) return { is: 'removed', message: 'The relay knows no machine with this token. Join it again with a link from Add a machine.' }
+  if (code === CLOSE_DEVICE_LIVE) return { is: 'refused', message: `The relay refused ${device.name}: ${reason} A machine cloned from another keeps its id, so anyhost captures nothing here. ${cloneFixFor(device.os)}` }
   return undefined
 }
+
+// A header holds Latin-1 alone, so a root's other characters go as JSON escapes, which the relay reads back the same.
+const rootsHeader = (roots: Roots): string => JSON.stringify(roots).replace(/[^\x20-\x7e]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
 
 type Pending = { readonly message: Uint8Array; wasSent: boolean; readonly resolve: (answer: { results: readonly Result[]; bytes: Uint8Array }) => void; readonly reject: (error: Error) => void }
 
@@ -189,7 +198,7 @@ export function connectRelay(options: RelayOptions): Relay {
     const message = JSON.parse(text) as FromPool
     if (message.t === 'welcome') {
       if (message.protocol < PROTOCOL_VERSION) {
-        drop({ is: 'refused', message: `The relay at ${login?.url} answers protocol ${message.protocol}, and anyhost ${plugin.version} needs ${PROTOCOL_VERSION}. Connect Cloudflare again to update the relay.` })
+        drop({ is: 'outdated', message: `The relay at ${login?.url} answers protocol ${message.protocol}, and anyhost ${plugin.version} needs ${PROTOCOL_VERSION}. Connect Cloudflare again to update the relay.` })
         return
       }
       failures = 0
@@ -219,7 +228,7 @@ export function connectRelay(options: RelayOptions): Relay {
     if (login === undefined) return drop({ is: 'unjoined', message: NOT_JOINED })
     const url = login.url
     const ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, {
-      headers: { authorization: `Bearer ${login.token}`, 'x-anyhost-name': options.device.name, 'x-anyhost-version': plugin.version },
+      headers: { authorization: `Bearer ${login.token}`, 'x-anyhost-name': options.device.name, 'x-anyhost-version': plugin.version, 'x-anyhost-roots': rootsHeader(options.roots) },
     })
     socket = ws
     ws.binaryType = 'arraybuffer'
@@ -250,9 +259,8 @@ export function connectRelay(options: RelayOptions): Relay {
     ws.addEventListener('close', (event) => {
       clearTimeout(late)
       if (socket !== ws) return
-      const refused = refusedBy(event.code, event.reason, options.device)
       const why = event.reason || failed
-      drop(refused === undefined ? { is: 'offline', message: `The relay at ${url} closed the connection with ${event.code}${why === '' ? '' : `: ${why}`}.` } : { is: 'refused', message: refused })
+      drop(refusedBy(event.code, event.reason, options.device) ?? { is: 'offline', message: `The relay at ${url} closed the connection with ${event.code}${why === '' ? '' : `: ${why}`}.` })
     })
   }
 
@@ -403,6 +411,13 @@ export function connectRelay(options: RelayOptions): Relay {
     getObject,
     on(kind, listener) {
       listeners[kind].push(listener)
+    },
+    // a state with a message waits to open again, and a connecting or connected socket needs nothing
+    reconnect() {
+      if (isClosed || !('message' in state)) return
+      clearTimeout(reopen)
+      failures = 0
+      void open()
     },
     close() {
       isClosed = true

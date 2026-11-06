@@ -44,7 +44,8 @@ export type Refusal = { readonly error: ErrorCode; readonly message: string }
 export type Roots = { readonly home: string; readonly claudeHome: string; readonly claudeTmp: string; readonly codexHome: string }
 export type DeviceRef = { readonly id: string; readonly name: string }
 export type JoiningDevice = DeviceRef & { readonly os: string; readonly arch: string; readonly roots: Roots }
-export type Device = JoiningDevice & { readonly connected: boolean; readonly joinedAt: string; readonly seenAt: string }
+// A removed machine stays listed with `removedAt`, so its sessions stay listed and resumable from its roots.
+export type Device = JoiningDevice & { readonly connected: boolean; readonly joinedAt: string; readonly seenAt: string; readonly removedAt?: string }
 
 // GET /v1/health
 export type Health = { readonly relay: number; readonly protocol: number; readonly bucket: string }
