@@ -115,12 +115,13 @@ async function isDaemonRunning(claudeHome: string): Promise<boolean> {
   return stat === undefined || stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] === lock.procStart
 }
 
-// Calls `heard` at each change of Claude Code's records under its folder, until the function it answers is called.
+// Calls `heard` at each change of Claude Code's records under its folder that a watcher heard, and every second
+// meanwhile, as a watcher drops a change with no word of it, until the function it answers is called.
 export type OnRecordsChange = (heard: () => void) => () => void
 
-// Answers the first time `found` finds what it looks for in the sessions Claude Code runs here, read again at each
-// change of their records under `claudeHome`, or undefined once `limitMs` passed. A signal that aborts first rejects
-// with its reason.
+// Answers the first time `found` finds what it looks for in the sessions Claude Code runs here, read at once and again
+// each time `onRecordsChange` calls, or undefined once `limitMs` passed. A signal that aborts first rejects with its
+// reason.
 export function whenSessions<T>(claudeHome: string, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number, onRecordsChange: OnRecordsChange, signal?: AbortSignal): Promise<T | undefined> {
   return new Promise((resolve, reject) => {
     let isReading = false

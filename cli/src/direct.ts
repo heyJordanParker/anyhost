@@ -54,7 +54,6 @@ export type DirectListener = {
   // `receive` its frames and becomes its link.
   hold(stream: number, key: string, receive: (frame: Uint8Array) => void, linked: (link: DirectLink) => void): void
   release(stream: number): void
-  close(): void
 }
 type Direction = 'viewer to host' | 'host to viewer'
 // One direction of a connection: `seal` frames one, with its length before it, and `open` takes a sealed frame without
@@ -68,9 +67,10 @@ export class LocalNetworkRefused extends Error {}
 const octetsOf = (address: string): number[] => (/^\d+\.\d+\.\d+\.\d+$/.test(address) ? address.split('.').map(Number) : [])
 
 // Tailscale gives each machine an address in 100.64.0.0/10 and in fd7a:115c:a1e0::/48.
+const isTailscaleIpv6 = (address: string): boolean => address.toLowerCase().startsWith('fd7a:115c:a1e0:')
 export function isTailscale(address: string): boolean {
   const [first, second = 0] = octetsOf(address)
-  return (first === 100 && second >= 64 && second < 128) || address.toLowerCase().startsWith('fd7a:115c:a1e0:')
+  return (first === 100 && second >= 64 && second < 128) || isTailscaleIpv6(address)
 }
 
 const isPrivate = (address: string): boolean => {
@@ -78,13 +78,18 @@ const isPrivate = (address: string): boolean => {
   return first === 10 || (first === 172 && second >= 16 && second < 32) || (first === 192 && second === 168)
 }
 
-// The addresses this machine offers viewers, Tailscale's first: its Tailscale addresses, and the private IPv4
-// addresses of its physical interfaces, never a public, loopback or bridge address. A link-local IPv6 address names no
-// interface of the viewer's, which only the viewer knows, so it is never offered.
+// The addresses this machine offers viewers, Tailscale's first: the Tailscale addresses of Tailscale's interface, and
+// the private IPv4 addresses of its physical interfaces, never a public, loopback or bridge address. 100.64.0.0/10 is
+// also the carrier-grade NAT range, which an ISP gives a machine's own interface, where its other customers reach it,
+// so it counts only on Tailscale's interface: `tailscale0` on Linux, and on macOS a `utun` interface, as `utun4` on the
+// Architect's Mac, whose number varies and which other VPNs use too, so there the one that holds Tailscale's IPv6
+// address. A link-local IPv6 address names no interface of the viewer's, which only the viewer knows, so it is never
+// offered.
 export function offeredAddresses(interfaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces()): string[] {
   const all = Object.entries(interfaces).flatMap(([name, infos]) => (infos ?? []).filter((info) => !info.internal).map((info) => ({ name, address: info.address })))
-  const tailscale = all.filter(({ address }) => isTailscale(address))
-  const lan = all.filter(({ name, address }) => isPrivate(address) && !isTailscale(address) && !BRIDGE.test(name))
+  const isTailscaleInterface = (name: string): boolean => name.startsWith('tailscale') || all.some((each) => each.name === name && isTailscaleIpv6(each.address))
+  const tailscale = all.filter(({ name, address }) => isTailscale(address) && isTailscaleInterface(name))
+  const lan = all.filter(({ name, address }) => isPrivate(address) && !BRIDGE.test(name))
   return [...new Set([...tailscale, ...lan].map(({ address }) => address))]
 }
 
@@ -217,17 +222,12 @@ export async function listenDirect(folder: string, problems: Problems, addresses
   const port = await portIn(folder)
   const held = new Map<number, { readonly key: Buffer; readonly receive: (frame: Uint8Array) => void; readonly linked: (link: DirectLink) => void }>()
   const servers = new Map<string, Promise<Server | undefined>>()
-  const sockets = new Set<Socket>()
   const accept = (socket: Socket): void => {
-    sockets.add(socket)
     socket.setNoDelay(true)
     // a connection whose hello does not open under the key of the stream it named within SILENCE_MS gets nothing sealed
     const late = setTimeout(() => socket.destroy(), SILENCE_MS)
     socket.on('error', () => undefined)
-    socket.on('close', () => {
-      clearTimeout(late)
-      sockets.delete(socket)
-    })
+    socket.on('close', () => clearTimeout(late))
     let opened: { readonly stream: number; readonly seal: Cipher; readonly open: Cipher } | undefined
     let heard: ((body: Buffer) => boolean) | undefined
     readFrames(
@@ -292,12 +292,6 @@ export async function listenDirect(folder: string, problems: Problems, addresses
     offer,
     hold: (stream, key, receive, linked) => void held.set(stream, { key: Buffer.from(key, 'base64'), receive, linked }),
     release: (stream) => void held.delete(stream),
-    close() {
-      for (const server of servers.values()) void server.then((bound) => bound?.close())
-      servers.clear()
-      for (const socket of sockets) socket.destroy()
-      held.clear()
-    },
   }
 }
 

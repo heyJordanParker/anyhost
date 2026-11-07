@@ -35,7 +35,7 @@ function machine(device: Device, relay: MemoryRelay, folder = temporaryFolder(),
   const roots = rootsUnder(folder)
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
-  const capture = openCapture(relay.connect(device, roots), device, roots, openDatabase(join(folder, 'state')), code, onCode)
+  const capture = openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(join(folder, 'state')), code, ...(onCode === undefined ? {} : { onCode }) })
   const upload = (...paths: string[]): Promise<Set<string>[]> => Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
   return { roots, transcript, capture, upload }
 }
@@ -176,9 +176,9 @@ test('a drain of several sessions goes up in one request, each session claimed b
   expect(relay.requests.flat().filter(({ op }) => op === 'claim')).toHaveLength(2)
 })
 
-// The suite missed it: no test drained after a reconnect, so none saw that a program claimed each session once per
-// start, and a takeover whose `released` a dying socket swallowed reached this machine only at a refused frame.
-test('the first drain of a session after the relay welcomes the machine again claims it again', async () => {
+// A takeover's `released` waits in the Pool until this machine says it heard it, and every welcome carries it again
+// until then, so a session this program claimed once needs no claim after a reconnect.
+test('a drain after the relay welcomes the machine again claims no session this program claimed already', async () => {
   const relay = await memoryRelay()
   const { transcript, capture, upload } = machine(deviceA, relay)
   writeFileSync(transcript, lines[0] ?? '')
@@ -190,7 +190,7 @@ test('the first drain of a session after the relay welcomes the machine again cl
   await upload(transcript)
 
   const drains = relay.requests.filter((ops) => ops.some((op) => op.op === 'put' && op.key.startsWith(`journals/${SESSION}/`)))
-  expect(drains.map((ops) => ops.filter(({ op }) => op === 'claim').length)).toEqual([1, 1])
+  expect(drains.map((ops) => ops.filter(({ op }) => op === 'claim').length)).toEqual([1, 0])
 })
 
 test('a frame over 1 MiB goes up by HTTP beside the request, and the journal reads it back byte for byte', async () => {
@@ -669,12 +669,11 @@ test('the repair of a journal R2 lost a frame of keeps the warning a takeover le
   expect(takeUntold(capture.db, SESSION)).toBe('anyhost-b')
 })
 
-// The suite missed it because its relay answered every request at once, where a link at 240 KB/s carries the 16 gets
-// a seal asks at once, about 700 KB each, one after another, and the last arrives past 40 s.
-test('a seal over a link whose answers take past 40 seconds in all finishes on its one socket, asking for each frame once', async () => {
-  const relay = await memoryRelay()
+// A session of 17 hot frames of about 700 KB each, a line of random text a frame of its own, as no two fit one
+// request's 1 MiB, so a seal asks for 16 of them at once, each in a request of its own. Answers the frames' sizes,
+// largest first.
+async function bigFrames(relay: MemoryRelay) {
   const { transcript, capture, upload } = machine(deviceA, relay)
-  // a line of random text a frame of its own, as no two fit one request's 1 MiB
   const frames = 17
   for (let frame = 0; frame < frames; frame += 1) {
     const text = Buffer.from(crypto.getRandomValues(new Uint8Array(700 * 1024))).toString('base64')
@@ -685,17 +684,44 @@ test('a seal over a link whose answers take past 40 seconds in all finishes on i
   expect(sizes).toHaveLength(frames)
   expect(sizes[0]).toBeLessThan(MAX_MESSAGE_BYTES)
   expect((sizes.at(-1) ?? 0) * 2).toBeGreaterThan(MAX_MESSAGE_BYTES)
-  relay.answerBytesPerMs = 240
+  return { capture, frames, sizes, quiet: (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000 }
+}
+
+// The suite missed it because its relay answered every request at once, where a link at 240 KB/s carries the 16 gets
+// a seal asks at once, about 700 KB each, one after another, and the last arrives past 40 s.
+test('a seal over a link whose answers take past 40 seconds in all finishes on its one socket, asking for each frame once', async () => {
+  const relay = await memoryRelay()
+  const { capture, frames, sizes, quiet } = await bigFrames(relay)
+  relay.downloadBytesPerMs = 240
   // the first 16 answers alone take past 40 s at that pace
-  expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.answerBytesPerMs).toBeGreaterThan(40_000)
+  expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(40_000)
   const asked = relay.requests.length
-  const quiet = (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000
 
   expect(await sealQuiet(capture, failTest, quiet)).toEqual(new Map())
   expect(journalOf(capture.db, SESSION)?.sealed).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
   expect(await hotFrames(relay)).toEqual([])
   expect(relay.requests.slice(asked).filter((ops) => ops.some(({ op }) => op === 'get'))).toHaveLength(frames)
 }, 180_000)
+
+// The suite missed it because its link carried each pong at once, past the answers ahead of it, where a WebSocket
+// delivers in order: a pong waits behind every answer the link still carries, and a ping behind every request.
+test('a seal over a link paced both ways, whose 16 answers queued ahead of any pong take past 70 seconds, keeps its one socket', async () => {
+  const relay = await memoryRelay()
+  const { capture, frames, sizes, quiet } = await bigFrames(relay)
+  relay.downloadBytesPerMs = 150
+  relay.uploadBytesPerMs = 150
+  // A ping goes every 30 s, so one goes within the seal's first 30 s, and its pong waits behind the answers left,
+  // past the 40 s a pong may take.
+  expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(70_000)
+  let welcomes = 0
+  capture.relay.on('welcome', () => (welcomes += 1))
+  const asked = relay.requests.length
+
+  expect(await sealQuiet(capture, failTest, quiet)).toEqual(new Map())
+  expect(welcomes).toBe(0)
+  expect(journalOf(capture.db, SESSION)?.sealed).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
+  expect(relay.requests.slice(asked).filter((ops) => ops.some(({ op }) => op === 'get'))).toHaveLength(frames)
+}, 240_000)
 
 test('a lines file names the sessions that wrote new lines, and never the lines before the first start', async () => {
   const relay = await memoryRelay()

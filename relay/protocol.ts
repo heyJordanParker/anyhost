@@ -11,10 +11,14 @@ export const MAX_OPS = 100
 // The bytes of a request's puts, and of an answer's gets. A larger object travels as its own HTTP request.
 export const MAX_MESSAGE_BYTES = 1024 * 1024
 export const INVITE_MS = 10 * 60_000
-// A machine's socket is alive while its last ping, or its connect, is this recent: the program pings every 30 seconds
-// (`PING_MS` in `cli/src/relay.ts`). Cloudflare keeps listing the socket of a machine that went to sleep until a message
-// sent on it fails, which a silent socket met only at 10 minutes (relay-spec R16), so the Pool delivers only to a live
-// socket and keeps a `released` for a machine with none in `waiting`.
+// The program pings every PING_MS, and the Pool counts a socket alive while the last message it heard on it, its last
+// ping, or its connect is within LIVE_MS. A WebSocket carries its messages in order, so a ping waits behind the data
+// already on its way, 10.5 s behind 1 MiB at the 100 KB/s a write counts as the slowest link, and every message the
+// Pool hears proves the socket alive. Cloudflare closes a socket that carries nothing for a while: one quiet for 10
+// minutes was closed by then, and one pinged every 30 seconds had every pong back within 40 seconds over 50 minutes
+// (relay-spec R16). Cloudflare keeps listing the socket of a machine that went to sleep until a message sent on it
+// fails, which a silent socket met only at 10 minutes (R16), so the Pool delivers only to a live socket.
+export const PING_MS = 30_000
 export const LIVE_MS = 40_000
 // What the R2 binding lists and deletes in one call.
 export const MAX_KEYS = 1000
@@ -87,19 +91,18 @@ export type Op =
   | { readonly op: 'remove'; readonly device: string }
 
 export type Listed = { readonly key: string; readonly size: number }
-// the machine that holds a session
-export type Claim = DeviceRef
 
 // What each op answers, by the op. A `get` answered 200 carries `size` bytes in the answer's bytes, and one the answer
-// has no room for answers 413. A `claim` names the machine it took the session from only while that machine has not
-// heard of it. Every op answers a request sent again after a lost answer as it answered the first.
+// has no room for answers 413. A `claim` names the machine it took the session from until that machine says it heard
+// of it, and `claims` the machine that holds each session. Every op answers a request sent again after a lost answer as
+// it answered the first.
 export type Results = {
   readonly get: { readonly status: 200; readonly etag: string; readonly size: number } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
   readonly put: { readonly status: 200; readonly etag: string } | { readonly status: 412; readonly etag?: string } | { readonly status: 409; readonly holder: DeviceRef }
   readonly list: { readonly status: 200; readonly objects: readonly Listed[]; readonly cursor?: string }
   readonly delete: { readonly status: 200 }
   readonly claim: { readonly status: 200; readonly told: true } | { readonly status: 200; readonly previous: DeviceRef; readonly told: false } | { readonly status: 409; readonly holder: DeviceRef }
-  readonly claims: { readonly status: 200; readonly claims: Readonly<Record<string, Claim>> }
+  readonly claims: { readonly status: 200; readonly claims: Readonly<Record<string, DeviceRef>> }
   readonly devices: { readonly status: 200; readonly devices: readonly Device[] }
   readonly invite: { readonly status: 200; readonly link: string; readonly expiresAt: string }
   readonly remove: { readonly status: 200 }
@@ -111,7 +114,10 @@ export type Request = { readonly id: number; readonly ops: readonly Op[] }
 // A request the Pool refuses whole, as one over MAX_OPS, answers `error` instead of `results`.
 export type Answer = { readonly id: number; readonly results: readonly Result[] } | ({ readonly id: number | null } & Refusal)
 
+// The Pool tells the machine that held a session that `to` took it, as the take comes and in each welcome, until that
+// machine answers `heard`, naming the session and `to`'s id, once it applied it. The Pool takes `heard` itself.
 export type Released = { readonly t: 'released'; readonly session: string; readonly to: DeviceRef; readonly at: string }
+export type Heard = { readonly t: 'heard'; readonly session: string; readonly to: string }
 export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceRef; readonly waiting: readonly Released[] }
 
 // What a machine sends another: the Pool routes it to every live socket of `to`, a device id, adding `from`. `attached` and

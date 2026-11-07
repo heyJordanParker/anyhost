@@ -36,6 +36,9 @@ export type Stream = {
   // typed while no host held the stream, go to the new peer, numbered from 0. A frame a link carried may have reached
   // the last peer's terminal, so it goes nowhere again.
   startOver(): void
+  // The link carried no frame from `offset` on, as the relay refused it while its machine's socket was down: there is
+  // no link from now on, and those frames count as carried by none, so a new peer gets them after `startOver`.
+  refused(offset: number): void
   // a frame the link brought
   receive(frame: Uint8Array): void
   close(): void
@@ -45,9 +48,10 @@ const KINDS: readonly Kind[] = ['input', 'resize', 'output', 'state', 'exit', 'm
 // The acknowledgement of what a side holds, which is also its first frame on each link.
 const ACK = 7
 const HEADER = 9
-// Each wakeup of an end cost 2 to 15 ms of Bun's CPU on a test machine, where a viewed busy session sends about 11
-// frames a second. An acknowledgement only lets the other side drop what it keeps for the next link, so a late one
-// costs a resend at most, which this side drops by its offset.
+// Each wakeup of an end cost 2 to 15 ms of Bun's CPU on a test machine, where a viewed busy session's `claude attach`
+// writes about 11 times a second, a frame each over a direct connection and at most 4 frames a second through the
+// relay. An acknowledgement only lets the other side drop what it keeps for the next link, so a late one costs a
+// resend at most, which this side drops by its offset.
 const ACK_MS = 1000
 // A full 120×40 screen of Claude Code took 6,442 bytes (worker-spec W7), so 8 MiB holds over a thousand screens.
 const MAX_WAITING = 8 * 2 ** 20
@@ -57,6 +61,15 @@ export const MAX_FRAME_BYTES = HEADER + MAX_WAITING
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+
+// A random id of one end of a stream: the viewer's stream id, which the relay routes by, and the host's `hostStream`.
+export const randomStreamId = (): number => crypto.getRandomValues(new Uint32Array(1))[0] ?? 0
+
+// the offset of a frame's first byte
+export const offsetOf = (frame: Uint8Array): number => {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
+  return view.getUint32(1) * 2 ** 32 + view.getUint32(5)
+}
 
 const bytesOf = (value: Values[Kind]): Uint8Array => (value instanceof Uint8Array ? value : encoder.encode(JSON.stringify(value)))
 const valueOf = (kind: Kind, bytes: Uint8Array): Values[Kind] => (kind === 'input' || kind === 'output' ? bytes : (JSON.parse(decoder.decode(bytes)) as Values[Kind]))
@@ -157,11 +170,14 @@ export function openStream(): Stream {
       clearTimeout(acking)
       acking = undefined
     },
+    refused(offset) {
+      use(undefined)
+      carriedTo = Math.min(carriedTo, offset)
+    },
     receive(frame) {
       if (isClosed || frame.length < HEADER) return
-      const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
       const code = frame[0] ?? 0
-      const offset = view.getUint32(1) * 2 ** 32 + view.getUint32(5)
+      const offset = offsetOf(frame)
       if (isStarting) return
       if (code === ACK) return peerHolds(offset)
       const kind = KINDS[code - 1]

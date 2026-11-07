@@ -74,6 +74,8 @@ export const anyhost = defineMod({
     }
     // The program's last answer of each session's holder and move, which a prompt goes on with while the program is slow.
     const known = new Map<string, Holder>()
+    // the sessions whose move a toast follows now
+    const following = new Set<string>()
     const check = async (): Promise<Holder | undefined> => {
       const session = sessions.current.id
       if ((await capture.ready().catch(() => undefined)) === undefined) return undefined
@@ -90,6 +92,8 @@ export const anyhost = defineMod({
           duration: Infinity,
         })
       }
+      // a move another command asked for, as anyhost move, gets the toast and its Keep it here too
+      if (holder.move !== undefined && MOVING.has(holder.move.step)) follow()
       return holder
     }
     // a session anyhost resume opened after a takeover says at once when the machine it came from did not hear of it
@@ -119,12 +123,19 @@ export const anyhost = defineMod({
 
     // /move asks the program, which drains, seals and sends the session, and its toast follows each step: the
     // session's own Claude Code ends once the session runs there, or refuses each prompt outside herdr. Until the machine
-    // answers, Keep it here ends the move and keeps the session here.
+    // answers, Keep it here ends the move and keeps the session here. One toast follows a session's move, whether this
+    // session's /move or a check that found it running asked for it.
     const follow = (): void => {
       const session = sessions.current.id
+      if (following.has(session)) return
+      following.add(session)
       const toast = `move-${session}`
       // the step and line the toast draws now
       let drawn = ''
+      const end = (): void => {
+        timer.stop()
+        following.delete(session)
+      }
       const timer = mod.every(FOLLOW_MS, async () => {
         const holder = await askProgram<Holder>(mod, `/claims/${session}`).catch((error: unknown) => {
           mod.log(`anyhost could not follow the move of ${session}: ${messageOf(error)}`, { level: 'warning' })
@@ -136,7 +147,7 @@ export const anyhost = defineMod({
         const { move } = holder
         // the program keeps its moves in memory only, so one that restarted knows this move no more
         if (move === undefined) {
-          timer.stop()
+          end()
           mod.toast.error('anyhost lost track of the move, as its program restarted', { id: toast, description: 'anyhost list shows which machine holds the session now.', duration: Infinity })
           return
         }
@@ -148,7 +159,7 @@ export const anyhost = defineMod({
           const keep = { label: 'Keep it here', onClick: () => askProgram(mod, '/move/keep', { session }) }
           mod.toast.loading(`Moving to ${move.to}…`, { id: toast, description: move.line, action: keep })
         }
-        if (!MOVING.has(move.step)) timer.stop()
+        if (!MOVING.has(move.step)) end()
       })
     }
     mod.use(

@@ -19,7 +19,7 @@ const upload = (capture: Capture, session: string, ...paths: string[]): Promise<
 function machine(device: Device, relay: MemoryRelay, home = join(temporaryFolder(), 'home'), state = join(temporaryFolder(), 'state'), code = noCode) {
   const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') }
   // the same roots on both machines, where relocate places every byte as its writer wrote it
-  return { roots, capture: openCapture(relay.connect(device, roots), device, roots, openDatabase(state), code) }
+  return { roots, capture: openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(state), code }) }
 }
 
 async function captured(relay: MemoryRelay, device: Device, session: string, prompt: string, cwd = '/work'): Promise<Capture> {
@@ -210,7 +210,7 @@ test("a session that worked in macOS's temp root continues in this machine's, an
   const home = join(temporaryFolder(), 'home')
   // the temp root as rootsHere records it on macOS, where Claude Code writes it with /private and the model without
   const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: '/private/tmp/claude-501', codexHome: join(home, '.codex') }
-  const writer = openCapture(relay.connect(mac, roots), mac, roots, openDatabase(join(temporaryFolder(), 'state')), noCode)
+  const writer = openCapture(relay.connect(mac, roots), mac, roots, { db: openDatabase(join(temporaryFolder(), 'state')), code: noCode })
   const scratchpad = (tmp: string, at: string): string => `${tmp}/${encoded(join(at, 'dotfiles'))}/${session}/scratchpad`
   const line = (cwd: string, read: string): string => `{"type":"user","message":{"role":"user","content":"Sum up ${read}/notes.md"},"cwd":"${cwd}","sessionId":"${session}"}\n`
   const there = scratchpad(roots.claudeTmp, roots.home)

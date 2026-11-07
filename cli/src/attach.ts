@@ -8,7 +8,7 @@ import { run } from './background.ts'
 import { dialDirect, isTailscale, LocalNetworkRefused, offeredAddresses, type DirectLink, type DirectOffer } from './direct.ts'
 import { waitAfter } from './relay.ts'
 import { serveSocket } from './serve.ts'
-import { openStream, type Link, type Size } from './stream.ts'
+import { openStream, randomStreamId, type Link, type Size } from './stream.ts'
 
 // A viewer waiting to dial the host again dials at once when the addresses this machine dials from changed, as on a
 // new network.
@@ -40,13 +40,12 @@ async function reportToHerdr(session: string, status: string): Promise<string | 
   )
 }
 
-const newStream = (): number => new DataView(crypto.getRandomValues(new Uint8Array(4)).buffer).getUint32(0)
 const newKey = (): string => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
 
 // The session through this machine's program, whose WebSocket at /attach takes the attach.
 export function attach(asked: string): Promise<number> {
   const frames = openStream()
-  let id = newStream()
+  let id = randomStreamId()
   let key = newKey()
   // what went wrong while the terminal was the session's, said once it is this terminal's again
   const problems = new Set<string>()
@@ -171,7 +170,7 @@ export function attach(asked: string): Promise<number> {
       ws.addEventListener('message', (event) => {
         if (socket !== ws) return
         if (typeof event.data !== 'string') return frames.receive(new Uint8Array(event.data as ArrayBuffer))
-        const message = JSON.parse(event.data) as { readonly t: string; readonly message?: string; readonly hostStream?: number } & Partial<DirectOffer>
+        const message = JSON.parse(event.data) as { readonly t: string; readonly message?: string; readonly hostStream?: number; readonly at?: number } & Partial<DirectOffer>
         if (message.t === 'attached') {
           wasAttached = true
           failures = 0
@@ -186,7 +185,12 @@ export function attach(asked: string): Promise<number> {
           dial()
         } else if (message.t === 'invalid') finish(1, message.message)
         // detach or offline: the link or the machine that holds the session is gone for now
-        else again()
+        else {
+          again()
+          // the frame at `at` and every one after it went nowhere, as this machine's relay was down, while a direct
+          // connection sends every frame its host did not acknowledge anyway
+          if (message.at !== undefined && direct === undefined) frames.refused(message.at)
+        }
       })
       ws.addEventListener('close', () => {
         if (socket !== ws || isDone) return
@@ -207,7 +211,7 @@ export function attach(asked: string): Promise<number> {
       leg = undefined
       hostStream = undefined
       leaveHost()
-      id = newStream()
+      id = randomStreamId()
       key = newKey()
       if (socket?.readyState === WebSocket.OPEN) socket.send(attachMessage())
     })

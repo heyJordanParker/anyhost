@@ -1,4 +1,4 @@
-import type { Claim, DeviceRef } from '../../relay/protocol.ts'
+import type { DeviceRef } from '../../relay/protocol.ts'
 import type { Relay } from './relay.ts'
 
 export class HeldElsewhere extends Error {
@@ -11,13 +11,13 @@ export class HeldElsewhere extends Error {
 }
 
 // Every session a machine claimed whose id begins with `prefix`, every one with none, with the machine that holds it now.
-export async function claimsOf(relay: Relay, prefix?: string): Promise<ReadonlyMap<string, Claim>> {
+export async function claimsOf(relay: Relay, prefix?: string): Promise<ReadonlyMap<string, DeviceRef>> {
   const { claims } = await relay.runOne({ op: 'claims', ...(prefix === undefined ? {} : { prefix }) })
   return new Map(Object.entries(claims))
 }
 
-// Takes the session for this machine, and answers the machine that held it before and whether the relay told it at
-// once, as it does a machine connected now. A machine it could not tell hears it in its next welcome.
+// Takes the session for this machine, and answers the machine that held it before and whether that machine said it
+// heard of it within about a second, as a connected one does. One that did not hears it in each welcome until it does.
 export async function takeClaim(relay: Relay, session: string, options: { take: boolean }): Promise<{ readonly previous?: DeviceRef; readonly told: boolean }> {
   const answer = await relay.runOne({ op: 'claim', session, take: options.take })
   if (answer.status === 409) throw new HeldElsewhere(answer.holder)

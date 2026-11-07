@@ -1,7 +1,8 @@
-// The Durable Object every machine of one person connects to: SQLite holds the machines, invites, claims and the
-// messages waiting for an offline machine, and each machine's hibernating WebSocket carries its requests, whose ops
-// the Pool runs on R2, and its messages to the other machines. Hibernation resets memory, so nothing the Pool needs
-// later lives only there: each socket's machine, connect time and open attach streams are in its attachment.
+// The Durable Object every machine of one person connects to: SQLite holds the machines, invites, claims and each
+// `released` its old holder has not said it heard, and each machine's hibernating WebSocket carries its requests, whose
+// ops the Pool runs on R2, and its messages to the other machines. Hibernation resets memory, so nothing the Pool needs
+// later lives only there: each socket's machine, connect time and open attach streams are in its attachment. Only an
+// idle socket hibernates, so the time the Pool last heard a socket, which a busy one needs, lives in memory.
 import { DurableObject, RpcTarget } from 'cloudflare:workers'
 import {
   ANSWER,
@@ -26,7 +27,6 @@ import {
   streamOf,
   tokenOf,
   type Answer,
-  type Claim,
   type DeviceRef,
   type ErrorCode,
   type Health,
@@ -81,6 +81,9 @@ create table if not exists meta (key text primary key, value text not null);`
 
 // How many R2 reads the first start's import runs at once.
 const IMPORT_READS = 50
+// How long a take waits for the old holder's `heard` before it answers that the old holder may not know: a message from
+// anyhost-a reached anyhost-b and came back in 753 ms at p99 (relay-spec R12).
+const HEARD_MS = 1000
 // Crockford's base32 leaves out I, L, O and U, so an invite read aloud or typed has no look-alike letters.
 const INVITE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
@@ -107,6 +110,8 @@ async function sha256(text: string): Promise<string> {
 }
 
 const randomBytes = (size: number): Uint8Array => crypto.getRandomValues(new Uint8Array(size))
+// a take that waits for `holder` to hear that `taker` took the session
+const hearingKey = (holder: string, session: string, taker: string): string => JSON.stringify([holder, session, taker])
 const base64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
 
 function inviteCode(): string {
@@ -163,6 +168,10 @@ export class Pool extends DurableObject<Env> {
   readonly #sql: SqlStorage
   // each session's frame writes in flight, which a takeover waits for before it answers
   readonly #writes = new Map<string, Set<Promise<void>>>()
+  // when the Pool last heard a message on each socket
+  readonly #heardAt = new WeakMap<WebSocket, number>()
+  // the takes that wait for their old holder's `heard`, by `hearingKey`
+  readonly #hearing = new Map<string, Set<() => void>>()
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -241,10 +250,11 @@ export class Pool extends DurableObject<Env> {
     return row === undefined ? undefined : { id: row.id, name: row.name ?? row.id }
   }
 
-  // The name of a machine with this id that holds an open socket under another name, as a clone's original does.
+  // The name of a machine with this id that holds a live socket under another name, as a clone's original does.
   #liveOtherThan(id: string, name: string): string | undefined {
     return this.ctx
       .getWebSockets(id)
+      .filter((socket) => this.#isLive(socket))
       .map((socket) => (socket.deserializeAttachment() as Attachment).name)
       .find((live) => live !== name)
   }
@@ -268,16 +278,17 @@ export class Pool extends DurableObject<Env> {
     }
   }
 
-  // Whether the socket's last ping, which the platform records without waking the Pool, or its connect is within
-  // LIVE_MS. A sleeping machine's socket stays listed, and a message sent on it goes nowhere with no error.
+  // Whether the Pool heard the socket within LIVE_MS: the last message it heard on it, its last ping, which the platform
+  // records without waking the Pool, or its connect. A ping waits behind the data on its way, so a busy link's messages
+  // keep it live. A sleeping machine's socket stays listed, and a message sent on it goes nowhere with no error.
   #isLive(socket: WebSocket): boolean {
     const pingedAt = this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0
     const { connectedAt } = socket.deserializeAttachment() as Attachment
-    return Date.now() - Math.max(pingedAt, connectedAt) <= LIVE_MS
+    return Date.now() - Math.max(this.#heardAt.get(socket) ?? 0, pingedAt, connectedAt) <= LIVE_MS
   }
 
   // Sends a message to every live socket among a machine's, and answers whether it has one. A socket that is not live
-  // gets nothing, so a message its machine never hears is never counted delivered, nor heard twice once it waited.
+  // gets nothing, so a message its machine never hears is never counted delivered.
   #deliver(device: string, message: string | Uint8Array, sockets = this.ctx.getWebSockets(device)): boolean {
     const live = sockets.filter((socket) => this.#isLive(socket))
     for (const socket of live) {
@@ -355,8 +366,8 @@ export class Pool extends DurableObject<Env> {
     return { device, write: new Write(write.done) }
   }
 
-  // GET /v1/connect: accepts a machine's socket and welcomes it with the messages that waited for it. Every refusal
-  // is a socket closed with its code, which a WebSocket client reads where it never sees an HTTP status.
+  // GET /v1/connect: accepts a machine's socket and welcomes it with every `released` it has not said it heard. Every
+  // refusal is a socket closed with its code, which a WebSocket client reads where it never sees an HTTP status.
   override async fetch(request: Request): Promise<Response> {
     const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket]
     const opened = new Response(null, { status: 101, webSocket: client })
@@ -381,14 +392,14 @@ export class Pool extends DurableObject<Env> {
     this.#sql.exec('update devices set name = ?, roots = ?, seen_at = ? where id = ?', name, JSON.stringify(roots), now, row.id)
     this.ctx.acceptWebSocket(server, [row.id])
     server.serializeAttachment({ device: row.id, name, origin: new URL(request.url).origin, connectedAt: now, streams: {} } satisfies Attachment)
-    const waiting = this.#sql.exec<{ id: number; message: string }>('select id, message from waiting where device = ? order by id', row.id).toArray()
-    this.#sql.exec('delete from waiting where device = ?', row.id)
+    const waiting = this.#sql.exec<{ message: string }>('select message from waiting where device = ? order by id', row.id).toArray()
     const welcome: Welcome = { t: 'welcome', ...healthOf(this.env), device: { id: row.id, name }, waiting: waiting.map(({ message }) => JSON.parse(message) as Released) }
     server.send(JSON.stringify(welcome))
     return opened
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    this.#heardAt.set(ws, Date.now())
     if (typeof message === 'string') return this.#control(ws, message)
     const bytes = new Uint8Array(message)
     if (bytes[0] === REQUEST) return await this.#request(ws, bytes)
@@ -464,6 +475,11 @@ export class Pool extends DurableObject<Env> {
       return
     }
     if (t === 'welcome' || t === 'released' || t === 'offline' || t === 'invalid') return invalid(`Only the relay sends ${t}.`)
+    if (t === 'heard') {
+      const { session } = message
+      if (!isText(session) || !isText(to)) return invalid('A heard names the session of the released it answers, and in to the machine that took it.')
+      return this.#heard(own.device, session, to)
+    }
     if (!isText(to)) return invalid(`A ${t} message names the machine it goes to in to.`)
     if (t === 'attach' && !(Number.isInteger(stream) && (stream as number) >= 0 && (stream as number) < 2 ** 32)) return invalid('An attach names its stream, a 32-bit unsigned integer.')
     if (!this.#deliver(to, JSON.stringify({ ...message, from }))) {
@@ -580,7 +596,7 @@ export class Pool extends DurableObject<Env> {
             op.prefix ?? '',
           )
           .toArray()
-        return { status: 200, claims: Object.fromEntries(rows.map(({ session, id, name }) => [session, { id, name: name ?? id } satisfies Claim])) }
+        return { status: 200, claims: Object.fromEntries(rows.map(({ session, id, name }) => [session, { id, name: name ?? id } satisfies DeviceRef])) }
       }
       case 'devices': {
         const rows = this.#sql.exec<DeviceRow>('select * from devices order by name').toArray()
@@ -609,6 +625,9 @@ export class Pool extends DurableObject<Env> {
         // a remove sent again after its answer was lost finds the machine removed already
         if (row.removed_at !== null) return { status: 200 }
         this.#sql.exec('update devices set removed_at = ? where id = ?', Date.now(), op.device)
+        // A take counts a removed machine told, as it connects no more until it joins again, and once joined again its
+        // next frame of a session another machine took is refused with that machine's name.
+        this.#sql.exec('delete from waiting where device = ?', op.device)
         for (const socket of this.ctx.getWebSockets(op.device)) socket.close(CLOSE_REMOVED, REMOVED_REASON)
         return { status: 200 }
       }
@@ -617,29 +636,66 @@ export class Pool extends DurableObject<Env> {
     }
   }
 
-  // Takes a session for a machine. A takeover writes the claim, so the old holder's next frame is refused, and tells
-  // the old holder on its live sockets, else in its next welcome. Every take then waits for the session's frames in
-  // flight before it answers, a take sent again after a lost answer too, which finds the session its own already. So
-  // each answers the machine that has not heard of the take yet from `waiting`, and a repeat answers as the first did.
-  // A removed machine connects no more until it joins again, so it is no machine to warn of.
+  // Takes a session for a machine. A takeover writes the claim, so the old holder's next frame is refused, and keeps
+  // the old holder's `released` in `waiting`, sent to its live sockets now and in each welcome, until it says it heard
+  // it, as a socket the Pool counts live may be a sleeping machine's. A machine that claims a session holds it, so a
+  // `released` of that session waiting for it is over. Every take then waits for the session's frames in flight, a take
+  // sent again after a lost answer too, which finds the session its own already, and up to HEARD_MS for a live old
+  // holder's `heard`, so `told` says the old holder applied the take, and a repeat answers as the first did. A removed
+  // machine connects no more until it joins again, so it is no machine to warn of.
   async #claim(device: DeviceRef, session: string, take: boolean): Promise<Result> {
     const held = this.#holderOf(session)
     if (held !== undefined && held.id !== device.id && !take) return { status: 409, holder: held }
     const at = Date.now()
     this.#sql.exec('insert into claims (session, device, at) values (?, ?, ?) on conflict (session) do update set device = excluded.device, at = excluded.at', session, device.id, at)
+    this.#sql.exec("delete from waiting where device = ? and json_extract(message, '$.session') = ?", device.id, session)
     if (held !== undefined && held.id !== device.id) {
       const released = JSON.stringify({ t: 'released', session, to: device, at: iso(at) } satisfies Released)
-      if (!this.#deliver(held.id, released)) this.#sql.exec('insert into waiting (device, message, at) values (?, ?, ?)', held.id, released, at)
+      this.#sql.exec('insert into waiting (device, message, at) values (?, ?, ?)', held.id, released, at)
+      this.#deliver(held.id, released)
     }
     if (!take) return { status: 200, told: true }
     await Promise.all([...(this.#writes.get(session) ?? [])])
-    const untold = this.#sql
+    let untold = this.#untold(session, device.id)
+    if (untold !== undefined && this.ctx.getWebSockets(untold.id).some((socket) => this.#isLive(socket))) {
+      await this.#heardWithin(untold.id, session, device.id)
+      untold = this.#untold(session, device.id)
+    }
+    return untold === undefined ? { status: 200, told: true } : { status: 200, previous: untold, told: false }
+  }
+
+  // The machine not removed whose `released` of the session `taker` took waits for its `heard`.
+  #untold(session: string, taker: string): DeviceRef | undefined {
+    return this.#sql
       .exec<{ id: string; name: string }>(
         "select waiting.device as id, devices.name from waiting join devices on devices.id = waiting.device where json_extract(message, '$.session') = ? and json_extract(message, '$.to.id') = ? and devices.removed_at is null",
         session,
-        device.id,
+        taker,
       )
       .toArray()[0]
-    return untold === undefined ? { status: 200, told: true } : { status: 200, previous: untold, told: false }
+  }
+
+  // Waits for `holder` to say it heard that `taker` took the session, or for HEARD_MS.
+  #heardWithin(holder: string, session: string, taker: string): Promise<void> {
+    const key = hearingKey(holder, session, taker)
+    const waiters = this.#hearing.get(key) ?? new Set()
+    this.#hearing.set(key, waiters)
+    return new Promise((resolve) => {
+      const done = (): void => {
+        clearTimeout(late)
+        waiters.delete(done)
+        if (waiters.size === 0 && this.#hearing.get(key) === waiters) this.#hearing.delete(key)
+        resolve()
+      }
+      const late = setTimeout(done, HEARD_MS)
+      waiters.add(done)
+    })
+  }
+
+  // A machine applied the `released` that says `taker` took the session: it waits no more, and the takes waiting for it
+  // answer.
+  #heard(holder: string, session: string, taker: string): void {
+    this.#sql.exec("delete from waiting where device = ? and json_extract(message, '$.session') = ? and json_extract(message, '$.to.id') = ?", holder, session, taker)
+    for (const done of [...(this.#hearing.get(hearingKey(holder, session, taker)) ?? [])]) done()
   }
 }

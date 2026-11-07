@@ -23,6 +23,8 @@ export type AnyhostState = {
     joined: JoinedRelay | { readonly problem: string } | null
     // the program's join with the link of the option join, as the install command Add a machine gives sets it
     joining: Joining | null
+    // the program's relay state at the Step's last check
+    relayState: string | null
     machines: Machines | null
     invite: Invite | null
     removing: string | null
@@ -31,11 +33,13 @@ export type AnyhostState = {
 }
 
 export const initialState: AnyhostState = {
-  memory: { connecting: null, isFollowing: false, joined: null, joining: null, machines: null, invite: null, removing: null, problem: null },
+  memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, invite: null, removing: null, problem: null },
 }
 
 // The relay states in which this machine needs the Step: not joined, as before a join or once the program forgot a
-// removed machine's login, or joined to a relay older than the program needs.
+// removed machine's login, or `outdated`, joined to a relay that answers an older protocol than the program needs. A
+// relay whose relay version alone is older welcomes the machine, which captures through it while the program updates it
+// with a cf login, so no Step shows for it, and only anyhost doctor shows an update that failed.
 const NEEDS_STEP = new Set(['unjoined', 'outdated'])
 // The relay welcomes a joined machine within CONNECT_MS, 10 seconds, of the program asking (cli/src/relay.ts).
 const CONNECT_WAIT_MS = 15_000
@@ -111,11 +115,14 @@ async function needsStep(mod: Mod<AnyhostState>): Promise<boolean> {
       await pause(mod, 250)
       continue
     }
-    const needs = NEEDS_STEP.has(relay.state)
-    // a run or a pasted link that joined this machine before it was removed is over, and the Step starts afresh
-    mod.state.memory.connecting = needs && connecting?.is === 'joined' ? null : (connecting ?? null)
-    if (needs && mod.state.memory.joined !== null && 'url' in mod.state.memory.joined) mod.state.memory.joined = null
-    return needs
+    mod.state.memory.relayState = relay.state
+    // A run or a pasted link that joined this machine before it was removed is over, and the Step starts afresh. An
+    // outdated relay keeps them: a run that uploaded a new protocol joins through the Worker, while Cloudflare runs the
+    // busy Pool's older code, which welcomes this machine as outdated, for up to 5 minutes.
+    const isRemoved = relay.state === 'unjoined'
+    mod.state.memory.connecting = isRemoved && connecting?.is === 'joined' ? null : (connecting ?? null)
+    if (isRemoved && mod.state.memory.joined !== null && 'url' in mod.state.memory.joined) mod.state.memory.joined = null
+    return NEEDS_STEP.has(relay.state)
   }
 }
 
@@ -141,6 +148,9 @@ function ConnectView({ mod }: { readonly mod: Mod<AnyhostState> }): RenderElemen
           </Box>
         )}
         {connecting === null ? null : <ConnectingView mod={mod} connecting={connecting} />}
+        {connecting?.is === 'joined' && mod.state.memory.relayState === 'outdated' ? (
+          <Text wrap="wrap">Cloudflare still runs your relay's older version, for up to 5 minutes after the upload. Press Finish once it runs the new one.</Text>
+        ) : null}
       </Box>
       <Box flexDirection="column">
         <Text bold>On every other machine</Text>

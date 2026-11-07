@@ -236,6 +236,21 @@ test('a machine removed after Connect Cloudflare joined it gets the Step afresh,
   expect(drawn).not.toContain('Joined this machine')
 })
 
+// The suite missed it: a run that uploaded a new protocol joined through the Worker while the busy Pool's older code
+// welcomed the machine as outdated, and the Step threw the joined run away, showing a bare Connect Cloudflare.
+test('a Step whose Connect Cloudflare joined keeps the run while the relay still reads outdated, and says what Finish waits for', async () => {
+  const joined = { is: 'joined', lines: ['Uploading the relay as the Worker anyhost', 'Joined this machine to https://anyhost.parker-labs.workers.dev'] }
+  const outdated = 'The relay at https://anyhost.parker-labs.workers.dev answers protocol 1, and anyhost 0.3.0 needs 2. Connect Cloudflare again to update the relay.'
+  const { tested, mod } = withProgram({ 'GET /status': [{ body: { relay: { state: 'outdated', message: outdated }, connecting: joined } }] })
+  expect(await connectStep.isDone(await mod())).toBe(false)
+  await tested.type('/step')
+  const drawn = (await tested.shown.page.lines({ columns: 400 })).join('\n')
+  expect(drawn).toContain('Joined this machine to https://anyhost.parker-labs.workers.dev')
+  expect(drawn).toContain('✔ This machine is joined to your relay.')
+  expect(drawn).toContain("Cloudflare still runs your relay's older version, for up to 5 minutes after the upload. Press Finish once it runs the new one.")
+  expect(drawn).not.toContain('[Connect Cloudflare]')
+})
+
 test('the Step shows the R2 page while R2 is off, and Next tells the program it is on', async () => {
   const off = { is: 'running', lines: ['R2 is off in Parker Labs. Turn it on at https://dash.cloudflare.com/?to=/:account/r2/overview, then go on.'], r2Page: 'https://dash.cloudflare.com/?to=/:account/r2/overview' }
   const { tested, asked } = withProgram({ 'POST /connect': [{ body: off }], 'POST /connect/r2': [{ body: { is: 'running', lines: off.lines } }] })
@@ -383,6 +398,21 @@ test('a move the program forgot, as it restarted, says so and stops following it
   await tested.settle()
 
   expect(moveToasts(tested)).toEqual([{ type: 'error', message: 'anyhost lost track of the move, as its program restarted', description: 'anyhost list shows which machine holds the session now.' }])
+})
+
+// The suite missed it: every move a test followed was one the session's own /move asked for, while anyhost move asks the
+// program from a terminal, and only the toast /move started offered Keep it here.
+test('a move anyhost move asked for, which a prompt finds running, gets the toast that follows it and offers Keep it here', async () => {
+  const waiting = 'anyhost-a took test-ses and does not answer. Keep it here takes the session back.'
+  const { tested, every } = withProgram({ 'GET /claims/test-session': [moveIs('moving', waiting, 'anyhost-a')] })
+  await tested.start()
+
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
+  await every.get(1000)?.()
+  await tested.settle()
+
+  // the loading toast of a move carries its Keep it here
+  expect(moveToasts(tested)).toEqual([{ type: 'loading', message: 'Moving to anyhost-a…', description: waiting }])
 })
 
 test('/move names the machine to move to, and shows why the program refused the move', async () => {

@@ -1,5 +1,6 @@
 import plugin from '../../.claude-plugin/plugin.json'
 import { PROTOCOL_VERSION, type Health } from '../../relay/protocol.ts'
+import { jsonOf } from './connect.ts'
 import { cmodDevice, relayLogin } from './device.ts'
 import { DAILY_LIMIT, isDailyLimit } from './relay.ts'
 import { serveSocket, type Status } from './serve.ts'
@@ -9,6 +10,9 @@ type Check = { readonly ok: string } | { readonly wait: string } | { readonly pr
 const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod makes the anyhost program a service of the machine, which records its sessions from each login on.'
 const JOIN = 'Connect your machines in the anyhost mod: Connect Cloudflare on your first machine, and on every other machine paste the command Add a machine gives in /machines on a joined one.'
 const UPDATE = 'The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.'
+// The mod's Step shows Connect Cloudflare only while the relay is `unjoined` or `outdated`, so the failed update of a
+// relay the program still captures through, an older relay version at this protocol, is fixed from the terminal.
+const UPDATE_FROM_TERMINAL = 'The program tries the update once a run. Run anyhost connect, which updates the relay with your Cloudflare login.'
 // cmod runs the program as the service com.claudemodmanager.anyhost.anyhost: a launchd agent on macOS and a systemd user
 // service on Linux, which a logout leaves running for a user systemd lingers for. A Linux machine with no systemd user
 // session runs the program from Claude Code instead.
@@ -36,11 +40,7 @@ async function relayChecks(): Promise<Check[]> {
   const health = ((): Health | Error => {
     if (answer instanceof Error) return answer
     if (answer.status !== 200) return new Error(`it answered ${answer.status}`)
-    try {
-      return JSON.parse(answer.text) as Health
-    } catch {
-      return new Error(`it answered 200 with no health: ${answer.text.trim().slice(0, 200)}`)
-    }
+    return jsonOf<Health>(answer.text) ?? new Error(`it answered 200 with no health: ${answer.text.trim().slice(0, 200)}`)
   })()
   if (health instanceof Error) return [joined, { problem: `The relay at ${login.url} did not answer: ${health.message}`, fix: 'Check this machine reaches the internet. The program keeps every change meanwhile and uploads it once the relay answers.' }]
   if (health.protocol < PROTOCOL_VERSION) {
@@ -102,7 +102,8 @@ function programChecks(address: string, status: Status | undefined): Check[] {
               fix: 'The program does not try that link again. Press Add a machine in /machines on a joined machine, then paste its command into the Connect your machines step of the anyhost mod, or run anyhost join with its link here.',
             },
           ]
-  const update: Check[] = updateProblem === undefined || isOutdatedUpdate ? [] : [{ problem: updateProblem, fix: UPDATE }]
+  // the mod shows its Connect your machines step only for an unjoined or outdated relay, so a connected one has no button
+  const update: Check[] = updateProblem === undefined || isOutdatedUpdate ? [] : [{ problem: updateProblem, fix: state === 'unjoined' ? UPDATE : UPDATE_FROM_TERMINAL }]
   // the listener starts once a run, and viewers on other machines go through the relay without it
   const direct: Check[] =
     status.directProblem === undefined ? [] : [{ problem: `${status.directProblem} Viewers on other machines reach this machine through the relay meanwhile.`, fix: RESTART }]
@@ -113,7 +114,7 @@ function programChecks(address: string, status: Status | undefined): Check[] {
 export async function doctor(): Promise<number> {
   const address = serveSocket()
   const status = await fetch('http://localhost/status', { unix: address, signal: AbortSignal.timeout(3000) })
-    .then(async (response) => (await response.json()) as Status)
+    .then(async (response) => jsonOf<Status>(await response.text()))
     .catch(() => undefined)
   const checks = [...(status === undefined ? await relayChecks() : []), await deviceCheck(), ...programChecks(address, status)]
   for (const check of checks) console.log('ok' in check ? `✔ ${check.ok}` : 'wait' in check ? `… ${check.wait}` : `✘ ${check.problem}\n  ${check.fix}`)

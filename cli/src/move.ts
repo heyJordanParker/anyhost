@@ -8,12 +8,12 @@
 import { mkdir, readFile, readlink, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import type { Delivered, Device, Offline, Released, Routed } from '../../relay/protocol.ts'
+import type { Delivered, Device, Offline, Routed } from '../../relay/protocol.ts'
 import { attachTerminal, backgroundJobOf, isAlive, keptSessions, recordedSessions, run, startInBackground, stopInBackground, whenSessions, type OnRecordsChange, type RunningSession } from './background.ts'
 import { captureAgainFrom, chainOf, changedFiles, checkoutOf, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
-import { HeldElsewhere, takeClaim } from './claims.ts'
+import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { devicesOf, otherMachine } from './device.ts'
-import { waitAfter, type Relay } from './relay.ts'
+import type { Relay } from './relay.ts'
 import { cloneMissing, localFolder, restore } from './resume.ts'
 import type { Tool } from './transcript.ts'
 
@@ -25,7 +25,7 @@ const RUNNING_MS = 60_000
 // Claude Code shuts down on SIGTERM once it wrote what it holds: on anyhost-b in 2.4 s once it had settled, and in
 // 9.5 s while it still started.
 const EXIT_MS = 60_000
-// How often a move or a start asks the relay whether the machine it waits for still runs the program it sent to.
+// How often a move or a start reads from the relay whether the machine it waits for is connected, and a move goes again.
 const CONNECTED_MS = 10_000
 // Claude Code locks its global config as proper-lockfile does: it makes the folder `<config>.lock`, which counts as
 // left behind 10 s after it last changed, and waits these times between tries, in 2.1.319.
@@ -52,9 +52,8 @@ export type MoveHere = {
 // What a machine that receives a session or starts one needs of its program.
 type ReceiveHere = { readonly environment: Promise<Record<string, string>>; readonly checkouts: string; readonly onRecordsChange: OnRecordsChange }
 
-type MovedAnswer = Extract<Routed, { readonly t: 'moved' }>
-type StartedAnswer = Extract<Routed, { readonly t: 'started' }>
-type Answer = Extract<Delivered, { readonly t: 'moved' | 'started' }> | Offline
+// what a machine answers a `move` or a `start` it received with
+type Reply = Extract<Routed, { readonly t: 'moved' | 'started' }>
 // The answer each message a machine asks with waits for: `moved` to a `move`, and `started` to a `start`.
 const ANSWER = { move: 'moved', start: 'started' } as const
 type Asked = Extract<Routed, { readonly t: keyof typeof ANSWER }>
@@ -66,109 +65,51 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 const reasonOf = (error: unknown): string => messageOf(error).replace(/\.+$/, '')
 const stamp = (): string => new Date().toISOString()
 
-// What waits for the answer to each message a relay sent, by the message's id: the other machine's `moved` to a `move`
-// and `started` to a `start`, or the Pool's `offline` for a machine with no socket open. Each relay hears them with one
-// listener of each kind, and each answer goes to what waits for it once, until the function `hear` answers is called.
-const waiting = new WeakMap<Relay, Map<string, (answer: Answer) => void>>()
-function hear(relay: Relay, id: string, heard: (answer: Answer) => void): () => void {
-  const known = waiting.get(relay) ?? new Map<string, (answer: Answer) => void>()
-  if (!waiting.has(relay)) {
-    const answered = (answer: Answer): void => {
-      if (answer.id === undefined) return
-      known.get(answer.id)?.(answer)
-      known.delete(answer.id)
-    }
-    relay.on('moved', answered)
-    relay.on('started', answered)
-    relay.on('offline', answered)
-    waiting.set(relay, known)
-  }
-  known.set(id, heard)
-  return () => void known.delete(id)
-}
-
-// The `move` and `start` each relay's asks wait on answers to, by id, which go again at each welcome of that relay's
-// socket, until the function `askAgain` answers is called. The Pool counts a socket alive until LIVE_MS after its last
-// ping, so an answer it sent to a socket that died just before counts as delivered though the asker never heard it, and
-// only the same message asked again brings it: the other machine answers a repeated id again (`answerOnce`).
-const asking = new WeakMap<Relay, Map<string, Asked>>()
-function askAgain(relay: Relay, message: Asked): () => void {
-  const known = asking.get(relay) ?? new Map<string, Asked>()
-  if (!asking.has(relay)) {
-    relay.on('welcome', () => {
-      for (const each of known.values()) relay.send(each)
-    })
-    asking.set(relay, known)
-  }
-  known.set(message.id, message)
-  return () => void known.delete(message.id)
-}
-
-// Sends a `move` or `start` to the machine it names, and answers that machine's answer to it, or `offline` once the
-// Pool answers that, or once the relay's `devices`, read as the message goes and every CONNECTED_MS after, lists the
-// machine not connected, removed, or seen since the message went. The Pool writes a machine's `seenAt` at each connect
-// and close of its sockets, so a program that restarted between two reads, whose wait for the message ended with it,
-// reads as gone, as does a command of that machine that opened or closed a socket of its own meanwhile. The message goes
-// again at each welcome of this machine's socket while it waits (`askAgain`). A signal that aborts first, as Keep it
-// here, rejects with its reason, and so does a read of `devices` that fails.
-async function ask<A extends Asked>(relay: Relay, message: A, signal?: AbortSignal): Promise<AnswerTo<A>> {
+// Sends a `move` or `start` to the machine it names, and answers that machine's answer to it, or `offline`. The relay's
+// `devices`, read as the message goes and every CONNECTED_MS after, counts the machine gone once it lists it not
+// connected or removed: the Pool counts a machine connected only while a socket of it pinged within LIVE_MS, so one
+// asleep or dead reads as gone. The message goes again with its id at each check that finds the machine there,
+// whatever happened to either socket meanwhile, as an answer dies with a socket the Pool still counted alive, and that
+// machine answers a repeated id without running it twice (`answerOnce`, `takeSession`). A start's ask also counts the
+// machine gone once its `seenAt` moved, which the Pool writes at each connect and close of its sockets, as a restart
+// between two reads ended the start's run there, and a repeat to the restarted program would start a second session,
+// so a `start` goes again only to the program it went to. A gone machine, or the Pool's `offline` for one with no
+// socket open, answers `offline` unless `keepsWaiting` answers true, as a move's does while that machine holds the
+// session. A signal that aborts first, as Keep it here, rejects with its reason, and so does a read of `devices` or a
+// `keepsWaiting` that fails.
+async function ask<A extends Asked>(relay: Relay, message: A, { signal, keepsWaiting = async () => false }: { readonly signal?: AbortSignal; readonly keepsWaiting?: () => Promise<boolean> } = {}): Promise<AnswerTo<A>> {
   const offline: Offline = { t: 'offline', id: message.id, to: message.to }
   signal?.throwIfAborted()
   const listed = (await devicesOf(relay)).get(message.to)
-  // the machine as the relay lists it now, no longer the one the message went to
-  const isGone = (now: Device | undefined): boolean => now === undefined || now.removedAt !== undefined || !now.connected || now.seenAt !== listed?.seenAt
+  // the machine as the relay lists it now: gone, or for a start no longer the program the start went to
+  const isGone = (now: Device | undefined): boolean => now === undefined || now.removedAt !== undefined || !now.connected || (message.t === 'start' && now.seenAt !== listed?.seenAt)
   if (isGone(listed)) return offline
   signal?.throwIfAborted()
   const answered = new AbortController()
   const until = signal === undefined ? answered.signal : AbortSignal.any([signal, answered.signal])
-  const forgetAsk = askAgain(relay, message)
+  const stops: (() => void)[] = []
   try {
     return await new Promise<AnswerTo<A>>((resolve, reject) => {
-      // an answer to this message's id is of the kind it waits for, unless another machine answered it wrongly
-      const forget = hear(relay, message.id, (answer) => (answer.t === 'offline' || answer.t === ANSWER[message.t] ? resolve(answer as AnswerTo<A>) : undefined))
-      until.addEventListener(
-        'abort',
-        () => {
-          forget()
-          reject(until.reason)
-        },
-        { once: true },
+      // the ask ends at an `offline`, unless it keeps waiting
+      const atOffline = async (): Promise<void> => {
+        if (!until.aborted && !(await keepsWaiting())) resolve(offline)
+      }
+      stops.push(
+        relay.on(ANSWER[message.t], (answer) => (answer.id === message.id ? resolve(answer as AnswerTo<A>) : undefined)),
+        relay.on('offline', (answer) => (answer.id === message.id ? void atOffline().catch(reject) : undefined)),
       )
+      until.addEventListener('abort', () => reject(until.reason), { once: true })
       if (!relay.send(message)) return reject(new Error(`This machine is not connected to the relay at ${relay.url}, so anyhost sent nothing.`))
       void (async () => {
         while (await sleep(CONNECTED_MS, true, { signal: until }).catch(() => false)) {
-          if (isGone((await devicesOf(relay)).get(message.to))) return resolve(offline)
+          if (isGone((await devicesOf(relay)).get(message.to))) await atOffline()
+          else if (!until.aborted) relay.send(message)
         }
       })().catch(reject)
     })
   } finally {
-    forgetAsk()
+    for (const stop of stops) stop()
     answered.abort()
-  }
-}
-
-// Sends this machine's answer to another machine's `move` or `start` until the Pool delivers it, as that machine waits
-// for it: an answer that finds this machine's socket down goes at the next welcome, and one the Pool answers `offline`,
-// as while the asking machine's socket is down, goes again after `waitAfter` its tries, until the relay lists that
-// machine removed. The Pool answers `offline` before it answers a request this machine sent after the message, so a
-// `devices` answered on the same socket with no `offline` heard says the Pool delivered it. A socket that dropped
-// meanwhile may have lost the `offline`, so the answer goes again, and the asking machine takes it once.
-async function deliver(relay: Relay, message: MovedAnswer | StartedAnswer, asker: string): Promise<void> {
-  let wasOffline = false
-  for (let tries = 1; ; tries += 1) {
-    const sentOn = relay.state
-    let isOffline = false
-    const forget = hear(relay, message.id, () => void (isOffline = true))
-    const isSent = relay.send(message)
-    const devices = await devicesOf(relay).catch(() => undefined)
-    forget()
-    const to = devices?.get(message.to)
-    if (devices !== undefined && (to === undefined || to.removedAt !== undefined)) return console.error(`${stamp()} The relay lists ${asker} removed, so anyhost sends it no answer to its ${message.t === 'moved' ? 'move' : 'start'}.`)
-    if (isSent && devices !== undefined && !isOffline && relay.state === sentOn) return
-    if (isOffline && !wasOffline) console.error(`${stamp()} The relay could not reach ${asker}, so anyhost sends its answer again until it does.`)
-    wasOffline ||= isOffline
-    // an answer this machine could not send waited in `devicesOf` for the next welcome
-    if (isSent || devices === undefined) await Bun.sleep(waitAfter(tries))
   }
 }
 
@@ -365,6 +306,13 @@ async function continueHere(capture: Capture, session: string, tool: Tool, here:
   for (const path of captureAgainFrom(capture, session, tool, at, end, here.problems)) here.queue(session, tool, path)
 }
 
+// The background job `job` of a session that runs on the machine `to` now stops here: its viewers hear where the session
+// went and attach to it there, and then `claude stop` ends it.
+async function stopMovedAway(here: MoveHere, session: string, to: string, job: string): Promise<void> {
+  here.movedAway(session, to)
+  await stopInBackground(job, await here.environment)
+}
+
 // Starts moving the session, named by its id or the start of it, to the machine named `machine`, once it checked
 // both, and answers the move, which goes on while its step and line change.
 export async function move(capture: Capture, asked: string, machine: string, here: MoveHere): Promise<Moving> {
@@ -427,10 +375,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
   // person can type into its terminal.
   const stopHere = async (env: Record<string, string>): Promise<void> => {
     const copy = await recorded()
-    if (copy?.kind === 'background' && copy.id !== undefined) {
-      here.movedAway(session, machine)
-      return await stopInBackground(copy.id, env)
-    }
+    if (copy?.kind === 'background' && copy.id !== undefined) return await stopMovedAway(here, session, machine, copy.id)
     const pane = copy === undefined ? undefined : await paneOf(session, env)
     // read again as the signal goes, so it reaches only a process that runs the session
     const pid = pane === undefined ? undefined : (await recorded())?.pid
@@ -438,6 +383,15 @@ export async function move(capture: Capture, asked: string, machine: string, her
     process.kill(pid, 'SIGTERM')
     await exited(pid)
     await run([pane.herdr, 'pane', 'run', pane.pane, `anyhost attach ${id}`], { env })
+  }
+  // An `offline` ends the move only while the other machine does not hold the session. Once it does, it may run the
+  // session already, as asleep, restarting, or with its answer lost, so the move waits for its answer, and Keep it here
+  // takes the session back.
+  const keepsWaiting = async (): Promise<boolean> => {
+    if ((await claimsOf(relay, session)).get(session)?.id !== target.id) return false
+    const line = `${machine} took ${id} and does not answer. Keep it here takes the session back.`
+    if (!keeping.signal.aborted && moving.line !== line) say('moving', line)
+    return true
   }
   void (async () => {
     const { signal } = keeping
@@ -454,7 +408,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
     signal.throwIfAborted()
     const started = Date.now()
     isAsked = true
-    const answer = await ask(relay, { t: 'move', id: crypto.randomUUID(), to: target.id, session, trusted }, signal)
+    const answer = await ask(relay, { t: 'move', id: crypto.randomUUID(), to: target.id, session, trusted }, { signal, keepsWaiting })
     keeping.abort()
     if (answer.t === 'offline') return await fail(`${machine} is offline, so the session keeps running here.`)
     if ('error' in answer) return await fail(`${machine} could not take the session: ${reasonOf(answer.error)}. It keeps running here.`)
@@ -474,23 +428,27 @@ export async function move(capture: Capture, asked: string, machine: string, her
 }
 
 // The answer this program gave each `move` and `start` it received, by the message's id, for as long as it runs, or
-// undefined while it works on one. An asker sends its message again after each welcome of its own socket (`askAgain`),
-// as it may have missed the answer: a repeated id gets the same answer again, and one still in progress gets nothing
-// more, as its first run answers it once it ends.
-const answers = new WeakMap<Relay, Map<string, MovedAnswer | StartedAnswer | undefined>>()
-async function answerOnce(relay: Relay, asked: { readonly id: string; readonly from: { readonly name: string } }, work: () => Promise<MovedAnswer | StartedAnswer>): Promise<void> {
-  const known = answers.get(relay) ?? new Map<string, MovedAnswer | StartedAnswer | undefined>()
+// undefined while it works on one. An asker sends its message again at each check of its wait (`ask`), as it may have
+// missed the answer: a repeated id gets the same answer again, and one still in progress gets nothing more, as its
+// first run answers it once it ends. Each answer goes once, and one the relay did not carry, as while either machine's
+// socket was down, reaches the asker at its next repeat.
+const answers = new WeakMap<Relay, Map<string, Reply | undefined>>()
+async function answerOnce(relay: Relay, asked: { readonly id: string; readonly from: { readonly name: string } }, work: () => Promise<Reply>): Promise<void> {
+  const known = answers.get(relay) ?? new Map<string, Reply | undefined>()
   answers.set(relay, known)
+  const answer = (reply: Reply): void => {
+    if (!relay.send(reply)) console.error(`${stamp()} anyhost sent ${asked.from.name} no answer, as this machine is not connected to the relay.`)
+  }
   if (known.has(asked.id)) {
     const before = known.get(asked.id)
     if (before === undefined) return
     console.error(`${stamp()} ${asked.from.name} asked again for its answer, as it may have missed it, so anyhost sends it again.`)
-    return await deliver(relay, before, asked.from.name)
+    return answer(before)
   }
   known.set(asked.id, undefined)
   const reply = await work()
   known.set(asked.id, reply)
-  await deliver(relay, reply, asked.from.name)
+  answer(reply)
 }
 
 // The machine side of `move`, once for each move's id (`answerOnce`).
@@ -498,20 +456,25 @@ export const receiveMove = (capture: Capture, asked: Extract<Delivered, { readon
   answerOnce(capture.relay, asked, () => takeSession(capture, asked, here))
 
 // Takes the claim and restores the session as `anyhost resume --take` does, runs it in Claude Code's background, and
-// answers whether it runs here. A move that fails here once it started the session's job, as when the asking machine
-// took the session back meanwhile, stops the job at once. A take of the session after the answer stops it in
-// `receiveReleased`.
-async function takeSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'move' }>, here: ReceiveHere): Promise<MovedAnswer> {
+// answers whether it runs here. A move this program has no answer for whose session this machine holds and Claude
+// Code runs in its background here moved already, as one this program's run before a restart took: it answers `moved`
+// with no stop and no restore, which would cut the job's turn off and lose what it had not uploaded. A move that fails
+// here once it started the session's job, as when the asking machine took the session back meanwhile, stops the job at
+// once. A take of the session after the answer stops it in `receiveReleased`.
+async function takeSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'move' }>, here: ReceiveHere): Promise<Reply> {
   const { device, roots } = capture
-  let reply: MovedAnswer
   // the stop of the job this move started here
   let stopJob: (() => Promise<void>) | undefined
   try {
+    const copy = (await recordedSessions(roots.claudeHome)).find((entry) => entry.sessionId === asked.session)
+    if (copy?.kind === 'background' && (await claimsOf(capture.relay, asked.session)).get(asked.session)?.id === device.id) {
+      console.error(`${stamp()} ${asked.from.name} asked again for its move of ${asked.session}, which ${device.name} holds and runs in Claude Code's background, so anyhost answers that it moved.`)
+      return { t: 'moved', id: asked.id, to: asked.from.id }
+    }
     console.error(`${stamp()} ${asked.from.name} moves ${asked.session} here.`)
     const env = await here.environment
     // A copy that runs here still holds the conversation as it was, so it stops before the restore, and Claude Code
     // keeps its job. Only the person ends one in a terminal of its own.
-    const copy = (await recordedSessions(roots.claudeHome)).find((entry) => entry.sessionId === asked.session)
     if (copy?.kind === 'interactive') throw new Error(`${device.name} runs the session in a terminal of its own, so close that terminal or exit that Claude Code there, then move the session again`)
     if (copy?.id !== undefined) await stopInBackground(copy.id, env)
     const { session, cwd } = await restore(capture, asked.session, { take: true, checkouts: here.checkouts })
@@ -530,13 +493,12 @@ async function takeSession(capture: Capture, asked: Extract<Delivered, { readonl
       throw error instanceof HeldElsewhere ? new Error(`${error.holder.name} took the session back`) : error
     })
     console.error(`${stamp()} ${device.name} runs ${session.id} in Claude Code's background in ${cwd}.`)
-    reply = { t: 'moved', id: asked.id, to: asked.from.id }
+    return { t: 'moved', id: asked.id, to: asked.from.id }
   } catch (error) {
     console.error(`${stamp()} ${device.name} could not take ${asked.session} from ${asked.from.name}: ${messageOf(error)}`)
     await stopJob?.().catch((failure: unknown) => console.error(`${stamp()} ${device.name} could not stop the background job it started for ${asked.session}: ${messageOf(failure)}`))
-    reply = { t: 'moved', id: asked.id, to: asked.from.id, error: messageOf(error) }
+    return { t: 'moved', id: asked.id, to: asked.from.id, error: messageOf(error) }
   }
-  return reply
 }
 
 // Starts a new session on the machine named `machine`, in its checkout of the repository the folder `cwd` is in, else
@@ -548,7 +510,8 @@ export async function startNew(capture: Capture, machine: string, cwd: string): 
   const branch = repo === '' ? '' : (await run(['git', '-C', cwd, 'branch', '--show-current'])).trim()
   const trusted = await trusts(capture, cwd)
   const answer = await ask(capture.relay, { t: 'start', id: crypto.randomUUID(), to: target.id, repo, branch, folder: repo === '' ? cwd : inside, trusted })
-  if (answer.t === 'offline') throw new Error(`${machine} is offline, so anyhost started no session there.`)
+  // it may have started the session before it went
+  if (answer.t === 'offline') throw new Error(`${machine} is offline or its program restarted before it answered. anyhost list shows whether a session started there.`)
   if ('error' in answer) throw new Error(`${machine} could not start a session: ${reasonOf(answer.error)}.`)
   return answer.session
 }
@@ -559,9 +522,8 @@ export const receiveStart = (capture: Capture, asked: Extract<Delivered, { reado
 
 // Finds or clones the checkout as a restore does, starts a new session in Claude Code's background there, claims it,
 // and answers it once Claude Code lists it running. A start that fails once its job started stops the job at once.
-async function startSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'start' }>, here: ReceiveHere): Promise<StartedAnswer> {
+async function startSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'start' }>, here: ReceiveHere): Promise<Reply> {
   const { relay, roots, device } = capture
-  let reply: StartedAnswer
   // the stop of the job this start started here
   let stopJob: (() => Promise<void>) | undefined
   try {
@@ -580,22 +542,21 @@ async function startSession(capture: Capture, asked: Extract<Delivered, { readon
     const { sessionId } = running
     await takeClaim(relay, sessionId, { take: false })
     console.error(`${stamp()} ${device.name} started ${sessionId} in ${cwd} for ${asked.from.name}.`)
-    reply = { t: 'started', id: asked.id, to: asked.from.id, session: sessionId }
+    return { t: 'started', id: asked.id, to: asked.from.id, session: sessionId }
   } catch (error) {
     console.error(`${stamp()} ${device.name} could not start a session for ${asked.from.name}: ${messageOf(error)}`)
     await stopJob?.().catch((failure: unknown) => console.error(`${stamp()} ${device.name} could not stop the background job it started for ${asked.from.name}: ${messageOf(failure)}`))
-    reply = { t: 'started', id: asked.id, to: asked.from.id, error: messageOf(error) }
+    return { t: 'started', id: asked.id, to: asked.from.id, error: messageOf(error) }
   }
-  return reply
 }
 
-// This machine's side of another machine's take of a session, as the relay's `released` or a welcome's `waiting` says
-// it: Claude Code's background job of the session here stops, so no copy runs here that refuses every prompt, as after
-// a move that failed took the session back from this machine, by whichever program started the job. A job in a turn
-// stops once its record says `idle`, so no turn is cut off, as the relay refuses that turn's frames anyway. Its viewers
-// hear where the session went. A move of the session from here leaves its copy alone, as the move stops it itself once
-// the session runs there, and a session this machine holds again by then keeps its job.
-export async function receiveReleased(capture: Capture, { session, to }: Released, here: MoveHere): Promise<void> {
+// This machine's side of the machine named `holder` taking the session, as the relay's `released` or this machine's
+// record of the holder says it: Claude Code's background job of the session here stops, so no copy runs here that
+// refuses every prompt, as after a move that failed took the session back from this machine, by whichever program
+// started the job. A job in a turn stops once its record says `idle`, so no turn is cut off, as the relay refuses that
+// turn's frames anyway. Its viewers hear where the session went. A move of the session from here leaves its copy alone,
+// as the move stops it itself once the session runs there, and a session this machine holds again by then keeps its job.
+export async function receiveReleased(capture: Capture, session: string, holder: string, here: MoveHere): Promise<void> {
   const moving = here.moves.get(session)
   if (moving !== undefined && moving.step !== 'moved' && moving.step !== 'failed') return
   const { db, device, roots } = capture
@@ -610,9 +571,8 @@ export async function receiveReleased(capture: Capture, { session, to }: Release
     here.onRecordsChange,
   )
   if (job?.id === undefined || (journalOf(db, session)?.holder ?? '') === '') return
-  here.movedAway(session, to.name)
-  await stopInBackground(job.id, await here.environment).then(
-    () => console.error(`${stamp()} ${to.name} took ${session} over, so ${device.name} stopped its background job ${job.id}.`),
-    (error: unknown) => console.error(`${stamp()} ${to.name} took ${session} over, and ${device.name} could not stop its background job ${job.id}: ${messageOf(error)}`),
+  await stopMovedAway(here, session, holder, job.id).then(
+    () => console.error(`${stamp()} ${holder} took ${session} over, so ${device.name} stopped its background job ${job.id}.`),
+    (error: unknown) => console.error(`${stamp()} ${holder} took ${session} over, and ${device.name} could not stop its background job ${job.id}: ${messageOf(error)}`),
   )
 }

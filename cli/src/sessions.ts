@@ -42,7 +42,7 @@ export async function listSessions(
   read?: {
     readonly devices: ReadonlyMap<string, Protocol.Device>
     readonly indexes: ReadonlyMap<string, readonly IndexedSession[]>
-    readonly claims: ReadonlyMap<string, Protocol.Claim>
+    readonly claims: ReadonlyMap<string, Protocol.DeviceRef>
   },
 ): Promise<ListedSession[]> {
   const known = read?.devices ?? (await devicesOf(relay))

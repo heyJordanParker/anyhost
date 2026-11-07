@@ -64,14 +64,32 @@ const machineTable = (machines: readonly Protocol.Device[], here: string): strin
 // how often anyhost move and anyhost connect read the program's step, as the mod's /move and Step do
 const FOLLOW_MS = 1000
 
+// One answer of this machine's program at its unix socket, as the mod's askProgram asks it: a GET, or a POST of `body`
+// as JSON. It answers undefined when no program answers there, and throws the program's own message when it refuses.
+async function askProgram<T>(path: string, body?: object): Promise<T | undefined> {
+  const unix = serveSocket()
+  const answer = await fetch(`http://localhost${path}`, { unix, ...(body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) }).catch(() => undefined)
+  if (answer === undefined) return undefined
+  const read = (await answer.json()) as T & { readonly message?: string }
+  if (!answer.ok) throw new Error(read.message ?? `The anyhost program at ${unix} answered ${path} with ${answer.status}.`)
+  return read
+}
+
+const noProgram = (): Error => new Error(`The anyhost program does not answer at ${serveSocket()}. Start Claude Code on this machine, and the anyhost mod starts it.`)
+
 // Asks this machine's program to move the session, as /move in the session does, since only the program holds the
-// session's upload queue, and prints each step of the move until it ends.
+// session's upload queue, and prints each step of the move until it ends, however long the move waits. Ctrl-C ends
+// only the command, as the move runs in the program.
 async function moveThroughProgram(session: string, machine: string): Promise<number> {
   const unix = serveSocket()
   const asked = await fetch('http://localhost/move', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, machine }) }).catch(() => undefined)
   if (asked === undefined) throw new Error(`The anyhost program does not answer at ${unix}. Start Claude Code on this machine, and the anyhost mod starts it.`)
   const started = (await asked.json()) as { readonly session: string; readonly message?: string }
   if (!asked.ok) throw new Error(started.message ?? `The anyhost program at ${unix} answered the move with ${asked.status}.`)
+  process.once('SIGINT', () => {
+    console.log(`The move of ${started.session.slice(0, 8)} to ${machine} goes on. Keep it here in the session takes the session back.`)
+    process.exit(130)
+  })
   let said = ''
   for (;;) {
     // the program's /claims/<session> answer carries the move it runs, as serve.ts serves it
@@ -89,39 +107,22 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
 // while the session starts. The program waits for its relay, and so does the command, saying so first when the relay
 // is not connected, until Ctrl-C ends it. Answers the session.
 async function startThroughProgram(machine: string, folder: string): Promise<string> {
-  const unix = serveSocket()
-  const status = await fetch('http://localhost/status', { unix }).then(
-    async (answer) => (await answer.json()) as Status,
-    () => undefined,
-  )
-  if (status === undefined) throw new Error(`The anyhost program does not answer at ${unix}. Start Claude Code on this machine, and the anyhost mod starts it.`)
+  const status = await askProgram<Status>('/status')
+  if (status === undefined) throw noProgram()
   const { relay } = status
   if (relay.state !== 'connected') console.log(`Waiting for the relay at ${relay.url} to connect.${relay.message === '' ? '' : ` ${relay.message}`} Ctrl-C stops waiting.`)
   // the program works in a folder of its own
-  const body = JSON.stringify({ machine, folder: resolve(folder) })
-  const asked = await fetch('http://localhost/new', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body }).catch((error: unknown) => error)
-  if (!(asked instanceof Response)) throw new Error(`The anyhost program at ${unix} stopped answering before ${machine} started a session (${asked instanceof Error ? asked.message : String(asked)}). anyhost list shows whether it did.`)
-  const started = (await asked.json()) as { readonly session?: string; readonly message?: string }
-  if (!asked.ok || started.session === undefined) throw new Error(started.message ?? `The anyhost program at ${unix} answered the start with ${asked.status}.`)
+  const started = await askProgram<{ readonly session: string }>('/new', { machine, folder: resolve(folder) })
+  if (started === undefined) throw new Error(`The anyhost program at ${serveSocket()} stopped answering before ${machine} started a session. anyhost list shows whether it did.`)
   return started.session
 }
 
 // Asks this machine's program to join, as the Step does, since the program saves the login in turn with its forget of
 // a login the relay refused. With no program answering, no forget runs, and the join runs here.
 async function joinThroughProgram(link: string): Promise<string> {
-  const unix = serveSocket()
-  const asked = await fetch('http://localhost/join', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ link }) }).catch(() => undefined)
-  if (asked === undefined) return await join(link, await cmodDevice())
-  const joined = (await asked.json()) as Partial<JoinedRelay> & { readonly message?: string }
-  if (!asked.ok || joined.url === undefined) throw new Error(joined.message ?? `The anyhost program at ${unix} answered the join with ${asked.status}.`)
+  const joined = await askProgram<JoinedRelay>('/join', { link })
+  if (joined === undefined) return await join(link, await cmodDevice())
   return joined.url
-}
-
-// The Connect Cloudflare the program's answer carries, or why it gave none.
-async function connectingOf(unix: string, answer: Response): Promise<Connecting> {
-  const read = (await answer.json()) as Connecting & { readonly message?: string }
-  if (!answer.ok) throw new Error(read.message ?? `The anyhost program at ${unix} answered Connect Cloudflare with ${answer.status}.`)
-  return read
 }
 
 // Asks this machine's program to run Connect Cloudflare, as the Step does, since the program saves the login in turn
@@ -130,30 +131,30 @@ async function connectingOf(unix: string, answer: Response): Promise<Connecting>
 // command's, over the program's unix socket, for that run alone. With no program answering, Connect Cloudflare runs
 // here.
 async function connectThroughProgram(): Promise<void> {
-  const unix = serveSocket()
-  const post = (path: string, body: object): Promise<Response> => fetch(`http://localhost${path}`, { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-  // a program that stops during the run, as at a restart, answers nothing for a moment
-  const stopped = (error: unknown): never => {
-    throw new Error(`The anyhost program at ${unix} stopped answering during Connect Cloudflare (${error instanceof Error ? error.message : String(error)}). Run anyhost connect again once it runs.`)
-  }
-  const started = await post('/connect', { apiToken: process.env['CLOUDFLARE_API_TOKEN'] }).catch(() => undefined)
+  const started = await askProgram<Connecting>('/connect', { apiToken: process.env['CLOUDFLARE_API_TOKEN'] })
   if (started === undefined) return await connectCloudflare(TERMINAL, await cmodDevice())
-  let view = await connectingOf(unix, started)
+  // a program that stops during the run, as at a restart, answers nothing for a moment
+  const during = async <T>(path: string, body?: object): Promise<T> => {
+    const asked = await askProgram<T>(path, body)
+    if (asked === undefined) throw new Error(`The anyhost program at ${serveSocket()} stopped answering during Connect Cloudflare. Run anyhost connect again once it runs.`)
+    return asked
+  }
+  let view = started
   for (let said = 0; ; ) {
     for (const line of view.lines.slice(said)) TERMINAL.say(line)
     said = view.lines.length
     if (view.is === 'joined') return
     if (view.is === 'failed') throw new Error(view.error ?? 'Connect Cloudflare failed.')
-    if (view.accounts !== undefined) view = await connectingOf(unix, await post('/connect/account', { id: (await TERMINAL.pickAccount(view.accounts)).id }).catch(stopped))
+    if (view.accounts !== undefined) view = await during<Connecting>('/connect/account', { id: (await TERMINAL.pickAccount(view.accounts)).id })
     else if (view.r2Page !== undefined) {
       await TERMINAL.enableR2(view.r2Page)
-      view = await connectingOf(unix, await post('/connect/r2', {}).catch(stopped))
+      view = await during<Connecting>('/connect/r2', {})
     } else {
       await Bun.sleep(FOLLOW_MS)
       // a program that started again since knows no run
-      const status = await fetch('http://localhost/status', { unix }).then(async (answer) => (await answer.json()) as Status, stopped)
-      if (status.connecting === undefined) throw new Error(`The anyhost program at ${unix} restarted during Connect Cloudflare. Run anyhost connect again.`)
-      view = status.connecting
+      const { connecting } = await during<Status>('/status')
+      if (connecting === undefined) throw new Error(`The anyhost program at ${serveSocket()} restarted during Connect Cloudflare. Run anyhost connect again.`)
+      view = connecting
     }
   }
 }

@@ -115,12 +115,14 @@ type Json = Record<string, any>
 type Message = Json | Uint8Array
 
 // One machine's socket, whose messages wait in its inbox until a test takes them. It pings well within LIVE_MS, as the
-// program does, so the Pool counts it alive until `silence` stops it, as a machine that went to sleep stops.
+// program does, so the Pool counts it alive until `silence` stops it, as a machine that went to sleep stops, and it
+// answers each `released` it takes, live or in a welcome, with `heard`, as the program does once it applied it.
 class Socket {
   readonly ws: WebSocket
   readonly closed: Promise<{ code: number; reason: string }>
   readonly #inbox: Message[] = []
   readonly #pinger = setInterval(() => this.ws.readyState === WebSocket.OPEN && this.ws.send('ping'), LIVE_MS / 4)
+  #isAsleep = false
   #wake = (): void => undefined
   #id = 0
 
@@ -130,7 +132,10 @@ class Socket {
     this.ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, { headers } as any)
     this.ws.binaryType = 'arraybuffer'
     this.ws.addEventListener('message', (event) => {
-      this.#inbox.push(typeof event.data === 'string' ? (event.data === 'pong' ? { t: 'pong' } : (JSON.parse(event.data) as Json)) : new Uint8Array(event.data as ArrayBuffer))
+      const message = typeof event.data === 'string' ? (event.data === 'pong' ? { t: 'pong' } : (JSON.parse(event.data) as Json)) : new Uint8Array(event.data as ArrayBuffer)
+      this.#inbox.push(message)
+      const released: Json[] = message instanceof Uint8Array ? [] : message['t'] === 'released' ? [message] : message['t'] === 'welcome' ? message['waiting'] : []
+      if (!this.#isAsleep) for (const { session, to } of released) this.send({ t: 'heard', session, to: to.id })
       this.#wake()
     })
     this.closed = new Promise((resolve) =>
@@ -141,9 +146,11 @@ class Socket {
     )
   }
 
-  // The machine sends nothing more, its socket left open, as a machine that went to sleep does.
+  // The machine sends nothing more by itself, neither a ping nor a heard, its socket left open, as a machine that went
+  // to sleep does.
   silence(): void {
     clearInterval(this.#pinger)
+    this.#isAsleep = true
   }
 
   // the next message `match` accepts, from those that came already or the ones still to come
@@ -441,6 +448,25 @@ describe('the socket', () => {
     mac.socket.send('ping')
     expect(await mac.socket.message('pong')).toEqual({ t: 'pong' })
   })
+
+  // The suite missed it: every socket the tests kept alive pinged on time, while a ping waits behind the uploads a
+  // link still carries, 10.5 s behind 1 MiB at 100 KB/s.
+  test('counts a machine connected while its uploads arrive, though its ping waits 15 s behind them, past LIVE_MS', async () => {
+    const busy = await joinNew(mac, 'busy-link')
+    // the Pool hears its uploads and none of its pings, as the ping due at 30 s waits behind them until 45 s
+    busy.socket.silence()
+    const pingArrives = Date.now() + LIVE_MS + 5000
+    for (let upload = 0; Date.now() < pingArrives; upload += 1) {
+      const { answer } = await busy.socket.request([{ op: 'put', key: `${prefix}busy/${upload}`, size: 1 }], [bytesOf(1)])
+      expect(answer['results']).toEqual([{ status: 200, etag: md5(bytesOf(1)) }])
+      await Bun.sleep(5000)
+    }
+    const [devices] = await mac.socket.results({ op: 'devices' })
+    expect((devices!['devices'] as Json[]).find((device) => device['id'] === busy.device.id)).toMatchObject({ connected: true })
+    // a message for it goes to it, not back as offline
+    mac.socket.send({ t: 'move', id: 'busy', to: busy.device.id, session: crypto.randomUUID(), trusted: false })
+    expect(await busy.socket.message('move')).toMatchObject({ id: 'busy', from: { id: mac.device.id } })
+  }, 90_000)
 
   test('closes an unknown token with 4401', async () => {
     const stranger = await connect(hex(32), 'stranger', roots('/home/stranger'))
@@ -791,6 +817,25 @@ describe('the holder', () => {
     const woken = await connect(asleep.token, asleep.device.name, asleep.device.roots)
     expect(await woken.message('welcome')).toMatchObject({ waiting: [{ t: 'released', session: sleeping, to: { id: mac.device.id, name: mac.device.name } }] })
   })
+
+  // The suite missed it: no machine took back a session it lost while the released of it waited for it, so the next
+  // welcome stopped the session there while the claims said it held it.
+  test('a machine that took back a session it lost hears no released of it at its next welcome, and holds it', async () => {
+    const laptop = await joinNew(mac, 'took-back')
+    const session = crypto.randomUUID()
+    expect(await laptop.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true }])
+    // the laptop sleeps past LIVE_MS, so the released of the take waits for it
+    laptop.socket.silence()
+    await Bun.sleep(LIVE_MS + 2000)
+    expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, previous: { id: laptop.device.id, name: laptop.device.name }, told: false }])
+    // it wakes on the same socket and takes the session back, as a move that failed does
+    expect(await laptop.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, told: true }])
+
+    const again = await connect(laptop.token, laptop.device.name, laptop.device.roots)
+    expect(await again.message('welcome')).toMatchObject({ waiting: [] })
+    const [claims] = await again.results({ op: 'claims', prefix: session })
+    expect(claims!['claims']).toEqual({ [session]: { id: laptop.device.id, name: laptop.device.name } })
+  }, 90_000)
 
   // The suite missed it: no test removed a machine a take had left untold, so every later take named it as a machine
   // that may take one more prompt, though a removed machine connects no more.

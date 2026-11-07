@@ -1,8 +1,8 @@
 // The one connection between this program and the person's relay: a WebSocket that carries every request of ops and
 // every message, and HTTPS for each object over MAX_MESSAGE_BYTES, which the relay's Worker streams to and from R2.
-// The socket pings every PING_MS, counts a pong more than PONG_MS late as a drop, and opens again at once, then after
-// 1, 2, 4 and up to 60 seconds. A request the relay never answered goes again on the next socket, and a put that
-// finds its own bytes there counts as written, so a dropped answer writes nothing twice.
+// The socket pings every PING_MS, counts PONG_MS with nothing heard while a ping waits as a drop, and opens again at
+// once, then after 1, 2, 4 and up to 60 seconds. A request the relay never answered goes again on the next socket, and
+// a put that finds its own bytes there counts as written, so a dropped answer writes nothing twice.
 import plugin from '../../.claude-plugin/plugin.json'
 import {
   ANSWER,
@@ -11,6 +11,7 @@ import {
   CLOSE_UNKNOWN_TOKEN,
   MAX_MESSAGE_BYTES,
   MAX_OPS,
+  PING_MS,
   PROTOCOL_VERSION,
   REMOVED_MESSAGE,
   REQUEST,
@@ -24,6 +25,7 @@ import {
   type Delivered,
   type DeviceRef,
   type FromPool,
+  type Heard,
   type Listed,
   type Offline,
   type Op,
@@ -35,17 +37,15 @@ import {
   type Welcome,
 } from '../../relay/protocol.ts'
 
-// Cloudflare closes a socket that carries nothing for a while and names no number: one quiet for 10 minutes was closed
-// by then, and one pinged every 30 seconds had every pong back within 40 seconds over 50 minutes (relay-spec R16). The
-// Pool counts a socket alive only while its last ping is within LIVE_MS (40 s), so a ping goes well within that.
-const PING_MS = 30_000
+// A ping goes every PING_MS whatever the socket carries, and the socket counts as dropped once nothing came for
+// PONG_MS while a ping waits. The pong comes behind the data the Pool sent before it, so every message heard proves the
+// socket alive, as one at 240 KB/s carries a seal's 16 answers of about 700 KB each, the last past 40 s.
 const PONG_MS = 40_000
 // A socket that brings no answer for ANSWER_MS while a request sent on it waits counts as dropped, and every request it
 // had not answered goes again on the next one, as no ping finds a lost answer: the Pool answers pings without waking,
-// so a pong is no answer. Each answer starts the wait again, so a slow link that keeps answering is never dropped, as
-// one at 240 KB/s that carries the answers to a seal's 16 gets of about 700 KB each, the last past 40 s. A drain
-// was answered in 1,714 ms at p90 and 2,098 ms at most over 20 drains (relay-spec R10), and one answer of
-// MAX_MESSAGE_BYTES takes 21 s at the 100 KB/s a write counts as the slowest link. So only a lost answer waits this
+// so a pong is no answer. Each answer starts the wait again, so a slow link that keeps answering is never dropped. A
+// drain was answered in 1,714 ms at p90 and 2,098 ms at most over 20 drains (relay-spec R10), and one answer of
+// MAX_MESSAGE_BYTES takes 10.5 s at the 100 KB/s a write counts as the slowest link. So only a lost answer waits this
 // long, which no path of the Pool loses today, as it answers a get whose body R2 failed with `storage`, and so does
 // nothing else on a dropped socket (PONG_MS).
 const ANSWER_MS = 40_000
@@ -101,10 +101,11 @@ export type Relay = {
   list(prefix: string): Promise<Listed[]>
   // one object by HTTP, which a broken download's next try goes on with from the byte it reached
   getObject(key: string): Promise<Got | undefined>
-  // A message for another machine, or an attach stream's bytes, on the socket the relay welcomed. Answers false while
-  // no socket is, and the message goes nowhere.
-  send(message: Routed | Uint8Array): boolean
-  on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): void
+  // A message for another machine, a `heard` for the Pool, or an attach stream's bytes, on the socket the relay
+  // welcomed. Answers false while no socket is, and the message goes nowhere.
+  send(message: Routed | Heard | Uint8Array): boolean
+  // calls `listener` with each message of the kind, until the function it answers is called
+  on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): () => void
   // connects at once on the login read now, closing the socket open on the last one, as after this machine joined
   reconnect(): void
   close(): void
@@ -174,6 +175,7 @@ function refusedBy(code: number, reason: string, device: RelayOptions['device'])
 const rootsHeader = (roots: Roots): string => JSON.stringify(roots).replace(/[^\x20-\x7e]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
 
 type Pending = {
+  readonly id: number
   readonly message: Uint8Array
   wasSent: boolean
   readonly resolve: (answer: { results: readonly Result[]; bytes: Uint8Array }) => void
@@ -254,11 +256,11 @@ export function connectRelay(options: RelayOptions): Relay {
     const { header, bytes } = decodeMessage(message)
     const answer = header as Answer
     const request = answer.id === null ? undefined : pending.get(answer.id)
-    if (request === undefined || answer.id === null) {
+    if (request === undefined) {
       if ('error' in answer) console.error(`${new Date().toISOString()} The relay refused a request: ${answer.message}`)
       return
     }
-    pending.delete(answer.id)
+    pending.delete(request.id)
     // every request still pending went out on this socket, as the welcome sends each one
     if (pending.size > 0) waitForAnswer()
     else {
@@ -269,12 +271,8 @@ export function connectRelay(options: RelayOptions): Relay {
     else request.resolve({ results: answer.results, bytes })
   }
 
-  const heard = (ws: WebSocket, text: string): void => {
-    if (text === 'pong') {
-      clearTimeout(pongDue)
-      pongDue = undefined
-      return
-    }
+  // A text message of the Pool's on the socket `ws` opened with the login `used`.
+  const control = (ws: WebSocket, used: Login, text: string): void => {
     const message = JSON.parse(text) as FromPool
     if (message.t === 'welcome') {
       if (message.protocol < PROTOCOL_VERSION) {
@@ -290,7 +288,7 @@ export function connectRelay(options: RelayOptions): Relay {
       const again = unanswered.filter((request) => request.wasSent).length
       if (again > 0) console.error(`${new Date().toISOString()} anyhost sends again ${again === 1 ? 'the request' : `the ${again} requests`} the relay had not answered.`)
       for (const request of unanswered) send(ws, request)
-      for (const waiter of waiting) if (login !== undefined) waiter.resolve(login)
+      for (const waiter of waiting) waiter.resolve(used)
       waiting.clear()
       return
     }
@@ -327,10 +325,23 @@ export function connectRelay(options: RelayOptions): Relay {
     const late = setTimeout(() => {
       if (socket === ws && state.is !== 'connected') drop({ is: 'offline', message: `The relay at ${url} did not welcome this machine within ${CONNECT_MS / 1000} seconds.` })
     }, CONNECT_MS)
+    // the wait for a ping's pong, which each message heard meanwhile starts again
+    const awaitPong = (): void => {
+      clearTimeout(pongDue)
+      pongDue = setTimeout(() => {
+        if (socket === ws) drop({ is: 'offline', message: `The relay at ${url} sent nothing for ${PONG_MS / 1000} seconds after a ping.` })
+      }, PONG_MS)
+    }
     ws.addEventListener('message', (event) => {
       if (socket !== ws) return
+      if (event.data === 'pong') {
+        clearTimeout(pongDue)
+        pongDue = undefined
+        return
+      }
+      if (pongDue !== undefined) awaitPong()
       try {
-        if (typeof event.data === 'string') return heard(ws, event.data)
+        if (typeof event.data === 'string') return control(ws, used, event.data)
         const bytes = new Uint8Array(event.data as ArrayBuffer)
         if (bytes[0] === ANSWER) answered(bytes)
         else if (bytes[0] === STREAM) emit('stream', bytes)
@@ -341,11 +352,9 @@ export function connectRelay(options: RelayOptions): Relay {
     ws.addEventListener('open', () => {
       if (socket !== ws) return
       pinger = setInterval(() => {
-        if (socket !== ws || pongDue !== undefined) return
+        if (socket !== ws) return
         ws.send('ping')
-        pongDue = setTimeout(() => {
-          if (socket === ws) drop({ is: 'offline', message: `The relay at ${url} answered no ping within ${PONG_MS / 1000} seconds.` })
-        }, PONG_MS)
+        if (pongDue === undefined) awaitPong()
       }, PING_MS)
     })
     ws.addEventListener('error', (event) => void (failed = (event as ErrorEvent).message ?? ''))
@@ -376,7 +385,7 @@ export function connectRelay(options: RelayOptions): Relay {
     const id = nextId++
     const message = encodeMessage(REQUEST, { id, ops: calls.map(toOp) }, calls.flatMap((call) => (call.op === 'put' ? [call.bytes] : [])))
     return new Promise((resolve, reject) => {
-      const asked: Pending = { message, wasSent: false, resolve, reject }
+      const asked: Pending = { id, message, wasSent: false, resolve, reject }
       pending.set(id, asked)
       if (state.is === 'connected' && socket !== undefined) send(socket, asked)
     })
@@ -526,8 +535,12 @@ export function connectRelay(options: RelayOptions): Relay {
       socket.send(message instanceof Uint8Array ? message : JSON.stringify(message))
       return true
     },
+    // a new list at each change, so an emit that runs calls the listeners it began with
     on(kind, listener) {
       listeners[kind] = [...(listeners[kind] ?? []), listener]
+      return () => {
+        listeners[kind] = (listeners[kind] ?? []).filter((each) => each !== listener)
+      }
     },
     // The socket open or opening on the login read before closes, as its object requests would use that login, which a
     // join since replaced, and the next opens at once on the login read now. Every request it had not answered goes

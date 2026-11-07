@@ -11,7 +11,7 @@ import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relay
 import { listenDirect, type DirectLink, type DirectListener, type DirectOffer } from './direct.ts'
 import { move, receiveMove, receiveReleased, receiveStart, startNew, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, waitAfter, type RelayState } from './relay.ts'
-import { openStream, type Exit, type Link, type SessionState, type Size, type Stream } from './stream.ts'
+import { offsetOf, openStream, randomStreamId, type Exit, type Link, type SessionState, type Size, type Stream } from './stream.ts'
 import { codexState, filesUnder, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
@@ -24,9 +24,15 @@ const BACKUP_MS = 60_000
 // fseventsd logged 3,622 `USER DROPPED` lines in 30 minutes on the Architect's Mac. That listing took 0.90 to 2.99 s for
 // 58,984 files there. A change the watcher prints as `unnamed` starts a listing of its folder at once.
 const SWEEP_ALL_MS = 60 * 60_000
-// The relay carries a terminal's output at most once per OUTPUT_MS, so a full-screen redraw is one message, not
-// hundreds (relay-spec "Control messages"). A direct connection and this machine's own socket carry it at once.
-const OUTPUT_MS = 20
+// The relay carries a viewer's output at most once per OUTPUT_MS, all of it since the last in one frame, so a busy
+// session costs the Pool at most 4 messages a second, where Cloudflare's Free plan allows 100,000 requests a day and
+// may count each WebSocket message as one (relay-spec "Control messages"). Replaying a busy `claude attach`'s 11 writes
+// a second to one viewer over `memoryRelay` on anyhost-a, the Pool took 11.0 messages a second at 20 ms and 4.7 at
+// 250 ms, the viewer's acknowledgements included: 2.5 and 5.9 hours of such viewing a day at one request per message.
+// Output after a quiet OUTPUT_MS goes at once, so a key typed at a quiet screen echoed in 15 ms at the median there,
+// against 36 ms at 20 ms, while one typed into a busy screen waits for the next frame: 172 ms against 29 ms. A direct
+// connection and this machine's own socket carry output at once.
+const OUTPUT_MS = 250
 // A viewer whose link is gone keeps its place for the longest wait between its tries to attach again.
 const LINGER_MS = 60_000
 // Claude Code rewrites a running session's record in `sessions/` under its folder at each change of its status, once
@@ -35,10 +41,13 @@ const LINGER_MS = 60_000
 // which reads the same records, 468 times as long.
 const STATE_MS = 200
 // Claude Code renames a new record into `sessions/` at each change of a session's status, and removes it as the
-// session ends, so whatever waits on the records reads them again at each change of the folder, and every READ_MS while
-// no ready watcher hears the folder: while the watcher is not ready, and while the folder is not there. Reading the
-// records themselves, as `claude agents --json` does, takes no process: one `claude agents --json` took 1.2 to 4 s on
-// anyhost-b while a session started there, on the CPU that session needs.
+// session ends, once each, so whatever waits on the records reads them again at each change of the folder the watcher
+// heard. A watcher drops a change with no word of it, as Bun 1.4.4's on macOS does, which would leave the wait on it
+// waiting, so the records are read every READ_MS too while anything waits on them, whatever the watcher's state, and
+// while no ready watcher hears the folder, for the status of the sessions shown: one read a second, of 5.3 ms of CPU for
+// 3 records (STATE_MS), and none on a machine where nothing waits and a watcher hears. Reading the records themselves,
+// as `claude agents --json` does, takes no process: one `claude agents --json` took 1.2 to 4 s on anyhost-b while a
+// session started there, on the CPU that session needs.
 const READ_MS = 1000
 // Bun 1.4.4's `fs.watch` on macOS runs every watch of a process through one FSEvents thread, which holds the lock that
 // each `watch()` and `close()` takes across `FSEventStreamStart`, and that waits on macOS's fseventsd, which takes no
@@ -315,7 +324,7 @@ export class UploadQueue {
 }
 
 // `names` is the relay Connect Cloudflare deploys and keeps current, the Worker and bucket anyhost, and `cloudflare` what
-// both reach, Cloudflare itself, unless a test passes its own.
+// both and every join reach, Cloudflare itself, unless a test passes its own.
 export async function serve(device: Device, names?: RelayNames, cloudflare?: Cloudflare): Promise<void> {
   // Two programs on one state folder would both write its database and its journals, so a second one refuses to start.
   // It replaces only a socket file nothing answers on, as a stopped program leaves.
@@ -331,18 +340,14 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   // A session's code that captureCode read after an upload goes up in the session's next drains. The database counts
   // what one relay's bucket holds, so a welcome from another relay starts it over and the program exits, and its
   // service starts it again on that relay.
-  const capture = openCapture(
-    relay,
-    device,
-    roots,
+  const capture = openCapture(relay, device, roots, {
     db,
-    undefined,
-    (session, tool, folder) => queue.add(session, tool, `${folder}/`),
-    (url, bucket) => {
+    onCode: (session, tool, folder) => queue.add(session, tool, `${folder}/`),
+    onOtherRelay: (url, bucket) => {
       console.error(`${new Date().toISOString()} This machine connects to the relay at ${url}, whose bucket is ${bucket}, not to the one its database counts, so anyhost exits, and its service starts it again on that relay.`)
       process.exit(0)
     },
-  )
+  })
   const heartbeat = join(stateFolder(), 'heartbeat')
   const current = new Map<string, string>()
   let shellProblem: string | undefined
@@ -402,7 +407,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const recordsHeard = new Set<() => void>()
   const onRecordsChange: OnRecordsChange = (heard) => {
     recordsHeard.add(heard)
-    return () => void recordsHeard.delete(heard)
+    followRecords()
+    return () => {
+      recordsHeard.delete(heard)
+      followRecords()
+    }
   }
   const recordsChanged = (): void => {
     for (const read of recordsHeard) read()
@@ -422,19 +431,23 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       (error: unknown) => problems.set(path, error),
     )
   }
-  // The watcher, the one process that runs WATCHER, from its start until it ends; the folders it watches, which are
-  // there, each by its inode and birth time, as a folder removed and made again is another, which a filesystem may give
-  // the inode number it had; and when it became ready, while it hears.
+  // The folders the watcher watches once they are there, each by its inode and birth time, as a folder removed and made
+  // again is another, which a filesystem may give the inode number it had. The watcher is a process that runs WATCHER:
+  // `ready` is the one that hears, with the folders it watches and when it got ready, and `starting` the newest one,
+  // from its start until it is ready or ended, while the one before goes on hearing, as a new watcher can wait minutes
+  // on fseventsd.
   const watched = new Map<string, string>()
   const probe = join(stateFolder(), 'watcher')
-  let watcher: Subprocess | undefined
-  let readyAt: number | undefined
+  let ready: { readonly child: Subprocess; readonly folders: ReadonlySet<string>; readonly at: number } | undefined
+  let starting: Subprocess | undefined
   let watcherFailures = 0
   let nextWatcher: ReturnType<typeof setTimeout> | undefined
-  // Reads Claude Code's records every READ_MS while no ready watcher hears `sessions/`, and runs no timer while one does.
+  const hears = (folder: string): boolean => ready?.folders.has(folder) === true && watched.has(folder)
+  // Reads Claude Code's records every READ_MS while anything waits on them or no ready watcher hears `sessions/`, and
+  // runs no timer otherwise.
   let pollingRecords: ReturnType<typeof setInterval> | undefined
   const followRecords = (): void => {
-    if (readyAt === undefined || !watched.has(records)) pollingRecords ??= setInterval(recordsChanged, READ_MS)
+    if (recordsHeard.size > 0 || !hears(records)) pollingRecords ??= setInterval(recordsChanged, READ_MS)
     else {
       clearInterval(pollingRecords)
       pollingRecords = undefined
@@ -451,55 +464,67 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     for (const folder of folders) unheard.set(folder, Math.min(unheard.get(folder) ?? Infinity, since))
   }
   unheardFrom(lastRanAt)
-  // Ends the watcher by SIGKILL, as its exit would wait on its watches. Each write from then on may go unheard.
-  const endWatcher = (): void => {
-    watcher?.kill('SIGKILL')
-    watcher = undefined
-    if (readyAt !== undefined) unheardFrom(Date.now())
-    readyAt = undefined
+  // The ready watcher ended, by its exit or a SIGKILL here, as its own exit would wait on its watches. Each write in its
+  // folders from then on may go unheard.
+  const endReady = (): void => {
+    if (ready === undefined) return
+    ready.child.kill('SIGKILL')
+    unheardFrom(Date.now(), [...ready.folders])
+    ready = undefined
     followRecords()
   }
-  // A change the watcher could not name in `folder` may be of any file written there since it got ready, so the next
-  // listing hears each of those, as Watchman crawls again after an overflow. Bun gives an inotify overflow to every
-  // watch, so each folder whose writes it dropped says so.
+  // When each folder's last listing started, which heard every file written there before it.
+  const listedAt = new Map<string, number>()
+  // A change the ready watcher could not name in `folder` may be of any file written there since the watcher got
+  // ready, or since the folder's last listing after that, so the next listing hears each of those, as Watchman crawls
+  // again after an overflow. Bun gives an inotify overflow to every watch, so each folder whose writes it dropped says
+  // so.
   const unnamed = (folder: string): void => {
-    unheardFrom(readyAt ?? Date.now(), [folder])
+    unheardFrom(Math.max(listedAt.get(folder) ?? 0, ready?.at ?? Date.now()), [folder])
     void watchFolders()
     void listWritten()
   }
-  // Starts a watcher of every folder in `watched` in place of the one before, and answers once it is ready or ended.
-  // One that is not ready WATCHER_MS after its start, or that exits, is a problem until a watcher is ready, and
-  // another starts after `waitAfter` the failures in a row.
+  // Starts a watcher of every folder in `watched`, and answers once it is ready or ended. It replaces a watcher still
+  // starting at once, and the ready one only once it is ready itself, so a watched folder that appears while fseventsd
+  // takes no new watcher leaves the ready one hearing the folders it watches. A watcher that is not ready WATCHER_MS
+  // after its start, or that exits, is a problem until a watcher is ready, and another starts after `waitAfter` the
+  // failures in a row, unless one starts already.
   const startWatcher = (): Promise<void> => {
-    endWatcher()
+    starting?.kill('SIGKILL')
     clearTimeout(nextWatcher)
     const settled = Promise.withResolvers<void>()
     const folders = watchable.flatMap(({ folder, depth }) => (watched.has(folder) ? [{ folder, depth: Number.isFinite(depth) ? depth : null }] : []))
     const child = Bun.spawn([process.execPath, '-e', WATCHER, JSON.stringify({ probe, folders })], { env: { ...process.env, BUN_BE_BUN: '1' }, stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' })
-    watcher = child
-    const failed = (why: string): void => {
-      if (watcher !== child) return
+    starting = child
+    const ended = (why: string): void => {
       clearTimeout(limit)
-      endWatcher()
+      settled.resolve()
+      if (child === ready?.child) endReady()
+      else if (child === starting) {
+        child.kill('SIGKILL')
+        starting = undefined
+      } else return
+      if (starting !== undefined) return
       watcherFailures++
       const wait = waitAfter(watcherFailures)
       problems.set('watcher', new Error(`anyhost's watcher ${why}, so each backup pass lists the watched folders for the files written since the one before, and another watcher starts in ${wait / 1000} s.`))
       nextWatcher = setTimeout(() => void startWatcher(), wait)
     }
-    const limit = setTimeout(() => failed(`heard none of its watches ${WATCHER_MS / 1000} s after its start, as while macOS's fseventsd takes no new watcher`), WATCHER_MS)
-    void child.exited.then(() => {
-      settled.resolve()
-      failed(`exited with ${child.signalCode ?? child.exitCode}`)
-    })
-    const ready = (): void => {
+    const limit = setTimeout(() => ended(`heard none of its watches ${WATCHER_MS / 1000} s after its start, as while macOS's fseventsd takes no new watcher`), WATCHER_MS)
+    void child.exited.then(() => ended(`exited with ${child.signalCode ?? child.exitCode}`))
+    const gotReady = (): void => {
       clearTimeout(limit)
+      starting = undefined
+      const before = ready
+      ready = { child, folders: new Set(folders.map(({ folder }) => folder)), at: Date.now() }
+      before?.child.kill('SIGKILL')
       watcherFailures = 0
-      readyAt = Date.now()
       problems.clear('watcher')
       followRecords()
       void listWritten()
       settled.resolve()
     }
+    // A watcher's changes count from its `ready` on: the ready watcher before it hears them until then.
     void (async () => {
       const decoder = new TextDecoder()
       let left = ''
@@ -507,8 +532,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         const lines = (left + decoder.decode(chunk, { stream: true })).split('\n')
         left = lines.pop() ?? ''
         for (const line of lines) {
-          if (watcher !== child) return
-          if (line === 'ready') ready()
+          if (child === starting) {
+            if (line === 'ready') gotReady()
+          } else if (child !== ready?.child) return
           else if (line.startsWith('unnamed ')) unnamed(JSON.parse(line.slice('unnamed '.length)) as string)
           else heard(JSON.parse(line) as string)
         }
@@ -537,23 +563,37 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (isNew) await startWatcher()
   }
   // A listing of the folders in `unheard` hears each file written in each since the time it names, in place of a
-  // watcher: as a watcher gets ready, at each backup pass while none is, and at a change the watcher could not name. A
-  // listing of all the Architect's Mac's 58,984 files took 0.90 to 2.99 s and 0.54 to 1.13 s of CPU at a load average
-  // near 70 to 90, and held the program's thread 212 ms at most.
-  let isListing = false
-  const listWritten = async (): Promise<void> => {
-    if (isListing || unheard.size === 0) return
-    isListing = true
+  // watcher: as a watcher gets ready, at each backup pass while a folder has none, and at a change the watcher could
+  // not name. A listing of all the Architect's Mac's 58,984 files took 0.90 to 2.99 s and 0.54 to 1.13 s of CPU at a
+  // load average near 70 to 90, and held the program's thread 212 ms at most.
+  const listOnce = async (): Promise<void> => {
     const [started, listing] = [Date.now(), new Map(unheard)]
     unheard.clear()
     for (const { folder, depth } of watchable) {
       const since = listing.get(folder)
       if (since === undefined || !watched.has(folder)) continue
+      listedAt.set(folder, started)
       for (const { path, mtimeMs } of await filesUnder(folder, depth)) if (mtimeMs >= since) heard(path)
     }
-    // a watcher ready since before the listing started heard every write the listing did not
-    if (readyAt === undefined || readyAt > started) unheardFrom(started)
-    isListing = false
+    // a watcher ready since before the listing started heard every write in its folders the listing did not
+    const isHeard = (folder: string): boolean => (ready?.at ?? Infinity) <= started && hears(folder)
+    unheardFrom(started, watchable.map(({ folder }) => folder).filter((folder) => !isHeard(folder)))
+  }
+  // The listing that runs, and the one asked while it runs, which starts once that one ended and answers every ask
+  // meanwhile, as an `unnamed` or a new watcher's ready can come during a listing, which already read its folders.
+  let listing: Promise<void> | undefined
+  let listingNext: Promise<void> | undefined
+  const listWritten = (): Promise<void> => {
+    if (listing !== undefined) {
+      listingNext ??= listing.then(() => {
+        listingNext = undefined
+        return listWritten()
+      })
+      return listingNext
+    }
+    if (unheard.size === 0) return Promise.resolve()
+    listing = listOnce().finally(() => (listing = undefined))
+    return listing
   }
   // A join here takes effect at once: the relay connects with the new login, and the problems it solves leave.
   const joined = (): void => {
@@ -610,7 +650,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     joining = { is: 'running' }
     try {
       try {
-        await joinRelay(link, device)
+        await joinRelay(link, device, cloudflare)
       } finally {
         await cmod(['option', 'anyhost', 'join', ''])
       }
@@ -712,7 +752,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         connectRun().turnedOnR2()
         return Response.json(connectRun().view)
       case '/join': {
-        const url = await joinRelay(link, device)
+        const url = await joinRelay(link, device, cloudflare)
         joined()
         return Response.json({ url } satisfies JoinedRelay)
       }
@@ -748,10 +788,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   // the other viewers' screens (worker-spec W9). A viewer whose link is gone keeps its stream for LINGER_MS, so its next
   // attach with the same stream goes on where both sides' bytes reached, and one forgotten attaches as a new viewer.
   // `carrier` reaches the viewer: through the relay, or the WebSocket of an `anyhost attach` on this machine. A viewer
-  // on another machine that reaches this one directly has its stream on `direct` while that connection lasts, and
-  // `pending` holds the output that waits for the relay's next message. `attached` answers the viewer's attach with
-  // `hostStream`, the random id this program drew for its end of the viewer's stream as it opened it, so a viewer that
-  // hears another id than the one it linked with last starts its stream over, whichever `attached` it missed.
+  // on another machine that reaches this one directly has its stream on `direct` while that connection lasts,
+  // `pending` holds the output that waits for the relay's next message, and `flushedAt` is when the last one went.
+  // `attached` answers the viewer's attach with `hostStream`, the random id this program drew for its end of the
+  // viewer's stream as it opened it, so a viewer that hears another id than the one it linked with last starts its
+  // stream over, whichever `attached` it missed.
   type Carrier = { readonly attached: (hostStream: number) => void; readonly link: Link; readonly isRelay: boolean }
   type Viewer = {
     readonly session: string
@@ -762,6 +803,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     carrier: Carrier
     direct?: DirectLink | undefined
     pending: Uint8Array[]
+    flushedAt: number
     flush?: ReturnType<typeof setTimeout> | undefined
     forget?: ReturnType<typeof setTimeout>
   }
@@ -776,13 +818,17 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const shown = new Map<string, Promise<Shown>>()
   // Every `claude attach` this program runs. Bun's terminal gives them no controlling terminal, so no hangup ends them
   // when this program goes, and a stopped program closes each first, then ends by the signal that stopped it. Every end
-  // of the program, by a signal or by `process.exit`, ends the watcher by SIGKILL first, which no wait on fseventsd
+  // of the program, by a signal or by `process.exit`, ends each watcher by SIGKILL first, which no wait on fseventsd
   // holds up.
   const terminals = new Set<AttachedTerminal>()
-  process.once('exit', () => watcher?.kill('SIGKILL'))
+  const killWatchers = (): void => {
+    ready?.child.kill('SIGKILL')
+    starting?.kill('SIGKILL')
+  }
+  process.once('exit', killWatchers)
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
     process.once(signal, () => {
-      watcher?.kill('SIGKILL')
+      killWatchers()
       for (const terminal of terminals) terminal.close()
       process.kill(process.pid, signal)
     })
@@ -814,20 +860,22 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   // offers none, and its viewers stay on the relay.
   const direct = listenDirect(stateFolder(), problems).catch((error: unknown) => void problems.set('direct', error))
   const noOffer: DirectOffer = { port: 0, addresses: [] }
-  // A viewer's output goes at once over a direct connection or this machine's own socket, and at most once per
-  // OUTPUT_MS through the relay.
+  // A viewer's output goes at once over a direct connection or this machine's own socket, and through the relay in one
+  // frame at most once per OUTPUT_MS: at once after a quiet OUTPUT_MS, as the first output of a turn of the event loop,
+  // and else OUTPUT_MS after the frame before.
   const flushOutput = (viewer: Viewer): void => {
     clearTimeout(viewer.flush)
     viewer.flush = undefined
     if (viewer.pending.length === 0) return
     const bytes = Buffer.concat(viewer.pending)
     viewer.pending = []
+    viewer.flushedAt = Date.now()
     viewer.stream.write('output', bytes)
   }
   const output = (viewer: Viewer, bytes: Uint8Array): void => {
     if (viewer.direct === undefined && viewer.carrier.isRelay) {
       viewer.pending.push(bytes)
-      viewer.flush ??= setTimeout(() => flushOutput(viewer), OUTPUT_MS)
+      viewer.flush ??= setTimeout(() => flushOutput(viewer), Math.max(0, viewer.flushedAt + OUTPUT_MS - Date.now()))
       return
     }
     flushOutput(viewer)
@@ -1029,8 +1077,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       if (known.direct === undefined) known.stream.use(carrier.link)
       return fitShown(known.session)
     }
-    const hostStream = crypto.getRandomValues(new Uint32Array(1))[0] ?? 0
-    const viewer: Viewer = { session, stream: openStream(), hostStream, size: { cols, rows }, isLinked: true, carrier, pending: [] }
+    const viewer: Viewer = { session, stream: openStream(), hostStream: randomStreamId(), size: { cols, rows }, isLinked: true, carrier, pending: [], flushedAt: 0 }
     viewers.set(stream, viewer)
     viewer.stream.on('input', (keys) => void shown.get(session)?.then((view) => typeInto(view, keys), () => undefined))
     viewer.stream.on('resize', (size) => {
@@ -1046,7 +1093,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     // The new viewer hears `attached` and links before the session is ready, which takes seconds at a start, so each
     // attach is answered in the order it came, and its dial during the start is taken. The keys wait for the session
     // meanwhile, and a start that fails reaches the viewer as `exit`.
-    carrier.attached(hostStream)
+    carrier.attached(viewer.hostStream)
     viewer.stream.use(carrier.link)
     const view = await showing.catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
     if (view instanceof Error) return viewer.stream.write('exit', { code: 1, message: view.message })
@@ -1101,10 +1148,22 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   // Another machine moves a session here, or starts a new one here, and hears whether it runs.
   relay.on('move', (message) => void receiveMove(capture, message, { environment, checkouts, onRecordsChange }))
   relay.on('start', (message) => void receiveStart(capture, message, { environment, checkouts, onRecordsChange }))
-  // Another machine took a session, as it comes or while this machine was away, and its background job here stops.
-  relay.on('released', (message) => void receiveReleased(capture, message, mover))
-  relay.on('welcome', ({ waiting }) => {
-    for (const message of waiting) void receiveReleased(capture, message, mover)
+  // Another machine took a session, and its background job here stops: at the `released` this socket takes, and at
+  // each welcome of it for every job of a session the database names another holder of, as every program process here
+  // writes the `released` it takes into the database, a command's connect too, whose `heard` ends the Pool's. The
+  // database keeps the holder's name alone, which is all `receiveReleased` takes. Each job stops once, whichever comes.
+  const releasing = new Set<string>()
+  const release = (session: string, holder: string): void => {
+    if (releasing.has(session)) return
+    releasing.add(session)
+    void receiveReleased(capture, session, holder, mover).finally(() => releasing.delete(session))
+  }
+  relay.on('released', ({ session, to }) => release(session, to.name))
+  relay.on('welcome', async () => {
+    for (const { sessionId, kind } of await recordedSessions(roots.claudeHome)) {
+      const holder = journalOf(db, sessionId)?.holder ?? ''
+      if (kind === 'background' && holder !== '') release(sessionId, holder)
+    }
   })
 
   // Each `anyhost attach` on this machine. Its first text message is its attach, and so is each later one, with the
@@ -1177,9 +1236,16 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     viewers.get(stream)?.stream.receive(bytes.subarray(5))
     toLeg(stream, bytes.subarray(5))
   })
-  // a new socket holds none of the streams the last one carried
+  // A new socket holds none of the streams the last one carried. The Pool tells a viewer so only once this machine's
+  // last socket closed, while it still lists a half-open one, as this machine's after a sleep, so each viewer the relay
+  // reached hears `detach` from here and attaches again, which links its stream again under the same `hostStream`. Each
+  // `anyhost attach` here that views another machine's session hears `detach` too.
   relay.on('welcome', () => {
-    for (const [stream, viewer] of viewers) if (viewer.carrier.isRelay) unlink(stream)
+    for (const [stream, viewer] of viewers) {
+      if (!viewer.carrier.isRelay || !viewer.isLinked) continue
+      unlink(stream)
+      relay.send({ t: 'detach', stream })
+    }
     for (const [stream, leg] of legs) if (leg.data.isHere !== true) toLeg(stream, { t: 'detach', stream })
   })
   await startLineOffsets(capture)
@@ -1210,8 +1276,12 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         }
         const { stream, isHere } = leg.data
         if (stream === undefined) return
-        if (isHere === true) viewers.get(stream)?.stream.receive(new Uint8Array(message))
-        else relay.send(encodeStream(stream, message))
+        const frame = new Uint8Array(message)
+        if (isHere === true) viewers.get(stream)?.stream.receive(frame)
+        // A frame the relay refused, as while this machine's socket is down, went nowhere, so `anyhost attach` hears
+        // `offline` with its offset and counts no frame from there on as carried, nor the keys it takes until it links
+        // again: a new host stream gets them all.
+        else if (!relay.send(encodeStream(stream, frame))) toLeg(stream, { t: 'offline', stream, to: '', at: offsetOf(frame) })
       },
       // `anyhost attach` ended, so the machine that shows it the session stops
       close(leg) {

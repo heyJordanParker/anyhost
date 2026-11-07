@@ -6,12 +6,12 @@ A push to `main` that raises the version releases it. The [CI workflow](../.gith
 
 1. Raise `version` in `.claude-plugin/plugin.json`. The `anyhost` program prints the same version, because it reads that file when it is built.
 2. Add a `## [<version>] - <date>` section to `CHANGELOG.md` with what changed for the people who use anyhost. `cmod publish` refuses a version without one.
-3. Run `bun test`, `bun run --cwd cli check` and `cmod check .`, then commit.
+3. Run `bun test`, `bun run --cwd cli check`, `bun run --cwd relay check` and `cmod check .`, then commit.
 4. Push to `main`.
 
 CI then:
 
-1. runs `bun run --cwd cli check`, `bun test` and `cmod check .` on macOS and on Linux, where it first starts the runner user's systemd, which runs each `claude --bg` and `claude attach` in a scope;
+1. runs `bun run --cwd cli check`, `bun run --cwd relay check`, `bun test` and `cmod check .` on macOS and on Linux, where it first starts the runner user's systemd, which runs each `claude --bg` and `claude attach` in a scope;
 2. releases only once both passed, and skips the release when the tag `v<version>` exists, so a push that keeps the version releases nothing;
 3. runs `cmod publish .`, which:
    - builds the mod's release from the committed files `package.json` `files` lists, bundles its hooks, and validates it with `claude plugin validate --strict`;
