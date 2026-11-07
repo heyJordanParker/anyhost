@@ -59,6 +59,8 @@ export function attach(asked: string): Promise<number> {
   // The way through this machine's program and the relay, from the host's `attached` on, and the direct connection to
   // the host, which carries the stream whenever it is up.
   let leg: Link | undefined
+  // the id of the host's end of the stream this side last linked with, which the host's `attached` names
+  let hostStream: number | undefined
   let direct: DirectLink | undefined
   let offer: DirectOffer | undefined
   let isDialing = false
@@ -147,7 +149,7 @@ export function attach(asked: string): Promise<number> {
       failures += 1
       retry = setTimeout(() => (socket?.readyState === WebSocket.OPEN ? socket.send(attachMessage()) : connect()), waitAfter(failures))
     }
-    // The stream's host so far holds it no more, as after `moved` or an `attached` that kept no stream: its direct
+    // The stream's host so far holds it no more, as after `moved` or an `attached` of another host stream: its direct
     // connection closes, the stream starts over for the next host, and the next dial goes at once.
     const leaveHost = (): void => {
       clearTimeout(redial)
@@ -169,13 +171,15 @@ export function attach(asked: string): Promise<number> {
       ws.addEventListener('message', (event) => {
         if (socket !== ws) return
         if (typeof event.data !== 'string') return frames.receive(new Uint8Array(event.data as ArrayBuffer))
-        const message = JSON.parse(event.data) as { readonly t: string; readonly message?: string; readonly kept?: boolean } & Partial<DirectOffer>
+        const message = JSON.parse(event.data) as { readonly t: string; readonly message?: string; readonly hostStream?: number } & Partial<DirectOffer>
         if (message.t === 'attached') {
           wasAttached = true
           failures = 0
-          // A host that kept no stream of this viewer, as its restarted program or one that forgot the viewer, takes the
-          // stream from its first byte, and the keys no link carried meanwhile reach it.
-          if (message.kept === false) leaveHost()
+          // A host stream this side never linked with, as a restarted host program or one that forgot the viewer opens,
+          // takes the stream from its first byte, and the keys no link carried meanwhile reach it, even when this side
+          // missed that host's earlier `attached`.
+          if (message.hostStream !== hostStream) leaveHost()
+          hostStream = message.hostStream
           leg = { send: (frame) => ws.send(frame) }
           offer = { port: message.port ?? 0, addresses: message.addresses ?? [] }
           if (direct === undefined) frames.use(leg)
@@ -201,6 +205,7 @@ export function attach(asked: string): Promise<number> {
     frames.on('moved', () => {
       offer = undefined
       leg = undefined
+      hostStream = undefined
       leaveHost()
       id = newStream()
       key = newKey()

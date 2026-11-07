@@ -4,7 +4,7 @@ import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
 import { checkoutOf, continueJournal, isCodePart, linesOf, markUntold, recordSummary, stopJournal, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
-import { HeldElsewhere, takeClaim } from './claims.ts'
+import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { devicesOf, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
@@ -240,8 +240,8 @@ export async function openSession(session: ListedSession, cwd: string): Promise<
 export async function restore(capture: Capture, id: string, options: { take: boolean; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
   const { relay, db, roots } = capture
   const devices = await devicesOf(relay)
-  const indexes = await indexesOf(relay, devices.keys())
-  const session = (await listSessions(relay, { devices, indexes })).find((entry) => entry.id === id)
+  const [indexes, claims] = await Promise.all([indexesOf(relay, devices.keys()), claimsOf(relay, id)])
+  const session = (await listSessions(relay, { devices, indexes, claims })).find((entry) => entry.id === id)
   if (session === undefined) throw new Error(`No machine lists the session ${id}. anyhost list shows every session.`)
   // A session only the machine it started on wrote is that machine's by capture alone, so a resume takes it. Once
   // another machine resumed it, which lists it then, taking it needs --take.

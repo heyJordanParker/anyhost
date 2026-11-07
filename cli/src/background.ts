@@ -4,7 +4,6 @@
 import type { Subprocess } from 'bun'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { rootsHere } from './device.ts'
 
 // A service gets the person's Claude Code in CLAUDE_CODE_EXECPATH, which cmod sets, and a command finds it on PATH.
 const claude = (): string => process.env['CLAUDE_CODE_EXECPATH'] || 'claude'
@@ -54,8 +53,10 @@ export type RunningSession = {
 
 // `claude attach` under a terminal of this program's. Bun's terminal gives its child no controlling terminal, so a
 // resize signals nobody, and `resize` sends the child SIGWINCH itself (worker-spec W2). `exited` answers the signal
-// that ended it, or null when it ended by itself. Once it ended, `write` throws, as Bun's closed terminal does, and
-// `resize` does nothing, as the attach after it opens at the size its viewers draw.
+// that ended it, or null when it ended by itself. Its terminal closes as `exited` resolves, never before, as Bun 1.4.4
+// closes a terminal only at its `close()`, on macOS and Linux alike, even after the child closed its side or died by
+// SIGKILL. From then on `write` throws, as Bun's closed terminal does, and `resize` does nothing, as the attach after it
+// opens at the size its viewers draw.
 export type AttachedTerminal = {
   write(bytes: Uint8Array): void
   resize(cols: number, rows: number): void
@@ -262,11 +263,11 @@ export async function startInBackground(session: string | undefined, cwd: string
 // id, as `claude --bg --resume` would start a copy under a new one. Any other session starts in Claude Code's background
 // in `cwd`, the folder it continues in here, and runs from then on. A session Claude Code runs in a terminal of its own
 // shows only there. `isKept` says the job is one Claude Code kept. `machine` names this machine in the refusals. The
-// record of a running session names its job and its kind, so only a session no record names runs `claude agents`,
-// which took 0.74 to 4.59 s on test machines.
-export async function backgroundJobOf(session: string, cwd: string, env: Record<string, string>, machine: string): Promise<{ readonly id: string; readonly cwd: string; readonly isKept: boolean }> {
+// record of a running session under `claudeHome` names its job and its kind, so only a session no record names runs
+// `claude agents`, which took 0.74 to 4.59 s on test machines.
+export async function backgroundJobOf(claudeHome: string, session: string, cwd: string, env: Record<string, string>, machine: string): Promise<{ readonly id: string; readonly cwd: string; readonly isKept: boolean }> {
   const isSession = (entry: RunningSession): boolean => entry.sessionId === session
-  const recorded = (await recordedSessions(rootsHere().claudeHome)).find(isSession)
+  const recorded = (await recordedSessions(claudeHome)).find(isSession)
   const kept = recorded?.kind === 'interactive' || recorded?.id !== undefined ? recorded : (await keptSessions()).find(isSession)
   if (kept?.kind === 'interactive') throw new Error(`${machine} runs the session ${session} in a terminal of its own, so only that terminal shows it.`)
   if (kept?.id !== undefined) return { id: kept.id, cwd: kept.cwd, isKept: true }

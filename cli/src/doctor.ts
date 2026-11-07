@@ -1,12 +1,21 @@
 import plugin from '../../.claude-plugin/plugin.json'
 import { PROTOCOL_VERSION, type Health } from '../../relay/protocol.ts'
 import { cmodDevice, relayLogin } from './device.ts'
+import { DAILY_LIMIT, isDailyLimit } from './relay.ts'
 import { serveSocket, type Status } from './serve.ts'
 
 type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
 
 const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod makes the anyhost program a service of the machine, which records its sessions from each login on.'
 const JOIN = 'Connect your machines in the anyhost mod: Connect Cloudflare on your first machine, and on every other machine paste the command Add a machine gives in /machines on a joined one.'
+const UPDATE = 'The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.'
+// cmod runs the program as the service com.claudemodmanager.anyhost.anyhost: a launchd agent on macOS and a systemd user
+// service on Linux, which a logout leaves running for a user systemd lingers for. A Linux machine with no systemd user
+// session runs the program from Claude Code instead.
+const RESTART =
+  process.platform === 'darwin'
+    ? 'Restart the program with launchctl kickstart -k gui/$(id -u)/com.claudemodmanager.anyhost.anyhost.'
+    : 'Restart the program with systemctl --user restart com.claudemodmanager.anyhost.anyhost, or, where no systemd user session runs it, close every Claude Code session and start one.'
 // The relay answered /v1/health in under a second from the test machines (relay-spec R11).
 const HEALTH_MS = 10_000
 
@@ -19,9 +28,20 @@ async function relayChecks(): Promise<Check[]> {
   if (login instanceof Error) return [{ problem: `anyhost cannot read which relay this machine joined: ${login.message}`, fix: JOIN }]
   if (login === undefined) return [{ problem: 'This machine is not joined to your relay, so anyhost uploads nothing from it.', fix: JOIN }]
   const joined: Check = { ok: `This machine is joined to the relay at ${login.url}.` }
-  const health = await fetch(`${login.url}/v1/health`, { signal: AbortSignal.timeout(HEALTH_MS) })
-    .then(async (answer) => (answer.ok ? ((await answer.json()) as Health) : new Error(`it answered ${answer.status}`)))
-    .catch((error: unknown) => new Error(messageOf(error)))
+  const answer = await fetch(`${login.url}/v1/health`, { signal: AbortSignal.timeout(HEALTH_MS) }).then(
+    async (got) => ({ status: got.status, text: await got.text() }),
+    (error: unknown) => new Error(messageOf(error)),
+  )
+  if (!(answer instanceof Error) && isDailyLimit(answer.status, answer.text)) return [joined, { problem: DAILY_LIMIT, fix: 'Wait until 00:00 UTC. The program keeps every change meanwhile and uploads it once the relay answers.' }]
+  const health = ((): Health | Error => {
+    if (answer instanceof Error) return answer
+    if (answer.status !== 200) return new Error(`it answered ${answer.status}`)
+    try {
+      return JSON.parse(answer.text) as Health
+    } catch {
+      return new Error(`it answered 200 with no health: ${answer.text.trim().slice(0, 200)}`)
+    }
+  })()
   if (health instanceof Error) return [joined, { problem: `The relay at ${login.url} did not answer: ${health.message}`, fix: 'Check this machine reaches the internet. The program keeps every change meanwhile and uploads it once the relay answers.' }]
   if (health.protocol < PROTOCOL_VERSION) {
     return [joined, { problem: `The relay at ${login.url} answers protocol ${health.protocol}, and anyhost ${plugin.version} needs ${PROTOCOL_VERSION}.`, fix: 'Connect Cloudflare again in the anyhost mod, or run anyhost connect, which updates the relay.' }]
@@ -39,6 +59,9 @@ async function deviceCheck(): Promise<Check> {
 function programChecks(address: string, status: Status | undefined): Check[] {
   if (status === undefined) return [{ problem: `The anyhost program does not answer at ${address}.`, fix: START_CLAUDE }]
   const { url, state, message, bucket } = status.relay
+  // an outdated relay and the failed update of it are one cause, so they make one line with the update's fix
+  const { updateProblem } = status
+  const isOutdatedUpdate = state === 'outdated' && updateProblem !== undefined
   const connection: Check =
     state === 'connected'
       ? {
@@ -46,13 +69,15 @@ function programChecks(address: string, status: Status | undefined): Check[] {
         }
       : state === 'connecting'
         ? { wait: `The anyhost program at ${address} connects to the relay, and ${status.pending} files wait for it.` }
-        : state === 'refused' || state === 'outdated'
-          ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Do what the line says. The program connects again within a minute.' }
-          : state === 'unjoined'
-            ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
-            : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
+        : isOutdatedUpdate
+          ? { problem: `The anyhost program at ${address} captures nothing: ${message} Its own update of the relay failed: ${updateProblem}`, fix: UPDATE }
+          : state === 'refused' || state === 'outdated'
+            ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Do what the line says. The program connects again within a minute.' }
+            : state === 'unjoined'
+              ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
+              : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
   // the program reads the shell's environment once at its start, so a fix takes a restart
-  const shell: Check = status.shellProblem === undefined ? { ok: 'The sessions the program starts get the environment your login shell sets up.' } : { problem: status.shellProblem, fix: 'Make your login shell start with no terminal and no input, then log out and in again, which starts the program anew.' }
+  const shell: Check = status.shellProblem === undefined ? { ok: 'The sessions the program starts get the environment your login shell sets up.' } : { problem: status.shellProblem, fix: `Make your login shell start with no terminal and no input. ${RESTART}` }
   // a stream macOS keeps off the local network still runs, through the relay
   const localNetwork: Check[] =
     status.localNetworkProblem === undefined
@@ -77,13 +102,10 @@ function programChecks(address: string, status: Status | undefined): Check[] {
               fix: 'The program does not try that link again. Press Add a machine in /machines on a joined machine, then paste its command into the Connect your machines step of the anyhost mod, or run anyhost join with its link here.',
             },
           ]
-  const update: Check[] =
-    status.updateProblem === undefined
-      ? []
-      : [{ problem: status.updateProblem, fix: 'The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.' }]
+  const update: Check[] = updateProblem === undefined || isOutdatedUpdate ? [] : [{ problem: updateProblem, fix: UPDATE }]
   // the listener starts once a run, and viewers on other machines go through the relay without it
   const direct: Check[] =
-    status.directProblem === undefined ? [] : [{ problem: `${status.directProblem} Viewers on other machines reach this machine through the relay meanwhile.`, fix: 'Log out and in again, which starts the program anew.' }]
+    status.directProblem === undefined ? [] : [{ problem: `${status.directProblem} Viewers on other machines reach this machine through the relay meanwhile.`, fix: RESTART }]
   const retried = status.problems.map((problem): Check => ({ problem, fix: 'The program tries this again by itself, and this line goes once it works.' }))
   return [connection, ...join, shell, ...localNetwork, ...update, ...direct, ...retried, ...gaps]
 }

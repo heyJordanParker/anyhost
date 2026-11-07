@@ -176,6 +176,23 @@ test('a drain of several sessions goes up in one request, each session claimed b
   expect(relay.requests.flat().filter(({ op }) => op === 'claim')).toHaveLength(2)
 })
 
+// The suite missed it: no test drained after a reconnect, so none saw that a program claimed each session once per
+// start, and a takeover whose `released` a dying socket swallowed reached this machine only at a refused frame.
+test('the first drain of a session after the relay welcomes the machine again claims it again', async () => {
+  const relay = await memoryRelay()
+  const { transcript, capture, upload } = machine(deviceA, relay)
+  writeFileSync(transcript, lines[0] ?? '')
+  await upload(transcript)
+  capture.relay.reconnect()
+  await welcomed(capture.relay)
+
+  appendFileSync(transcript, lines[1] ?? '')
+  await upload(transcript)
+
+  const drains = relay.requests.filter((ops) => ops.some((op) => op.op === 'put' && op.key.startsWith(`journals/${SESSION}/`)))
+  expect(drains.map((ops) => ops.filter(({ op }) => op === 'claim').length)).toEqual([1, 1])
+})
+
 test('a frame over 1 MiB goes up by HTTP beside the request, and the journal reads it back byte for byte', async () => {
   const relay = await memoryRelay()
   const { transcript, upload, capture } = machine(deviceA, relay)

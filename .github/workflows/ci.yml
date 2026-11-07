@@ -31,7 +31,7 @@ jobs:
         with:
           bun-version: 1.4.4
 
-      - name: Install Claude Code and cmod, which check and publish the mod
+      - name: Install Claude Code and cmod, which check the mod
         run: |
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -85,11 +85,9 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install -g @cmodjs/cli
 
-      - name: Install the packages of the mod, the program and the relay
-        run: |
-          bun install --frozen-lockfile
-          bun install --cwd cli --frozen-lockfile
-          bun install --cwd relay --frozen-lockfile
+      # The program's build installs its own packages, and the relay's bundle needs none.
+      - name: Install the packages of the mod
+        run: bun install --frozen-lockfile
 
       - name: Release the version when it is new
         run: |

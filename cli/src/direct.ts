@@ -125,7 +125,7 @@ export function cipherOf(key: Uint8Array, stream: number, viewerSalt: Uint8Array
 // most `limit()`. A callback that answers false closes the connection, and so does a frame past the limit.
 function readFrames(socket: Socket, opening: number, limit: () => number, onOpening: (bytes: Buffer) => boolean, onFrame: (body: Buffer) => boolean): void {
   let pending: Buffer = Buffer.alloc(0)
-  let isOpened = opening === 0
+  let isOpened = false
   socket.on('data', (chunk: Buffer) => {
     pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk])
     if (!isOpened) {
@@ -146,9 +146,15 @@ function readFrames(socket: Socket, opening: number, limit: () => number, onOpen
   })
 }
 
-// A connection whose hellos both opened: it seals every frame, pings every PING_MS, and ends once SILENCE_MS pass with
-// nothing heard, or the connection closes. `heard` takes each sealed frame after the hello.
-function linkOn(socket: Socket, address: string, seal: Cipher, open: Cipher, receive: (frame: Uint8Array) => void): { readonly link: DirectLink; readonly heard: (body: Buffer) => boolean } {
+// A connection whose other end's hello, `hello`, opens empty under the stream's key, or undefined when it does not: it
+// seals every frame, pings every PING_MS, and ends once SILENCE_MS pass with nothing heard, or the connection closes.
+// `heard` takes each sealed frame after the hello.
+function linkOn(socket: Socket, address: string, seal: Cipher, open: Cipher, hello: Buffer, receive: (frame: Uint8Array) => void): { readonly link: DirectLink; readonly heard: (body: Buffer) => boolean } | undefined {
+  try {
+    if (open.open(hello).length > 0) return undefined
+  } catch {
+    return undefined
+  }
   let isEnded = false
   let endWith: (why: string) => void = () => undefined
   const ended = new Promise<string>((resolve) => (endWith = resolve))
@@ -241,16 +247,13 @@ export async function listenDirect(folder: string, problems: Problems, addresses
         if (heard !== undefined) return heard(body)
         const holding = opened === undefined ? undefined : held.get(opened.stream)
         if (opened === undefined || holding === undefined) return false
-        try {
-          if (opened.open.open(body).length > 0) return false
-        } catch {
-          return false
-        }
+        const linked = linkOn(socket, socket.localAddress ?? '', opened.seal, opened.open, body, holding.receive)
+        if (linked === undefined) return false
         clearTimeout(late)
+        // this side's hello, its first sealed frame, before any ping
         socket.write(opened.seal.seal(EMPTY))
-        const { link, heard: hear } = linkOn(socket, socket.localAddress ?? '', opened.seal, opened.open, holding.receive)
-        heard = hear
-        holding.linked(link)
+        heard = linked.heard
+        holding.linked(linked.link)
         return true
       },
     )
@@ -379,14 +382,10 @@ export function dialDirect(offer: DirectOffer, stream: number, key: string, rece
         // the host's hello, empty, which opens under the stream's key
         (body) => {
           if (heard !== undefined) return heard(body)
-          try {
-            if (open.open(body).length > 0) return false
-          } catch {
-            return false
-          }
+          const linked = linkOn(socket, address, seal, open, body, receive)
+          if (linked === undefined) return false
           isOver = true
           clearTimeout(late)
-          const linked = linkOn(socket, address, seal, open, receive)
           heard = linked.heard
           resolve(linked.link)
           return true

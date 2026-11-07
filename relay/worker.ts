@@ -17,7 +17,7 @@ async function putObject(env: Env, pool: DurableObjectStub<Pool>, key: string, r
   using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')), holder)
   if ('refused' in authorized) return reply(authorized.refused)
   const written = await conditionalPut(env.BUCKET, key, request.body, request.headers)
-  if ('stored' in written) return Response.json({ etag: written.stored.etag, size: written.stored.size })
+  if ('stored' in written) return Response.json({ etag: written.stored.etag })
   return reply(refuse(412, 'precondition', `${key} failed the request's If-Match or If-None-Match.`, written.etag === undefined ? {} : { etag: written.etag }))
 }
 

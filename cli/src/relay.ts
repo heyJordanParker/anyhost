@@ -36,7 +36,8 @@ import {
 } from '../../relay/protocol.ts'
 
 // Cloudflare closes a socket that carries nothing for a while and names no number: one quiet for 10 minutes was closed
-// by then, and one pinged every 30 seconds had every pong back within 40 seconds over 50 minutes (relay-spec R16).
+// by then, and one pinged every 30 seconds had every pong back within 40 seconds over 50 minutes (relay-spec R16). The
+// Pool counts a socket alive only while its last ping is within LIVE_MS (40 s), so a ping goes well within that.
 const PING_MS = 30_000
 const PONG_MS = 40_000
 // A socket that brings no answer for ANSWER_MS while a request sent on it waits counts as dropped, and every request it
@@ -45,7 +46,8 @@ const PONG_MS = 40_000
 // one at 240 KB/s that carries the answers to a seal's 16 gets of about 700 KB each, the last past 40 s. A drain
 // was answered in 1,714 ms at p90 and 2,098 ms at most over 20 drains (relay-spec R10), and one answer of
 // MAX_MESSAGE_BYTES takes 21 s at the 100 KB/s a write counts as the slowest link. So only a lost answer waits this
-// long, as one did once R2 failed a get's body, and so does nothing else on a dropped socket (PONG_MS).
+// long, which no path of the Pool loses today, as it answers a get whose body R2 failed with `storage`, and so does
+// nothing else on a dropped socket (PONG_MS).
 const ANSWER_MS = 40_000
 // A socket opened in 494 to 689 ms on a home link (R16).
 const CONNECT_MS = 10_000
@@ -67,14 +69,15 @@ const OBJECT_TRIES = 6
 export type Login = { readonly url: string; readonly token: string }
 // A put carries its bytes, whose length its op names as `size`.
 export type Call = Exclude<Op, { readonly op: 'put' }> | { readonly op: 'put'; readonly key: string; readonly bytes: Uint8Array; readonly if?: Condition; readonly holder?: string }
-type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string; readonly bytes: Uint8Array }
+type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly bytes: Uint8Array }
 // An op's answer, a get's with its bytes, which come by HTTP when the relay's answer had no room for them. A result that
 // names an error, as a failed R2 call does, rejects instead.
 export type RanOf<K extends Op['op']> = K extends 'get' ? Got | { readonly status: 404 } : Results[K]
 type Ran = RanOf<Op['op']>
 // `connected` once the welcome came. `unjoined` is no login, as before a join or after the relay refused the login for
 // good, `offline` a relay that does not answer or a login that failed to read, each tried again, `outdated` a relay
-// older than this program needs, and `refused` a clone of a connected machine.
+// that answers an older protocol than this program speaks, while an older relay at this protocol is `connected`, and
+// `refused` a clone of a connected machine.
 export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
@@ -126,9 +129,9 @@ const NOT_JOINED = 'This machine is not joined to your relay, so anyhost keeps w
 // Cloudflare answers a Worker past the Free plan's 100,000 requests a day with 429 and `error code: 1027` until midnight
 // UTC (workers/platform/limits, "Daily requests"), while open sockets go on carrying requests, which are no Worker
 // requests. Cloudflare's documentation names no status or body for 1027: 429 and that body are what workers.dev answered
-// a client that is no browser (github.com/rancher/rke2/issues/11326).
-const DAILY_LIMIT = 'Cloudflare refuses the relay with its error 1027: the relay\'s Worker reached the Free plan\'s limit of 100,000 requests a day, which resets at 00:00 UTC.'
-const isDailyLimit = (status: number, body: string): boolean => status === 429 && body.includes('error code: 1027')
+// a client that is no browser (github.com/rancher/rke2/issues/11326). anyhost doctor reads the relay's health the same way.
+export const DAILY_LIMIT = 'Cloudflare refuses the relay with its error 1027: the relay\'s Worker reached the Free plan\'s limit of 100,000 requests a day, which resets at 00:00 UTC.'
+export const isDailyLimit = (status: number, body: string): boolean => status === 429 && body.includes('error code: 1027')
 const md5 = (bytes: Uint8Array): string => new Bun.CryptoHasher('md5').update(bytes).digest('hex')
 const objectUrl = (login: Login, key: string): string => `${login.url}/v1/objects/${key.split('/').map(encodeURIComponent).join('/')}`
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -215,8 +218,9 @@ export function connectRelay(options: RelayOptions): Relay {
     clearTimeout(answerDue)
     answerDue = setTimeout(() => drop({ is: 'offline', message: `The relay at ${login?.url} sent no answer for ${ANSWER_MS / 1000} seconds while a request waited.` }), ANSWER_MS)
   }
-  const send = (request: Pending): void => {
-    socket?.send(request.message)
+  // a request on the socket the relay welcomed
+  const send = (on: WebSocket, request: Pending): void => {
+    on.send(request.message)
     request.wasSent = true
     if (answerDue === undefined) waitForAnswer()
   }
@@ -265,7 +269,7 @@ export function connectRelay(options: RelayOptions): Relay {
     else request.resolve({ results: answer.results, bytes })
   }
 
-  const heard = (text: string): void => {
+  const heard = (ws: WebSocket, text: string): void => {
     if (text === 'pong') {
       clearTimeout(pongDue)
       pongDue = undefined
@@ -285,7 +289,7 @@ export function connectRelay(options: RelayOptions): Relay {
       emit('welcome', message)
       const again = unanswered.filter((request) => request.wasSent).length
       if (again > 0) console.error(`${new Date().toISOString()} anyhost sends again ${again === 1 ? 'the request' : `the ${again} requests`} the relay had not answered.`)
-      for (const request of unanswered) send(request)
+      for (const request of unanswered) send(ws, request)
       for (const waiter of waiting) if (login !== undefined) waiter.resolve(login)
       waiting.clear()
       return
@@ -326,7 +330,7 @@ export function connectRelay(options: RelayOptions): Relay {
     ws.addEventListener('message', (event) => {
       if (socket !== ws) return
       try {
-        if (typeof event.data === 'string') return heard(event.data)
+        if (typeof event.data === 'string') return heard(ws, event.data)
         const bytes = new Uint8Array(event.data as ArrayBuffer)
         if (bytes[0] === ANSWER) answered(bytes)
         else if (bytes[0] === STREAM) emit('stream', bytes)
@@ -374,7 +378,7 @@ export function connectRelay(options: RelayOptions): Relay {
     return new Promise((resolve, reject) => {
       const asked: Pending = { message, wasSent: false, resolve, reject }
       pending.set(id, asked)
-      if (state.is === 'connected') send(asked)
+      if (state.is === 'connected' && socket !== undefined) send(socket, asked)
     })
   }
 
@@ -444,7 +448,7 @@ export function connectRelay(options: RelayOptions): Relay {
           idle = setTimeout(() => controller.abort(new Error(`no byte came for ${IDLE_MS / 1000} seconds`)), IDLE_MS)
         }
         if (got !== size) throw new Error(`the download of ${key} ended at byte ${got} of ${size}`)
-        return { status: 200, etag, size, modified: new Date(answer.headers.get('last-modified') ?? 0).toISOString(), bytes: Buffer.concat(parts) }
+        return { status: 200, etag, size, bytes: Buffer.concat(parts) }
       } finally {
         clearTimeout(idle)
       }

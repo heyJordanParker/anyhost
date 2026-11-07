@@ -11,6 +11,11 @@ export const MAX_OPS = 100
 // The bytes of a request's puts, and of an answer's gets. A larger object travels as its own HTTP request.
 export const MAX_MESSAGE_BYTES = 1024 * 1024
 export const INVITE_MS = 10 * 60_000
+// A machine's socket is alive while its last ping, or its connect, is this recent: the program pings every 30 seconds
+// (`PING_MS` in `cli/src/relay.ts`). Cloudflare keeps listing the socket of a machine that went to sleep until a message
+// sent on it fails, which a silent socket met only at 10 minutes (relay-spec R16), so the Pool delivers only to a live
+// socket and keeps a `released` for a machine with none in `waiting`.
+export const LIVE_MS = 40_000
 // What the R2 binding lists and deletes in one call.
 export const MAX_KEYS = 1000
 
@@ -53,8 +58,9 @@ export type Refusal = { readonly error: ErrorCode; readonly message: string }
 export type Roots = { readonly home: string; readonly claudeHome: string; readonly claudeTmp: string; readonly codexHome: string }
 export type DeviceRef = { readonly id: string; readonly name: string }
 export type JoiningDevice = DeviceRef & { readonly os: string; readonly arch: string; readonly roots: Roots }
-// A removed machine stays listed with `removedAt`, so its sessions stay listed and resumable from its roots.
-export type Device = JoiningDevice & { readonly connected: boolean; readonly joinedAt: string; readonly seenAt: string; readonly removedAt?: string }
+// A removed machine stays listed with `removedAt`, so its sessions stay listed and resumable from its roots. `connected`
+// says it holds a socket alive within LIVE_MS.
+export type Device = JoiningDevice & { readonly connected: boolean; readonly seenAt: string; readonly removedAt?: string }
 
 // GET /v1/health
 export type Health = { readonly relay: number; readonly protocol: number; readonly bucket: string }
@@ -80,14 +86,15 @@ export type Op =
   | { readonly op: 'invite' }
   | { readonly op: 'remove'; readonly device: string }
 
-export type Listed = { readonly key: string; readonly size: number; readonly modified: string }
-export type Claim = DeviceRef & { readonly at: string }
+export type Listed = { readonly key: string; readonly size: number }
+// the machine that holds a session
+export type Claim = DeviceRef
 
 // What each op answers, by the op. A `get` answered 200 carries `size` bytes in the answer's bytes, and one the answer
 // has no room for answers 413. A `claim` names the machine it took the session from only while that machine has not
 // heard of it. Every op answers a request sent again after a lost answer as it answered the first.
 export type Results = {
-  readonly get: { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
+  readonly get: { readonly status: 200; readonly etag: string; readonly size: number } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
   readonly put: { readonly status: 200; readonly etag: string } | { readonly status: 412; readonly etag?: string } | { readonly status: 409; readonly holder: DeviceRef }
   readonly list: { readonly status: 200; readonly objects: readonly Listed[]; readonly cursor?: string }
   readonly delete: { readonly status: 200 }
@@ -107,12 +114,12 @@ export type Answer = { readonly id: number; readonly results: readonly Result[] 
 export type Released = { readonly t: 'released'; readonly session: string; readonly to: DeviceRef; readonly at: string }
 export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceRef; readonly waiting: readonly Released[] }
 
-// What a machine sends another: the Pool routes it to every socket of `to`, a device id, adding `from`. `attached` and
+// What a machine sends another: the Pool routes it to every live socket of `to`, a device id, adding `from`. `attached` and
 // `detach` name only their stream, whose two machines the Pool knows from the `attach` that opened it. `key` is the
 // base64 of the 32 random bytes that key the stream's direct connection, and `attached` is the host's answer, with the
-// port and the addresses that connection reaches it at, and `kept`, whether the host kept the viewer's stream, which a
-// host that restarted or forgot the viewer did not. `move` asks `to` to take the session and run it in Claude
-// Code's background, and `moved`, with the same `id`, answers that it runs it, or why it does not. `start` asks `to` to
+// port and the addresses that connection reaches it at, and `hostStream`, the random id the host drew for its own end of
+// the stream as it opened it, which a host that restarted or forgot the viewer draws anew. `move` asks `to` to take the
+// session and run it in Claude Code's background, and `moved`, with the same `id`, answers that it runs it, or why it does not. `start` asks `to` to
 // start a new session in its checkout of `repo` on `branch`, in `folder` inside it, or outside git in the folder at
 // `folder` on the asking machine, and `started` answers the session, or why it started none. `trusted` says the asking
 // machine's Claude Code trusts the session's folder, so `to` trusts the folder the session runs in there.
@@ -124,10 +131,10 @@ export type Routed =
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly session: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly error: string }
   | { readonly t: 'attach'; readonly stream: number; readonly to: string; readonly session: string; readonly cols: number; readonly rows: number; readonly key: string }
-  | { readonly t: 'attached'; readonly stream: number; readonly kept: boolean; readonly port: number; readonly addresses: readonly string[] }
+  | { readonly t: 'attached'; readonly stream: number; readonly hostStream: number; readonly port: number; readonly addresses: readonly string[] }
   | { readonly t: 'detach'; readonly stream: number }
 export type Delivered = Routed & { readonly from: DeviceRef }
-// The Pool's answer to a message for a machine with no open socket, or to one it cannot read.
+// The Pool's answer to a message for a machine with no socket alive within LIVE_MS, or to one it cannot read.
 export type Offline = { readonly t: 'offline'; readonly id?: string; readonly stream?: number; readonly to: string }
 export type Invalid = { readonly t: 'invalid'; readonly message: string }
 export type FromPool = Welcome | Released | Delivered | Offline | Invalid

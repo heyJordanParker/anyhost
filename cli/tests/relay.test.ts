@@ -5,7 +5,7 @@ import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSyn
 import { connect as dialTcp, createServer, type Socket } from 'node:net'
 import type { NetworkInterfaceInfo } from 'node:os'
 import { dirname, join } from 'node:path'
-import { MAX_MESSAGE_BYTES, cloneFixFor, encodeStream, streamOf } from '../../relay/protocol.ts'
+import { LIVE_MS, MAX_MESSAGE_BYTES, cloneFixFor, encodeStream, streamOf } from '../../relay/protocol.ts'
 import { isAlive } from '../src/background.ts'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, uploadSessions } from '../src/capture.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device, type MachineRoots } from '../src/device.ts'
@@ -304,10 +304,10 @@ test('a stream whose link dropped frames sends again from the offset the other s
 
 // A viewer's link to a host in production's order: the viewer links at the host's `attached`, which serve.ts sends
 // before its stream's first `use()`, so what the viewer sends reaches the host before the viewer hears the host's first
-// frame. At an `attached` whose `kept` says the host kept no stream of the viewer, the viewer's stream starts over, as
-// attach.ts starts it.
-const attachedTo = (viewer: Stream, host: Stream, kept: boolean): void => {
-  if (!kept) viewer.startOver()
+// frame. The `attached` names a host stream the viewer never linked with, so the viewer's stream starts over, as attach.ts
+// starts it.
+const attachedTo = (viewer: Stream, host: Stream): void => {
+  viewer.startOver()
   const held: Uint8Array[] = []
   let isHeld = true
   viewer.use({ send: (frame) => (isHeld ? void held.push(frame) : host.receive(frame)) })
@@ -331,7 +331,7 @@ test("keys typed before, during and after the loss of the host's stream, as its 
     }
     const type = (keys: string): void => viewer.write('input', encoder.encode(keys))
     const first = hostNamed('first')
-    attachedTo(viewer, first, false)
+    attachedTo(viewer, first)
     first.write('output', encoder.encode('first screen. '))
     type('earlier')
     // which the host acknowledges a second later
@@ -344,7 +344,7 @@ test("keys typed before, during and after the loss of the host's stream, as its 
     type('during')
 
     const second = hostNamed('second')
-    attachedTo(viewer, second, false)
+    attachedTo(viewer, second)
     second.write('output', encoder.encode('second screen.'))
     type('after')
     expect(typed).toEqual(['first:earlier', 'first:yes', 'second:during', 'second:after'])
@@ -354,8 +354,8 @@ test("keys typed before, during and after the loss of the host's stream, as its 
   }
 })
 
-// The kind of a stream frame, its first byte: 3 is output, 7 an acknowledgement, which names the offset a side holds in
-// its last 4 bytes, and 8 a side's start.
+// The kind of a stream frame, its first byte: 3 is output, and 7 an acknowledgement, a side's first frame on each link
+// too, which names the offset a side holds in its last 4 bytes.
 const kindOf = (frame: Uint8Array): number => frame[0] ?? 0
 const heldIn = (frame: Uint8Array): number => new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(5)
 // A link to `to` that keeps each frame it carries in `carried`.
@@ -375,19 +375,21 @@ test('a stream that takes nothing runs no timer, and one that takes frames ackno
     viewer.use(keptLinkTo(host, fromViewer))
     jest.advanceTimersByTime(60_000)
     expect(jest.getTimerCount()).toBe(0)
-    expect(fromViewer.map(kindOf)).toEqual([8])
+    // the link's first frame, which holds nothing yet
+    expect(fromViewer.map(kindOf)).toEqual([7])
+    expect(heldIn(fromViewer[0] ?? new Uint8Array())).toBe(0)
 
     host.write('output', encoder.encode('one '))
     jest.advanceTimersByTime(400)
     host.write('output', encoder.encode('two'))
     jest.advanceTimersByTime(599)
-    expect(fromViewer.map(kindOf)).toEqual([8])
+    expect(fromViewer.map(kindOf)).toEqual([7])
     jest.advanceTimersByTime(1)
-    expect(fromViewer.map(kindOf)).toEqual([8, 7])
+    expect(fromViewer.map(kindOf)).toEqual([7, 7])
     expect(heldIn(fromViewer[1] ?? new Uint8Array())).toBe('one two'.length)
     jest.advanceTimersByTime(60_000)
     expect(jest.getTimerCount()).toBe(0)
-    expect(fromViewer.map(kindOf)).toEqual([8, 7])
+    expect(fromViewer.map(kindOf)).toEqual([7, 7])
   } finally {
     jest.useRealTimers()
   }
@@ -682,12 +684,14 @@ const procStat = existsSync(`/proc/${process.pid}/stat`) ? readFileSync(`/proc/$
 const DAEMON_LOCK = JSON.stringify({ pid: process.pid, ...(procStat === undefined ? {} : { procStart: procStat.slice(procStat.lastIndexOf(')') + 2).split(' ')[19] }) })
 
 // A machine's folders, its relay login, the cmod that answers its device token and the options `person` sets, and the Claude Code that
-// runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen, prints the
-// terminal's size at its start, clears the screen and prints it again at each SIGWINCH in one write, as Claude Code
-// paints a frame, prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
+// runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen and prints the
+// terminal's size in one write at its start, after the seconds `draws-after` in the machine's folder holds when there is
+// one, clears the screen and prints it again at each SIGWINCH in one write, as Claude Code paints a frame, keeps its
+// terminal cooked, which echoes each key as the terminal takes it, prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
 // when its terminal closes. It reads the lines in a job of its own and waits for it, as a signal it traps ends a `wait`
 // at once, while bash 5 runs the trap of a signal that came during `read` only once a line comes. Each run goes into
-// `claude.log` in the machine's folder, with its arguments.
+// `claude.log` in the machine's folder, with its arguments. `claude agents` answers after the seconds `slow` in the
+// machine's folder holds, when there is one, as it took up to 4.59 s on test machines.
 // Its record in `sessions/` names the test's own process, which runs as long as the test, and so does the lock of
 // Claude Code's daemon, which a background session needs to run. `claude` replaces that Claude Code with a script of
 // the machine's folder.
@@ -720,10 +724,12 @@ async function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, c
         `#!/bin/bash
 echo "$*" >> '${join(folder, 'claude.log')}'
 case "$1" in
-  agents) printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
+  agents)
+    if [ -e '${join(folder, 'slow')}' ]; then sleep "$(cat '${join(folder, 'slow')}')"; fi
+    printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
   attach)
-    printf '\\033[?1049h'
-    echo "size $(stty size)"
+    if [ -e '${join(folder, 'draws-after')}' ]; then sleep "$(cat '${join(folder, 'draws-after')}')"; fi
+    printf '\\033[?1049hsize %s\\n' "$(stty size)"
     while IFS= read -r line; do [ "$line" = leave ] && exit 0; echo "typed $line"; done <&0 &
     trap 'printf "\\033[2Jsize %s\\n" "$(stty size)"' WINCH
     while kill -0 $! 2>/dev/null; do wait $!; done ;;
@@ -956,8 +962,70 @@ test('anyhost doctor beside a program whose option join failed prints why and th
   }
 })
 
+// The suite missed it: an outdated relay printed two ✘ lines for one cause, the connection's and its failed update's.
+test("anyhost doctor beside a program whose relay is outdated and whose update of it failed prints one ✘ line with the update's fix", async () => {
+  const { env, socket } = await machineFor(await memoryRelay(), HOST, false)
+  const message = 'The relay at https://anyhost.parker-labs.workers.dev answers protocol 0, and anyhost 0.9.0 needs 1. Connect Cloudflare again to update the relay.'
+  const update = '2026-11-07T09:20:00.000Z relay update: Error: cf is logged in to no Cloudflare account on this machine. Connect Cloudflare logs it in.'
+  const status: Status = {
+    device: HOST,
+    relay: { url: 'https://anyhost.parker-labs.workers.dev', state: 'outdated', message, bucket: 'anyhost' },
+    pending: 3,
+    uploadEvery: 5,
+    capturedAt: '',
+    problems: [],
+    journalGaps: [],
+    updateProblem: update,
+  }
+  const program = Bun.serve({ unix: socket, fetch: () => Response.json(status) })
+  try {
+    const { code, out } = await anyhostOn(env, ['doctor'])
+    expect(code).toBe(1)
+    const problems = out.split('\n').filter((line) => line.startsWith('✘'))
+    expect(problems).toEqual([`✘ The anyhost program at ${socket} captures nothing: ${message} Its own update of the relay failed: ${update}`])
+    const lines = out.split('\n')
+    expect(lines[lines.indexOf(problems[0] ?? '') + 1]).toBe('  The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.')
+  } finally {
+    await program.stop(true)
+  }
+})
+
+// The suite missed it: "log out and in again" leaves a systemd user service that lingers running, so it restarted no
+// program on such a Linux machine.
+test('anyhost doctor names the command that restarts the program as the service of this machine, for a problem only a restart fixes', async () => {
+  const { env, socket } = await machineFor(await memoryRelay(), HOST, false)
+  const direct = 'anyhost offers viewers on other machines no direct connection: Error: EADDRINUSE: address already in use.'
+  const status: Status = { device: HOST, relay: { url: '', state: 'connecting', message: '', bucket: '' }, pending: 0, uploadEvery: 5, capturedAt: '', problems: [], journalGaps: [], directProblem: direct }
+  const program = Bun.serve({ unix: socket, fetch: () => Response.json(status) })
+  try {
+    const { out } = await anyhostOn(env, ['doctor'])
+    const lines = out.split('\n')
+    const restart =
+      process.platform === 'darwin'
+        ? 'Restart the program with launchctl kickstart -k gui/$(id -u)/com.claudemodmanager.anyhost.anyhost.'
+        : 'Restart the program with systemctl --user restart com.claudemodmanager.anyhost.anyhost, or, where no systemd user session runs it, close every Claude Code session and start one.'
+    expect(lines[lines.indexOf(`✘ ${direct} Viewers on other machines reach this machine through the relay meanwhile.`) + 1]).toBe(`  ${restart}`)
+  } finally {
+    await program.stop(true)
+  }
+})
+
+// The suite missed it: anyhost doctor read Cloudflare's daily limit as a relay that did not answer, and said to check
+// the internet.
+test("anyhost doctor with no program reads the relay's 429 error code: 1027 as Cloudflare's daily limit, which resets at 00:00 UTC", async () => {
+  const relay = await memoryRelay()
+  const { env } = await machineFor(relay, HOST, false)
+  relay.dailyLimited = Infinity
+  const { code, out } = await anyhostOn(env, ['doctor'])
+  expect(code).toBe(1)
+  const lines = out.split('\n')
+  expect(lines[lines.indexOf(`✘ ${DAILY_LIMIT}`) + 1]).toBe('  Wait until 00:00 UTC. The program keeps every change meanwhile and uploads it once the relay answers.')
+  expect(out).not.toContain('did not answer')
+})
+
 // A viewer on its own machine, attached to SESSION on HOST through the relay as `anyhost serve` sends an attach, whose
-// stream starts over at an `attached` that kept none of it, as `anyhost attach` starts it.
+// stream starts over at an `attached` of a host stream it never linked with, as `anyhost attach` starts it. `attach`
+// sends the same attach again, as `anyhost attach` does after a `detach`.
 async function viewerOn(relay: MemoryRelay, device: Device, size: { cols: number; rows: number }) {
   const client = relay.connect(device, roots(`/home/${device.name}`))
   await welcomed(client)
@@ -967,15 +1035,19 @@ async function viewerOn(relay: MemoryRelay, device: Device, size: { cols: number
   stream.on('output', (bytes) => void (seen.shown += decoder.decode(bytes)))
   stream.on('state', ({ status }) => void seen.states.push(status))
   stream.on('exit', ({ message }) => void seen.exits.push(message))
+  let hostStream: number | undefined
   client.on('attached', (message) => {
     if (message.stream !== id) return
     seen.attached.push(message)
-    if (!message.kept) stream.startOver()
+    if (message.hostStream !== hostStream) stream.startOver()
+    hostStream = message.hostStream
     stream.use({ send: (frame) => void client.send(encodeStream(id, frame)) })
   })
   client.on('stream', (bytes) => (streamOf(bytes) === id ? stream.receive(bytes.subarray(5)) : undefined))
-  client.send({ t: 'attach', stream: id, to: HOST.id, session: SESSION, ...size, key: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64') })
-  return { id, stream, seen, client }
+  const key = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
+  const attach = (): void => void client.send({ t: 'attach', stream: id, to: HOST.id, session: SESSION, ...size, key })
+  attach()
+  return { id, stream, seen, client, attach }
 }
 
 test('serve answers at unix:<its state folder>/serve.sock, and two viewers of one session draw it at the smaller size of the two', async () => {
@@ -991,7 +1063,7 @@ test('serve answers at unix:<its state folder>/serve.sock, and two viewers of on
   await waitFor('the first viewer\'s screen', () => small.seen.shown.includes('size 24 80'))
   // the host offers the port it picked at its first start and every address of this machine it may be dialed at
   const { port } = JSON.parse(readFileSync(join(host.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'direct.json'), 'utf8')) as { port: number }
-  expect(small.seen.attached).toEqual([{ t: 'attached', stream: small.id, kept: false, port, addresses: offeredAddresses(), from: { id: HOST.id, name: HOST.name } }])
+  expect(small.seen.attached).toEqual([{ t: 'attached', stream: small.id, hostStream: expect.any(Number), port, addresses: offeredAddresses(), from: { id: HOST.id, name: HOST.name } }])
   expect(small.seen.shown.startsWith('\x1b[?1049h')).toBe(true)
   await waitFor('the session\'s status', () => small.seen.states.includes('busy'))
 
@@ -1129,8 +1201,9 @@ test('a claude attach SIGKILL ended while its session runs starts again, and its
 const typedIn = (shown: string): string[] => [...shown.matchAll(/typed (\S+)/g)].map(([, line]) => line ?? '')
 
 // The suite missed it: no test typed while the host started its claude attach again, and a write to the closed
-// terminal of the attach that ended threw, which ended the host's program.
-test("keys typed while the host's claude attach starts again after a SIGKILL reach the new attach once each, in order", async () => {
+// terminal of the attach that ended threw, which ended the host's program. Its attaches drew at once, so no test saw
+// keys reach a terminal before the attach in it was up, which a cooked terminal takes Enter in as a newline.
+test("keys typed while the host's claude attach starts again after a SIGKILL reach the new attach once each, in order, after its first frame", async () => {
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST, true)
   const served = await serveOn(host.env)
@@ -1138,6 +1211,8 @@ test("keys typed while the host's claude attach starts again after a SIGKILL rea
   const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
   await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
   const before = viewer.seen.shown.length
+  // the next attach draws its first frame half a second after it starts
+  writeFileSync(join(host.folder, 'draws-after'), '0.5')
   Bun.spawnSync(['pkill', '-KILL', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`])
   await waitFor('the attach ending', () => attachesOn(host) === '')
   // the host follows the session's record for 3 s after a signal ended its attach, then starts the attach again
@@ -1148,9 +1223,61 @@ test("keys typed while the host's claude attach starts again after a SIGKILL rea
   // a key the host typed twice would show by now
   await Bun.sleep(1000)
   expect(typedIn(viewer.seen.shown)).toEqual(['one', 'two'])
+  // the cooked terminal echoes each key as it takes it, which comes after the new attach's frame, Enter included
+  const fresh = viewer.seen.shown.slice(before)
+  expect(fresh.indexOf('one\r\n')).toBeGreaterThan(fresh.indexOf('size 24 80'))
   expect(served.child.exitCode).toBeNull()
   expect(viewer.seen.exits).toEqual([])
 })
+
+// The suite missed it: each viewer test sent one attach per stream, and the host's start never waited, as the test
+// Claude Code's record named its job and `claude agents` answered at once.
+test("a viewer whose attach goes again while the host's start takes 3 s, as anyhost attach sends it after a detach, shows the session, and its keys reach it once each", async () => {
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
+  // a job a reboot stopped, which no record names, so the host's start asks claude agents, which answers after 3 s
+  rmSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', `${process.pid}.json`))
+  writeFileSync(join(host.folder, 'slow'), '3')
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await Bun.sleep(1000)
+  viewer.attach()
+  viewer.stream.write('input', encoder.encode('one\r'))
+  await waitFor('the session on the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'), 20_000)
+  viewer.stream.write('input', encoder.encode('two\r'))
+  await waitFor('both lines', () => typedIn(viewer.seen.shown).length >= 2)
+  // a key the host typed twice would show by now
+  await Bun.sleep(1000)
+  expect(typedIn(viewer.seen.shown)).toEqual(['one', 'two'])
+  // the first attach opened the host's end of the stream, and the second found the same one
+  const [first, second, ...more] = viewer.seen.attached.map((message) => (message as { hostStream: number }).hostStream)
+  expect({ first: typeof first, second, more }).toEqual({ first: 'number', second: first, more: [] })
+  expect(viewer.seen.exits).toEqual([])
+}, 40_000)
+
+// The suite missed it: no test took Claude Code's daemon lock away while a viewer watched, and only a change in
+// `sessions/` made the host read the records again.
+test('a session whose records change while a Claude Code update leaves no daemon lock for 2 s keeps its claude attach and its viewer once the lock is back', async () => {
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
+  await waitFor('the session\'s status', () => viewer.seen.states.includes('busy'))
+  // the old daemon removes its lock as it ends, the session's turn ends in the gap, and the new daemon locks 2 s later
+  const lock = join(host.env['CLAUDE_CONFIG_DIR'] ?? '', 'daemon.lock')
+  rmSync(lock)
+  recordSession(host.env['HOME'] ?? '', process.pid, 'idle')
+  await Bun.sleep(2000)
+  writeFileSync(lock, DAEMON_LOCK)
+  // past the 10 s a record check started in the gap follows the records
+  await Bun.sleep(13_000)
+  expect(viewer.seen.exits).toEqual([])
+  viewer.stream.write('input', encoder.encode('after the update\r'))
+  await waitFor('typing into the same attach', () => viewer.seen.shown.includes('typed after the update'))
+}, 60_000)
 
 // HOST, whose Claude Code runs SESSION and which holds it, and VIEWER, each with its program, and `anyhost attach` of
 // the session in an 80×24 terminal on VIEWER, once it shows the session.
@@ -1172,7 +1299,7 @@ async function attachedFrom(relay: MemoryRelay) {
 }
 
 // The suite missed it: its restart test linked the restarted host before its viewer, where in production the viewer
-// links at the host's `attached`, before the host's `start`, so the new host took the viewer's old frames.
+// links at the host's `attached`, before the host's first frame, so the new host took the viewer's old frames.
 test("keys typed before, during and after the host's program restarts reach the session once each, in order, and a line typed within 1 s of the restart once", async () => {
   const relay = await memoryRelay()
   const { host, served, screen, terminal } = await attachedFrom(relay)
@@ -1186,6 +1313,32 @@ test("keys typed before, during and after the host's program restarts reach the 
   terminal.write('during\r')
   const before = screen.shown.length
   await serveOn(host.env)
+  await waitFor('the new attach on the viewer\'s terminal', () => screen.shown.slice(before).includes('size 24 80'), 40_000)
+  terminal.write('after\r')
+  await waitFor('the line after', () => typedIn(screen.shown).includes('after'))
+  // a key the host typed twice would show by now
+  await Bun.sleep(1000)
+  expect(typedIn(screen.shown)).toEqual(['yes', 'during', 'after'])
+}, 90_000)
+
+// The suite missed it: every `attached` of the restarted host reached its viewer, so no viewer met a host that knew its
+// stream while it still followed the stream of the host's program before.
+test("keys typed before, during and after the host's program restarts reach the session once each, though the viewer's socket broke as the new program's first attached came", async () => {
+  const relay = await memoryRelay()
+  const { host, served, screen, terminal } = await attachedFrom(relay)
+  terminal.write('yes\r')
+  await waitFor('the line on the first attach', () => typedIn(screen.shown).includes('yes'))
+  // the line is acknowledged, so it goes to no host again
+  await Bun.sleep(1500)
+  served.child.kill('SIGTERM')
+  await served.child.exited
+  await Bun.sleep(1000)
+  terminal.write('during\r')
+  const before = screen.shown.length
+  const lost = relay.loseNext(VIEWER.id, 'attached')
+  await serveOn(host.env)
+  await lost
+  // the viewer's machine connects again, and anyhost attach attaches again, which the new program answers
   await waitFor('the new attach on the viewer\'s terminal', () => screen.shown.slice(before).includes('size 24 80'), 40_000)
   terminal.write('after\r')
   await waitFor('the line after', () => typedIn(screen.shown).includes('after'))
@@ -1373,7 +1526,7 @@ test('a second serve on one state folder refuses to start, naming the one that r
   const unknown = await fetch('http://localhost/machines/rename', { unix: host.socket, method: 'POST', body: '{}' })
   expect(unknown.status).toBe(404)
   expect(await unknown.json()).toEqual({
-    message: 'anyhost serves GET /status, /machines and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/invite, /machines/remove, /move and /move/keep, and a WebSocket at /attach, not POST /machines/rename.',
+    message: 'anyhost serves GET /status, /machines and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/invite, /machines/remove, /move, /move/keep and /new, and a WebSocket at /attach, not POST /machines/rename.',
   })
 })
 
@@ -1529,6 +1682,29 @@ test('a watched folder the watcher cannot watch at its start, as one removed aft
   }
 }, 60_000)
 
+// The suite missed it: every watcher a test ran heard each write, while macOS's watcher drops events with no word of
+// it, and a full sweep statted only the files the program captured, so no sweep found a file no event named.
+test('a file written in a watched folder while the watcher hears nothing is uploaded by the next full sweep', async () => {
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, false)
+  // The program's first backup pass, its first full sweep, comes after it read the options, which wait for the test.
+  const cmod = join(host.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs', 'cmod')
+  const release = join(host.folder, 'release')
+  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace('"options anyhost")', `"options anyhost") while [ ! -e '${release}' ]; do sleep 0.1; done;`))
+  ranAnHourAgo(host)
+  await serveOn({ ...host.env, ANYHOST_WATCHER_DROPS: '1' })
+  // past the watcher getting ready and the listing that follows it
+  await Bun.sleep(3000)
+  expect((await problemsOn(host.socket)).filter(isWatcherProblem)).toEqual([])
+  const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
+  // a watcher that heard it would have queued it by now
+  await Bun.sleep(1000)
+  writeFileSync(release, '')
+  await waitFor('the session the full sweep found uploaded', () => isUploaded(relay, SESSION, 'Plan the trip'), 30_000)
+}, 60_000)
+
 test('a listing of the watched folders and of a session\'s files follows no symlink, so a cycle leaves the other files listed, and the log names a folder it cannot read once', async () => {
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST, false)
@@ -1594,7 +1770,9 @@ const NEW_SESSION = 'abcdef12-0000-4000-8000-000000000001'
 // `claude attach` starts a kept job again, and shows the terminal's size and each line typed. Every call goes into
 // `claude.log`: the time, the folder it ran in, and its arguments. A session it runs has the pid of the program that asked for it, which runs as
 // long as the test. `claude agents` answers after the seconds `slow` holds, when there is one, `claude --bg` waits the
-// seconds `hang` holds, and `claude stop` fails with the text of `fail-stop`.
+// seconds `hang` holds, and `claude stop` fails with the text of `fail-stop`. `claude --bg --resume` appends the text of
+// `appends` to the session's transcript, as Claude Code re-appends a resumed session's metadata there, and a session
+// `claude --bg` starts while `unlisted` is there is listed running only once that file goes.
 const backgroundClaude = (folder: string): string => `#!/bin/bash
 F='${folder}'
 echo "$(date +%s%N) $PWD $*" >> "$F/claude.log"
@@ -1610,7 +1788,9 @@ case "$1" in
     if [ -e "$F/hang" ]; then sleep "$(cat "$F/hang")"; fi
     if [ -e "$F/fail" ]; then cat "$F/fail" >&2; exit 1; fi
     session="\${3:-${NEW_SESSION}}"
-    running "$session"
+    if [ -n "$3" ] && [ -e "$F/appends" ]; then cat "$F/appends" >> "$(find "$CLAUDE_CONFIG_DIR/projects" -name "$session.jsonl" | head -n 1)"; fi
+    if [ -e "$F/unlisted" ]; then (while [ -e "$F/unlisted" ]; do sleep 0.1; done; running "$session") > /dev/null 2>&1 &
+    else running "$session"; fi
     echo "backgrounded · \${session:0:8} · test (idle — send a prompt to start)" ;;
   attach)
     if [ -e "$F/kept.json" ]; then rm "$F/kept.json"; running '${SESSION}'; fi
@@ -1646,8 +1826,8 @@ async function stepsOf(socket: string, until: ReadonlySet<string> = new Set(['mo
 }
 
 // The machine SESSION runs on, in a terminal of its own in a herdr pane, or in Claude Code's background, as `kind`
-// says, its Claude Code's process `claude`, and its program captured it, with the options `person` sets. The session
-// works in `work` in the machine's home, which holds one file.
+// says, its Claude Code's process `claude`, and its program captured it, with the options `person` sets, and what the
+// program logged so far. The session works in `work` in the machine's home, which holds one file.
 async function runningOn(relay: MemoryRelay, device = LAPTOP, kind: 'interactive' | 'background' = 'interactive', person: Record<string, unknown> = {}) {
   const laptop = await machineFor(relay, device, false, backgroundClaude, person)
   const home = laptop.env['HOME'] ?? ''
@@ -1662,7 +1842,7 @@ exit 0
   const cwd = join(home, 'work')
   mkdirSync(cwd, { recursive: true })
   writeFileSync(join(cwd, 'notes.txt'), 'the plan for the trip\n')
-  await serveOn(laptop.env)
+  const { logged } = await serveOn(laptop.env)
   await waitFor('the machine connecting', () => relay.isConnected(device.id))
   const transcript = join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
@@ -1679,7 +1859,7 @@ exit 0
   status('idle')
   // the first drain at the default 5 seconds claims the session
   await waitFor('the machine claiming the session', async () => (await relay.claims()).get(SESSION) === device.id, 15_000)
-  return { ...laptop, cwd, transcript, claude, status }
+  return { ...laptop, cwd, transcript, claude, status, logged }
 }
 
 async function workerOn(relay: MemoryRelay, prepare: (folder: string) => void = () => undefined, device = WORKER) {
@@ -1762,6 +1942,64 @@ test('a move to a machine that is offline keeps the session running here, with i
   expect(laptop.claude.exitCode).toBeNull()
 }, 60_000)
 
+// The suite missed it: every worker a move or start test took offline stayed down, while a program that restarts
+// within the 10 s between two checks of its connection reads as connected at both, and its wait for the move died
+// with it.
+test('a move to a worker whose program restarts after it took the move ends with the offline line within two checks of its connection, and the laptop keeps the session', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  // its Claude Code starts the session past the end of the test
+  const worker = await workerOn(relay, (folder) => writeFileSync(join(folder, 'hang'), '60'))
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  await waitFor('the worker starting the session', () => logOf(worker.folder, 'claude.log').some((line) => line.endsWith(`--bg --resume ${SESSION}`)), 30_000)
+  worker.child.kill('SIGKILL')
+  const killedAt = Date.now()
+  await serveOn(worker.env)
+  await waitFor('the worker connecting again', () => relay.isConnected(WORKER.id))
+  const { last } = await stepsOf(laptop.socket)
+
+  // two checks 10 s apart, and the answer of the relay's devices
+  expect(Date.now() - killedAt).toBeLessThan(20_000)
+  expect(last.line).toBe(`${WORKER.name} is offline, so the session keeps running here.`)
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
+  expect((await claimOn(laptop.socket)).machine).toBeUndefined()
+}, 90_000)
+
+// The suite missed it: every worker that heard `released` for a session was the program that started its job, while a
+// program that restarted since knew nothing of the job its earlier run started.
+test("a worker program restarted after it ran claude --bg --resume for a move stops that job at the session's released, once its turn ends", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  // its Claude Code starts the session past the end of the test
+  const worker = await workerOn(relay, (folder) => writeFileSync(join(folder, 'hang'), '60'))
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  await waitFor('the worker starting the session', () => logOf(worker.folder, 'claude.log').some((line) => line.endsWith(`--bg --resume ${SESSION}`)), 30_000)
+  worker.child.kill('SIGKILL')
+  await serveOn(worker.env)
+  await waitFor('the worker connecting again', () => relay.isConnected(WORKER.id))
+  // Claude Code's daemon runs the job the earlier program started, in a turn
+  const job = Bun.spawn(['sleep', '600'])
+  children.push(job)
+  const workerHome = worker.env['HOME'] ?? ''
+  const record = (status: string): void =>
+    writeFileSync(join(workerHome, '.claude', 'sessions', `${job.pid}.json`), JSON.stringify({ pid: job.pid, sessionId: SESSION, jobId: SESSION.slice(0, 8), kind: 'bg', cwd: join(workerHome, 'work'), status }))
+  record('busy')
+  const stops = (): string[] => logOf(worker.folder, 'claude.log').filter((line) => line.endsWith(`stop ${SESSION.slice(0, 8)}`))
+
+  // the laptop's move ends offline and takes the session back
+  const { last } = await stepsOf(laptop.socket)
+  await waitFor('the worker hearing it lost the session', async () => (await claimOn(worker.socket)).machine === LAPTOP.name)
+  await Bun.sleep(1000)
+  const stopsInTurn = stops()
+  record('idle')
+  await waitFor('the worker stopping the job once its turn ended', () => stops().length > 0)
+
+  expect(last.line).toBe(`${WORKER.name} is offline, so the session keeps running here.`)
+  expect(stopsInTurn).toEqual([])
+  expect(stops()).toHaveLength(1)
+}, 90_000)
+
 test('a move the worker cannot take takes the claim back, and the laptop captures the session again', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
@@ -1803,6 +2041,39 @@ test('a move to a worker that took the claim and answers nothing waits for it, a
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   expect(laptop.claude.exitCode).toBeNull()
 }, 60_000)
+
+// The suite missed it: every worker of a move that failed after it took the claim wrote nothing to the session, so no
+// frame of the worker's ever waited at the laptop's end, where the laptop's next frame met it as a fork.
+test("Keep it here after a moved the laptop never heard, from a worker that ran the session and wrote to it, leaves the laptop taking the next prompt and capturing it with no fork, and stops the worker's job", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  // the worker's resume re-appends the session's metadata, and its Claude Code lists the session running once the
+  // worker uploaded that
+  const worker = await workerOn(relay, (folder) => {
+    writeFileSync(join(folder, 'appends'), `{"type":"permission-mode","permissionMode":"default","sessionId":"${SESSION}"}\n`)
+    writeFileSync(join(folder, 'unlisted'), '')
+  })
+  const held = relay.holdNext('moved')
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  await waitFor('the worker uploading what its resume wrote', () => isUploaded(relay, SESSION, '"permission-mode"'), 30_000)
+  rmSync(join(worker.folder, 'unlisted'))
+  // the worker runs the session and answers, and the relay holds the answer
+  const release = await held
+  expect((await postTo(laptop.socket, '/move/keep', { session: SESSION })).status).toBe(200)
+  const { last } = await stepsOf(laptop.socket)
+  await waitFor("the worker stopping its job as the laptop took the session back", () => logOf(worker.folder, 'claude.log').some((line) => line.endsWith(`stop ${SESSION.slice(0, 8)}`)))
+  release()
+
+  expect(last).toEqual({ to: WORKER.name, step: 'failed', line: `${WORKER.name} did not answer, so the session keeps running here.` })
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
+  // the laptop's next prompt goes up from the laptop, past what the worker wrote
+  writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"And the hotel"}}\n`, { flag: 'a' })
+  await waitFor('the next prompt uploading', () => isUploaded(relay, SESSION, 'And the hotel'), 15_000)
+  expect((await claimOn(laptop.socket)).machine).toBeUndefined()
+  expect(laptop.logged()).not.toContain('Another machine wrote byte')
+  expect(laptop.claude.exitCode).toBeNull()
+}, 90_000)
 
 test('Keep it here while the move waits for the turn to end keeps the session here, with its claim', async () => {
   const relay = await memoryRelay()
@@ -1915,6 +2186,32 @@ test("Keep it here while a session that keeps writing uploads ends the move's dr
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
 }, 60_000)
 
+// The suite missed it: no move test's code read failed, and a move read the failure only of a read it started itself,
+// while a session that keeps writing has an upload start the read the move waits on.
+test('a move of a session that keeps writing while its code cannot be read ends failed with the reason of the read it waited on', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  await workerOn(relay)
+  // the working folder is a checkout whose index git refuses, so every read of its code fails
+  Bun.spawnSync(['git', 'init', '-q', laptop.cwd])
+  writeFileSync(join(laptop.cwd, '.git', 'index'), 'not an index')
+  // git takes 2 s to refuse it, so the read an upload started still runs as the move looks for one to wait on
+  script(join(laptop.folder, 'bin', 'git'), `#!/bin/bash\ncase " $* " in *" ls-files "*) sleep 2 ;; esac\nexec '${Bun.which('git') ?? 'git'}' "$@"\n`)
+  const writer = keepsWriting(laptop)
+  await Bun.sleep(500)
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const { last } = await stepsOf(laptop.socket)
+  writer.stop()
+
+  expect(last.step).toBe('failed')
+  expect(last.line).toStartWith(`anyhost could not move the session to ${WORKER.name}: anyhost could not read the code of ${SESSION.slice(0, 8)}: `)
+  // git's own words for an index it refuses, as `index file smaller than expected`
+  expect(last.line).toContain(': index file ')
+  expect(last.line).toEndWith('. It keeps running here.')
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
+}, 60_000)
+
 // A third machine of the person's, which takes a session over as `anyhost resume --take` there does.
 const DESKTOP: Device = { id: 'device-desktop', name: 'anyhost-c', os: 'linux', arch: 'arm64' }
 
@@ -1971,6 +2268,80 @@ test('a moved the relay could not deliver, as the laptop lost its socket just be
   expect(logOf(worker.folder, 'claude.log').filter((line) => line.endsWith(`--bg --resume ${SESSION}`))).toHaveLength(1)
   await laptop.claude.exited
   expect(laptop.claude.signalCode).toBe('SIGTERM')
+}, 90_000)
+
+// Whether the relay lists the machine as connected, as `/machines` shows it.
+const listedConnected = async (asking: Relay, id: string): Promise<boolean | undefined> => (await machinesOf(asking)).find((machine) => machine.id === id)?.connected
+
+// The suite missed it: `disconnect` closed the Pool's socket cleanly, so every machine a test took offline sent a close
+// the real network never sends, and no Pool held the open socket of a machine gone to sleep, which it counted as told.
+test('a laptop gone silent with a drain in flight while the desktop takes its session refuses that session\'s next prompt once it connects again, and the Pool stores no frame of it after the take', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const desktop = relay.connect(DESKTOP, roots('/home/desktop'))
+  await welcomed(desktop)
+  // the first upload's index is up, so no upload of the session is in flight as the laptop goes silent
+  await waitFor('the laptop putting its index', () => relay.puts.some(({ key }) => key === `sessions/${LAPTOP.id}/index.json`))
+  await Bun.sleep(1000)
+  const wake = relay.silence(LAPTOP.id)
+  // a line written as the lid closes, whose drain goes out on the silent socket
+  writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"And the hotel"}}\n`, { flag: 'a' })
+  // the Pool counts the laptop's socket alive for up to LIVE_MS after its last ping
+  for (const started = Date.now(); (await listedConnected(desktop, LAPTOP.id)) !== false; await Bun.sleep(250)) {
+    if (Date.now() - started > LIVE_MS + 15_000) throw new Error(`The relay still lists ${LAPTOP.name} connected ${LIVE_MS + 15_000} ms after it went silent.`)
+  }
+
+  const [taken] = await Promise.all(desktop.run([{ op: 'claim', session: SESSION, take: true }]))
+  expect(taken).toEqual({ status: 200, previous: { id: LAPTOP.id, name: LAPTOP.name }, told: false })
+  const stored = relay.puts.length
+  wake()
+  // a laptop that dropped its silent socket itself waits out its next try to connect, up to 60 s
+  await waitFor('the laptop connecting again', async () => ((await (await fetch('http://localhost/status', { unix: laptop.socket })).json()) as Status).relay.state === 'connected', 70_000)
+
+  expect((await claimOn(laptop.socket)).machine).toBe(DESKTOP.name)
+  // The drain the silent socket swallowed goes again, whole, on the next socket, after the welcome, and the Pool refuses
+  // its frames with 409, as the desktop holds the session: a fork is a frame stored, never one sent. The requests the
+  // laptop sends at its welcome are answered by then.
+  await Bun.sleep(3000)
+  expect(relay.puts.slice(stored).filter(({ key }) => key.startsWith(`journals/${SESSION}/`))).toEqual([])
+}, 180_000)
+
+// The suite missed it: the same `disconnect`, whose close the Pool heard at once, so `/machines` never had to tell a
+// machine gone silent from a connected one.
+test('/machines lists a machine gone silent as connected until LIVE_MS passed, and as not connected from then on', async () => {
+  const relay = await memoryRelay()
+  const laptop = relay.connect(LAPTOP, roots('/home/laptop'))
+  const desktop = relay.connect(DESKTOP, roots('/home/desktop'))
+  await Promise.all([welcomed(laptop), welcomed(desktop)])
+  relay.silence(LAPTOP.id)
+  expect(await listedConnected(desktop, LAPTOP.id)).toBe(true)
+
+  await Bun.sleep(LIVE_MS + 2000)
+
+  expect(await listedConnected(desktop, LAPTOP.id)).toBe(false)
+}, 90_000)
+
+// The suite missed it: every asker a move test cut off lost its socket with a close the Pool heard at once, while the
+// Pool counts a silent socket alive for LIVE_MS and sends it the answer, which counts as delivered and reaches no one.
+test("a moved the Pool sent to the laptop's silent socket reaches the laptop once it connects again and asks again, and the worker runs the session once", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+  const held = relay.holdNext('moved')
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const release = await held
+  const wake = relay.silence(LAPTOP.id)
+  release()
+  // the Pool sends `moved` to the silent socket it still counts alive, and answers the worker's devices after it
+  await Bun.sleep(2000)
+  wake()
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(last.step).toBe('moved')
+  expect(worker.logged()).toContain(`${LAPTOP.name} asked again for its answer`)
+  expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)
+  expect(logOf(worker.folder, 'claude.log').filter((line) => line.endsWith(`--bg --resume ${SESSION}`))).toHaveLength(1)
 }, 90_000)
 
 // The suite missed it: the test Claude Code's `claude stop` never failed, and no test read /status after a move.
@@ -2116,6 +2487,25 @@ test('a worker whose Claude Code config it cannot read fails the move with the r
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
 }, 60_000)
 
+// The suite missed it: every laptop a trust test moved from could read its own Claude Code config, while one it could
+// not read sent the move untrusted, which the worker's Claude Code refuses with `Workspace not trusted`.
+test("a laptop whose Claude Code config it cannot read fails the move with the reason before it asks the worker", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+  trust(laptop, laptop.env['HOME'] ?? '')
+  chmodSync(configOf(laptop), 0o000)
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const { last } = await stepsOf(laptop.socket)
+  chmodSync(configOf(laptop), 0o600)
+
+  expect(last.line).toStartWith(`anyhost could not move the session to ${WORKER.name}: EACCES`)
+  expect(last.line).toEndWith('. It keeps running here.')
+  expect(worker.logged()).not.toContain(`${LAPTOP.name} moves ${SESSION} here.`)
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
+}, 60_000)
+
 test('a worker whose Claude Code config is a symlink to a missing file trusts the folder in that file, and the config stays a symlink', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
@@ -2241,6 +2631,60 @@ test('anyhost new to a worker whose program ends after it took the start ends wi
   expect(code).toBe(1)
   expect(err.trim()).toBe(`${WORKER.name} is offline, so anyhost started no session there.`)
 }, 60_000)
+
+// The suite missed it: no test dropped the socket of anyhost new's own process, which alone waited for `started`, while
+// the relay sends `started` only to the sockets the laptop has open as it comes.
+test("anyhost new whose command's own socket drops while the worker starts the session prints the session it started and exits 0", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP, false, backgroundClaude)
+  // its Claude Code takes 3 s to start the session
+  const worker = await workerOn(relay, (folder) => writeFileSync(join(folder, 'hang'), '3'))
+  await serveOn(laptop.env)
+  await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))
+  const checkout = tripOn(laptop)
+
+  const started = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
+  children.push(started)
+  await waitFor('the worker starting the session', () => logOf(worker.folder, 'claude.log').some((line) => line.endsWith(' --bg')), 30_000)
+  // every socket of the laptop but its program's, which it opened first, ends, and none opens until the relay sent the
+  // worker's `started` on
+  const reconnect = relay.disconnect(LAPTOP.id, 1)
+  await waitFor('the worker answering', () => worker.logged().includes(`${WORKER.name} started ${NEW_SESSION}`), 30_000)
+  await Bun.sleep(1000)
+  reconnect()
+  const [code, out] = await Promise.all([started.exited, new Response(started.stdout).text()])
+
+  expect(out).toStartWith(`${WORKER.name} started ${NEW_SESSION.slice(0, 8)}.\n`)
+  expect(code).toBe(0)
+}, 60_000)
+
+test("anyhost new while its program's relay is not connected says what it waits for, and starts the session once the relay connects", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP, false, backgroundClaude)
+  await workerOn(relay)
+  await serveOn(laptop.env)
+  await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))
+  const checkout = tripOn(laptop)
+  const reconnect = relay.disconnect(LAPTOP.id)
+  const relayState = async (): Promise<string> => ((await (await fetch('http://localhost/status', { unix: laptop.socket })).json()) as Status).relay.state
+  await waitFor('the program reading its relay down', async () => (await relayState()) !== 'connected')
+
+  const started = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
+  children.push(started)
+  let printed = ''
+  const reading = (async () => {
+    for await (const chunk of started.stdout) printed += decoder.decode(chunk)
+  })()
+  await waitFor('the line that says what anyhost new waits for', () => printed.includes('\n'), 30_000)
+  const waiting = printed
+  reconnect()
+  const [code] = await Promise.all([started.exited, reading])
+
+  expect(waiting).toStartWith(`Waiting for the relay at ${relay.url} to connect.`)
+  expect(waiting).toEndWith(' Ctrl-C stops waiting.\n')
+  expect(printed.slice(waiting.length)).toStartWith(`${WORKER.name} started ${NEW_SESSION.slice(0, 8)}.\n`)
+  expect(code).toBe(0)
+}, 90_000)
 
 // systemd's systemd-run, which logs each call into `systemd-run.log` in the machine's folder and runs the command in it
 const systemdOn = (folder: string): void =>

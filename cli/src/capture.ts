@@ -18,11 +18,12 @@ import type { Call, RanOf, Relay } from './relay.ts'
 import { codexNameOf, codexState, filesOf, linesFiles, namedIn, ownerOf, summarize, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
-// At `uploadEvery` 0 a drain that carries a file's change carries no code, and a drain of code puts up to
-// CODE_PIECES frames of at most CODE_PIECE_BYTES each at once, so a line written meanwhile waits for one batch. From a
-// test machine whose link takes about 1.2 MB/s, a batch of 4 pieces of 128 KiB takes about 0.6 s: code catches up 2 to 3
-// times as fast as one piece at a time, and a line still reaches R2 within about 1 s while the session commits. 8
-// pieces fill the link, and lines wait past 2 s.
+// At `uploadEvery` 0 a drain that carries a file's change carries no code, unless the session's drain before it carried
+// its files alone while code waited (`codeSkipped`): then its code goes up after the files' frame. A drain of code puts
+// up to CODE_PIECES frames of at most CODE_PIECE_BYTES each at once, so a line written meanwhile waits for one batch. A
+// batch of 4 pieces of 128 KiB is 0.44 s of a link of 1.2 MB/s: code catches up 2 to 3 times as fast as one piece at a
+// time, and a line still reaches R2 within about 1 s while the session commits. 8 pieces fill the link, and lines wait
+// past 2 s.
 export const CODE_PIECE_BYTES = 128 * 2 ** 10
 export const CODE_PIECES = 4
 // A session written within QUIET_MS is active: the backup checks its files every minute, and seals it once it is not.
@@ -53,11 +54,12 @@ export type IndexedSession = {
 // The working folder's code, from `code.ts`: a header, and parts each stored once at `anyhost:code/<session>/parts/<sha256>`.
 export type Code = { readonly captureCode: typeof captureCode; readonly restoreCode: typeof restoreCode }
 // `onCode` hears that a session's code waits in `codeWaiting` for the session's next drains, which put it in frames after
-// the files', so no drain waits on git. `codeRuns` holds the one `captureCode` running per session. A session in
+// the files', so no drain waits on git. `codeRuns` holds the one `captureCode` running per session, which answers its
+// failure, or undefined once it read, so whatever waits on it reads how it ended. A session in
 // `codeStale` changed while its code was read or went up, so its code is read again once that ends. A session in
 // `codeSkipped` had its last drain at `uploadEvery` 0 carry its files alone while its code waited, so its next drain
-// carries code too. `claimed` holds the sessions this program claimed since it started, so a takeover tells this
-// machine of each one it captures.
+// carries code too. `claimed` holds the sessions this program claimed since the relay last welcomed it, so a takeover
+// tells this machine of each one it captures after any reconnect.
 // `lastIndex` is the index.json this program last put, which `writeIndex` puts again only once it changed.
 export type Capture = Code & {
   readonly relay: Relay
@@ -65,7 +67,7 @@ export type Capture = Code & {
   readonly device: Device
   readonly roots: MachineRoots
   readonly hashers: Map<string, Bun.CryptoHasher>
-  readonly codeRuns: Map<string, Promise<void>>
+  readonly codeRuns: Map<string, Promise<Error | undefined>>
   readonly codeWaiting: Map<string, { readonly folder: string; readonly code: CodeCapture }>
   readonly codeStale: Set<string>
   readonly codeSkipped: Set<string>
@@ -143,15 +145,17 @@ export const countedRelay = (db: Database): CountedRelay | undefined => db.query
 // Whether the welcome of the relay at `url`, which names `bucket`, comes from the relay the database counts. Every
 // relay Connect Cloudflare deploys names the bucket `anyhost`, so another person's relay, or the person's own made again
 // in another account, differs by its address alone.
-export const isSameRelay = (counted: CountedRelay | undefined, url: string, bucket: string): boolean =>
+const isSameRelay = (counted: CountedRelay | undefined, url: string, bucket: string): boolean =>
   counted === undefined || (counted.bucket === bucket && (counted.url === '' || counted.url === url))
 
 // The journals' ends and the code parts uploaded count what one relay's bucket holds, so a welcome from another relay
-// than the database counts, as after a machine joined another person's relay, starts the database over.
-function useRelay(db: Database, url: string, bucket: string): void {
+// than the database counts, as after a machine joined another person's relay, starts the database over. Answers
+// whether it did.
+function useRelay(db: Database, url: string, bucket: string): boolean {
   const counted = countedRelay(db)
-  if (counted?.url === url && counted.bucket === bucket) return
-  if (!isSameRelay(counted, url, bucket)) {
+  if (counted?.url === url && counted.bucket === bucket) return false
+  const isOther = !isSameRelay(counted, url, bucket)
+  if (isOther) {
     startOver(db)
     makeTables(db)
   }
@@ -159,11 +163,14 @@ function useRelay(db: Database, url: string, bucket: string): void {
     db.run('delete from bucket')
     db.query('insert into bucket (name, url) values (?, ?)').run(bucket, url)
   })()
+  return isOther
 }
 
 // What the relay tells this machine goes into its database at once: the relay that welcomes it and the bucket it names,
 // and each session another machine took, whether the welcome brings it from the time this machine was away or it comes
-// as it happens.
+// as it happens. A `released` the relay sent on a socket that died before it arrived is in no welcome, so each welcome
+// forgets the sessions claimed, and the next drain of each claims it again, which holds it elsewhere at a 409.
+// `onOtherRelay` hears a welcome from another relay than the database counted, once the database started over.
 export function openCapture(
   relay: Relay,
   device: Device,
@@ -171,15 +178,19 @@ export function openCapture(
   db = openDatabase(),
   code: Code = { captureCode, restoreCode },
   onCode: Capture['onCode'] = () => undefined,
+  onOtherRelay: (url: string, bucket: string) => void = () => undefined,
 ): Capture {
+  const claimed = new Set<string>()
   const released = ({ session, to, at }: { readonly session: string; readonly to: { readonly name: string }; readonly at: string }): void =>
     holdElsewhere(db, session, to.name, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
   relay.on('welcome', ({ bucket, waiting }) => {
-    useRelay(db, relay.url, bucket)
+    const isOther = useRelay(db, relay.url, bucket)
+    claimed.clear()
     for (const message of waiting) released(message)
+    if (isOther) onOtherRelay(relay.url, bucket)
   })
   relay.on('released', released)
-  return { ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeSkipped: new Set(), claimed: new Set(), missingFolders: new Set(), onCode, lastIndex: '' }
+  return { ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeSkipped: new Set(), claimed, missingFolders: new Set(), onCode, lastIndex: '' }
 }
 
 // A path that names a code part is no file on any machine: restore hands it to `restoreCode` instead of placing it.
@@ -536,7 +547,7 @@ type Put = { readonly start: number; readonly body: Uint8Array; readonly records
 
 // A drain: every session's frames go up in one request, after each session read what its files gained, and a frame
 // over MAX_MESSAGE_BYTES goes by HTTP beside it, so it holds back no other frame. The first drain of a session since
-// the program started claims it in the same request, before its frames, so a takeover tells this machine. Answers
+// the relay's last welcome claims it in the same request, before its frames, so a takeover tells this machine. Answers
 // each session with its paths left for the next drain.
 export function uploadSessions(capture: Capture, sessions: readonly Changed[], problems: Problems, isEveryWrite = false): (readonly [Changed, Promise<Set<string>>])[] {
   const read = sessions.map((changed) => [changed, readUpload(capture, changed.session, changed.tool, changed.paths, problems, isEveryWrite)] as const)
@@ -775,7 +786,8 @@ function codeRecord(capture: Capture, session: string, path: string, bytes: Uint
 
 // Reads the working folder's code after the files' upload, never before it: what changed waits for the next drain. One
 // read runs per session, and none while the last one's records still go up; a change meanwhile reads it again after.
-// A move reads it once more, for a change nothing the session wrote names.
+// A move reads it once more, for a change nothing the session wrote names. The read in `codeRuns` answers its failure,
+// which also goes to `problems`.
 export function startCode(capture: Capture, session: string, tool: Tool, problems: Problems): void {
   const folder = workingFolderOf(capture.db, session)
   if (folder === '') return
@@ -797,13 +809,16 @@ export function startCode(capture: Capture, session: string, tool: Tool, problem
       return undefined
     })
     .then(
-      (code) => {
+      (code): undefined => {
         problems.clear(`code ${folder}`)
         if (code === undefined) return
         capture.codeWaiting.set(session, { folder, code })
         capture.onCode(session, tool, folder)
       },
-      (error: unknown) => problems.set(`code ${folder}`, error),
+      (error: unknown): Error => {
+        problems.set(`code ${folder}`, error)
+        return error instanceof Error ? error : new Error(String(error))
+      },
     )
     .finally(() => {
       capture.codeRuns.delete(session)
@@ -886,12 +901,14 @@ export async function seal(capture: Capture, session: string): Promise<number> {
   return at
 }
 
-// The journal goes on from `at`, where its chain in R2 ends, short of the `end` this machine counted, as after R2 lost a
-// frame: with every file of the session whole, as a new session's files go up from byte 0, and with every part of its
-// code again, since a code header past `at` may name a part only the lost frames held. The warning a takeover left for
-// the session's next prompt stays. Answers the session's files, which the caller uploads. A session whose transcript
-// is gone here leaves the problem `journal <session>`, which names the span a restore lacks.
-function captureAgainFrom(capture: Capture, session: string, tool: Tool, at: number, end: number, problems: Problems): Set<string> {
+// The journal goes on from `at`, where its chain in R2 ends, elsewhere than the `end` this machine counted: short of it,
+// as after R2 lost a frame, or past it, as after a move that failed once the other machine wrote to the session. It goes
+// on with every file of the session whole, as a new session's files go up from byte 0, so its next state is this
+// machine's, and with every part of its code again, since a code header past `at` may name a part only the lost frames
+// held. The warning a takeover left for the session's next prompt stays. Answers the session's files, which the caller
+// uploads. A session whose transcript is gone here leaves the problem `journal <session>`, which names the span a
+// restore lacks.
+export function captureAgainFrom(capture: Capture, session: string, tool: Tool, at: number, end: number, problems: Problems): Set<string> {
   const { db, device, roots } = capture
   const paths = db
     .query<{ path: string }, [string]>('select path from files where session = ?')

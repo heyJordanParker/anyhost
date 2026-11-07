@@ -1,4 +1,5 @@
 import { homedir } from 'node:os'
+import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import plugin from '../../.claude-plugin/plugin.json'
 import type * as Protocol from '../../relay/protocol.ts'
@@ -7,7 +8,7 @@ import { openCapture, type Capture } from './capture.ts'
 import { connectCloudflare, join, type Connecting, type Progress } from './connect.ts'
 import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, otherMachine, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
-import { startNew, type Moving } from './move.ts'
+import type { Moving } from './move.ts'
 import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, restore } from './resume.ts'
 import { serve, serveSocket, type JoinedRelay, type Status } from './serve.ts'
@@ -83,6 +84,28 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
   }
 }
 
+// Asks this machine's program to start a session on the machine named `machine` for `folder`, since the relay sends
+// that machine's answer to the sockets this machine has open as it comes, and only the program's own socket stays open
+// while the session starts. The program waits for its relay, and so does the command, saying so first when the relay
+// is not connected, until Ctrl-C ends it. Answers the session.
+async function startThroughProgram(machine: string, folder: string): Promise<string> {
+  const unix = serveSocket()
+  const status = await fetch('http://localhost/status', { unix }).then(
+    async (answer) => (await answer.json()) as Status,
+    () => undefined,
+  )
+  if (status === undefined) throw new Error(`The anyhost program does not answer at ${unix}. Start Claude Code on this machine, and the anyhost mod starts it.`)
+  const { relay } = status
+  if (relay.state !== 'connected') console.log(`Waiting for the relay at ${relay.url} to connect.${relay.message === '' ? '' : ` ${relay.message}`} Ctrl-C stops waiting.`)
+  // the program works in a folder of its own
+  const body = JSON.stringify({ machine, folder: resolve(folder) })
+  const asked = await fetch('http://localhost/new', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body }).catch((error: unknown) => error)
+  if (!(asked instanceof Response)) throw new Error(`The anyhost program at ${unix} stopped answering before ${machine} started a session (${asked instanceof Error ? asked.message : String(asked)}). anyhost list shows whether it did.`)
+  const started = (await asked.json()) as { readonly session?: string; readonly message?: string }
+  if (!asked.ok || started.session === undefined) throw new Error(started.message ?? `The anyhost program at ${unix} answered the start with ${asked.status}.`)
+  return started.session
+}
+
 // Asks this machine's program to join, as the Step does, since the program saves the login in turn with its forget of
 // a login the relay refused. With no program answering, no forget runs, and the join runs here.
 async function joinThroughProgram(link: string): Promise<string> {
@@ -103,11 +126,17 @@ async function connectingOf(unix: string, answer: Response): Promise<Connecting>
 
 // Asks this machine's program to run Connect Cloudflare, as the Step does, since the program saves the login in turn
 // with its forget of a login the relay refused, and follows it once a second, printing each line and asking each
-// question on the terminal. With no program answering, Connect Cloudflare runs here.
+// question on the terminal. The program's service environment has no CLOUDFLARE_API_TOKEN, so the request carries this
+// command's, over the program's unix socket, for that run alone. With no program answering, Connect Cloudflare runs
+// here.
 async function connectThroughProgram(): Promise<void> {
   const unix = serveSocket()
   const post = (path: string, body: object): Promise<Response> => fetch(`http://localhost${path}`, { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-  const started = await post('/connect', {}).catch(() => undefined)
+  // a program that stops during the run, as at a restart, answers nothing for a moment
+  const stopped = (error: unknown): never => {
+    throw new Error(`The anyhost program at ${unix} stopped answering during Connect Cloudflare (${error instanceof Error ? error.message : String(error)}). Run anyhost connect again once it runs.`)
+  }
+  const started = await post('/connect', { apiToken: process.env['CLOUDFLARE_API_TOKEN'] }).catch(() => undefined)
   if (started === undefined) return await connectCloudflare(TERMINAL, await cmodDevice())
   let view = await connectingOf(unix, started)
   for (let said = 0; ; ) {
@@ -115,18 +144,14 @@ async function connectThroughProgram(): Promise<void> {
     said = view.lines.length
     if (view.is === 'joined') return
     if (view.is === 'failed') throw new Error(view.error ?? 'Connect Cloudflare failed.')
-    if (view.accounts !== undefined) view = await connectingOf(unix, await post('/connect/account', { id: (await TERMINAL.pickAccount(view.accounts)).id }))
+    if (view.accounts !== undefined) view = await connectingOf(unix, await post('/connect/account', { id: (await TERMINAL.pickAccount(view.accounts)).id }).catch(stopped))
     else if (view.r2Page !== undefined) {
       await TERMINAL.enableR2(view.r2Page)
-      view = await connectingOf(unix, await post('/connect/r2', {}))
+      view = await connectingOf(unix, await post('/connect/r2', {}).catch(stopped))
     } else {
       await Bun.sleep(FOLLOW_MS)
-      // a program that stops during the run, as at a restart, answers nothing for a moment, then knows no run
-      const status = await fetch('http://localhost/status', { unix }).then(
-        async (answer) => (await answer.json()) as Status,
-        (error: unknown) => new Error(`The anyhost program at ${unix} stopped answering during Connect Cloudflare (${error instanceof Error ? error.message : String(error)}). Run anyhost connect again once it runs.`),
-      )
-      if (status instanceof Error) throw status
+      // a program that started again since knows no run
+      const status = await fetch('http://localhost/status', { unix }).then(async (answer) => (await answer.json()) as Status, stopped)
       if (status.connecting === undefined) throw new Error(`The anyhost program at ${unix} restarted during Connect Cloudflare. Run anyhost connect again.`)
       view = status.connecting
     }
@@ -220,8 +245,7 @@ async function main(argv: string[]): Promise<number> {
   if (command === 'move' && rest.length === 2 && rest[0] !== undefined && rest[1] !== undefined) return await moveThroughProgram(rest[0], rest[1])
   if (command === 'new' && rest.length === 2 && rest[0] !== undefined && rest[1] !== undefined) {
     const [machine, folder] = rest
-    // the session shows here once the connection is closed, as it runs for as long as the person works in it
-    const session = await connected(async (capture) => await startNew(capture, machine, folder))
+    const session = await startThroughProgram(machine, folder)
     console.log(`${machine} started ${session.slice(0, 8)}.`)
     return await attach(session)
   }

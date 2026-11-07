@@ -1,11 +1,14 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test'
+import type { Subprocess } from 'bun'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { COMPATIBILITY_DATE, PROTOCOL_VERSION, RELAY_VERSION } from '../../relay/protocol.ts'
+import { decompress } from '../src/capture.ts'
 import { connectCloudflare, connectForStep, join as joinRelay, runCf, updateRelay, type Account, type Cloudflare, type Progress } from '../src/connect.ts'
 import { forgetRelayLogin, personOptions, relayLogin, saveRelayLogin } from '../src/device.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
-import { memoryRelay, stopRelays, temporaryFolder, until, welcomed } from './memory.ts'
+import type { Status } from '../src/serve.ts'
+import { memoryRelay, stopRelays, temporaryFolder, until, welcomed, type MemoryRelay } from './memory.ts'
 
 const NAMES = { worker: 'anyhost-test-connect', bucket: 'anyhost-test' }
 const ACCOUNT: Account = { id: '0534ffa9', name: 'Parker Labs' }
@@ -66,19 +69,22 @@ const sha256 = (text: string): string => new Bun.CryptoHasher('sha256').update(t
 const CLOUDFLARE_404 = '<!DOCTYPE html><html><body>404</body></html>'
 const cloudflare404 = (): Response => new Response(CLOUDFLARE_404, { status: 404, headers: { 'content-type': 'text/html; charset=UTF-8' } })
 
-// `relay` is the relay version the Worker's module answers in /v1/health
-type Worker = { metadata: Record<string, unknown>; module: string; secret: string | undefined; route: boolean; relay: number }
+// `relay` and `protocol` are the versions the Worker's module answers in /v1/health and its welcome
+type Worker = { metadata: Record<string, unknown>; module: string; secret: string | undefined; route: boolean; relay: number; protocol: number }
 type Envelope = { success: boolean; errors: { code: number; message: string }[]; result: unknown }
 
 // Cloudflare as anyhost meets it: the API of the login's accounts, of which ACCOUNT holds the buckets and Workers, the
-// relay each upload runs at its workers.dev address, and cf, whose login is a JSON file of its access token or, under
-// `keyring`, a file no other program reads. `relay` is a relay of that version deployed before, `health` what its
-// /v1/health answers in place of the relay, `notFoundHealth` the /v1/health reads Cloudflare's own 404 page answers
-// first, as at a new address or a route just turned on, `secretLag` the joins a new setup code answers `invite_unknown`
-// after an upload over the Worker, while the busy Pool keeps relay 1's code, which checks the setup code against its own
-// environment, `resets` the API calls the link resets, and `timeouts` the API calls that get no answer until their time
-// limit ends them. A new secret alone reaches the join at once, as relay 2's Worker checks the setup code itself.
-function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; buckets?: Record<string, string>; keyring?: boolean; apiToken?: boolean; loggedIn?: boolean; expired?: 403 | 401; notFoundHealth?: number; resets?: number; timeouts?: number; others?: Account[]; relay?: number; health?: { status: number; body: string }; secretLag?: number; loseBucketMake?: boolean } = { r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' } }) {
+// relay each upload runs at its workers.dev address, and cf, whose login is a JSON file of its access token, under
+// `keyring` a file no other program reads, and under `apiToken` the API token `fresh` cf runs with in
+// CLOUDFLARE_API_TOKEN. `relay` and `protocol` are the versions of a relay deployed before, `health` what its /v1/health
+// answers in place of the relay, `notFound` the requests to the Worker Cloudflare's own 404 page answers first, as at a
+// new address or a route just turned on, `unavailable` the joins after those the relay answers with its 503
+// `unavailable`, as while the Pool resets for a new version, `secretLag` the joins a new setup code answers
+// `invite_unknown` after an upload over the Worker, while the busy Pool keeps its old code, `upload` what an upload of
+// the Worker waits for before Cloudflare answers it, `resets` the API calls the link resets, and `timeouts` the API calls
+// that get no answer until their time limit ends them. A new secret alone reaches the join at once, as the Worker checks
+// the setup code itself.
+function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; buckets?: Record<string, string>; keyring?: boolean; apiToken?: boolean; loggedIn?: boolean; expired?: 403 | 401; notFound?: number; unavailable?: number; resets?: number; timeouts?: number; others?: Account[]; relay?: number; protocol?: number; health?: { status: number; body: string }; secretLag?: number; upload?: Promise<void>; loseBucketMake?: boolean } = { r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' } }) {
   const loginFile = join(temporaryFolder(), 'default.json')
   writeFileSync(loginFile, JSON.stringify({ oauth_token: account.expired === undefined ? 'fresh' : 'expired' }))
   let isLoggedIn = account.loggedIn ?? true
@@ -86,7 +92,8 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
   let whoamis = 0
   let r2 = account.r2
   let subdomain = account.subdomain
-  let notFound = account.notFoundHealth ?? 0
+  let notFound = account.notFound ?? 0
+  let unavailable = account.unavailable ?? 0
   let resets = account.resets ?? 0
   let timeouts = account.timeouts ?? 0
   // the clock the setup waits on, which moves only as it waits
@@ -97,9 +104,10 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
   const workers = new Map<string, Worker>()
   if (account.relay !== undefined) {
     const metadata = { bindings: [{ type: 'plain_text', name: 'BUCKET_NAME', text: 'anyhost-test' }] }
-    workers.set(NAMES.worker, { metadata, module: 'class Pool {}', secret: sha256('an earlier setup code'), route: true, relay: account.relay })
+    workers.set(NAMES.worker, { metadata, module: 'class Pool {}', secret: sha256('an earlier setup code'), route: true, relay: account.relay, protocol: account.protocol ?? PROTOCOL_VERSION })
   }
-  const joined: string[] = []
+  // the machine each used setup code joined, which the Pool joins again with it, as after a lost answer
+  const joined = new Map<string, string>()
   const calls: string[] = []
   const cfRuns: { args: readonly string[]; env: CfEnvironment }[] = []
   const said: string[] = []
@@ -143,9 +151,10 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
       const form = init.body as FormData
       const metadata = JSON.parse(await (form.get('metadata') as Blob).text()) as { bindings: { type: string; text?: string }[]; keep_bindings?: string[] }
       const secret = metadata.bindings.find(({ type }) => type === 'secret_text')?.text ?? (metadata.keep_bindings?.includes('secret_text') === true ? workers.get(worker)?.secret : undefined)
-      // a busy Pool keeps its old code, and the setup code with it, after an upload over the Worker too
+      await account.upload
+      // a busy Pool keeps its old code after an upload over the Worker
       if (workers.has(worker)) lagging = account.secretLag ?? 0
-      workers.set(worker, { metadata, module: await (form.get('relay.js') as Blob).text(), secret, route: workers.get(worker)?.route ?? false, relay: RELAY_VERSION })
+      workers.set(worker, { metadata, module: await (form.get('relay.js') as Blob).text(), secret, route: workers.get(worker)?.route ?? false, relay: RELAY_VERSION, protocol: PROTOCOL_VERSION })
       return envelope(200, {})
     }
     if (worker !== undefined && method === 'PUT' && rest === '/secrets') {
@@ -165,18 +174,25 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
     return envelope(404, null, [7003, `No route for ${method} ${path}.`])
   }
 
-  // the relay as its Pool answers: its health for its bucket, and a join with the setup code its secret names, once
+  // the relay as its Pool answers: its health for its bucket, and a join with the setup code its secret names, which
+  // joins one machine, again too
   async function relay(worker: Worker, method: string, path: string, init: RequestInit): Promise<Response> {
     const bucketName = (worker.metadata['bindings'] as { name: string; text?: string }[]).find(({ name }) => name === 'BUCKET_NAME')?.text ?? ''
-    const health = { relay: worker.relay, protocol: PROTOCOL_VERSION, bucket: bucketName }
+    const health = { relay: worker.relay, protocol: worker.protocol, bucket: bucketName }
     if (method === 'GET' && path === '/v1/health') return Response.json(health)
     if (method === 'POST' && path === '/v1/join') {
+      if (unavailable > 0) {
+        unavailable -= 1
+        return Response.json({ error: 'unavailable', message: 'The relay failed: Error: Durable Object reset because its code was updated.' }, { status: 503 })
+      }
       const { invite, device } = JSON.parse(String(init.body)) as { invite: string; device: { id: string; name: string } }
       const code = sha256(invite)
       const isLive = lagging === 0
       lagging = Math.max(0, lagging - 1)
-      if (!isLive || code !== worker.secret || joined.includes(code)) return Response.json({ error: 'invite_unknown', message: 'The relay made no invite with that code. Make a new one with Add a machine.' }, { status: 403 })
-      joined.push(code)
+      if (!isLive || code !== worker.secret) return Response.json({ error: 'invite_unknown', message: 'The relay made no invite with that code. Make a new one with Add a machine.' }, { status: 403 })
+      const usedBy = joined.get(code)
+      if (usedBy !== undefined && usedBy !== device.id) return Response.json({ error: 'invite_used', message: `The invite already joined ${usedBy}. Make a new one with Add a machine.` }, { status: 403 })
+      joined.set(code, device.id)
       return Response.json({ ...health, token: `token-of-${device.name}`, device: { id: device.id, name: device.name } })
     }
     return Response.json({ error: 'missing', message: `The relay has no route ${method} ${path}.` }, { status: 404 })
@@ -202,7 +218,7 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
     const [name, at] = host.split('.')
     const worker = workers.get(name ?? '')
     if (worker === undefined || !worker.route || at !== subdomain) return cloudflare404()
-    if (pathname === '/v1/health' && notFound > 0) {
+    if (notFound > 0) {
       notFound -= 1
       return cloudflare404()
     }
@@ -223,7 +239,9 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
       writeFileSync(loginFile, JSON.stringify({ oauth_token: 'fresh' }))
       isExpired = false
     }
-    // cf logged in with an API token names its source as cf's own `authSource` does
+    // cf logged in with an API token names its source as cf's own `authSource` does, and reads the token from the
+    // environment it runs in, which runCf makes of anyhost's own and what it adds
+    if (account.apiToken === true && (env['CLOUDFLARE_API_TOKEN'] ?? process.env['CLOUDFLARE_API_TOKEN']) === undefined) return JSON.stringify({ authenticated: false, error: 'Not logged in' })
     const source = account.apiToken === true ? 'CLOUDFLARE_API_TOKEN environment variable' : `OAuth token from ${account.keyring === true ? loginFile.replace('.json', '.enc') : loginFile}`
     return JSON.stringify({ authenticated: true, authSource: source, accounts: [...(account.others ?? []), ACCOUNT] })
   }
@@ -267,18 +285,17 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
   } }
 }
 
-test('deploys the relay from nothing into the bucket it finds in the EU, waits for it, and joins this machine', async () => {
+test('deploys the relay from nothing into the bucket it finds in the EU and joins this machine, reading no health', async () => {
   const cloudflare = standIn()
   await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
   const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
-  expect([...new Set(cloudflare.calls)]).toEqual([
+  expect(cloudflare.calls).toEqual([
     `GET /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/settings`,
     `GET /accounts/${ACCOUNT.id}/workers/subdomain`,
     `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test (default)`,
     `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test (eu)`,
     `PUT /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect`,
     `POST /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/subdomain`,
-    `GET ${relayUrl}/v1/health`,
     `POST ${relayUrl}/v1/join`,
   ])
   const worker = cloudflare.workers.get('anyhost-test-connect')
@@ -294,19 +311,73 @@ test('deploys the relay from nothing into the bucket it finds in the EU, waits f
     migrations: { new_tag: 'v1', new_sqlite_classes: ['Pool'] },
   })
   expect(worker?.module).toContain('class Pool')
-  // 30 seconds of the relay's own 200, one a second
-  expect(cloudflare.calls.filter((call) => call.endsWith('/v1/health')).length).toBe(30)
   expect(storedToken()).toBe('token-of-macbook')
   expect(JSON.parse(readFileSync(stateFile('relay.json'), 'utf8'))).toEqual({ url: relayUrl })
   expect(cloudflare.said.at(-1)).toBe(`Joined this machine to ${relayUrl}`)
   expect(existsSync(stateFile('connect'))).toBe(false)
 })
 
-test('waits for 30 seconds straight of the relay answering while the new address still answers Cloudflare\'s 404 page', async () => {
-  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, notFoundHealth: 12 })
+// The suite missed it: a first Connect read the health 30 times, a fixed 30 s of its 48.1 s live, as the health shows
+// nothing of the Pool, whose Worker answers it.
+test('a first Connect makes no health read and joins once the new address stops answering Cloudflare\'s 404 page, a second after the last', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, notFound: 3 })
+  const started = cloudflare.cloudflare.now()
   await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
-  // 30 seconds counted from the last 404, a second before the first 200 after it
-  expect(cloudflare.calls.filter((call) => call.endsWith('/v1/health')).length).toBe(12 + 29)
+  const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
+  expect(cloudflare.calls.filter((call) => call.startsWith('GET https://'))).toEqual([])
+  expect(cloudflare.calls.filter((call) => call === `POST ${relayUrl}/v1/join`)).toHaveLength(4)
+  expect(cloudflare.cloudflare.now() - started).toBe(3000)
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
+// The suite missed it: a join that met the Worker's 503 while the Pool resets for a new version failed the setup.
+test('a join the relay answers with its 503 unavailable asks again a second later, and joins', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION - 1, unavailable: 2 })
+  await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
+  const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
+  expect(cloudflare.calls.filter((call) => call === `POST ${relayUrl}/v1/join`)).toHaveLength(3)
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
+// The suite missed it: a join whose answer the link lost failed the setup once its tries ran out, though the Pool joins
+// the same machine again with the code it used.
+test('a join that gets no answer through all its tries asks again within its patience, and joins', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION })
+  let lost = 6
+  const losing: Cloudflare = {
+    ...cloudflare.cloudflare,
+    fetch: async (url, init) => {
+      if (url.endsWith('/v1/join') && lost > 0) {
+        lost -= 1
+        throw new Error('ECONNRESET: The socket connection was closed unexpectedly.')
+      }
+      return await cloudflare.cloudflare.fetch(url, init)
+    },
+  }
+  await connectCloudflare(cloudflare.progress, DEVICE, NAMES, losing)
+  expect(lost).toBe(0)
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
+// The suite missed it: a second machine's Connect Cloudflare set a newer setup code, and the first one's join blamed
+// Cloudflare's rollout after 10 minutes.
+test('a join whose setup code another Connect Cloudflare replaced fails after 10 minutes, naming that Connect and to press it again', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION })
+  // the other machine sets its setup code right after this one's
+  const replacing: Cloudflare = {
+    ...cloudflare.cloudflare,
+    fetch: async (url, init) => {
+      const answer = await cloudflare.cloudflare.fetch(url, init)
+      const worker = cloudflare.workers.get(NAMES.worker)
+      if (url.endsWith('/secrets') && worker !== undefined) worker.secret = sha256("the other machine's setup code")
+      return answer
+    },
+  }
+  const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
+  await expect(connectCloudflare(cloudflare.progress, DEVICE, NAMES, replacing)).rejects.toThrow(
+    `${relayUrl} still refused the setup code 10 minutes after anyhost set it: The relay made no invite with that code. Make a new one with Add a machine. Another Connect Cloudflare, as on another machine, may have set a newer setup code since. Press Connect Cloudflare again, or run anyhost connect.`,
+  )
+  expect(existsSync(stateFile('relay.json'))).toBe(false)
 })
 
 test('a call the link reset tries again after 1, 2, 4, 8 and 16 seconds, and fails naming the call after the sixth', async () => {
@@ -396,6 +467,18 @@ test('a cf logged in with an API token gets its calls made with the token CLOUDF
   expect(storedToken()).toBe('token-of-macbook')
 })
 
+// The suite missed it: the program reads its own service environment, which has no CLOUDFLARE_API_TOKEN, so the token
+// login worked only with no program running.
+test("Connect Cloudflare for the Step logs cf in with the API token anyhost connect sent, which this process's environment lacks, and joins", async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, apiToken: true })
+  const run = connectForStep(DEVICE, NAMES, cloudflare.cloudflare, 'fresh')
+  await run.done
+  expect(run.view).toMatchObject({ is: 'joined' })
+  expect(cloudflare.cfRuns).toEqual([{ args: ['auth', 'whoami'], env: { CLOUDFLARE_API_TOKEN: 'fresh' } }])
+  expect(process.env['CLOUDFLARE_API_TOKEN']).toBeUndefined()
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
 test('a cf run that needs no person and never exits is stopped at its limit, which its error names', async () => {
   // a package registry that takes the request and never answers, so `bun x` waits for cf for good
   const registry = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Promise<Response>(() => undefined) })
@@ -459,9 +542,20 @@ test.each([RELAY_VERSION, RELAY_VERSION + 1])('setup on an account whose relay a
   expect(cloudflare.said.at(-1)).toBe(`Joined this machine to ${relayUrl}`)
 })
 
-test('setup on an account whose relay is older than this program uploads this one with a new setup code, no migration, and joins', async () => {
+test('setup on an account whose relay is older than this program uploads this one with a new setup code, no migration, and joins, turning the route on once', async () => {
   const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION - 1 })
   await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
+  const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
+  expect(cloudflare.calls).toEqual([
+    `GET /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/settings`,
+    `GET /accounts/${ACCOUNT.id}/workers/subdomain`,
+    `POST /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/subdomain`,
+    `GET ${relayUrl}/v1/health`,
+    `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test (default)`,
+    `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test (eu)`,
+    `PUT /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect`,
+    `POST ${relayUrl}/v1/join`,
+  ])
   const again = cloudflare.workers.get(NAMES.worker)
   expect(again?.relay).toBe(RELAY_VERSION)
   expect(again?.module).toContain('class Pool')
@@ -469,6 +563,21 @@ test('setup on an account whose relay is older than this program uploads this on
   expect(again?.metadata['migrations']).toBeUndefined()
   expect(again?.metadata['keep_bindings']).toBeUndefined()
   expect(storedToken()).toBe('token-of-macbook')
+})
+
+// The suite missed it: an upload went up only for a lower relay version, so a protocol bump that left RELAY_VERSION as
+// it was left every machine outdated with nothing that fixed it.
+test('setup and updateRelay upload this relay over one at this relay version that answers an older protocol', async () => {
+  const connecting = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION, protocol: PROTOCOL_VERSION - 1 })
+  await connectCloudflare(connecting.progress, DEVICE, NAMES, connecting.cloudflare)
+  expect(connecting.workers.get(NAMES.worker)?.protocol).toBe(PROTOCOL_VERSION)
+  expect(connecting.calls).toContain(`PUT /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect`)
+  expect(storedToken()).toBe('token-of-macbook')
+
+  const updating = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION, protocol: PROTOCOL_VERSION - 1 })
+  const secret = updating.workers.get(NAMES.worker)?.secret
+  await updateRelay(NAMES, updating.cloudflare)
+  expect(updating.workers.get(NAMES.worker)).toMatchObject({ protocol: PROTOCOL_VERSION, secret })
 })
 
 // The suite missed it: the stand-in's cmod named the machine the program connects as.
@@ -509,7 +618,7 @@ test.each([
 // The suite missed it: every stand-in Worker answered its health the moment its route went on, while a live route
 // answered Cloudflare's 404 page 13 ms after it went on and the relay 0.55 to 1.4 s after.
 test('setup over a Worker whose route was just turned on asks again while Cloudflare answers its 404 page, and joins', async () => {
-  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION, notFoundHealth: 2 })
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION, notFound: 2 })
   await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
   const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
   expect(cloudflare.calls.slice(2)).toEqual([
@@ -522,7 +631,7 @@ test('setup over a Worker whose route was just turned on asks again while Cloudf
 })
 
 test('setup over a Worker that answers Cloudflare\'s 404 page 30 s after its route went on uploads nothing and fails naming the limit', async () => {
-  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION, notFoundHealth: 1000 })
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION, notFound: 1000 })
   const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
   await expect(connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)).rejects.toThrow(
     `${relayUrl}/v1/health still answered Cloudflare's 404 page 30 s after anyhost turned its route on, so anyhost uploads nothing over the Worker there. Try again later. Its answer: <!DOCTYPE html>`,
@@ -699,3 +808,231 @@ test('join refuses a link that is no invite link, and says why the relay refused
     'https://anyhost-test-connect.parker-labs.workers.dev refused to join macbook: The relay made no invite with that code. Make a new one with Add a machine.',
   )
 })
+
+const SRC = join(import.meta.dir, '..', 'src')
+const SESSION = '11111111-2222-3333-4444-555555555555'
+const decoder = new TextDecoder()
+const children: Subprocess[] = []
+const servers: { stop(closeActiveConnections?: boolean): Promise<void> }[] = []
+afterEach(async () => {
+  for (const child of children.splice(0)) {
+    child.kill()
+    await child.exited
+  }
+  await Promise.all(servers.splice(0).map((server) => server.stop(true)))
+})
+
+// A program that runs `anyhost serve` against the relay in workerd took 5.0 to 8.3 s on test machines, as relay.test.ts
+// measured, so a wait on one gives it 30 s.
+async function waitFor(what: string, isTrue: () => boolean | Promise<boolean>, ms = 30_000): Promise<void> {
+  for (const started = Date.now(); !(await isTrue()); await Bun.sleep(20)) if (Date.now() - started > ms) throw new Error(`${what} did not happen within ${ms} ms.`)
+}
+
+const statusOf = async (socket: string): Promise<Status> => (await (await fetch('http://localhost/status', { unix: socket })).json()) as Status
+
+// The environment this machine's program and commands run in, as its service gives one: the test's state folder,
+// Claude Code folder and cmod, whose options set `uploadEvery` 0, and folders of their own for the rest, so no child
+// reads this Mac's. No test here runs a session, so Claude Code is a program that fails.
+function machineEnv(): Record<string, string> {
+  const folder = temporaryFolder()
+  writeFileSync(join(home, 'data', 'cmod', 'programs', 'settings.json'), '{"uploadEvery":0}')
+  return {
+    PATH: process.env['PATH'] ?? '',
+    HOME: folder,
+    XDG_STATE_HOME: process.env['XDG_STATE_HOME'] ?? '',
+    XDG_DATA_HOME: join(home, 'data'),
+    CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'] ?? '',
+    CLAUDE_CODE_TMPDIR: folder,
+    CODEX_HOME: join(folder, '.codex'),
+    CLAUDE_CODE_EXECPATH: '/usr/bin/false',
+    ANYHOST_DEVICE_ID: DEVICE.id,
+    ANYHOST_DEVICE_NAME: DEVICE.name,
+    ANYHOST_DEVICE_OS: DEVICE.os,
+    ANYHOST_DEVICE_ARCH: DEVICE.arch,
+  }
+}
+
+// Runs `anyhost serve` as its service runs it, with `cloudflare` for the Cloudflare its Connect Cloudflare and relay
+// update reach: a script hands `serve` a Cloudflare that sends each fetch and cf run to a server of this test, which
+// answers it from `cloudflare`. Answers the program's socket. What the program logs goes to the test's own errors.
+async function programWith(cloudflare: Cloudflare, env: Record<string, string>): Promise<string> {
+  const server = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    async fetch(request) {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/cf') {
+        const { args, env: cfEnv } = (await request.json()) as { args: string[]; env: CfEnvironment }
+        return await cloudflare.cf(args, cfEnv).then(
+          (printed) => new Response(printed),
+          (error: unknown) => new Response(error instanceof Error ? error.message : String(error), { status: 500 }),
+        )
+      }
+      // an upload's form, its parts as the program sent them, as the stand-in reads a form
+      const formOf = async (): Promise<FormData> => {
+        const form = new FormData()
+        for (const [name, value] of await request.formData()) form.append(name, value)
+        return form
+      }
+      const isForm = (request.headers.get('content-type') ?? '').startsWith('multipart/form-data')
+      const body = request.method === 'GET' ? undefined : isForm ? await formOf() : await request.text()
+      return await cloudflare.fetch(decodeURIComponent(pathname.slice('/fetch/'.length)), { method: request.method, headers: request.headers, ...(body === undefined ? {} : { body }) })
+    },
+  })
+  servers.push(server)
+  const script = join(temporaryFolder(), 'program.ts')
+  writeFileSync(
+    script,
+    `import { deviceFromEnvironment } from ${JSON.stringify(join(SRC, 'device.ts'))}
+import { serve } from ${JSON.stringify(join(SRC, 'serve.ts'))}
+const at = 'http://127.0.0.1:${server.port}'
+await serve(deviceFromEnvironment(), ${JSON.stringify(NAMES)}, {
+  fetch: (url, init) => fetch(at + '/fetch/' + encodeURIComponent(url), init),
+  async cf(args, env) {
+    const answer = await fetch(at + '/cf', { method: 'POST', body: JSON.stringify({ args, env }) })
+    const printed = await answer.text()
+    if (!answer.ok) throw new Error(printed)
+    return printed
+  },
+  now: Date.now,
+  sleep: Bun.sleep,
+})
+`,
+  )
+  const child = Bun.spawn(['bun', script], { env, stdout: 'pipe', stderr: 'inherit' })
+  children.push(child)
+  const reader = child.stdout.getReader()
+  let printed = ''
+  while (!printed.includes('\n')) {
+    const { value, done } = await reader.read()
+    if (done) throw new Error(`anyhost serve exited, having printed ${JSON.stringify(printed)}.`)
+    printed += decoder.decode(value)
+  }
+  reader.releaseLock()
+  return printed.slice('unix:'.length, printed.indexOf('\n'))
+}
+
+// A machine's socket to the front, with the headers the relay reads, and the messages it sent before the front's own
+// socket to the relay opened.
+type Carried = { readonly headers: Record<string, string>; readonly queued: (string | Uint8Array)[]; relay?: WebSocket }
+
+// The memory relay behind a front whose welcome names the versions `worker` runs, as the relay Connect Cloudflare put
+// up answers its own, and keeps each welcome's versions in `welcomes`.
+function frontOf(relay: MemoryRelay, worker: () => Worker | undefined): { readonly url: string; readonly welcomes: { relay: number; protocol: number }[] } {
+  const welcomes: { relay: number; protocol: number }[] = []
+  const server = Bun.serve<Carried>({
+    port: 0,
+    hostname: '127.0.0.1',
+    fetch(request, server) {
+      const headers: Record<string, string> = {}
+      for (const [name, value] of request.headers) if (name === 'authorization' || name.startsWith('x-anyhost-')) headers[name] = value
+      return server.upgrade(request, { data: { headers, queued: [] } }) ? undefined : new Response("The front carries only the relay's WebSocket.", { status: 400 })
+    },
+    websocket: {
+      open(front) {
+        const socket = new WebSocket(`${relay.url.replace(/^http/, 'ws')}/v1/connect`, { headers: front.data.headers })
+        socket.binaryType = 'arraybuffer'
+        front.data.relay = socket
+        socket.addEventListener('open', () => {
+          for (const message of front.data.queued.splice(0)) socket.send(message)
+        })
+        socket.addEventListener('message', ({ data }) => {
+          if (typeof data !== 'string') return void front.send(new Uint8Array(data as ArrayBuffer))
+          const message = data === 'pong' ? undefined : (JSON.parse(data) as { readonly t?: string })
+          if (message?.t !== 'welcome') return void front.send(data)
+          const versions = { relay: worker()?.relay ?? 0, protocol: worker()?.protocol ?? 0 }
+          welcomes.push(versions)
+          front.send(JSON.stringify({ ...message, ...versions }))
+        })
+        // a close the front passes on with its code, or a socket that ended with no close, as 1006 says
+        socket.addEventListener('close', ({ code, reason }) => (code === 1000 || (code >= 3000 && code < 5000) ? front.close(code, reason) : front.terminate()))
+      },
+      message(front, message) {
+        const { relay: socket } = front.data
+        if (socket?.readyState === WebSocket.OPEN) socket.send(message)
+        else front.data.queued.push(typeof message === 'string' ? message : new Uint8Array(message))
+      },
+      close(front) {
+        front.data.relay?.close()
+      },
+    },
+  })
+  servers.push(server)
+  return { url: `http://127.0.0.1:${server.port}`, welcomes }
+}
+
+// The suite missed it: the program updated only a relay of an older protocol, so a relay fix alone, at the same
+// protocol, never rolled out.
+test('a running program whose relay is an older relay version at its protocol keeps capturing while it uploads this relay with its cf login, then connects to it', async () => {
+  const relay = await memoryRelay()
+  const upload = Promise.withResolvers<void>()
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION - 1, upload: upload.promise })
+  const front = frontOf(relay, () => cloudflare.workers.get(NAMES.worker))
+  await saveRelayLogin({ url: front.url, token: await relay.join(DEVICE, ROOTS) })
+  const env = machineEnv()
+  const socket = await programWith(cloudflare.cloudflare, env)
+  await waitFor('the relay update uploading', () => cloudflare.calls.includes(`PUT /accounts/${ACCOUNT.id}/workers/scripts/${NAMES.worker}`))
+  expect((await statusOf(socket)).relay.state).toBe('connected')
+
+  // a session's line goes up while the upload waits
+  const transcript = join(env['CLAUDE_CONFIG_DIR'] ?? '', 'projects', '-work', `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
+  await waitFor('the line uploading', () => relay.puts.some(({ key, body }) => key.startsWith(`journals/${SESSION}/hot/`) && decoder.decode(decompress(body)).includes('Plan the trip')))
+  expect(cloudflare.workers.get(NAMES.worker)?.relay).toBe(RELAY_VERSION - 1)
+
+  upload.resolve()
+  await waitFor('the program connecting to the relay it put up', () => front.welcomes.length === 2)
+  expect(front.welcomes).toEqual([
+    { relay: RELAY_VERSION - 1, protocol: PROTOCOL_VERSION },
+    { relay: RELAY_VERSION, protocol: PROTOCOL_VERSION },
+  ])
+  const updated = cloudflare.workers.get(NAMES.worker)
+  expect(updated?.metadata['keep_bindings']).toEqual(['secret_text'])
+  expect(updated?.secret).toBe(sha256('an earlier setup code'))
+  const status = await statusOf(socket)
+  expect(status.relay.state).toBe('connected')
+  expect(status.updateProblem).toBeUndefined()
+}, 60_000)
+
+// The suite missed it: a machine whose own update failed kept the problem, and anyhost doctor its ✘, after another
+// machine updated the relay.
+test('a running program whose relay update failed loses the relay update problem once a relay that needs no upload welcomes it', async () => {
+  const relay = await memoryRelay()
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, loggedIn: false, relay: RELAY_VERSION, protocol: PROTOCOL_VERSION - 1 })
+  const front = frontOf(relay, () => cloudflare.workers.get(NAMES.worker))
+  await saveRelayLogin({ url: front.url, token: await relay.join(DEVICE, ROOTS) })
+  const socket = await programWith(cloudflare.cloudflare, machineEnv())
+  await waitFor('the failed update in /status', async () => (await statusOf(socket)).updateProblem !== undefined)
+  const failed = await statusOf(socket)
+  expect(failed.relay.state).toBe('outdated')
+  expect(failed.updateProblem).toEndWith('relay update: Error: cf is logged in to no Cloudflare account on this machine. Connect Cloudflare logs it in.')
+
+  // another machine's Connect Cloudflare puts this program's relay up, which the program's next connect meets
+  const worker = cloudflare.workers.get(NAMES.worker)
+  if (worker !== undefined) worker.protocol = PROTOCOL_VERSION
+  await waitFor('the program connecting', async () => (await statusOf(socket)).relay.state === 'connected')
+  expect((await statusOf(socket)).updateProblem).toBeUndefined()
+}, 60_000)
+
+// The suite missed it: anyhost connect goes through the program, whose service environment has no
+// CLOUDFLARE_API_TOKEN, so a token login worked only with no program running.
+test("anyhost connect with CLOUDFLARE_API_TOKEN set sends it to the running program, whose Connect Cloudflare logs cf in and calls Cloudflare's API with it", async () => {
+  const other: Account = { id: 'f00dfeed', name: 'Side Project' }
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', apiToken: true, others: [other] })
+  const env = machineEnv()
+  await programWith(cloudflare.cloudflare, env)
+  const command = Bun.spawn(['bun', join(SRC, 'main.ts'), 'connect'], { env: { ...env, CLOUDFLARE_API_TOKEN: 'fresh' }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+  children.push(command)
+  // the run asks which account only once the token's login listed them and the API took it, and it joins nothing
+  // before the answer, as a join would point the program at the stand-in's workers.dev address
+  const reader = command.stdout.getReader()
+  let printed = ''
+  while (!printed.includes('Type the number of the account your relay goes in:')) {
+    const { value, done } = await reader.read()
+    if (done) throw new Error(`anyhost connect exited, having printed ${JSON.stringify(printed)}: ${await new Response(command.stderr).text()}`)
+    printed += decoder.decode(value)
+  }
+  expect(cloudflare.cfRuns).toEqual([{ args: ['auth', 'whoami'], env: { CLOUDFLARE_API_TOKEN: 'fresh' } }])
+  expect(cloudflare.calls).toEqual([`GET /accounts/${other.id}/workers/scripts/anyhost-test-connect/settings`, `GET /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/settings`])
+}, 60_000)

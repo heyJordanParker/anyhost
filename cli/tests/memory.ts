@@ -27,8 +27,17 @@ type Asked = { readonly refused: readonly (readonly [number, Result])[]; readonl
 // A machine's socket to the front, and the socket the front opened to the Pool for it with the machine's headers. The
 // messages the machine sent before the Pool's socket opened wait in `queued`. `device` is the machine the Pool welcomed.
 // `held` is the message `holdNext` holds and every message the machine sent after it, in order. `freeAt` is when the
-// link `answerBytesPerMs` paces has carried the answers it took.
-type Front = { readonly headers: Record<string, string>; readonly queued: (string | Uint8Array)[]; readonly asked: Map<number, Asked>; pool?: WebSocket; device?: string; held?: (string | Uint8Array)[] | undefined; freeAt?: number }
+// link `answerBytesPerMs` paces has carried the answers it took. A front `silence` set carries nothing either way.
+type Front = {
+  readonly headers: Record<string, string>
+  readonly queued: (string | Uint8Array)[]
+  readonly asked: Map<number, Asked>
+  pool?: WebSocket
+  device?: string
+  held?: (string | Uint8Array)[] | undefined
+  freeAt?: number
+  isSilent?: boolean
+}
 
 // The relay as the program meets it: the relay's Worker and Pool in workerd through Miniflare, as `startLocal` in
 // relay/relay.test.ts runs them, with the Pool's SQLite and the R2 bucket in memory, behind a front at `url` that
@@ -76,9 +85,18 @@ export type MemoryRelay = {
   // Holds the next message of the type `t` a machine sends, and every message that machine sends after it, at the front,
   // and answers once it holds one, with the function that sends them on in order.
   holdNext(t: string): Promise<() => void>
-  // Ends every socket of the machine and refuses its connects, as a machine whose network went does, and answers the
-  // function that lets it connect again.
-  disconnect(device: string): () => void
+  // Ends the machine's socket as the Pool sends it the next message of the type `t`, which the machine never gets, as a
+  // connection that broke while the message was on its way, and answers once it did. The machine connects again.
+  loseNext(device: string, t: string): Promise<void>
+  // Ends every socket of the machine but the first `kept` it opened, and refuses its connects, and answers the function
+  // that lets it connect again. The Pool hears each close at once, as it does when the machine or its network closes the
+  // connection. With `kept` 1, the program's socket stays and a command's own socket, opened after it, ends.
+  disconnect(device: string, kept?: number): () => void
+  // The front carries no message, ping or pong of the machine's sockets either way, leaves the Pool's sockets open and
+  // refuses the machine's connects, as when the machine went to sleep or its network went with no close, so the Pool
+  // hears nothing and the machine hears nothing back. Answers the function that wakes it: the machine's end of those
+  // sockets breaks, as a woken machine finds them, and it connects again, while the Pool's end stays open.
+  silence(device: string): () => void
   // a client of the machine's token, which a machine that joined before keeps
   connect(device: Device, roots: MachineRoots): Relay
   stop(): Promise<void>
@@ -208,10 +226,13 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
   }
   // the type of the message `holdNext` holds next, with what hears it held
   let holding: { readonly t: string; readonly heard: (release: () => void) => void } | undefined
-  // the machines `disconnect` ended, whose connects the front refuses
+  // the machine and the type of the message `loseNext` loses next, with what hears it lost
+  let losing: { readonly device: string; readonly t: string; readonly lost: () => void } | undefined
+  // the machines `disconnect` ended or `silence` put to sleep, whose connects the front refuses
   const disconnected = new Set<string>()
   // A message the machine sent: held while a message before it is, else a request, or a message for the Pool.
   const fromMachine = (front: ServerWebSocket<Front>, message: string | Uint8Array): void => {
+    if (front.data.isSilent === true) return
     if (front.data.held !== undefined) return void front.data.held.push(message)
     if (typeof message === 'string') {
       if (holding === undefined || !message.includes(`"t":"${holding.t}"`)) return toPool(front, message)
@@ -265,6 +286,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
           for (const message of front.data.queued.splice(0)) socket.send(message)
         })
         socket.addEventListener('message', ({ data }) => {
+          if (front.data.isSilent === true) return
           if (typeof data !== 'string') {
             const bytes = new Uint8Array(data as ArrayBuffer)
             return bytes[0] === ANSWER ? answered(front, bytes) : void front.send(bytes)
@@ -272,11 +294,17 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
           if (data !== 'pong') {
             const message = JSON.parse(data) as { readonly t: string; readonly device?: { readonly id: string } }
             if (message.t === 'welcome' && message.device !== undefined) front.data.device = message.device.id
+            if (losing !== undefined && front.data.device === losing.device && message.t === losing.t) {
+              const { lost } = losing
+              losing = undefined
+              front.terminate()
+              return lost()
+            }
           }
           front.send(data)
         })
         socket.addEventListener('close', ({ code, reason }) => {
-          if (fronts.has(front)) closeWith(front, code, reason)
+          if (fronts.has(front) && front.data.isSilent !== true) closeWith(front, code, reason)
         })
       },
       message(front, message) {
@@ -287,7 +315,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
         atOnce -= front.data.asked.size
         front.data.asked.clear()
         const { pool: socket } = front.data
-        if (socket !== undefined && socket.readyState !== WebSocket.CLOSED) closeWith(socket, code, reason)
+        if (socket !== undefined && socket.readyState !== WebSocket.CLOSED && front.data.isSilent !== true) closeWith(socket, code, reason)
       },
     },
   })
@@ -347,10 +375,21 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       socket.send(encodeMessage(REQUEST, { id: 0, ops: [{ op: 'remove', device }] }, []))
     },
     holdNext: (t) => new Promise((heard) => void (holding = { t, heard })),
-    disconnect(device) {
+    loseNext: (device, t) => new Promise((lost) => void (losing = { device, t, lost })),
+    disconnect(device, kept = 0) {
       disconnected.add(device)
-      for (const front of fronts) if (front.data.device === device) front.terminate()
+      // the fronts in the order the machine opened them
+      for (const front of [...fronts].filter((each) => each.data.device === device).slice(kept)) front.terminate()
       return () => void disconnected.delete(device)
+    },
+    silence(device) {
+      disconnected.add(device)
+      const silent = [...fronts].filter((front) => front.data.device === device)
+      for (const front of silent) front.data.isSilent = true
+      return () => {
+        disconnected.delete(device)
+        for (const front of silent) front.terminate()
+      }
     },
     connect(device, roots) {
       const token = tokens.get(device.id) ?? relay.join(device, roots)

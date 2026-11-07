@@ -15,6 +15,7 @@ import {
   CLOSE_UNKNOWN_TOKEN,
   COMPATIBILITY_DATE,
   INVITE_MS,
+  LIVE_MS,
   MAX_MESSAGE_BYTES,
   MAX_OPS,
   PROTOCOL_VERSION,
@@ -113,11 +114,13 @@ const machine = (name: string, os = 'linux'): JoiningDevice => ({ id: hex(16), n
 type Json = Record<string, any>
 type Message = Json | Uint8Array
 
-// One machine's socket, whose messages wait in its inbox until a test takes them.
+// One machine's socket, whose messages wait in its inbox until a test takes them. It pings well within LIVE_MS, as the
+// program does, so the Pool counts it alive until `silence` stops it, as a machine that went to sleep stops.
 class Socket {
   readonly ws: WebSocket
   readonly closed: Promise<{ code: number; reason: string }>
   readonly #inbox: Message[] = []
+  readonly #pinger = setInterval(() => this.ws.readyState === WebSocket.OPEN && this.ws.send('ping'), LIVE_MS / 4)
   #wake = (): void => undefined
   #id = 0
 
@@ -130,7 +133,17 @@ class Socket {
       this.#inbox.push(typeof event.data === 'string' ? (event.data === 'pong' ? { t: 'pong' } : (JSON.parse(event.data) as Json)) : new Uint8Array(event.data as ArrayBuffer))
       this.#wake()
     })
-    this.closed = new Promise((resolve) => this.ws.addEventListener('close', (event) => resolve({ code: event.code, reason: event.reason })))
+    this.closed = new Promise((resolve) =>
+      this.ws.addEventListener('close', (event) => {
+        clearInterval(this.#pinger)
+        resolve({ code: event.code, reason: event.reason })
+      }),
+    )
+  }
+
+  // The machine sends nothing more, its socket left open, as a machine that went to sleep does.
+  silence(): void {
+    clearInterval(this.#pinger)
   }
 
   // the next message `match` accepts, from those that came already or the ones still to come
@@ -175,7 +188,8 @@ class Socket {
     const gets: Uint8Array[] = []
     let at = 0
     for (const result of answer['results'] ?? []) {
-      if (result.status !== 200 || result.size === undefined || result.modified === undefined) continue
+      // a get answered 200 is the one result that names a size
+      if (result.status !== 200 || result.size === undefined) continue
       gets.push(bytes.subarray(at, at + result.size))
       at += result.size
     }
@@ -191,6 +205,7 @@ class Socket {
   }
 
   close(): void {
+    clearInterval(this.#pinger)
     this.ws.close()
   }
 }
@@ -289,7 +304,7 @@ describe('the first start', () => {
     const byId = new Map((devices!['devices'] as Json[]).map((device) => [device['id'], device]))
     expect(byId.get(imported.mac.id)).toMatchObject({ name: imported.mac.record.name, os: 'darwin', connected: true, roots: roots('/Users/jordan') })
     expect(byId.get(imported.old.id)).toMatchObject({ name: imported.old.record.name, os: 'linux', arch: 'x64', connected: false, roots: roots('/home/old') })
-    expect(claims!['claims'][imported.session]).toEqual({ id: imported.old.id, name: imported.old.record.name, at: '2026-11-05T06:52:05.684Z' })
+    expect(claims!['claims'][imported.session]).toEqual({ id: imported.old.id, name: imported.old.record.name })
     const keysLeft = [...devicesLeft!['objects'], ...claimsLeft!['objects']].map((object: Json) => object['key'])
     expect(keysLeft).toContain(`devices/${imported.broken}.json`)
     for (const key of [`devices/${imported.mac.id}.json`, `devices/${imported.old.id}.json`, `claims/${imported.session}.json`]) expect(keysLeft).not.toContain(key)
@@ -445,13 +460,12 @@ describe('the socket', () => {
 })
 
 describe('ops', () => {
-  test('put stores, and get answers the bytes with etag, size and modified time, or 404', async () => {
+  test('put stores, and get answers the bytes with etag and size, or 404', async () => {
     const key = `${prefix}ops/a.txt`
     const { answer } = await mac.socket.request([{ op: 'put', key, size: 5 }], [new TextEncoder().encode('hello')])
     expect(answer['results']).toEqual([{ status: 200, etag: md5('hello') }])
     const { answer: got, gets } = await mac.socket.request([{ op: 'get', key }, { op: 'get', key: `${prefix}ops/none` }])
-    expect(got['results'][0]).toMatchObject({ status: 200, etag: md5('hello'), size: 5 })
-    expect(Math.abs(Date.parse(got['results'][0].modified) - Date.now())).toBeLessThan(120_000)
+    expect(got['results'][0]).toEqual({ status: 200, etag: md5('hello'), size: 5 })
     expect(got['results'][1]).toEqual({ status: 404 })
     expect(new TextDecoder().decode(gets[0])).toBe('hello')
   })
@@ -476,13 +490,13 @@ describe('ops', () => {
     expect((await putObject(mac.token, second, big)).status).toBe(200)
     const { answer, gets } = await mac.socket.request([{ op: 'get', key: first }, { op: 'get', key: second }])
     expect(answer['results']).toEqual([
-      { status: 200, etag: md5(big), size: big.length, modified: expect.any(String) },
+      { status: 200, etag: md5(big), size: big.length },
       { status: 413, etag: md5(big), size: big.length },
     ])
     expect(gets[0]).toEqual(big)
   })
 
-  test('list answers keys, sizes and modified times up to 1,000 at a time, with a cursor while more remain', async () => {
+  test('list answers keys and sizes up to 1,000 at a time, with a cursor while more remain', async () => {
     const folder = `${prefix}ops/list/`
     for (let at = 0; at < 1001; at += MAX_OPS) {
       const ops = Array.from({ length: Math.min(MAX_OPS, 1001 - at) }, (_, index) => ({ op: 'put', key: `${folder}${String(at + index).padStart(4, '0')}`, size: 1 }) as const)
@@ -500,7 +514,7 @@ describe('ops', () => {
     } while (cursor !== undefined)
     expect(pages.length).toBeGreaterThan(1)
     const objects = pages.flatMap((page) => page['objects'] as Json[])
-    expect(objects[0]).toEqual({ key: `${folder}0000`, size: 1, modified: expect.any(String) })
+    expect(objects[0]).toEqual({ key: `${folder}0000`, size: 1 })
     const keys = objects.map((object) => object['key'] as string)
     expect(keys).toEqual(Array.from({ length: 1001 }, (_, index) => `${folder}${String(index).padStart(4, '0')}`))
     const [tooMany] = await mac.socket.results({ op: 'delete', keys })
@@ -519,7 +533,7 @@ describe('ops', () => {
     expect(await other.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, told: true }])
     expect(await mac.socket.message('released')).toEqual({ t: 'released', session, to: { id: other.device.id, name: other.device.name }, at: expect.any(String) })
     const [claims] = await mac.socket.results({ op: 'claims' })
-    expect(claims!['claims'][session]).toEqual({ id: other.device.id, name: other.device.name, at: expect.any(String) })
+    expect(claims!['claims'][session]).toEqual({ id: other.device.id, name: other.device.name })
   })
 
   test('claims with a prefix answers only the sessions whose id begins with it', async () => {
@@ -531,7 +545,7 @@ describe('ops', () => {
     for (const session of [...under, before, after]) expect(await mac.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true }])
     const [claims] = await mac.socket.results({ op: 'claims', prefix: stem })
     expect(Object.keys(claims!['claims']).sort()).toEqual([...under].sort())
-    expect(claims!['claims'][under[0]!]).toEqual({ id: mac.device.id, name: mac.device.name, at: expect.any(String) })
+    expect(claims!['claims'][under[0]!]).toEqual({ id: mac.device.id, name: mac.device.name })
     const [all] = await mac.socket.results({ op: 'claims' })
     expect(Object.keys(all!['claims'])).toEqual(expect.arrayContaining([...under, before, after]))
   })
@@ -545,7 +559,6 @@ describe('ops', () => {
       arch: 'arm64',
       roots: roots('/Users/jordan'),
       connected: true,
-      joinedAt: expect.any(String),
       seenAt: expect.any(String),
     })
   })
@@ -554,9 +567,9 @@ describe('ops', () => {
 describe('objects over HTTP', () => {
   test('PUT /v1/objects honours If-None-Match and If-Match, and needs a Content-Length', async () => {
     const key = `${prefix}http/frame.zst`
-    expect(await json(await putObject(mac.token, key, 'first', { 'if-none-match': '*' }))).toEqual({ status: 200, etag: md5('first'), size: 5 })
+    expect(await json(await putObject(mac.token, key, 'first', { 'if-none-match': '*' }))).toEqual({ status: 200, etag: md5('first') })
     expect(await json(await putObject(mac.token, key, 'again', { 'if-none-match': '*' }))).toMatchObject({ status: 412, error: 'precondition', etag: md5('first') })
-    expect(await json(await putObject(mac.token, key, 'second', { 'if-match': `"${md5('first')}"` }))).toEqual({ status: 200, etag: md5('second'), size: 6 })
+    expect(await json(await putObject(mac.token, key, 'second', { 'if-match': `"${md5('first')}"` }))).toEqual({ status: 200, etag: md5('second') })
     expect(await json(await putObject(mac.token, key, 'third', { 'if-match': `"${md5('first')}"` }))).toMatchObject({ status: 412, etag: md5('second') })
     const unsized = new ReadableStream({
       start(controller) {
@@ -568,7 +581,7 @@ describe('objects over HTTP', () => {
     // workerd hands the Worker a chunked body without a length, which R2 refuses, while Cloudflare takes the whole
     // body first and names its length
     if (target === undefined) expect(chunked).toMatchObject({ status: 411, error: 'length_required' })
-    else expect(chunked).toEqual({ status: 200, etag: md5('no length'), size: 9 })
+    else expect(chunked).toEqual({ status: 200, etag: md5('no length') })
   })
 
   test('GET /v1/objects streams the object with ETag, Content-Length and Last-Modified, and a Range of it', async () => {
@@ -753,6 +766,45 @@ describe('the holder', () => {
     await back.closed
     const again = await connect(away.token, away.device.name, away.device.roots)
     expect(await again.message('welcome')).toMatchObject({ waiting: [] })
+  })
+
+  // The suite missed it: every machine a test took a session from had closed its socket, so the Pool never held the
+  // open socket of a machine gone silent, as a sleeping laptop's is, and counted a message sent on it as delivered.
+  test('a take of a session whose holder\'s socket is open but silent past LIVE_MS answers told false with previous, and the holder\'s next welcome carries released, while a holder that pinged hears it at once', async () => {
+    const asleep = await joinNew(mac, 'asleep')
+    const awake = await joinNew(mac, 'awake')
+    const [sleeping, pinging] = [crypto.randomUUID(), crypto.randomUUID()]
+    expect(await asleep.socket.results({ op: 'claim', session: sleeping, take: false })).toEqual([{ status: 200, told: true }])
+    expect(await awake.socket.results({ op: 'claim', session: pinging, take: false })).toEqual([{ status: 200, told: true }])
+    asleep.socket.silence()
+    // both sockets connected longer ago than LIVE_MS, so only the awake one's pings keep it alive
+    await Bun.sleep(LIVE_MS + 2000)
+
+    expect(await mac.socket.results({ op: 'claim', session: sleeping, take: true })).toEqual([{ status: 200, previous: { id: asleep.device.id, name: asleep.device.name }, told: false }])
+    expect(await mac.socket.results({ op: 'claim', session: pinging, take: true })).toEqual([{ status: 200, told: true }])
+    expect(await awake.socket.message('released')).toMatchObject({ session: pinging, to: { id: mac.device.id } })
+    const [devices] = await mac.socket.results({ op: 'devices' })
+    const connected = (id: string): unknown => (devices!['devices'] as Json[]).find((device) => device['id'] === id)?.['connected']
+    expect([connected(asleep.device.id), connected(awake.device.id)]).toEqual([false, true])
+    // the Pool sent nothing on the silent socket, which a sleeping machine never reads
+    await asleep.socket.none('released', 500)
+    const woken = await connect(asleep.token, asleep.device.name, asleep.device.roots)
+    expect(await woken.message('welcome')).toMatchObject({ waiting: [{ t: 'released', session: sleeping, to: { id: mac.device.id, name: mac.device.name } }] })
+  })
+
+  // The suite missed it: no test removed a machine a take had left untold, so every later take named it as a machine
+  // that may take one more prompt, though a removed machine connects no more.
+  test('a take sent again after the machine it took the session from was removed answers told true', async () => {
+    const away = await joinNew(mac, 'removed-holder')
+    const session = crypto.randomUUID()
+    expect(await away.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true }])
+    away.socket.close()
+    await away.socket.closed
+    // the Pool hears the close a moment after the machine does
+    await Bun.sleep(500)
+    expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, previous: { id: away.device.id, name: away.device.name }, told: false }])
+    expect(await mac.socket.results({ op: 'remove', device: away.device.id })).toEqual([{ status: 200 }])
+    expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, told: true }])
   })
 })
 

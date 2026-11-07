@@ -36,13 +36,17 @@ export async function indexesOf(relay: Relay, devices: Iterable<string>): Promis
 }
 
 // Every session the machines' indexes name, each from the index of the machine that holds it, else the latest. `read`
-// is the machines and their indexes a caller read already.
+// is the machines, their indexes and the claims a caller read already, as a restore reads only its own session's claim.
 export async function listSessions(
   relay: Relay,
-  read?: { readonly devices: ReadonlyMap<string, Protocol.Device>; readonly indexes: ReadonlyMap<string, readonly IndexedSession[]> },
+  read?: {
+    readonly devices: ReadonlyMap<string, Protocol.Device>
+    readonly indexes: ReadonlyMap<string, readonly IndexedSession[]>
+    readonly claims: ReadonlyMap<string, Protocol.Claim>
+  },
 ): Promise<ListedSession[]> {
   const known = read?.devices ?? (await devicesOf(relay))
-  const [indexes, claims] = await Promise.all([read?.indexes ?? indexesOf(relay, known.keys()), claimsOf(relay)])
+  const [indexes, claims] = await Promise.all([read?.indexes ?? indexesOf(relay, known.keys()), read?.claims ?? claimsOf(relay)])
   const latest = new Map<string, ListedSession>()
   for (const [device, index] of indexes) {
     for (const session of index) {

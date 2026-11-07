@@ -127,8 +127,8 @@ export async function otherMachine(relay: Relay, here: Device, name: string, ins
 }
 
 // The command that joins one more machine: cmod installs anyhost with the option `join`, which the program exchanges
-// at its first start. Its invite joins one machine before `expiresAt`. The link is quoted, because zsh's extendedglob
-// reads its `#` as a pattern.
+// at its next read of the options, as it starts and within a minute of the option changing while it runs. Its invite
+// joins one machine before `expiresAt`. The link is quoted, because zsh's extendedglob reads its `#` as a pattern.
 export async function inviteMachine(relay: Relay): Promise<{ readonly command: string; readonly expiresAt: string }> {
   const { link, expiresAt } = await relay.runOne({ op: 'invite' })
   return { command: `cmod install ${new URL(plugin.repository).pathname.slice(1)} --option 'join=${link}'`, expiresAt }

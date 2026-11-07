@@ -29,11 +29,12 @@ export type Stream = {
   on<K extends keyof Events>(kind: K, listener: (value: Events[K]) => void): void
   // the way to the other end from now on, or none, while frames wait for the next one
   use(link: Link | undefined): void
-  // A new peer from now on, as the session's new machine is after `moved`, or a host that kept no stream of this viewer:
-  // the stream starts over from its first byte with no link, and what it writes meanwhile waits for that peer's first
-  // link. It takes nothing until the new peer's `start`, as the last peer's frames may still come. The frames no link
-  // carried, as the keys typed while no host held the stream, go to the new peer, numbered from 0. A frame a link
-  // carried may have reached the last peer's terminal, so it goes nowhere again.
+  // A new peer from now on, as the session's new machine is after `moved`, or a new stream of the host, as a restarted
+  // host program or one that forgot the viewer opens: the stream starts over from its first byte with no link, and what
+  // it writes meanwhile waits for that peer's first link. It takes nothing until that link, as the last peer's frames
+  // may still come before it, and the first link's frames are the new peer's. The frames no link carried, as the keys
+  // typed while no host held the stream, go to the new peer, numbered from 0. A frame a link carried may have reached
+  // the last peer's terminal, so it goes nowhere again.
   startOver(): void
   // a frame the link brought
   receive(frame: Uint8Array): void
@@ -41,9 +42,8 @@ export type Stream = {
 }
 
 const KINDS: readonly Kind[] = ['input', 'resize', 'output', 'state', 'exit', 'moved']
-// A side's first frame on each link: `start` on its first one, as it holds nothing yet, and `ack` on every later one.
+// The acknowledgement of what a side holds, which is also its first frame on each link.
 const ACK = 7
-const START = 8
 const HEADER = 9
 // Each wakeup of an end cost 2 to 15 ms of Bun's CPU on a test machine, where a viewed busy session sends about 11
 // frames a second. An acknowledgement only lets the other side drop what it keeps for the next link, so a late one
@@ -77,15 +77,14 @@ export function openStream(): Stream {
     for (const listener of listeners[kind] ?? []) (listener as (value: Events[K]) => void)(value)
   }
   let link: Link | undefined
-  let wasLinked = false
   let sent = 0
   let received = 0
   let acknowledged = 0
-  // every frame from the last offset the peer named on, in order
-  let waiting: { readonly offset: number; readonly size: number; readonly frame: Uint8Array }[] = []
+  // every frame from the last offset the peer named on, in order, with its kind's code
+  let waiting: { readonly offset: number; readonly size: number; readonly code: number; readonly frame: Uint8Array }[] = []
   let waitingBytes = 0
   let isClosed = false
-  // from `startOver` to the new peer's `start`
+  // from `startOver` to the next link
   let isStarting = false
   // the offset before which every byte this side wrote went on a link, as of the last link that went
   let carriedTo = 0
@@ -100,10 +99,8 @@ export function openStream(): Stream {
     link.send(frameOf(ACK, received))
   }
 
-  // The peer holds every byte before `offset`. A peer that names more than this side sent holds an earlier stream's
-  // bytes, and this side keeps all it has.
+  // The peer holds every byte before `offset`.
   const peerHolds = (offset: number): void => {
-    if (offset > sent) return
     const kept = waiting.filter((frame) => frame.offset + frame.size > offset)
     waitingBytes -= waiting.slice(0, waiting.length - kept.length).reduce((total, frame) => total + frame.size, 0)
     waiting = kept
@@ -118,10 +115,20 @@ export function openStream(): Stream {
   // a frame of `bytes` at the next offset, kept until the peer acknowledges it
   const keep = (code: number, bytes: Uint8Array): Uint8Array => {
     const frame = frameOf(code, sent, bytes)
-    waiting.push({ offset: sent, size: bytes.length, frame })
+    waiting.push({ offset: sent, size: bytes.length, code, frame })
     waitingBytes += bytes.length
     sent += bytes.length
     return frame
+  }
+
+  const use = (next: Link | undefined): void => {
+    if (link !== undefined) carriedTo = sent
+    link = isClosed ? undefined : next
+    if (link === undefined) return
+    isStarting = false
+    link.send(frameOf(ACK, received))
+    acknowledged = received
+    for (const { frame } of waiting) link.send(frame)
   }
 
   return {
@@ -139,23 +146,13 @@ export function openStream(): Stream {
     on(kind, listener) {
       listeners[kind] = [...(listeners[kind] ?? []), listener]
     },
-    use(next) {
-      if (link !== undefined) carriedTo = sent
-      link = isClosed ? undefined : next
-      if (link === undefined) return
-      link.send(wasLinked ? frameOf(ACK, received) : frameOf(START, 0))
-      wasLinked = true
-      acknowledged = received
-      for (const { frame } of waiting) link.send(frame)
-    },
+    use,
     startOver() {
-      if (link !== undefined) carriedTo = sent
+      use(undefined)
       const uncarried = waiting.filter((kept) => kept.offset >= carriedTo)
       sent = received = acknowledged = waitingBytes = carriedTo = 0
       waiting = []
-      for (const { frame } of uncarried) keep(frame[0] ?? 0, frame.subarray(HEADER))
-      link = undefined
-      wasLinked = false
+      for (const { code, frame } of uncarried) keep(code, frame.subarray(HEADER))
       isStarting = true
       clearTimeout(acking)
       acking = undefined
@@ -165,9 +162,8 @@ export function openStream(): Stream {
       const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
       const code = frame[0] ?? 0
       const offset = view.getUint32(1) * 2 ** 32 + view.getUint32(5)
-      if (isStarting && code !== START) return
-      isStarting = false
-      if (code === START || code === ACK) return peerHolds(offset)
+      if (isStarting) return
+      if (code === ACK) return peerHolds(offset)
       const kind = KINDS[code - 1]
       const bytes = frame.subarray(HEADER)
       // a frame this side took already, or one past a gap, which the next link's first frame sends again
