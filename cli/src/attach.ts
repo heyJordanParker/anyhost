@@ -97,8 +97,16 @@ export function attach(asked: string): Promise<number> {
         (link) => {
           isDialing = false
           if (link === undefined) return dialAgain(started, addresses)
-          // a session that moved meanwhile runs on another machine, which the next attach's offer names
-          if (isDone || dialed !== id) return link.close()
+          if (isDone) return link.close()
+          // A session that moved meanwhile runs on another machine, which the offer of the next attach names, and the
+          // `attached` that brought it dialed nothing while this dial ran.
+          if (dialed !== id) {
+            link.close()
+            return dial()
+          }
+          // No `attached` came since the last link went, so the host may hold a new stream, as a restarted program
+          // does, which only its next `attached` says, and which dials again.
+          if (leg === undefined) return link.close()
           direct = link
           dials = 0
           frames.use(link)
@@ -139,6 +147,16 @@ export function attach(asked: string): Promise<number> {
       failures += 1
       retry = setTimeout(() => (socket?.readyState === WebSocket.OPEN ? socket.send(attachMessage()) : connect()), waitAfter(failures))
     }
+    // The stream's host so far holds it no more, as after `moved` or an `attached` that kept no stream: its direct
+    // connection closes, the stream starts over for the next host, and the next dial goes at once.
+    const leaveHost = (): void => {
+      clearTimeout(redial)
+      dials = 0
+      const link = direct
+      direct = undefined
+      link?.close()
+      frames.startOver()
+    }
     const connect = (): void => {
       const ws = new WebSocket(`ws+unix://${serveSocket()}:/attach`)
       ws.binaryType = 'arraybuffer'
@@ -151,10 +169,13 @@ export function attach(asked: string): Promise<number> {
       ws.addEventListener('message', (event) => {
         if (socket !== ws) return
         if (typeof event.data !== 'string') return frames.receive(new Uint8Array(event.data as ArrayBuffer))
-        const message = JSON.parse(event.data) as { readonly t: string; readonly message?: string } & Partial<DirectOffer>
+        const message = JSON.parse(event.data) as { readonly t: string; readonly message?: string; readonly kept?: boolean } & Partial<DirectOffer>
         if (message.t === 'attached') {
           wasAttached = true
           failures = 0
+          // A host that kept no stream of this viewer, as its restarted program or one that forgot the viewer, takes the
+          // stream from its first byte, and the keys no link carried meanwhile reach it.
+          if (message.kept === false) leaveHost()
           leg = { send: (frame) => ws.send(frame) }
           offer = { port: message.port ?? 0, addresses: message.addresses ?? [] }
           if (direct === undefined) frames.use(leg)
@@ -178,13 +199,9 @@ export function attach(asked: string): Promise<number> {
     // The session moved to another machine, which holds it now: this machine's program attaches it again where it went,
     // on a new stream to its new host, which starts from its first byte, so the keys typed meanwhile reach it there.
     frames.on('moved', () => {
-      clearTimeout(redial)
       offer = undefined
       leg = undefined
-      const link = direct
-      direct = undefined
-      link?.close()
-      frames.startOver()
+      leaveHost()
       id = newStream()
       key = newKey()
       if (socket?.readyState === WebSocket.OPEN) socket.send(attachMessage())

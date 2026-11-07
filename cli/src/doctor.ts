@@ -63,7 +63,29 @@ function programChecks(address: string, status: Status | undefined): Check[] {
     problem,
     fix: "Put the session's transcript back at its path, as from a backup, and the program uploads it whole within an hour. Else a restore of the session goes on without that span. This line goes when the program restarts.",
   }))
-  return [connection, shell, ...localNetwork, ...status.problems.map((problem): Check => ({ problem, fix: 'The program tries again at the next write or within 60 seconds, and this line goes once the cause is gone.' })), ...gaps]
+  // The join with the link of the option join, which `cmod install … --option 'join=<link>'` set. The program tries a
+  // link once, and an invite joins one machine within 10 minutes, so only a new invite joins after a failure.
+  const { joining } = status
+  const join: Check[] =
+    joining === undefined
+      ? []
+      : joining.is === 'running'
+        ? [{ wait: `The anyhost program at ${address} joins this machine with the link of the option join.` }]
+        : [
+            {
+              problem: `The link of the option join joined no relay: ${joining.error}`,
+              fix: 'The program does not try that link again. Press Add a machine in /machines on a joined machine, then paste its command into the Connect your machines step of the anyhost mod, or run anyhost join with its link here.',
+            },
+          ]
+  const update: Check[] =
+    status.updateProblem === undefined
+      ? []
+      : [{ problem: status.updateProblem, fix: 'The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.' }]
+  // the listener starts once a run, and viewers on other machines go through the relay without it
+  const direct: Check[] =
+    status.directProblem === undefined ? [] : [{ problem: `${status.directProblem} Viewers on other machines reach this machine through the relay meanwhile.`, fix: 'Log out and in again, which starts the program anew.' }]
+  const retried = status.problems.map((problem): Check => ({ problem, fix: 'The program tries this again by itself, and this line goes once it works.' }))
+  return [connection, ...join, shell, ...localNetwork, ...update, ...direct, ...retried, ...gaps]
 }
 
 export async function doctor(): Promise<number> {

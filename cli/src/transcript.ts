@@ -54,11 +54,13 @@ export const watchedFolders = (roots: MachineRoots): { readonly folder: string; 
   { folder: join(roots.codexHome, 'sessions'), depth: Infinity },
 ]
 
+// A file no session keeps: a dotfile such as `.lock`, or the temp file of an atomic write, `custom-title.json.tmp.2cbcf23f`.
+const isTransient = (path: string): boolean => basename(path).startsWith('.') || /\.tmp\.[0-9a-f]+$/.test(path)
+
 export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
   const lines = linesFiles(roots).get(path)
   if (lines !== undefined) return lines
-  // a dotfile such as `.lock`, or the temp file of an atomic write, `custom-title.json.tmp.2cbcf23f`
-  if (basename(path).startsWith('.') || /\.tmp\.[0-9a-f]+$/.test(path)) return undefined
+  if (isTransient(path)) return undefined
   const under = (folder: string): string[] => (path.startsWith(folder + sep) ? path.slice(folder.length + 1).split(sep) : [])
   const project = under(claudeFolder(roots, 'projects'))
   if (project.length === 2 && project[1]?.endsWith('.jsonl') === true) {
@@ -82,14 +84,21 @@ export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
   return undefined
 }
 
-// each folder and reason a walk of `filesUnder` failed at, which the log names once
+// each folder and reason a listing failed at, which the log names once
 const failedListings = new Set<string>()
+// A folder a listing could not read costs only its own files, and the log names it once with the reason, but for a
+// folder gone meanwhile.
+const listingFailed = (folder: string, error: unknown): void => {
+  const line = `anyhost lists no file in ${folder}: ${error instanceof Error ? error.message : String(error)}`
+  if ((error as NodeJS.ErrnoException).code === 'ENOENT' || failedListings.has(line)) return
+  failedListings.add(line)
+  console.error(`${new Date().toISOString()} ${line}`)
+}
 
 // Every file `depth` levels of folders down from `folder` or fewer, counting the folder itself, with its modified time.
 // The walk follows no symlink, as Bun's recursive `readdir` follows one into a cycle and fails the whole listing with
-// ELOOP, which it did 6.4 s into the temp root at a cycle in another agent's scratchpad. A folder that fails costs only
-// its own files, and the log names it once with the reason, but for a folder gone meanwhile. It lists and stats in
-// this thread and yields after each folder, as `changedFiles` stats.
+// ELOOP, which it did 6.4 s into the temp root at a cycle in another agent's scratchpad. It lists and stats in this
+// thread and yields after each folder, as `changedFiles` stats.
 export async function filesUnder(folder: string, depth = Infinity): Promise<{ readonly path: string; readonly mtimeMs: number }[]> {
   const files: { path: string; mtimeMs: number }[] = []
   const left = [{ folder, depth }]
@@ -102,21 +111,22 @@ export async function filesUnder(folder: string, depth = Infinity): Promise<{ re
         else if (entry.isFile()) files.push({ path, mtimeMs: statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0 })
       }
     } catch (error) {
-      const line = `anyhost lists no file in ${next.folder}: ${error instanceof Error ? error.message : String(error)}`
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || failedListings.has(line)) continue
-      failedListings.add(line)
-      console.error(`${new Date().toISOString()} ${line}`)
+      listingFailed(next.folder, error)
     }
   }
   return files
 }
 
-// a session's files under `folder`, but a dotfile such as `.lock`, or the temp file of an atomic write
-const sessionFilesUnder = async (folder: string): Promise<string[]> =>
-  (await filesUnder(folder)).map(({ path }) => path).filter((path) => !basename(path).startsWith('.') && !/\.tmp\.[0-9a-f]+$/.test(path))
+const sessionFilesUnder = async (folder: string): Promise<string[]> => (await filesUnder(folder)).map(({ path }) => path).filter((path) => !isTransient(path))
 
-const foldersIn = async (folder: string): Promise<string[]> =>
-  (await readdir(folder, { withFileTypes: true }).catch(() => [])).filter((entry) => entry.isDirectory()).map((entry) => join(folder, entry.name))
+const foldersIn = async (folder: string): Promise<string[]> => {
+  try {
+    return (await readdir(folder, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => join(folder, entry.name))
+  } catch (error) {
+    listingFailed(folder, error)
+    return []
+  }
+}
 
 // Every file of a session that exists now, and the files it will write to whose names are known: the program
 // captures a session it sees for the first time from byte 0 of each.

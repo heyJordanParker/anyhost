@@ -4,6 +4,7 @@
 import type { Subprocess } from 'bun'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { rootsHere } from './device.ts'
 
 // A service gets the person's Claude Code in CLAUDE_CODE_EXECPATH, which cmod sets, and a command finds it on PATH.
 const claude = (): string => process.env['CLAUDE_CODE_EXECPATH'] || 'claude'
@@ -53,7 +54,8 @@ export type RunningSession = {
 
 // `claude attach` under a terminal of this program's. Bun's terminal gives its child no controlling terminal, so a
 // resize signals nobody, and `resize` sends the child SIGWINCH itself (worker-spec W2). `exited` answers the signal
-// that ended it, or null when it ended by itself.
+// that ended it, or null when it ended by itself. Once it ended, `write` throws, as Bun's closed terminal does, and
+// `resize` does nothing, as the attach after it opens at the size its viewers draw.
 export type AttachedTerminal = {
   write(bytes: Uint8Array): void
   resize(cols: number, rows: number): void
@@ -116,8 +118,9 @@ async function isDaemonRunning(claudeHome: string): Promise<boolean> {
 export type OnRecordsChange = (heard: () => void) => () => void
 
 // Answers the first time `found` finds what it looks for in the sessions Claude Code runs here, read again at each
-// change of their records under `claudeHome`, or undefined once `limitMs` passed.
-export function whenSessions<T>(claudeHome: string, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number, onRecordsChange: OnRecordsChange): Promise<T | undefined> {
+// change of their records under `claudeHome`, or undefined once `limitMs` passed. A signal that aborts first rejects
+// with its reason.
+export function whenSessions<T>(claudeHome: string, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number, onRecordsChange: OnRecordsChange, signal?: AbortSignal): Promise<T | undefined> {
   return new Promise((resolve, reject) => {
     let isReading = false
     let isStale = false
@@ -128,13 +131,20 @@ export function whenSessions<T>(claudeHome: string, found: (sessions: readonly R
       isDone = true
       stopHearing()
       clearTimeout(limit)
+      signal?.removeEventListener('abort', aborted)
     }
+    const aborted = (): void => {
+      end()
+      reject(signal?.reason)
+    }
+    signal?.addEventListener('abort', aborted, { once: true })
     const limit = Number.isFinite(limitMs)
       ? setTimeout(() => {
           end()
           resolve(undefined)
         }, limitMs)
       : undefined
+    if (signal?.aborted === true) return aborted()
     const read = async (): Promise<void> => {
       if (isDone) return
       if (isReading) {
@@ -250,14 +260,18 @@ export async function startInBackground(session: string | undefined, cwd: string
 // The id `claude attach` takes for a session this machine holds, and the folder it runs in. A background job Claude Code
 // keeps of the session, running or stopped, opens with `claude attach`, which starts a stopped one again under its own
 // id, as `claude --bg --resume` would start a copy under a new one. Any other session starts in Claude Code's background
-// in `cwd`, the folder it continues in here. A session Claude Code runs in a terminal of its own shows only there.
-// `machine` names this machine in the refusals.
-export async function backgroundJobOf(session: string, cwd: string, env: Record<string, string>, machine: string): Promise<{ readonly id: string; readonly cwd: string }> {
-  const kept = (await keptSessions()).find((entry) => entry.sessionId === session)
+// in `cwd`, the folder it continues in here, and runs from then on. A session Claude Code runs in a terminal of its own
+// shows only there. `isKept` says the job is one Claude Code kept. `machine` names this machine in the refusals. The
+// record of a running session names its job and its kind, so only a session no record names runs `claude agents`,
+// which took 0.74 to 4.59 s on test machines.
+export async function backgroundJobOf(session: string, cwd: string, env: Record<string, string>, machine: string): Promise<{ readonly id: string; readonly cwd: string; readonly isKept: boolean }> {
+  const isSession = (entry: RunningSession): boolean => entry.sessionId === session
+  const recorded = (await recordedSessions(rootsHere().claudeHome)).find(isSession)
+  const kept = recorded?.kind === 'interactive' || recorded?.id !== undefined ? recorded : (await keptSessions()).find(isSession)
   if (kept?.kind === 'interactive') throw new Error(`${machine} runs the session ${session} in a terminal of its own, so only that terminal shows it.`)
-  if (kept?.id !== undefined) return { id: kept.id, cwd: kept.cwd }
+  if (kept?.id !== undefined) return { id: kept.id, cwd: kept.cwd, isKept: true }
   if (cwd === '') throw new Error(`${machine} knows no folder of the session ${session}, so it cannot start it.`)
-  return { id: await startInBackground(session, cwd, env), cwd }
+  return { id: await startInBackground(session, cwd, env), cwd, isKept: false }
 }
 
 // Stops a background session Claude Code runs here. Claude Code keeps its job, which `claude attach` starts again.
@@ -276,6 +290,7 @@ export function attachTerminal(id: string, cwd: string, env: Record<string, stri
   return {
     write: (bytes) => void terminal.write(bytes),
     resize(columns, lines) {
+      if (terminal.closed) return
       terminal.resize(columns, lines)
       child.kill('SIGWINCH')
     },

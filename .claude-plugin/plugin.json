@@ -30,7 +30,7 @@
     "join": {
       "type": "string",
       "title": "Join with",
-      "description": "An invite link from Add a machine in /machines on a joined machine. anyhost joins this machine with it at its next start, then empties it.",
+      "description": "An invite link from Add a machine in /machines on a joined machine. anyhost joins this machine with it within a minute, then empties it.",
       "default": ""
     }
   }

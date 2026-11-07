@@ -39,11 +39,13 @@ import {
 // by then, and one pinged every 30 seconds had every pong back within 40 seconds over 50 minutes (relay-spec R16).
 const PING_MS = 30_000
 const PONG_MS = 40_000
-// A request the relay has not answered ANSWER_MS after it went out counts as a drop of its socket, and goes again on
-// the next one, as no ping finds a lost answer: the Pool answers pings without waking. A drain was answered in 1,714 ms
-// at p90 and 2,098 ms at most over 20 drains (relay-spec R10), and a request carries up to MAX_MESSAGE_BYTES each way,
-// 21 s at the 100 KB/s a write counts as the slowest link. So only a lost answer waits this long, as one did once R2
-// failed a get's body, and so does nothing else on a dropped socket (PONG_MS).
+// A socket that brings no answer for ANSWER_MS while a request sent on it waits counts as dropped, and every request it
+// had not answered goes again on the next one, as no ping finds a lost answer: the Pool answers pings without waking,
+// so a pong is no answer. Each answer starts the wait again, so a slow link that keeps answering is never dropped, as
+// one at 240 KB/s that carries the answers to a seal's 16 gets of about 700 KB each, the last past 40 s. A drain
+// was answered in 1,714 ms at p90 and 2,098 ms at most over 20 drains (relay-spec R10), and one answer of
+// MAX_MESSAGE_BYTES takes 21 s at the 100 KB/s a write counts as the slowest link. So only a lost answer waits this
+// long, as one did once R2 failed a get's body, and so does nothing else on a dropped socket (PONG_MS).
 const ANSWER_MS = 40_000
 // A socket opened in 494 to 689 ms on a home link (R16).
 const CONNECT_MS = 10_000
@@ -65,13 +67,14 @@ const OBJECT_TRIES = 6
 export type Login = { readonly url: string; readonly token: string }
 // A put carries its bytes, whose length its op names as `size`.
 export type Call = Exclude<Op, { readonly op: 'put' }> | { readonly op: 'put'; readonly key: string; readonly bytes: Uint8Array; readonly if?: Condition; readonly holder?: string }
-export type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string; readonly bytes: Uint8Array }
+type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string; readonly bytes: Uint8Array }
 // An op's answer, a get's with its bytes, which come by HTTP when the relay's answer had no room for them. A result that
 // names an error, as a failed R2 call does, rejects instead.
 export type RanOf<K extends Op['op']> = K extends 'get' ? Got | { readonly status: 404 } : Results[K]
-export type Ran = RanOf<Op['op']>
+type Ran = RanOf<Op['op']>
 // `connected` once the welcome came. `unjoined` is no login, as before a join or after the relay refused the login for
-// good, `outdated` a relay older than this program needs, and `refused` a clone of a connected machine.
+// good, `offline` a relay that does not answer or a login that failed to read, each tried again, `outdated` a relay
+// older than this program needs, and `refused` a clone of a connected machine.
 export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
@@ -167,11 +170,9 @@ function refusedBy(code: number, reason: string, device: RelayOptions['device'])
 // A header holds Latin-1 alone, so a root's other characters go as JSON escapes, which the relay reads back the same.
 const rootsHeader = (roots: Roots): string => JSON.stringify(roots).replace(/[^\x20-\x7e]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
 
-// `due` drops the socket the request last went on once ANSWER_MS passed with no answer.
 type Pending = {
   readonly message: Uint8Array
   wasSent: boolean
-  due?: ReturnType<typeof setTimeout>
   readonly resolve: (answer: { results: readonly Result[]; bytes: Uint8Array }) => void
   readonly reject: (error: Error) => void
 }
@@ -199,24 +200,25 @@ export function connectRelay(options: RelayOptions): Relay {
   let reopen: ReturnType<typeof setTimeout> | undefined
   let pinger: ReturnType<typeof setInterval> | undefined
   let pongDue: ReturnType<typeof setTimeout> | undefined
+  // the socket's one wait for an answer, while a request sent on it waits for its own
+  let answerDue: ReturnType<typeof setTimeout> | undefined
 
   const failPending = (message: string): void => {
     for (const [id, request] of pending) {
       pending.delete(id)
-      clearTimeout(request.due)
       request.reject(new Error(message))
     }
     for (const waiter of waiting) waiter.reject(new Error(message))
     waiting.clear()
   }
+  const waitForAnswer = (): void => {
+    clearTimeout(answerDue)
+    answerDue = setTimeout(() => drop({ is: 'offline', message: `The relay at ${login?.url} sent no answer for ${ANSWER_MS / 1000} seconds while a request waited.` }), ANSWER_MS)
+  }
   const send = (request: Pending): void => {
-    const on = socket
-    on?.send(request.message)
+    socket?.send(request.message)
     request.wasSent = true
-    clearTimeout(request.due)
-    request.due = setTimeout(() => {
-      if (socket === on) drop({ is: 'offline', message: `The relay at ${login?.url} left a request unanswered for ${ANSWER_MS / 1000} seconds.` })
-    }, ANSWER_MS)
+    if (answerDue === undefined) waitForAnswer()
   }
   const welcomedLogin = (): Promise<Login> => {
     if (state.is === 'connected' && login !== undefined) return Promise.resolve(login)
@@ -230,6 +232,8 @@ export function connectRelay(options: RelayOptions): Relay {
     clearInterval(pinger)
     clearTimeout(pongDue)
     pongDue = undefined
+    clearTimeout(answerDue)
+    answerDue = undefined
     const was = socket
     socket = undefined
     was?.terminate()
@@ -251,7 +255,12 @@ export function connectRelay(options: RelayOptions): Relay {
       return
     }
     pending.delete(answer.id)
-    clearTimeout(request.due)
+    // every request still pending went out on this socket, as the welcome sends each one
+    if (pending.size > 0) waitForAnswer()
+    else {
+      clearTimeout(answerDue)
+      answerDue = undefined
+    }
     if ('error' in answer) request.reject(new Error(`The relay refused the request: ${answer.message}`))
     else request.resolve({ results: answer.results, bytes })
   }
@@ -289,10 +298,16 @@ export function connectRelay(options: RelayOptions): Relay {
     const attempt = (opens += 1)
     state = { is: 'connecting' }
     await forgetting
-    const read = await options.login().catch((error: unknown) => {
-      console.error(`${new Date().toISOString()} anyhost could not read this machine's relay login: ${messageOf(error)}`)
-      return undefined
-    })
+    let read: Login | undefined
+    try {
+      read = await options.login()
+    } catch (error) {
+      if (isClosed || attempt !== opens) return
+      // a token cmod could not read, or a relay.json that is no JSON, says nothing of whether this machine joined
+      const message = `anyhost could not read this machine's relay login: ${messageOf(error)}`
+      console.error(`${new Date().toISOString()} ${message}`)
+      return drop({ is: 'offline', message })
+    }
     if (isClosed || attempt !== opens) return
     login = read
     if (login === undefined) return drop({ is: 'unjoined', message: unjoined })
@@ -300,7 +315,7 @@ export function connectRelay(options: RelayOptions): Relay {
     const used = login
     const url = login.url
     const ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, {
-      headers: { authorization: `Bearer ${login.token}`, 'x-anyhost-name': options.device.name, 'x-anyhost-version': plugin.version, 'x-anyhost-roots': rootsHeader(options.roots) },
+      headers: { authorization: `Bearer ${login.token}`, 'x-anyhost-name': options.device.name, 'x-anyhost-roots': rootsHeader(options.roots) },
     })
     socket = ws
     ws.binaryType = 'arraybuffer'

@@ -4,6 +4,8 @@
 // A new relay keeps answering every protocol before its own, so machines on two versions work side by side.
 export const RELAY_VERSION = 1
 export const PROTOCOL_VERSION = 1
+// The Workers runtime the relay is deployed and tested at.
+export const COMPATIBILITY_DATE = '2026-11-01'
 
 export const MAX_OPS = 100
 // The bytes of a request's puts, and of an answer's gets. A larger object travels as its own HTTP request.
@@ -82,13 +84,14 @@ export type Listed = { readonly key: string; readonly size: number; readonly mod
 export type Claim = DeviceRef & { readonly at: string }
 
 // What each op answers, by the op. A `get` answered 200 carries `size` bytes in the answer's bytes, and one the answer
-// has no room for answers 413.
+// has no room for answers 413. A `claim` names the machine it took the session from only while that machine has not
+// heard of it. Every op answers a request sent again after a lost answer as it answered the first.
 export type Results = {
   readonly get: { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
   readonly put: { readonly status: 200; readonly etag: string } | { readonly status: 412; readonly etag?: string } | { readonly status: 409; readonly holder: DeviceRef }
   readonly list: { readonly status: 200; readonly objects: readonly Listed[]; readonly cursor?: string }
   readonly delete: { readonly status: 200 }
-  readonly claim: { readonly status: 200; readonly previous?: DeviceRef; readonly told: boolean } | { readonly status: 409; readonly holder: DeviceRef }
+  readonly claim: { readonly status: 200; readonly told: true } | { readonly status: 200; readonly previous: DeviceRef; readonly told: false } | { readonly status: 409; readonly holder: DeviceRef }
   readonly claims: { readonly status: 200; readonly claims: Readonly<Record<string, Claim>> }
   readonly devices: { readonly status: 200; readonly devices: readonly Device[] }
   readonly invite: { readonly status: 200; readonly link: string; readonly expiresAt: string }
@@ -107,7 +110,8 @@ export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceR
 // What a machine sends another: the Pool routes it to every socket of `to`, a device id, adding `from`. `attached` and
 // `detach` name only their stream, whose two machines the Pool knows from the `attach` that opened it. `key` is the
 // base64 of the 32 random bytes that key the stream's direct connection, and `attached` is the host's answer, with the
-// port and the addresses that connection reaches it at. `move` asks `to` to take the session and run it in Claude
+// port and the addresses that connection reaches it at, and `kept`, whether the host kept the viewer's stream, which a
+// host that restarted or forgot the viewer did not. `move` asks `to` to take the session and run it in Claude
 // Code's background, and `moved`, with the same `id`, answers that it runs it, or why it does not. `start` asks `to` to
 // start a new session in its checkout of `repo` on `branch`, in `folder` inside it, or outside git in the folder at
 // `folder` on the asking machine, and `started` answers the session, or why it started none. `trusted` says the asking
@@ -120,7 +124,7 @@ export type Routed =
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly session: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly error: string }
   | { readonly t: 'attach'; readonly stream: number; readonly to: string; readonly session: string; readonly cols: number; readonly rows: number; readonly key: string }
-  | { readonly t: 'attached'; readonly stream: number; readonly port: number; readonly addresses: readonly string[] }
+  | { readonly t: 'attached'; readonly stream: number; readonly kept: boolean; readonly port: number; readonly addresses: readonly string[] }
   | { readonly t: 'detach'; readonly stream: number }
 export type Delivered = Routed & { readonly from: DeviceRef }
 // The Pool's answer to a message for a machine with no open socket, or to one it cannot read.

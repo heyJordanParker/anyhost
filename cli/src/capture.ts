@@ -30,8 +30,10 @@ export const QUIET_MS = 10 * 60_000
 // The full sweep yields to the program's other work every SWEEP_BATCH files: a stat of the Architect's Mac's 40,898
 // captured files took 0.21 s of CPU in the program's thread, so a batch holds a prompt's check for about 5 ms.
 const SWEEP_BATCH = 1000
-// A seal that fetched 1110 frames at once held every connection the machine had, so every upload on it timed out
-// connecting once a minute. Requests of up to MAX_MESSAGE_BYTES of frames go at most this many ahead of the one read.
+// A seal or a restore asks for frames at most this many requests ahead of the one it reads, each up to MAX_MESSAGE_BYTES
+// of frames on the machine's one socket or one larger frame by HTTP, so a journal of thousands of frames neither sits
+// in memory whole nor fills the socket its drains share. A slow link keeps the socket, which waits ANSWER_MS from each
+// answer, not from each request.
 const REQUESTS_AHEAD = 16
 const TAIL_BYTES = 32
 const SCHEMA = 2
@@ -52,8 +54,10 @@ export type IndexedSession = {
 export type Code = { readonly captureCode: typeof captureCode; readonly restoreCode: typeof restoreCode }
 // `onCode` hears that a session's code waits in `codeWaiting` for the session's next drains, which put it in frames after
 // the files', so no drain waits on git. `codeRuns` holds the one `captureCode` running per session. A session in
-// `codeStale` changed while its code was read or went up, so its code is read again once that ends. `claimed` holds
-// the sessions this program claimed since it started, so a takeover tells this machine of each one it captures.
+// `codeStale` changed while its code was read or went up, so its code is read again once that ends. A session in
+// `codeSkipped` had its last drain at `uploadEvery` 0 carry its files alone while its code waited, so its next drain
+// carries code too. `claimed` holds the sessions this program claimed since it started, so a takeover tells this
+// machine of each one it captures.
 // `lastIndex` is the index.json this program last put, which `writeIndex` puts again only once it changed.
 export type Capture = Code & {
   readonly relay: Relay
@@ -64,6 +68,7 @@ export type Capture = Code & {
   readonly codeRuns: Map<string, Promise<void>>
   readonly codeWaiting: Map<string, { readonly folder: string; readonly code: CodeCapture }>
   readonly codeStale: Set<string>
+  readonly codeSkipped: Set<string>
   readonly claimed: Set<string>
   // the working folders found missing, each logged once
   readonly missingFolders: Set<string>
@@ -96,7 +101,8 @@ export function openDatabase(folder = stateFolder()): Database {
   const db = new Database(join(folder, 'anyhost.db'))
   db.run('pragma journal_mode = wal')
   db.run('pragma busy_timeout = 5000')
-  db.run('create table if not exists bucket (name text not null)')
+  db.run("create table if not exists bucket (name text not null, url text not null default '')")
+  if (db.query<{ name: string }, []>("select name from pragma_table_info('bucket') where name = 'url'").get() === null) db.run("alter table bucket add column url text not null default ''")
   if (db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version !== SCHEMA) startOver(db)
   makeTables(db)
   return db
@@ -127,25 +133,37 @@ function makeTables(db: Database): void {
     last_activity text not null default '', size integer not null default 0)`)
 }
 
-// The bucket the database counts. A database from before the bucket was kept counts the first one its relay names.
-export const countedBucket = (db: Database): string | undefined => db.query<{ name: string }, []>('select name from bucket').get()?.name
+// The relay whose bucket the database counts: its address and the bucket its welcome names.
+export type CountedRelay = { readonly url: string; readonly bucket: string }
 
-// The journals' ends and the code parts uploaded count what one bucket holds, so a relay that names another bucket
+// The relay the database counts. A database from before the bucket was kept counts the first relay that welcomes this
+// machine, and one from before the address was kept, whose `url` is empty, the first address of a relay of its bucket.
+export const countedRelay = (db: Database): CountedRelay | undefined => db.query<CountedRelay, []>('select url, name as bucket from bucket').get() ?? undefined
+
+// Whether the welcome of the relay at `url`, which names `bucket`, comes from the relay the database counts. Every
+// relay Connect Cloudflare deploys names the bucket `anyhost`, so another person's relay, or the person's own made again
+// in another account, differs by its address alone.
+export const isSameRelay = (counted: CountedRelay | undefined, url: string, bucket: string): boolean =>
+  counted === undefined || (counted.bucket === bucket && (counted.url === '' || counted.url === url))
+
+// The journals' ends and the code parts uploaded count what one relay's bucket holds, so a welcome from another relay
 // than the database counts, as after a machine joined another person's relay, starts the database over.
-function useBucket(db: Database, bucket: string): void {
-  if (countedBucket(db) === bucket) return
-  if (countedBucket(db) !== undefined) {
+function useRelay(db: Database, url: string, bucket: string): void {
+  const counted = countedRelay(db)
+  if (counted?.url === url && counted.bucket === bucket) return
+  if (!isSameRelay(counted, url, bucket)) {
     startOver(db)
     makeTables(db)
   }
   db.transaction(() => {
     db.run('delete from bucket')
-    db.query('insert into bucket (name) values (?)').run(bucket)
+    db.query('insert into bucket (name, url) values (?, ?)').run(bucket, url)
   })()
 }
 
-// What the relay tells this machine goes into its database at once: the bucket the welcome names, and each session
-// another machine took, whether the welcome brings it from the time this machine was away or it comes as it happens.
+// What the relay tells this machine goes into its database at once: the relay that welcomes it and the bucket it names,
+// and each session another machine took, whether the welcome brings it from the time this machine was away or it comes
+// as it happens.
 export function openCapture(
   relay: Relay,
   device: Device,
@@ -157,11 +175,11 @@ export function openCapture(
   const released = ({ session, to, at }: { readonly session: string; readonly to: { readonly name: string }; readonly at: string }): void =>
     holdElsewhere(db, session, to.name, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
   relay.on('welcome', ({ bucket, waiting }) => {
-    useBucket(db, bucket)
+    useRelay(db, relay.url, bucket)
     for (const message of waiting) released(message)
   })
   relay.on('released', released)
-  return { ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), claimed: new Set(), missingFolders: new Set(), onCode, lastIndex: '' }
+  return { ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeSkipped: new Set(), claimed: new Set(), missingFolders: new Set(), onCode, lastIndex: '' }
 }
 
 // A path that names a code part is no file on any machine: restore hands it to `restoreCode` instead of placing it.
@@ -560,8 +578,10 @@ export function uploadSessions(capture: Capture, sessions: readonly Changed[], p
 
 // Reads everything a session's files gained since its last upload and its waiting code, as one hot frame at the
 // journal's end, or answers the paths left when there is nothing to send. With `isEveryWrite`, at `uploadEvery` 0, the
-// files go up alone and the code in drains of its own, several pieces at once. A session another machine holds, or
-// whose position another machine took, uploads nothing more.
+// files go up alone and the code in drains of its own, several pieces at once, unless the drain before carried the
+// files alone while code waited: then the files' frame goes first and the code's pieces after it, so a session that
+// keeps writing still backs up its code. A session another machine holds, or whose position another machine took,
+// uploads nothing more.
 async function readUpload(capture: Capture, session: string, tool: Tool, paths: ReadonlySet<string>, problems: Problems, isEveryWrite: boolean): Promise<Upload | Set<string>> {
   const { db, roots } = capture
   let journal = journalOf(db, session)
@@ -602,8 +622,11 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
     }
   }
   const waiting = capture.codeWaiting.get(session)
-  const code = waiting === undefined || (isEveryWrite && changes.length > 0) ? { frames: [], isDone: false } : codeFrames(capture, session, waiting, isEveryWrite)
-  const frames = (isEveryWrite && changes.length > 0 ? [changes] : isEveryWrite ? code.frames : [[...changes, ...code.frames.flat()]]).filter((records) => records.length > 0)
+  const isFilesAlone = isEveryWrite && changes.length > 0 && !capture.codeSkipped.has(session)
+  if (isFilesAlone && waiting !== undefined) capture.codeSkipped.add(session)
+  else capture.codeSkipped.delete(session)
+  const code = waiting === undefined || isFilesAlone ? { frames: [], isDone: false } : codeFrames(capture, session, waiting, isEveryWrite)
+  const frames = (isFilesAlone ? [changes] : isEveryWrite ? [changes, ...code.frames] : [[...changes, ...code.frames.flat()]]).filter((records) => records.length > 0)
   if (frames.length === 0) return left
   return { session, tool, end: journal.end, changes, frames, code, waiting, left }
 }
@@ -615,7 +638,7 @@ async function finishUpload(
   answers: { readonly claim: Promise<RanOf<'claim'>> | undefined; readonly puts: readonly Put[] },
   problems: Problems,
 ): Promise<Set<string>> {
-  const { db, roots, relay } = capture
+  const { db, roots } = capture
   const { session, tool, changes, code, waiting, left } = upload
   // a claim another machine holds refuses the frames after it too, which say who holds the session
   if ((await answers.claim)?.status === 200) capture.claimed.add(session)
@@ -629,12 +652,11 @@ async function finishUpload(
     ),
   )
   if (outcomes.some((outcome) => 'isHere' in outcome && !outcome.isHere)) return new Set()
-  // The journal counts the frames up to the first that failed. The frames after it are never read, and the next drain
-  // writes over them; the code stays in codeWaiting, since captureCode counts every part it returned as written.
+  // The journal counts the frames up to the first that failed. The frames after it are off the chain, which no restore
+  // reads: a drain that writes at one's position writes over it (`frameWritten`), and a seal deletes each once the
+  // journal's end passes it. The code stays in codeWaiting, since captureCode counts every part it returned as written.
   const failure = outcomes.find((outcome) => 'error' in outcome)
   const counted = failure === undefined ? outcomes : outcomes.slice(0, outcomes.indexOf(failure))
-  const after = failure === undefined ? [] : outcomes.slice(outcomes.indexOf(failure) + 1).flatMap((outcome) => ('error' in outcome ? [] : [hotKey(session, outcome.frame.start)]))
-  if (after.length > 0) await relay.runOne({ op: 'delete', keys: after }).catch(() => undefined)
   const records = counted.flatMap(({ frame }) => frame.records)
   const last = counted.at(-1)?.frame
   const end = last === undefined ? upload.end : last.start + last.body.length
@@ -666,9 +688,10 @@ async function finishUpload(
 }
 
 // Answers whether a frame put with If-None-Match at its journal position and the session as its holder is there. The
-// position holding the same bytes counts as written, as after an answer lost on the way back. This machine's own other
-// bytes there went up past a position that failed, or before a crash, and the journal never counted them, so this
-// frame replaces them. Another machine's bytes there make this machine's lines a fork, and a session another machine
+// relay's answer counts a position that holds this frame's own bytes as written already (`written` in relay.ts), as
+// after an answer lost on the way back. This machine's own other bytes there, or its same lines compressed otherwise,
+// went up past a position that failed, or before a crash, and the journal never counted them, so this frame replaces
+// them. Another machine's bytes there make this machine's lines a fork, and a session another machine
 // holds refuses the frame: either way this machine stops capturing the session.
 async function frameWritten(capture: Capture, session: string, tool: Tool, start: number, body: Uint8Array, put: RanOf<'put'>): Promise<boolean> {
   const { relay, db, device } = capture
@@ -681,7 +704,6 @@ async function frameWritten(capture: Capture, session: string, tool: Tool, start
   if (answer.status === 412) {
     const there = await relay.runOne({ op: 'get', key })
     const written = there.status === 200 ? decompress(there.bytes) : undefined
-    if (written !== undefined && sameBytes(written, body)) return true
     // the frame's first record names the machine that wrote it
     const writer = written === undefined ? undefined : (JSON.parse(new TextDecoder().decode(written.subarray(0, written.indexOf(10)))) as RecordHeader).device
     if (writer === device.id || writer === undefined) {
@@ -800,15 +822,15 @@ function statOf(path: string): Stats | undefined {
   }
 }
 
-// Every file of every session this machine captures and wrote at `writtenSince` or later whose size or modified time
-// moved past its last record, or that is gone since its last record: an event the watcher dropped, an upload that
-// failed, or a folder the watcher was not on yet. It stats in this thread: 40,898 stats through libuv's thread pool
-// took 2.58 s of CPU on the Architect's Mac, and 0.21 s here.
-export async function changedFiles(capture: Capture, writtenSince = 0): Promise<Map<string, Set<string>>> {
+// Every file of every session this machine captures and wrote at `writtenSince` or later, or of `session` alone, whose
+// size or modified time moved past its last record, or that is gone since its last record: an event the watcher
+// dropped, an upload that failed, or a folder the watcher was not on yet. It stats in this thread: 40,898 stats through
+// libuv's thread pool took 2.58 s of CPU on the Architect's Mac, and 0.21 s here.
+export async function changedFiles(capture: Capture, writtenSince = 0, session?: string): Promise<Map<string, Set<string>>> {
   const { db, roots } = capture
-  const rows = db.query<{ session: string; path: string; local_size: number; mtime: number; sha256: string }, [number]>(
-    "select files.session, path, local_size, mtime, sha256 from files join journals using (session) where stopped = '' and written_at >= ?",
-  ).all(writtenSince)
+  const rows = db.query<{ session: string; path: string; local_size: number; mtime: number; sha256: string }, [number, string | null]>(
+    "select files.session, path, local_size, mtime, sha256 from files join journals using (session) where stopped = '' and written_at >= ?1 and (?2 is null or session = ?2)",
+  ).all(writtenSince, session ?? null)
   const lines = linesFiles(roots)
   const codex = codexState(roots)
   const changed = new Map<string, Set<string>>()

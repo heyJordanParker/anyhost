@@ -11,7 +11,7 @@ SESSION                               TOOL    ENTRYPOINT  MACHINE  HOLDER  LAST 
 $ anyhost resume 3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4
 ```
 
-anyhost has two parts:
+anyhost has three parts:
 
 - **The `anyhost` program**, one copy per machine. It uploads every file Claude Code and Codex keep for a session to your relay as it changes, and answers `anyhost list`, `anyhost resume`, `anyhost attach` and `anyhost doctor`.
 - **A Claude Code mod** built with [cmod](https://github.com/heyJordanParker/cmod). It runs the program as a service of the machine, from each login on, and stops a session that continues on another machine from taking prompts.
@@ -37,8 +37,8 @@ cmod downloads the `anyhost` program from this repository's release, checks it a
 
 Until a machine joins your relay, the mod's install page shows one step, **Connect your machines**:
 
-- On your first machine, or any machine where you have a Cloudflare login, press **Connect Cloudflare**. It logs `cf`, Cloudflare's own command, in to your account when it is not, so you approve Cloudflare's page once, then deploys the relay into your account and joins the machine, showing each call as it runs. A relay already there, as new as this anyhost's or newer, gets only a new setup code. When your login reaches several accounts, the one that holds your relay is used, else you pick the one, and an account that never turned R2 on gets a link to Cloudflare's R2 page and a **Next** button. `anyhost connect` does the same from a terminal.
-- On every other machine, paste the command **Add a machine** gives in `/machines` on a joined machine: `cmod install heyJordanParker/anyhost --option 'join=<link>'`. anyhost joins with the link as its program starts, then empties the option. On a machine that has anyhost already, paste the command or its link into the step, or run `anyhost join <link>`. A link joins one machine, within 10 minutes.
+- On your first machine, or any machine where you have a Cloudflare login, press **Connect Cloudflare**. It logs `cf`, Cloudflare's own command, in to your account when it is not, so you approve Cloudflare's page once, then deploys the relay into your account and joins the machine, showing each call as it runs. A relay already there, as new as this anyhost's or newer, gets only a new setup code. A relay that answers anything but its version, as past Cloudflare's daily limit of 100,000 requests, gets nothing, and the step says what it answered, so you connect again later. When your login reaches several accounts, the one that holds your relay is used, else you pick the one, and an account that never turned R2 on gets a link to Cloudflare's R2 page and a **Next** button. `anyhost connect` does the same from a terminal.
+- On every other machine, paste the command **Add a machine** gives in `/machines` on a joined machine: `cmod install heyJordanParker/anyhost --option 'join=<link>'`. anyhost joins with the link as its program starts, then empties the option, and the step waits for that join. A link that joins no relay, as one past its 10 minutes, shows on the step with why, and `anyhost doctor` prints it too: paste the command of a new invite into the step. On a machine that has anyhost already, paste the command or its link into the step, or run `anyhost join <link>`. A link joins one machine, within 10 minutes.
 
 A machine joins once: it keeps the relay's address in `~/.local/state/anyhost/relay.json` and its own token with cmod's secrets. Until it joins, anyhost keeps what its sessions write and uploads nothing. A program that finds your relay older than it needs updates it with this machine's Cloudflare login, and a machine without one shows the step again. Run `anyhost doctor` to see that each part works.
 

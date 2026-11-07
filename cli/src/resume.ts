@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
 import { checkoutOf, continueJournal, isCodePart, linesOf, markUntold, recordSummary, stopJournal, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
 import { HeldElsewhere, takeClaim } from './claims.ts'
-import { devicesOf } from './device.ts'
+import { devicesOf, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
 import { codexState, linesFiles, ownerOf } from './transcript.ts'
@@ -82,7 +82,7 @@ function writersOf(devices: ReadonlyMap<string, Protocol.Device>, indexes: Reado
 // Where the session's working folder goes on this machine: in the checkout of its repository found by remote, or
 // in the folder this machine keeps checkouts in; outside git, where relocate moves its path from the writer's home,
 // temp root and other roots to this machine's.
-export async function localFolder(capture: Capture, session: Pick<IndexedSession, 'repo' | 'repoFolder' | 'cwd'>, writer: Roots, chosen: string): Promise<string> {
+export async function localFolder(capture: Capture, session: Pick<IndexedSession, 'repo' | 'repoFolder' | 'cwd'>, writer: MachineRoots, chosen: string): Promise<string> {
   const { home } = capture.roots
   if (session.repo !== '') {
     const checkouts = checkoutsOf(capture, chosen)

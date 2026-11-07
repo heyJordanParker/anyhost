@@ -44,7 +44,7 @@ export type Env = {
   readonly POOL: DurableObjectNamespace<Pool>
   // the bucket's name, which the binding does not tell, for /v1/health and the welcome
   readonly BUCKET_NAME: string
-  // the sha256 of the setup code the last setup made, in hex
+  // the sha256 of the setup code the last setup made, in hex, which only the Worker reads
   readonly SETUP_CODE_SHA256?: string
 }
 
@@ -94,7 +94,9 @@ function jsonOf(text: string | null): unknown {
     return undefined
   }
 }
-const refuse = (status: number, error: ErrorCode, message: string, more: object = {}): Reply => ({ status, body: { error, message, ...more } satisfies Refusal })
+// Every refusal of an HTTP route, which the Pool's RPC methods answer as it is and `reply` sends.
+export const refuse = (status: number, error: ErrorCode, message: string, more: object = {}): Reply => ({ status, body: { error, message, ...more } satisfies Refusal })
+export const reply = ({ status, body }: Reply): Response => Response.json(body, { status })
 
 export const healthOf = (env: Env): Health => ({ relay: RELAY_VERSION, protocol: PROTOCOL_VERSION, bucket: env.BUCKET_NAME })
 
@@ -159,7 +161,7 @@ class Write extends RpcTarget {
 export class Pool extends DurableObject<Env> {
   readonly #sql: SqlStorage
   // each session's frame writes in flight, which a takeover waits for before it answers
-  readonly #writes = new Map<string, Set<Promise<unknown>>>()
+  readonly #writes = new Map<string, Set<Promise<void>>>()
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -246,15 +248,23 @@ export class Pool extends DurableObject<Env> {
       .find((live) => live !== name)
   }
 
-  #track(session: string, write: Promise<unknown>): void {
+  // A frame's write, which names its session: refused with the machine that holds the session when another one does,
+  // else counted in flight until `done`, so a takeover waits for it.
+  #startWrite(device: DeviceRef, session: string): { readonly holder: DeviceRef } | { readonly done: () => void } {
+    const held = this.#holderOf(session)
+    if (held !== undefined && held.id !== device.id) return { holder: held }
     const writes = this.#writes.get(session) ?? new Set()
     this.#writes.set(session, writes)
+    let done = (): void => undefined
+    const write = new Promise<void>((resolve) => (done = resolve))
     writes.add(write)
-    const forget = (): void => {
-      writes.delete(write)
-      if (writes.size === 0) this.#writes.delete(session)
+    return {
+      done: () => {
+        done()
+        writes.delete(write)
+        if (writes.size === 0) this.#writes.delete(session)
+      },
     }
-    write.then(forget, forget)
   }
 
   // Sends a message to every open socket of a machine, and answers whether it has one.
@@ -269,15 +279,18 @@ export class Pool extends DurableObject<Env> {
     return sockets.length > 0
   }
 
-  // POST /v1/join: exchanges an invite or the setup code for a device token.
-  async join(body: unknown): Promise<Reply> {
+  // POST /v1/join: exchanges an invite or the setup code for a device token. The Worker passes the setup code's sha256
+  // from its own environment, because Cloudflare serves each Worker request with the newest version, while a Pool busy
+  // with requests keeps the environment of the version it started with for up to 300 s
+  // (durable-objects/deployments/durable-objects-code-updates), which a live run waited out in full: 300.8 and 301.3 s.
+  async join(body: unknown, setupCodeSha256: string | undefined): Promise<Reply> {
     const device = isRecord(body) ? joiningOf(body['device']) : undefined
     const code = isRecord(body) ? body['invite'] : undefined
     if (device === undefined || !isText(code)) return refuse(400, 'invalid', 'A join names the invite and the device with its id, name, os, arch and roots.')
     const codeSha256 = await sha256(code)
     const now = Date.now()
     const invite = this.#sql.exec<{ expires_at: number | null; used_by: string | null; used_at: number | null }>('select expires_at, used_by, used_at from invites where code_sha256 = ?', codeSha256).toArray()[0]
-    if (invite === undefined && codeSha256 !== this.env.SETUP_CODE_SHA256) return refuse(403, 'invite_unknown', 'The relay made no invite with that code. Make a new one with Add a machine.')
+    if (invite === undefined && codeSha256 !== setupCodeSha256) return refuse(403, 'invite_unknown', 'The relay made no invite with that code. Make a new one with Add a machine.')
     // A machine whose join answer was lost sends the join again, so the machine that used the code joins again with it
     // for INVITE_MS after that use, unless it was removed since. Any other machine is refused.
     const usedBy = invite?.used_by == null ? undefined : this.#sql.exec<{ name: string; removed_at: number | null }>('select name, removed_at from devices where id = ?', invite.used_by).toArray()[0]
@@ -326,11 +339,9 @@ export class Pool extends DurableObject<Env> {
     if (row.removed_at !== null) return { refused: refuse(403, 'removed', REMOVED_MESSAGE) }
     const device = { id: row.id, name: row.name }
     if (holder === undefined) return { device }
-    const held = this.#holderOf(holder)
-    if (held !== undefined && held.id !== device.id) return { refused: refuse(409, 'held', `${held.name} holds the session ${holder}.`, { holder: held }) }
-    let done = (): void => undefined
-    this.#track(holder, new Promise<void>((resolve) => (done = resolve)))
-    return { device, write: new Write(done) }
+    const write = this.#startWrite(device, holder)
+    if ('holder' in write) return { refused: refuse(409, 'held', `${write.holder.name} holds the session ${holder}.`, { holder: write.holder }) }
+    return { device, write: new Write(write.done) }
   }
 
   // GET /v1/connect: accepts a machine's socket and welcomes it with the messages that waited for it. Every refusal
@@ -344,10 +355,10 @@ export class Pool extends DurableObject<Env> {
       return opened
     }
     const name = request.headers.get('x-anyhost-name') ?? ''
-    if (name === '') return Response.json({ error: 'invalid', message: 'A connect names its machine in X-Anyhost-Name.' } satisfies Refusal, { status: 400 })
+    if (name === '') return reply(refuse(400, 'invalid', 'A connect names its machine in X-Anyhost-Name.'))
     // a machine's roots follow it, as a CLAUDE_CONFIG_DIR set since its join moves Claude Code's folder
     const roots = rootsOf(jsonOf(request.headers.get('x-anyhost-roots')))
-    if (roots === undefined) return Response.json({ error: 'invalid', message: 'A connect names its machine\'s roots as JSON in X-Anyhost-Roots.' } satisfies Refusal, { status: 400 })
+    if (roots === undefined) return reply(refuse(400, 'invalid', 'A connect names its machine\'s roots as JSON in X-Anyhost-Roots.'))
     const row = this.#deviceOf(await sha256(tokenOf(request.headers.get('authorization'))))
     if (row === undefined) return closeWith(CLOSE_UNKNOWN_TOKEN, 'The relay knows no machine with this token.')
     if (row.removed_at !== null) return closeWith(CLOSE_REMOVED, REMOVED_REASON)
@@ -527,13 +538,9 @@ export class Pool extends DurableObject<Env> {
         const condition: unknown = op.if
         if (condition !== undefined && !(isRecord(condition) && (condition['none'] === '*' || isText(condition['match'])))) return invalid('A put\'s if is {"none":"*"} or {"match":"<etag>"}.')
         if (op.holder !== undefined && !isText(op.holder)) return invalid('A put\'s holder names a session.')
-        if (op.holder !== undefined) {
-          const held = this.#holderOf(op.holder)
-          if (held !== undefined && held.id !== device.id) return { status: 409, holder: held }
-        }
-        const write = conditionalPut(this.env.BUCKET, op.key, bytes, new Headers(op.if === undefined ? {} : conditionHeaders(op.if)))
-        if (op.holder !== undefined) this.#track(op.holder, write)
-        const written = await write
+        const write = op.holder === undefined ? undefined : this.#startWrite(device, op.holder)
+        if (write !== undefined && 'holder' in write) return { status: 409, holder: write.holder }
+        const written = await conditionalPut(this.env.BUCKET, op.key, bytes, new Headers(op.if === undefined ? {} : conditionHeaders(op.if))).finally(write?.done)
         if ('stored' in written) return { status: 200, etag: written.stored.etag }
         return written.etag === undefined ? { status: 412 } : { status: 412, etag: written.etag }
       }
@@ -587,8 +594,11 @@ export class Pool extends DurableObject<Env> {
       }
       case 'remove': {
         if (!isText(op.device)) return invalid('A remove names the device id.')
-        const removed = this.#sql.exec('update devices set removed_at = ? where id = ? and removed_at is null', Date.now(), op.device).rowsWritten
-        if (removed === 0) return { status: 404, error: 'unknown_device', message: `No machine with the id ${op.device} is joined.` }
+        const row = this.#sql.exec<{ removed_at: number | null }>('select removed_at from devices where id = ?', op.device).toArray()[0]
+        if (row === undefined) return { status: 404, error: 'unknown_device', message: `No machine with the id ${op.device} is joined.` }
+        // a remove sent again after its answer was lost finds the machine removed already
+        if (row.removed_at !== null) return { status: 200 }
+        this.#sql.exec('update devices set removed_at = ? where id = ?', Date.now(), op.device)
         for (const socket of this.ctx.getWebSockets(op.device)) socket.close(CLOSE_REMOVED, REMOVED_REASON)
         return { status: 200 }
       }
@@ -597,18 +607,28 @@ export class Pool extends DurableObject<Env> {
     }
   }
 
-  // Takes a session for a machine. A takeover writes the claim first, so the old holder's next frame is refused, then
-  // waits for its frames in flight, and only then answers and tells the old holder, at once or in its next welcome.
+  // Takes a session for a machine. A takeover writes the claim, so the old holder's next frame is refused, and tells
+  // the old holder, at once or in its next welcome. Every take then waits for the session's frames in flight before it
+  // answers, a take sent again after a lost answer too, which finds the session its own already. So each answers the
+  // machine that has not heard of the take yet from `waiting`, and a repeat answers as the first did.
   async #claim(device: DeviceRef, session: string, take: boolean): Promise<Result> {
     const held = this.#holderOf(session)
     if (held !== undefined && held.id !== device.id && !take) return { status: 409, holder: held }
     const at = Date.now()
     this.#sql.exec('insert into claims (session, device, at) values (?, ?, ?) on conflict (session) do update set device = excluded.device, at = excluded.at', session, device.id, at)
-    if (held === undefined || held.id === device.id) return { status: 200, told: true }
-    await Promise.allSettled([...(this.#writes.get(session) ?? [])])
-    const released = JSON.stringify({ t: 'released', session, to: device, at: iso(at) } satisfies Released)
-    const told = this.#deliver(held.id, released)
-    if (!told) this.#sql.exec('insert into waiting (device, message, at) values (?, ?, ?)', held.id, released, at)
-    return { status: 200, previous: held, told }
+    if (held !== undefined && held.id !== device.id) {
+      const released = JSON.stringify({ t: 'released', session, to: device, at: iso(at) } satisfies Released)
+      if (!this.#deliver(held.id, released)) this.#sql.exec('insert into waiting (device, message, at) values (?, ?, ?)', held.id, released, at)
+    }
+    if (!take) return { status: 200, told: true }
+    await Promise.all([...(this.#writes.get(session) ?? [])])
+    const untold = this.#sql
+      .exec<{ id: string; name: string }>(
+        "select waiting.device as id, devices.name from waiting join devices on devices.id = waiting.device where json_extract(message, '$.session') = ? and json_extract(message, '$.to.id') = ?",
+        session,
+        device.id,
+      )
+      .toArray()[0]
+    return untold === undefined ? { status: 200, told: true } : { status: 200, previous: untold, told: false }
   }
 }

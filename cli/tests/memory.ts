@@ -5,13 +5,20 @@ import type { ServerWebSocket } from 'bun'
 // Miniflare is the relay's own dependency, which `bun install --cwd relay` installs.
 import { Miniflare, convertV4MiniflareOptions } from '../../relay/node_modules/miniflare'
 import { bundleRelay } from '../../relay/build.ts'
-import { ANSWER, REQUEST, decodeMessage, encodeMessage, type Answer, type Op, type Request, type Result } from '../../relay/protocol.ts'
-import type { Code } from '../src/capture.ts'
+import { ANSWER, COMPATIBILITY_DATE, REQUEST, decodeMessage, encodeMessage, type Answer, type Op, type Request, type Result } from '../../relay/protocol.ts'
+import type { Code, Problems } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
 
 // The stand-in for the working folder's code: nothing to record, and the session continues in the folder it names.
 export const noCode: Code = { captureCode: async () => undefined, restoreCode: async (_header, _readPart, folder) => folder }
+// the problems of a test that expects none: the first one fails it
+export const failTest: Problems = {
+  set: (_key, error) => {
+    throw error
+  },
+  clear: () => undefined,
+}
 
 type Bucket = Awaited<ReturnType<Miniflare['getR2Bucket']>>
 // A request a front sent the Pool: the results of the ops a switch failed, by their position, and the puts it carried,
@@ -19,14 +26,17 @@ type Bucket = Awaited<ReturnType<Miniflare['getR2Bucket']>>
 type Asked = { readonly refused: readonly (readonly [number, Result])[]; readonly puts: readonly { readonly index: number; readonly key: string; readonly body: Uint8Array }[] }
 // A machine's socket to the front, and the socket the front opened to the Pool for it with the machine's headers. The
 // messages the machine sent before the Pool's socket opened wait in `queued`. `device` is the machine the Pool welcomed.
-type Front = { readonly headers: Record<string, string>; readonly queued: (string | Uint8Array)[]; readonly asked: Map<number, Asked>; pool?: WebSocket; device?: string }
+// `held` is the message `holdNext` holds and every message the machine sent after it, in order. `freeAt` is when the
+// link `answerBytesPerMs` paces has carried the answers it took.
+type Front = { readonly headers: Record<string, string>; readonly queued: (string | Uint8Array)[]; readonly asked: Map<number, Asked>; pool?: WebSocket; device?: string; held?: (string | Uint8Array)[] | undefined; freeAt?: number }
 
 // The relay as the program meets it: the relay's Worker and Pool in workerd through Miniflare, as `startLocal` in
 // relay/relay.test.ts runs them, with the Pool's SQLite and the R2 bucket in memory, behind a front at `url` that
 // carries every request, message and object between a machine and the relay, and makes the faults only a stand-in
 // makes. `refuse` fails the ops it names as R2 would, `delayMs` sends each request that much later, `stalled` holds
 // every request back, `dropAnswers` drops the socket instead of that many answers, `unanswered` never sends that many
-// answers on a socket that stays open, `cutDownloads` breaks that many GETs of an object, and `dailyLimited` answers
+// answers on a socket that stays open, `answerBytesPerMs` carries each answer at that many bytes a millisecond after
+// the one before it, as a slow link does, `cutDownloads` breaks that many GETs of an object, and `dailyLimited` answers
 // that many HTTP requests, a connect too, as Cloudflare answers a Worker past its daily requests.
 export type MemoryRelay = {
   readonly url: string
@@ -41,6 +51,8 @@ export type MemoryRelay = {
   stalled: boolean
   dropAnswers: number
   unanswered: number
+  // 0 carries every answer at once
+  answerBytesPerMs: number
   dailyLimited: number
   // GETs of an object that break after half its bytes, and the Range header of every GET
   cutDownloads: number
@@ -61,6 +73,12 @@ export type MemoryRelay = {
   // The machine removes itself on its open socket, and the Pool closes every socket of it. The Pool answers on none, as
   // it closed the one the remove came on.
   remove(device: string): void
+  // Holds the next message of the type `t` a machine sends, and every message that machine sends after it, at the front,
+  // and answers once it holds one, with the function that sends them on in order.
+  holdNext(t: string): Promise<() => void>
+  // Ends every socket of the machine and refuses its connects, as a machine whose network went does, and answers the
+  // function that lets it connect again.
+  disconnect(device: string): () => void
   // a client of the machine's token, which a machine that joined before keeps
   connect(device: Device, roots: MachineRoots): Relay
   stop(): Promise<void>
@@ -70,7 +88,6 @@ export type MemoryRelay = {
 export const MEMORY = 'memory'
 // the Worker's name in Miniflare, which reaching the Pool's database takes
 const WORKER = 'relay'
-const COMPATIBILITY_DATE = '2026-11-01'
 
 const started: MemoryRelay[] = []
 export const stopRelays = async (): Promise<void> => {
@@ -80,6 +97,15 @@ export const stopRelays = async (): Promise<void> => {
 // waits for the relay's welcome
 export async function welcomed(relay: Relay): Promise<void> {
   while (relay.state.is !== 'connected') await Bun.sleep(2)
+}
+
+// Waits for what a machine hears on its own, or a stand-in does, trying every 2 ms. It counts its tries, not the
+// clock, as a stand-in that moves the clock moves it for this wait too.
+export async function until(isTrue: () => boolean | Promise<boolean>): Promise<void> {
+  for (let tries = 0; !(await isTrue()); tries += 1) {
+    if (tries > 2500) throw new Error('It did not happen within 2,500 tries 2 ms apart.')
+    await Bun.sleep(2)
+  }
 }
 
 let relayCode: Promise<string> | undefined
@@ -147,7 +173,13 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       relay.unanswered -= 1
       return
     }
-    front.send(asked.refused.length === 0 || results === undefined ? message : encodeMessage(ANSWER, { id: answer.id, results }, [bytes]))
+    const sent = asked.refused.length === 0 || results === undefined ? message : encodeMessage(ANSWER, { id: answer.id, results }, [bytes])
+    if (relay.answerBytesPerMs === 0) return void front.send(sent)
+    const now = Date.now()
+    front.data.freeAt = Math.max(now, front.data.freeAt ?? 0) + sent.length / relay.answerBytesPerMs
+    setTimeout(() => {
+      if (fronts.has(front)) front.send(sent)
+    }, front.data.freeAt - now)
   }
   const request = async (front: ServerWebSocket<Front>, message: Uint8Array): Promise<void> => {
     const { header, bytes } = decodeMessage(message)
@@ -174,6 +206,27 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
     if (kept.length === 0) return answered(front, encodeMessage(ANSWER, { id, results: [] }, []))
     toPool(front, refused.length === 0 ? message : encodeMessage(REQUEST, { id, ops: kept.map(({ op }) => op) }, kept.map((each) => each.bytes)))
   }
+  // the type of the message `holdNext` holds next, with what hears it held
+  let holding: { readonly t: string; readonly heard: (release: () => void) => void } | undefined
+  // the machines `disconnect` ended, whose connects the front refuses
+  const disconnected = new Set<string>()
+  // A message the machine sent: held while a message before it is, else a request, or a message for the Pool.
+  const fromMachine = (front: ServerWebSocket<Front>, message: string | Uint8Array): void => {
+    if (front.data.held !== undefined) return void front.data.held.push(message)
+    if (typeof message === 'string') {
+      if (holding === undefined || !message.includes(`"t":"${holding.t}"`)) return toPool(front, message)
+      const { heard } = holding
+      holding = undefined
+      front.data.held = [message]
+      return heard(() => {
+        const held = front.data.held ?? []
+        front.data.held = undefined
+        for (const each of held) fromMachine(front, each)
+      })
+    }
+    if (message[0] === REQUEST) void request(front, message)
+    else toPool(front, message)
+  }
 
   const server = Bun.serve<Front>({
     port: 0,
@@ -185,6 +238,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       }
       const headers = forwarded(request, url)
       if (request.headers.get('upgrade') === 'websocket') {
+        for (const device of disconnected) if (request.headers.get('authorization') === `Bearer ${await tokens.get(device)}`) return new Response(`${device} has no network.`, { status: 503 })
         if (server.upgrade(request, { data: { headers, queued: [], asked: new Map() } })) return undefined
         return new Response('The front opened no WebSocket.', { status: 400 })
       }
@@ -226,10 +280,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
         })
       },
       message(front, message) {
-        if (typeof message === 'string') return toPool(front, message)
-        const bytes = new Uint8Array(message)
-        if (bytes[0] === REQUEST) void request(front, bytes)
-        else toPool(front, bytes)
+        fromMachine(front, typeof message === 'string' ? message : new Uint8Array(message))
       },
       close(front, code, reason) {
         fronts.delete(front)
@@ -253,6 +304,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
     stalled: false,
     dropAnswers: 0,
     unanswered: 0,
+    answerBytesPerMs: 0,
     cutDownloads: 0,
     dailyLimited: 0,
     ranges: [],
@@ -293,6 +345,12 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       const socket = [...fronts].find((front) => front.data.device === device)?.data.pool
       if (socket?.readyState !== WebSocket.OPEN) throw new Error(`No socket of ${device} is open to remove it on.`)
       socket.send(encodeMessage(REQUEST, { id: 0, ops: [{ op: 'remove', device }] }, []))
+    },
+    holdNext: (t) => new Promise((heard) => void (holding = { t, heard })),
+    disconnect(device) {
+      disconnected.add(device)
+      for (const front of fronts) if (front.data.device === device) front.terminate()
+      return () => void disconnected.delete(device)
     },
     connect(device, roots) {
       const token = tokens.get(device.id) ?? relay.join(device, roots)

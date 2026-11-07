@@ -1,27 +1,24 @@
 // The relay's Worker: the HTTP routes under /v1. It streams each object over 1 MiB straight between the machine and
 // R2, and hands everything else to the Pool, the one Durable Object of the person's machines.
-import { Pool, conditionalPut, healthOf, type Env, type Reply } from './pool.ts'
-import { tokenOf, type ErrorCode, type Refusal } from './protocol.ts'
+import { Pool, conditionalPut, healthOf, refuse, reply, type Env } from './pool.ts'
+import { tokenOf } from './protocol.ts'
 
 export { Pool }
 
 const OBJECTS = '/v1/objects/'
-
-const reply = ({ status, body }: Reply): Response => Response.json(body, { status })
-const refuse = (status: number, error: ErrorCode, message: string): Response => reply({ status, body: { error, message } satisfies Refusal })
 
 // Streams the request's body into R2, which reads its If-Match and If-None-Match as the binding's `onlyIf`. A journal
 // frame names its session in X-Anyhost-Holder: the Pool refuses it once another machine holds the session, and a
 // takeover waits until the write ends.
 async function putObject(env: Env, pool: DurableObjectStub<Pool>, key: string, request: Request): Promise<Response> {
   // the R2 binding refuses a stream of unknown length
-  if (!request.headers.has('content-length')) return refuse(411, 'length_required', 'A PUT of an object names its Content-Length.')
+  if (!request.headers.has('content-length')) return reply(refuse(411, 'length_required', 'A PUT of an object names its Content-Length.'))
   const holder = request.headers.get('x-anyhost-holder') ?? undefined
   using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')), holder)
   if ('refused' in authorized) return reply(authorized.refused)
   const written = await conditionalPut(env.BUCKET, key, request.body, request.headers)
   if ('stored' in written) return Response.json({ etag: written.stored.etag, size: written.stored.size })
-  return Response.json({ error: 'precondition', message: `${key} failed the request's If-Match or If-None-Match.`, ...(written.etag === undefined ? {} : { etag: written.etag }) }, { status: 412 })
+  return reply(refuse(412, 'precondition', `${key} failed the request's If-Match or If-None-Match.`, written.etag === undefined ? {} : { etag: written.etag }))
 }
 
 // Streams an object from R2, or the part its Range names, which R2 reads from the request's headers, so a broken
@@ -35,8 +32,8 @@ async function getObject(env: Env, pool: DurableObjectStub<Pool>, key: string, r
     if (error instanceof Error && error.message.endsWith('(10039)')) return undefined
     throw error
   })
-  if (object === undefined) return refuse(416, 'invalid', `${key} has no bytes in ${request.headers.get('range')}.`)
-  if (object === null) return refuse(404, 'missing', `No object ${key} is in the bucket.`)
+  if (object === undefined) return reply(refuse(416, 'invalid', `${key} has no bytes in ${request.headers.get('range')}.`))
+  if (object === null) return reply(refuse(404, 'missing', `No object ${key} is in the bucket.`))
   // an object without a type is text to Cloudflare, which compresses it and drops its Content-Length
   const headers = new Headers({ 'content-type': 'application/octet-stream', etag: object.httpEtag, 'last-modified': object.uploaded.toUTCString(), 'accept-ranges': 'bytes' })
   const { offset, end } = servedOf(object.range, object.size)
@@ -60,10 +57,11 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (pathname === '/v1/health' && request.method === 'GET') return Response.json(healthOf(env))
   if (pathname === '/v1/join' && request.method === 'POST') {
     const body: unknown = await request.json().catch(() => undefined)
-    return reply(await pool.join(body))
+    // the setup code of the newest secret, which a busy Pool's own environment lacks for up to 300 s
+    return reply(await pool.join(body, env.SETUP_CODE_SHA256))
   }
   if (pathname === '/v1/connect' && request.method === 'GET') {
-    if (request.headers.get('upgrade') !== 'websocket') return refuse(426, 'invalid', '/v1/connect opens a WebSocket.')
+    if (request.headers.get('upgrade') !== 'websocket') return reply(refuse(426, 'invalid', '/v1/connect opens a WebSocket.'))
     return await pool.fetch(request)
   }
   if (pathname.startsWith(OBJECTS) && pathname.length > OBJECTS.length && (request.method === 'PUT' || request.method === 'GET')) {
@@ -71,11 +69,11 @@ async function route(request: Request, env: Env): Promise<Response> {
     try {
       key = decodeURIComponent(pathname.slice(OBJECTS.length))
     } catch {
-      return refuse(400, 'invalid', `${pathname} names no key the relay can decode.`)
+      return reply(refuse(400, 'invalid', `${pathname} names no key the relay can decode.`))
     }
     return request.method === 'PUT' ? await putObject(env, pool, key, request) : await getObject(env, pool, key, request)
   }
-  return refuse(404, 'missing', `The relay has no route ${request.method} ${pathname}.`)
+  return reply(refuse(404, 'missing', `The relay has no route ${request.method} ${pathname}.`))
 }
 
 export default {
@@ -86,7 +84,7 @@ export default {
       return await route(request, env)
     } catch (error) {
       console.error(`${request.method} ${new URL(request.url).pathname} failed: ${String(error)}`)
-      return refuse(503, 'unavailable', `The relay failed: ${String(error)}`)
+      return reply(refuse(503, 'unavailable', `The relay failed: ${String(error)}`))
     }
   },
 } satisfies ExportedHandler<Env>

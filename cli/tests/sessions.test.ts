@@ -1,23 +1,17 @@
 import { afterEach, expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture, type Problems } from '../src/capture.ts'
+import { journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
 import { HeldElsewhere, takeClaim } from '../src/claims.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { restore } from '../src/resume.ts'
 import { downloadJournal, listSessions } from '../src/sessions.ts'
-import { memoryRelay, noCode, stopRelays, temporaryFolder, type MemoryRelay } from './memory.ts'
+import { failTest, memoryRelay, noCode, stopRelays, temporaryFolder, until, type MemoryRelay } from './memory.ts'
 
 afterEach(stopRelays)
 
 const mac: Device = { id: 'device-mac', name: 'mac', os: 'darwin', arch: 'arm64' }
 const server: Device = { id: 'device-server', name: 'server', os: 'linux', arch: 'x64' }
-const failTest: Problems = {
-  set: (_key, error) => {
-    throw error
-  },
-  clear: () => undefined,
-}
 // a drain of the Claude Code session's paths, answering the paths it left
 const upload = (capture: Capture, session: string, ...paths: string[]): Promise<Set<string>[]> =>
   Promise.all(uploadSessions(capture, [{ session, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
@@ -36,11 +30,6 @@ async function captured(relay: MemoryRelay, device: Device, session: string, pro
   await upload(capture, session, transcript)
   await writeIndex(capture)
   return capture
-}
-
-// waits for what the relay tells a machine, which comes on its own socket
-async function until(isTrue: () => boolean | Promise<boolean>): Promise<void> {
-  for (const started = Date.now(); !(await isTrue()); await Bun.sleep(2)) if (Date.now() - started > 5000) throw new Error('The relay told the machine nothing within 5 s.')
 }
 
 test('the index lists sessions of two devices, each held by the machine that holds it', async () => {

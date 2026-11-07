@@ -29,9 +29,11 @@ export type Stream = {
   on<K extends keyof Events>(kind: K, listener: (value: Events[K]) => void): void
   // the way to the other end from now on, or none, while frames wait for the next one
   use(link: Link | undefined): void
-  // A new peer from now on, as the session's new machine is after `moved`: the stream starts over from its first byte
-  // with no link, and what it writes meanwhile waits for that peer's first link. It takes nothing until the new peer's
-  // `start`, as the last peer's frames may still come. What the last peer never acknowledged goes nowhere.
+  // A new peer from now on, as the session's new machine is after `moved`, or a host that kept no stream of this viewer:
+  // the stream starts over from its first byte with no link, and what it writes meanwhile waits for that peer's first
+  // link. It takes nothing until the new peer's `start`, as the last peer's frames may still come. The frames no link
+  // carried, as the keys typed while no host held the stream, go to the new peer, numbered from 0. A frame a link
+  // carried may have reached the last peer's terminal, so it goes nowhere again.
   startOver(): void
   // a frame the link brought
   receive(frame: Uint8Array): void
@@ -49,6 +51,9 @@ const HEADER = 9
 const ACK_MS = 1000
 // A full 120×40 screen of Claude Code took 6,442 bytes (worker-spec W7), so 8 MiB holds over a thousand screens.
 const MAX_WAITING = 8 * 2 ** 20
+// The longest frame a side sends: a side keeps at most MAX_WAITING bytes its peer did not acknowledge, and ends the
+// stream instead of sending a frame past that.
+export const MAX_FRAME_BYTES = HEADER + MAX_WAITING
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -82,9 +87,10 @@ export function openStream(): Stream {
   let isClosed = false
   // from `startOver` to the new peer's `start`
   let isStarting = false
+  // the offset before which every byte this side wrote went on a link, as of the last link that went
+  let carriedTo = 0
   // armed by the first frame taken since the last acknowledgement, so a stream that takes nothing runs no timer
   let acking: ReturnType<typeof setTimeout> | undefined
-  const fromNothing = (): void => void ([sent, received, acknowledged, waiting, waitingBytes] = [0, 0, 0, [], 0])
 
   // A link that comes later names `received` in its first frame instead.
   const acknowledge = (): void => {
@@ -109,14 +115,20 @@ export function openStream(): Stream {
     clearTimeout(acking)
   }
 
+  // a frame of `bytes` at the next offset, kept until the peer acknowledges it
+  const keep = (code: number, bytes: Uint8Array): Uint8Array => {
+    const frame = frameOf(code, sent, bytes)
+    waiting.push({ offset: sent, size: bytes.length, frame })
+    waitingBytes += bytes.length
+    sent += bytes.length
+    return frame
+  }
+
   return {
     write(kind, value) {
       const bytes = bytesOf(value)
       if (isClosed || bytes.length === 0) return
-      const frame = frameOf(KINDS.indexOf(kind) + 1, sent, bytes)
-      waiting.push({ offset: sent, size: bytes.length, frame })
-      waitingBytes += bytes.length
-      sent += bytes.length
+      const frame = keep(KINDS.indexOf(kind) + 1, bytes)
       if (waitingBytes > MAX_WAITING) {
         close()
         emit('lost', `The other end acknowledged none of the last ${waitingBytes} bytes, past the ${MAX_WAITING} this side keeps.`)
@@ -128,6 +140,7 @@ export function openStream(): Stream {
       listeners[kind] = [...(listeners[kind] ?? []), listener]
     },
     use(next) {
+      if (link !== undefined) carriedTo = sent
       link = isClosed ? undefined : next
       if (link === undefined) return
       link.send(wasLinked ? frameOf(ACK, received) : frameOf(START, 0))
@@ -136,7 +149,11 @@ export function openStream(): Stream {
       for (const { frame } of waiting) link.send(frame)
     },
     startOver() {
-      fromNothing()
+      if (link !== undefined) carriedTo = sent
+      const uncarried = waiting.filter((kept) => kept.offset >= carriedTo)
+      sent = received = acknowledged = waitingBytes = carriedTo = 0
+      waiting = []
+      for (const { frame } of uncarried) keep(frame[0] ?? 0, frame.subarray(HEADER))
       link = undefined
       wasLinked = false
       isStarting = true
@@ -150,10 +167,6 @@ export function openStream(): Stream {
       const offset = view.getUint32(1) * 2 ** 32 + view.getUint32(5)
       if (isStarting && code !== START) return
       isStarting = false
-      // A peer that starts after this side took its bytes lost the stream, as a restarted program does, so this side
-      // starts over from nothing too. What it sent and the peer never acknowledged may have reached the peer's
-      // terminal, so it goes nowhere again.
-      if (code === START && received > 0) fromNothing()
       if (code === START || code === ACK) return peerHolds(offset)
       const kind = KINDS[code - 1]
       const bytes = frame.subarray(HEADER)

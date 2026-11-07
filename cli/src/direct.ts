@@ -20,7 +20,7 @@ import { connect, createServer, type Server, type Socket } from 'node:net'
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os'
 import { join } from 'node:path'
 import type { Problems } from './capture.ts'
-import type { Link } from './stream.ts'
+import { MAX_FRAME_BYTES, type Link } from './stream.ts'
 
 const PING_MS = 1000
 const SILENCE_MS = 3000
@@ -30,9 +30,8 @@ const DIAL_APART_MS = 250
 const SALT_BYTES = 16
 const OPENING_BYTES = 4 + SALT_BYTES
 const TAG_BYTES = 16
-// A stream keeps at most 8 MiB its peer did not acknowledge, so no frame it sends is longer than that and its 9-byte
-// header.
-const MAX_SEALED_BYTES = 8 * 2 ** 20 + 9 + TAG_BYTES
+// a stream's longest frame, sealed
+const MAX_SEALED_BYTES = MAX_FRAME_BYTES + TAG_BYTES
 const EMPTY = new Uint8Array()
 // The interfaces of container and virtual machine bridges: Docker's `docker0`, `br-<network>` and `veth<pair>` on
 // Linux, and macOS's `bridge100` and up, which carry OrbStack's machines and Docker networks on a Mac.

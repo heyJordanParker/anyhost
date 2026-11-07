@@ -25,7 +25,7 @@ export const anyhost = defineMod({
   name: 'anyhost',
   state: initialState,
   // The anyhost program reads them with cmod options: uploadEvery within a minute of a change, since one program
-  // serves every session, checkouts at each anyhost resume, and join at its start.
+  // serves every session, checkouts at each anyhost resume, and join at its start and within a minute of a change.
   options: {
     uploadEvery: option.number({
       title: 'Upload every',
@@ -40,7 +40,7 @@ export const anyhost = defineMod({
     }),
     join: option.text({
       title: 'Join with',
-      description: 'An invite link from Add a machine in /machines on a joined machine. anyhost joins this machine with it at its next start, then empties it.',
+      description: 'An invite link from Add a machine in /machines on a joined machine. anyhost joins this machine with it within a minute, then empties it.',
       default: '',
     }),
   },

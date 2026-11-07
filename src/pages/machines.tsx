@@ -9,7 +9,8 @@ import type { Device as Machine } from '../../relay/protocol.ts'
 // these copy the program's `Connecting`, `Status` and `JoinedRelay`. `relay/protocol.ts` uses nothing but the language.
 type Account = { readonly id: string; readonly name: string }
 type Connecting = { readonly is: 'running' | 'joined' | 'failed'; readonly lines: readonly string[]; readonly accounts?: readonly Account[]; readonly r2Page?: string; readonly error?: string }
-type Status = { readonly relay: { readonly state: string; readonly message: string }; readonly connecting?: Connecting }
+type Joining = { readonly is: 'running' } | { readonly is: 'failed'; readonly error: string }
+type Status = { readonly relay: { readonly state: string; readonly message: string }; readonly connecting?: Connecting; readonly joining?: Joining }
 type JoinedRelay = { readonly url: string }
 type Machines = { readonly here: string; readonly machines: readonly Machine[] }
 type Invite = { readonly command: string; readonly expiresAt: string }
@@ -20,6 +21,8 @@ export type AnyhostState = {
     isFollowing: boolean
     // the program's answer to the invite link pasted on the Step: the relay joined, or why not
     joined: JoinedRelay | { readonly problem: string } | null
+    // the program's join with the link of the option join, as the install command Add a machine gives sets it
+    joining: Joining | null
     machines: Machines | null
     invite: Invite | null
     removing: string | null
@@ -28,7 +31,7 @@ export type AnyhostState = {
 }
 
 export const initialState: AnyhostState = {
-  memory: { connecting: null, isFollowing: false, joined: null, machines: null, invite: null, removing: null, problem: null },
+  memory: { connecting: null, isFollowing: false, joined: null, joining: null, machines: null, invite: null, removing: null, problem: null },
 }
 
 // The relay states in which this machine needs the Step: not joined, as before a join or once the program forgot a
@@ -73,8 +76,9 @@ function follow(mod: Mod<AnyhostState>): void {
     // a program that restarts answers at a later tick
     const status = await askProgram<Status>(mod, '/status').catch((error: unknown) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`, { level: 'warning' }))
     if (status === undefined) return
-    const { connecting } = status
+    const { connecting, joining } = status
     mod.state.memory.connecting = connecting ?? null
+    mod.state.memory.joining = joining ?? null
     if (connecting?.is === 'running') return
     timer.stop()
     mod.state.memory.isFollowing = false
@@ -88,24 +92,29 @@ async function connectAsk(mod: Mod<AnyhostState>, path: string, body: object): P
   if (answered.is === 'running') follow(mod)
 }
 
+// A link that joins this machine ends the failure of the option's join, which the program forgets too.
 async function joinWith(mod: Mod<AnyhostState>, link: string): Promise<void> {
   mod.state.memory.joined = await askProgram<JoinedRelay>(mod, '/join', { link }).catch((error: unknown) => ({ problem: messageOf(error) }))
+  if ('url' in mod.state.memory.joined) mod.state.memory.joining = null
 }
 
 // Done once this machine is joined to a relay that answers the program's protocol. A program that just started
-// connects first, so the Step never opens on a joined machine for that moment.
+// connects first, and one installed with the command Add a machine gives joins with the option's link first, so the
+// Step never opens on a machine that is joining for that moment.
 async function needsStep(mod: Mod<AnyhostState>): Promise<boolean> {
   const started = Date.now()
   for (;;) {
-    const { relay, connecting } = await askProgram<Status>(mod, '/status')
+    const { relay, connecting, joining } = await askProgram<Status>(mod, '/status')
     if (connecting?.is === 'running') follow(mod)
-    if (relay.state === 'connecting' && Date.now() - started < CONNECT_WAIT_MS) {
+    mod.state.memory.joining = joining ?? null
+    if (joining?.is === 'running' || (relay.state === 'connecting' && Date.now() - started < CONNECT_WAIT_MS)) {
       await pause(mod, 250)
       continue
     }
     const needs = NEEDS_STEP.has(relay.state)
-    // a run that joined this machine before it was removed is over, and the Step starts afresh
+    // a run or a pasted link that joined this machine before it was removed is over, and the Step starts afresh
     mod.state.memory.connecting = needs && connecting?.is === 'joined' ? null : (connecting ?? null)
+    if (needs && mod.state.memory.joined !== null && 'url' in mod.state.memory.joined) mod.state.memory.joined = null
     return needs
   }
 }
@@ -118,7 +127,7 @@ export const connectStep: Step<AnyhostState> = {
 }
 
 function ConnectView({ mod }: { readonly mod: Mod<AnyhostState> }): RenderElement {
-  const { connecting, joined } = mod.state.memory
+  const { connecting, joined, joining } = mod.state.memory
   return (
     <Box flexDirection="column" gap={1}>
       <Text wrap="wrap">anyhost keeps every session of every machine in your own Cloudflare account, through a relay it sets up there. Connect each machine once.</Text>
@@ -136,6 +145,14 @@ function ConnectView({ mod }: { readonly mod: Mod<AnyhostState> }): RenderElemen
       <Box flexDirection="column">
         <Text bold>On every other machine</Text>
         <Text wrap="wrap">Paste the command or the invite link that Add a machine gives in /machines on a joined machine.</Text>
+        {joining === null ? null : joining.is === 'running' ? (
+          <Text dimColor wrap="wrap">Joining with the invite link of the install command</Text>
+        ) : (
+          <Box flexDirection="column">
+            <Text color="error" wrap="wrap">{`The invite link of the install command joined no relay: ${joining.error}`}</Text>
+            <Text wrap="wrap">anyhost tries a link once. Press Add a machine in /machines on a joined machine for a new invite, and paste its command here.</Text>
+          </Box>
+        )}
         <Input key="invite" label="› " placeholder="cmod install … --option 'join=https://…/v1/join#…'" submitLabel="join" onSubmit={(link) => void joinWith(mod, link)} />
         {joined === null ? null : 'url' in joined ? <Text color="success">{`✔ Joined ${joined.url}`}</Text> : <Text color="error" wrap="wrap">{joined.problem}</Text>}
       </Box>

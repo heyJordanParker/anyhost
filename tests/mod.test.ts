@@ -165,6 +165,37 @@ test('the Step is left to do on a machine not joined or on a relay too old, and 
   expect(asked.filter(({ path }) => path === '/status')).toHaveLength(3)
 })
 
+// The suite missed it: no /status the Step read carried the join with the link of the install command.
+test('the Step waits while the program joins with the link of the install command, and is done once the join lands', async () => {
+  const joining: Answer = { body: { relay: { state: 'unjoined', message: '' }, joining: { is: 'running' } } }
+  const { mod, asked } = withProgram({ 'GET /status': [joining, joining, joining, relayIs('connecting'), relayIs('connected')] })
+  expect(await connectStep.isDone(await mod())).toBe(true)
+  expect(asked.filter(({ path }) => path === '/status')).toHaveLength(5)
+})
+
+test('the Step on a program whose install command\'s link joined no relay shows why, and how to join', async () => {
+  const error = 'https://anyhost.parker-labs.workers.dev refused to join test-computer: The invite expired at 2026-11-07T09:10:00.000Z, 10 minutes after it was made. Make a new one with Add a machine.'
+  const { tested, mod } = withProgram({ 'GET /status': [{ body: { relay: { state: 'unjoined', message: '' }, joining: { is: 'failed', error } } }] })
+  expect(await connectStep.isDone(await mod())).toBe(false)
+  await tested.type('/step')
+  const drawn = (await tested.shown.page.lines({ columns: 400 })).join('\n')
+  expect(drawn).toContain(`The invite link of the install command joined no relay: ${error}`)
+  expect(drawn).toContain('anyhost tries a link once. Press Add a machine in /machines on a joined machine for a new invite, and paste its command here.')
+})
+
+test('a machine removed after a link pasted on the Step joined it gets the Step afresh', async () => {
+  const command = "cmod install heyJordanParker/anyhost --option 'join=https://anyhost.parker-labs.workers.dev/v1/join#K7QX2M4W9TPR6ZC3HN8JD5VB'"
+  const removed = 'This machine was removed from your machines. Join it again with a link from Add a machine.'
+  const { tested, mod } = withProgram({ 'POST /join': [{ body: { url: 'https://anyhost.parker-labs.workers.dev' } }], 'GET /status': [{ body: { relay: { state: 'unjoined', message: removed } } }] })
+  const started = await mod()
+  await tested.type('/step')
+  await tested.shown.page.input('invite', command)
+  expect((await tested.shown.page.lines()).join('\n')).toContain('✔ Joined https://anyhost.parker-labs.workers.dev')
+
+  expect(await connectStep.isDone(started)).toBe(false)
+  expect((await tested.shown.page.lines()).join('\n')).not.toContain('✔ Joined')
+})
+
 test('Connect Cloudflare on the Step shows each line, asks for the account, and says when this machine joined', async () => {
   const accounts = [{ id: 'a1', name: 'Parker Labs' }, { id: 'a2', name: 'Side Project' }]
   const asking = { is: 'running', lines: ['Checking your Cloudflare login'], accounts }

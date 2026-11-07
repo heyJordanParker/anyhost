@@ -70,7 +70,7 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
   const asked = await fetch('http://localhost/move', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, machine }) }).catch(() => undefined)
   if (asked === undefined) throw new Error(`The anyhost program does not answer at ${unix}. Start Claude Code on this machine, and the anyhost mod starts it.`)
   const started = (await asked.json()) as { readonly session: string; readonly message?: string }
-  if (!asked.ok) throw new Error(started.message)
+  if (!asked.ok) throw new Error(started.message ?? `The anyhost program at ${unix} answered the move with ${asked.status}.`)
   let said = ''
   for (;;) {
     // the program's /claims/<session> answer carries the move it runs, as serve.ts serves it
@@ -88,7 +88,7 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
 async function joinThroughProgram(link: string): Promise<string> {
   const unix = serveSocket()
   const asked = await fetch('http://localhost/join', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ link }) }).catch(() => undefined)
-  if (asked === undefined) return await join(link)
+  if (asked === undefined) return await join(link, await cmodDevice())
   const joined = (await asked.json()) as Partial<JoinedRelay> & { readonly message?: string }
   if (!asked.ok || joined.url === undefined) throw new Error(joined.message ?? `The anyhost program at ${unix} answered the join with ${asked.status}.`)
   return joined.url
@@ -108,7 +108,7 @@ async function connectThroughProgram(): Promise<void> {
   const unix = serveSocket()
   const post = (path: string, body: object): Promise<Response> => fetch(`http://localhost${path}`, { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
   const started = await post('/connect', {}).catch(() => undefined)
-  if (started === undefined) return await connectCloudflare(TERMINAL)
+  if (started === undefined) return await connectCloudflare(TERMINAL, await cmodDevice())
   let view = await connectingOf(unix, started)
   for (let said = 0; ; ) {
     for (const line of view.lines.slice(said)) TERMINAL.say(line)
@@ -121,9 +121,14 @@ async function connectThroughProgram(): Promise<void> {
       view = await connectingOf(unix, await post('/connect/r2', {}))
     } else {
       await Bun.sleep(FOLLOW_MS)
-      const { connecting } = (await (await fetch('http://localhost/status', { unix })).json()) as Status
-      if (connecting === undefined) throw new Error(`The anyhost program at ${unix} restarted during Connect Cloudflare. Run anyhost connect again.`)
-      view = connecting
+      // a program that stops during the run, as at a restart, answers nothing for a moment, then knows no run
+      const status = await fetch('http://localhost/status', { unix }).then(
+        async (answer) => (await answer.json()) as Status,
+        (error: unknown) => new Error(`The anyhost program at ${unix} stopped answering during Connect Cloudflare (${error instanceof Error ? error.message : String(error)}). Run anyhost connect again once it runs.`),
+      )
+      if (status instanceof Error) throw status
+      if (status.connecting === undefined) throw new Error(`The anyhost program at ${unix} restarted during Connect Cloudflare. Run anyhost connect again.`)
+      view = status.connecting
     }
   }
 }
