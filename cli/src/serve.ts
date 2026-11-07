@@ -1,9 +1,9 @@
 import type { ServerWebSocket, Subprocess } from 'bun'
-import { rmSync, watch } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { rmSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { encodeStream, streamOf, type Routed } from '../../relay/protocol.ts'
-import { attachTerminal, backgroundJobOf, personEnvironment, recordedSessions, whenSessions, type AttachedTerminal, type RunningSession } from './background.ts'
+import { attachTerminal, backgroundJobOf, personEnvironment, recordedSessions, whenSessions, type AttachedTerminal, type OnRecordsChange, type RunningSession } from './background.ts'
 import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, workingFolderOf, writeIndex, type Changed, type Problems } from './capture.ts'
 import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
@@ -12,7 +12,7 @@ import { listenDirect, type DirectLink, type DirectOffer } from './direct.ts'
 import { move, receiveMove, receiveStart, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, waitAfter, type RelayState } from './relay.ts'
 import { openStream, type Exit, type Link, type SessionState, type Size, type Stream } from './stream.ts'
-import { codexState, watchedFolders, type Tool } from './transcript.ts'
+import { codexState, filesUnder, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
 // The backup stats every file of every session it captures at the program's start and once an hour, for the writes no
@@ -30,6 +30,48 @@ const LINGER_MS = 60_000
 // one rewrite. One read of 3 sessions' records took 5.3 ms of CPU on a test machine, and one `claude agents --json`,
 // which reads the same records, 468 times as long.
 const STATE_MS = 200
+// Claude Code renames a new record into `sessions/` at each change of a session's status, and removes it as the
+// session ends, so whatever waits on the records reads them again at each change of the folder, and every READ_MS while
+// no watcher hears the folder: while the watcher is not ready, and before Claude Code made the folder. Reading the
+// records themselves, as `claude agents --json` does, takes no process: one `claude agents --json` took 1.2 to 4 s on
+// anyhost-b while a session started there, on the CPU that session needs.
+const READ_MS = 1000
+// Bun 1.4.4's `fs.watch` on macOS runs every watch of a process through one FSEvents thread, which holds the lock that
+// each `watch()` and `close()` takes across `FSEventStreamStart`, and that waits on macOS's fseventsd, which takes no
+// new watcher for minutes at a time while OrbStack Helper holds its 512 (Bun issue #43870). The process's JavaScript
+// then waits on the lock, which no signal ends, and so does its exit, as Bun's exit joins that thread. So the program
+// never watches in its own process: WATCHER is the program of the one process that holds its watches, run as bun, as
+// `personEnvironment` runs it. It prints the path of each change as a JSON string on a line of its own, and `ready`
+// once its watches hear, which a write of `probe` says: it writes the probe every 100 ms until its watch of the
+// probe's folder heard one, as a stream that waits on fseventsd hears nothing though each `watch()` returned. A folder
+// it may not list, which Bun's recursive watch on Linux fails with EACCES, costs only that folder, and the log names it.
+// It ends by SIGKILL once its input closes, as the program's end closes it, since its exit would wait on the lock too.
+// `ANYHOST_WATCHER_HANGS=1` blocks it before its watches, as a stall does, for tests.
+const WATCHER = `
+const { basename, dirname, join } = require('node:path')
+const { watch, writeFileSync } = require('node:fs')
+const { probe, folders } = JSON.parse(process.argv.at(-1))
+if (process.env.ANYHOST_WATCHER_HANGS === '1') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
+const say = (line) => process.stdout.write(line + '\\n')
+for (const { folder, isRecursive } of folders) {
+  watch(folder, { recursive: isRecursive }, (_event, name) => name === null || say(JSON.stringify(join(folder, name))))
+    .on('error', (error) => console.error(new Date().toISOString() + ' anyhost hears no change in a folder under ' + folder + ': ' + error.message))
+}
+const write = () => writeFileSync(probe, String(process.pid))
+let probing = setInterval(write, 100)
+watch(dirname(probe), (_event, name) => {
+  if (name !== basename(probe) || probing === undefined) return
+  clearInterval(probing)
+  probing = undefined
+  say('ready')
+})
+write()
+process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL')).resume()
+`
+// A watcher that is not ready this long after its start gets SIGKILL, and another starts after `waitAfter` its failures.
+// Ten watchers on anyhost-a were ready 25 to 468 ms after their start, at a Mac load average near 130. No watcher on the
+// Mac was ready from 09:02 to 09:55 on 2026-11-07, as fseventsd took no new watcher for that whole time.
+const WATCHER_MS = 10_000
 // A new viewer of a session already shown gets a redraw: the terminal a row shorter until Claude Code clears the screen
 // to paint it at that size, then back. On a test machine Claude Code set only its modes again when the size came back
 // within 50 ms, and 1 of 7 redraws with the size back after 300 ms painted nothing, so the size comes back once the
@@ -215,11 +257,6 @@ export class UploadQueue {
   }
 }
 
-async function filesUnder(folder: string, isRecursive: boolean): Promise<string[]> {
-  const entries = await readdir(folder, { recursive: isRecursive, withFileTypes: true }).catch(() => [])
-  return entries.filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name))
-}
-
 // `names` is the relay Connect Cloudflare deploys and keeps current, the Worker and bucket anyhost unless a test names
 // its own.
 export async function serve(device: Device, names?: RelayNames): Promise<void> {
@@ -239,7 +276,6 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   // a session's code that captureCode read after an upload goes up in the session's next drains
   const capture = openCapture(relay, device, roots, db, undefined, (session, tool, folder) => queue.add(session, tool, `${folder}/`))
   const heartbeat = join(stateFolder(), 'heartbeat')
-  const watched = new Set<string>()
   const current = new Map<string, string>()
   let shellProblem: string | undefined
   let localNetworkProblem: string | undefined
@@ -292,8 +328,22 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     problems.clear('join')
     queue.drain()
   })
+  // Claude Code's records of the sessions it runs, in `sessions/` under its folder, and what waits on their changes.
+  const records = join(roots.claudeHome, 'sessions')
+  const recordsHeard = new Set<() => void>()
+  const onRecordsChange: OnRecordsChange = (heard) => {
+    recordsHeard.add(heard)
+    return () => void recordsHeard.delete(heard)
+  }
+  const recordsChanged = (): void => {
+    for (const read of recordsHeard) read()
+    statesChanged()
+  }
+  // every folder the watcher watches once it is there, with the levels of folders in it that a listing reads
+  const watchable = (): { readonly folder: string; readonly depth: number }[] => [...watchedFolders(roots), { folder: records, depth: 1 }]
   const heard = (path: string): void => {
-    if (!watched.has(path) && watchedFolders(roots).some(({ folder }) => folder === path)) void watchFolders()
+    if (!watched.has(path) && watchable().some(({ folder }) => folder === path)) void watchFolders()
+    if (dirname(path) === records) return recordsChanged()
     // a write to Codex's write-ahead log is a change of its database
     const changed = path.startsWith(codexState(roots)) ? codexState(roots) : path
     void sessionsOf(capture, path).then(
@@ -303,28 +353,102 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       (error: unknown) => problems.set(path, error),
     )
   }
+  // The watcher, the one process that runs WATCHER, from its start until it ends; the folders it watches, which are
+  // there; and when it became ready, while it hears. `unlisted` holds the folders watched since the last listing, whose
+  // every file the next listing hears, as Claude Code writes into a new folder before any watcher hears it.
+  const watched = new Set<string>()
+  const unlisted = new Set<string>()
+  const probe = join(stateFolder(), 'watcher')
+  let watcher: Subprocess | undefined
+  let readyAt: number | undefined
+  let watcherFailures = 0
+  let nextWatcher: ReturnType<typeof setTimeout> | undefined
+  // The time from which a write may have gone unheard, or undefined while a ready watcher hears every write: at the
+  // start the heartbeat's, so the start hears what changed while the program did not run, or the start's own on a first
+  // start, which captures nothing old.
+  let unheardSince: number | undefined = await stat(heartbeat).then((found) => found.mtimeMs, () => Date.now())
+  // Ends the watcher by SIGKILL, as its exit would wait on its watches. Each write from then on may go unheard.
+  const endWatcher = (): void => {
+    watcher?.kill('SIGKILL')
+    watcher = undefined
+    if (readyAt !== undefined) unheardSince ??= Date.now()
+    readyAt = undefined
+  }
+  // Starts a watcher of every folder in `watched` in place of the one before, and answers once it is ready or ended.
+  // One that is not ready WATCHER_MS after its start, or that exits, is a problem until a watcher is ready, and
+  // another starts after `waitAfter` the failures in a row.
+  const startWatcher = (): Promise<void> => {
+    endWatcher()
+    clearTimeout(nextWatcher)
+    const settled = Promise.withResolvers<void>()
+    const folders = watchable().flatMap(({ folder, depth }) => (watched.has(folder) ? [{ folder, isRecursive: depth > 1 }] : []))
+    const child = Bun.spawn([process.execPath, '-e', WATCHER, JSON.stringify({ probe, folders })], { env: { ...process.env, BUN_BE_BUN: '1' }, stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' })
+    watcher = child
+    const failed = (why: string): void => {
+      if (watcher !== child) return
+      clearTimeout(limit)
+      endWatcher()
+      watcherFailures++
+      const wait = waitAfter(watcherFailures)
+      problems.set('watcher', new Error(`anyhost's watcher ${why}, so each backup pass lists the watched folders for the files written since the one before, and another watcher starts in ${wait / 1000} s.`))
+      nextWatcher = setTimeout(() => void startWatcher(), wait)
+    }
+    const limit = setTimeout(() => failed(`heard none of its watches ${WATCHER_MS / 1000} s after its start, as while macOS's fseventsd takes no new watcher`), WATCHER_MS)
+    void child.exited.then(() => {
+      settled.resolve()
+      failed(`exited with ${child.signalCode ?? child.exitCode}`)
+    })
+    const ready = (): void => {
+      clearTimeout(limit)
+      watcherFailures = 0
+      readyAt = Date.now()
+      problems.clear('watcher')
+      void listWritten()
+      settled.resolve()
+    }
+    void (async () => {
+      const decoder = new TextDecoder()
+      let left = ''
+      for await (const chunk of child.stdout) {
+        const lines = (left + decoder.decode(chunk, { stream: true })).split('\n')
+        left = lines.pop() ?? ''
+        for (const line of lines) {
+          if (watcher !== child) return
+          if (line === 'ready') ready()
+          else heard(JSON.parse(line) as string)
+        }
+      }
+    })()
+    return settled.promise
+  }
   // A folder Claude Code makes while the program runs, such as `tasks/` at a session's first task, is watched as soon
-  // as its parent's watcher names it, and every file it already holds is new, so each is heard.
+  // as the watch of its parent names it, by a new watcher of every folder, and the next listing hears every file in it.
   const watchFolders = async (isStart = false): Promise<void> => {
-    for (const { folder, isRecursive } of watchedFolders(roots)) {
+    let isNew = false
+    for (const { folder } of watchable()) {
       if (watched.has(folder) || !(await stat(folder).then((info) => info.isDirectory(), () => false)) || watched.has(folder)) continue
       watched.add(folder)
-      watch(folder, { recursive: isRecursive }, (_event, name) => {
-        if (name !== null) heard(join(folder, name))
-      })
-      if (!isStart) for (const path of await filesUnder(folder, isRecursive)) heard(path)
+      if (!isStart) unlisted.add(folder)
+      isNew = true
     }
+    if (isNew) await startWatcher()
   }
-  // The files that changed while the program did not run: stats only, so it reads no unchanged file. A first start
-  // has no heartbeat and captures nothing old.
-  const catchUp = async (): Promise<void> => {
-    const since = await stat(heartbeat).then((found) => found.mtimeMs, () => undefined)
-    if (since === undefined) return
-    for (const { folder, isRecursive } of watchedFolders(roots)) {
-      for (const path of await filesUnder(folder, isRecursive)) {
-        if (await stat(path).then((found) => found.mtimeMs > since, () => false)) heard(path)
-      }
+  // A listing of the watched folders hears each file written since `unheardSince`, in place of a watcher: as a watcher
+  // gets ready and at each backup pass while none is. A listing of the Architect's Mac's 58,984 files took 0.90 to
+  // 2.99 s and 0.54 to 1.13 s of CPU at a load average near 70 to 90, and held the program's thread 212 ms at most.
+  let isListing = false
+  const listWritten = async (): Promise<void> => {
+    if (isListing || unheardSince === undefined) return
+    isListing = true
+    const [started, since, fresh] = [Date.now(), unheardSince, new Set(unlisted)]
+    unlisted.clear()
+    for (const { folder, depth } of watchable()) {
+      if (!watched.has(folder)) continue
+      for (const { path, mtimeMs } of await filesUnder(folder, depth)) if (mtimeMs >= since || fresh.has(folder)) heard(path)
     }
+    // a watcher ready since before the listing started heard every write the listing did not
+    unheardSince = readyAt !== undefined && readyAt <= started ? undefined : started
+    isListing = false
   }
   // A join here takes effect at once: the relay connects with the new login, and the problems it solves leave.
   const joined = (): void => {
@@ -355,6 +479,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   const backup = async (): Promise<void> => {
     await watchFolders()
     await Bun.write(heartbeat, '')
+    await listWritten()
     await settle('options', async () => {
       const { uploadEvery, join: link, checkouts: chosen } = await personOptions()
       queue.uploadEvery = uploadEveryOf(uploadEvery)
@@ -499,10 +624,14 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   const viewers = new Map<number, Viewer>()
   const shown = new Map<string, Promise<Shown>>()
   // Every `claude attach` this program runs. Bun's terminal gives them no controlling terminal, so no hangup ends them
-  // when this program goes, and a stopped program closes each first, then ends by the signal that stopped it.
+  // when this program goes, and a stopped program closes each first, then ends by the signal that stopped it. Every end
+  // of the program, by a signal or by `process.exit`, ends the watcher by SIGKILL first, which no wait on fseventsd
+  // holds up.
   const terminals = new Set<AttachedTerminal>()
+  process.once('exit', () => watcher?.kill('SIGKILL'))
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) {
     process.once(signal, () => {
+      watcher?.kill('SIGKILL')
       for (const terminal of terminals) terminal.close()
       process.kill(process.pid, signal)
     })
@@ -514,7 +643,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   // Whether Claude Code runs the session here: its record says so now, or again within RESPAWN_MS, as Claude Code
   // respawns a session whose process crashed or that it killed.
   const keepsRunning = (session: string): Promise<boolean> =>
-    whenSessions(roots.claudeHome, (sessions) => sessions.some((entry) => entry.sessionId === session) || undefined, RESPAWN_MS).then((found) => found === true)
+    whenSessions(roots.claudeHome, (sessions) => sessions.some((entry) => entry.sessionId === session) || undefined, RESPAWN_MS, onRecordsChange).then((found) => found === true)
   // The record check of a shown session that runs already, or `check` as the new one.
   const checkRecord = (view: Shown, check: () => Promise<boolean>): Promise<boolean> =>
     (view.recordCheck ??= check().finally(() => (view.recordCheck = undefined)))
@@ -635,7 +764,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       const current = await view
       const isGone = (sessions: readonly RunningSession[]): true | undefined => (sessions.some((entry) => entry.sessionId === session) ? undefined : true)
       const isRecorded = async (): Promise<boolean> => isGone(await recordedSessions(roots.claudeHome)) === undefined
-      const stopping = async (): Promise<boolean> => (await whenSessions(roots.claudeHome, isGone, STOPPING_MS)) === undefined && (await isRecorded())
+      const stopping = async (): Promise<boolean> => (await whenSessions(roots.claudeHome, isGone, STOPPING_MS, onRecordsChange)) === undefined && (await isRecorded())
       const isRunning = await checkRecord(current, signal === null ? () => keepsRunning(session) : stopping)
       if (!isCurrent()) return
       quickEnds = lived < QUICK_END_MS ? quickEnds + 1 : 0
@@ -654,8 +783,6 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     const view = (async (): Promise<Shown> => {
       const { id, cwd } = await runHere(session)
       const terminal = await open(id, cwd, await environment, size)
-      // a running session has its record in `sessions/`, so the folder is there to watch
-      watchStates()
       statesChanged()
       ready = { terminal, size, isAlternateScreen: false, state: { session, status: 'unknown' }, wasRecorded: false }
       return ready
@@ -747,20 +874,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     if (!fit(session, view)) redraw(view)
   }
   // Claude Code's own status of each session shown, which each viewer hears as it changes.
-  let statesWatch: ReturnType<typeof watch> | undefined
   let reading: ReturnType<typeof setTimeout> | undefined
   const statesChanged = (): void => {
     clearTimeout(reading)
     reading = setTimeout(() => void readStates(), STATE_MS)
-  }
-  const watchStates = (): void => {
-    if (statesWatch !== undefined) return
-    try {
-      statesWatch = watch(join(roots.claudeHome, 'sessions'), statesChanged)
-      problems.clear('claude sessions')
-    } catch (error) {
-      problems.set('claude sessions', error)
-    }
   }
   const readStates = async (): Promise<void> => {
     if (shown.size === 0) return
@@ -798,10 +915,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     }
     void showing?.then((view) => view.terminal.close(), () => undefined)
   }
-  const mover: MoveHere = { moves, problems, environment, queue: (session, tool, path) => queue.add(session, tool, path), flush: (session) => queue.flush(session), movedAway }
+  const mover: MoveHere = { moves, problems, environment, queue: (session, tool, path) => queue.add(session, tool, path), flush: (session) => queue.flush(session), movedAway, onRecordsChange }
   // Another machine moves a session here, or starts a new one here, and hears whether it runs.
-  relay.on('move', (message) => void receiveMove(capture, message, { environment, checkouts }).then((answer) => relay.send(answer)))
-  relay.on('start', (message) => void receiveStart(capture, message, { environment, checkouts }).then((answer) => relay.send(answer)))
+  relay.on('move', (message) => void receiveMove(capture, message, { environment, checkouts, onRecordsChange }).then((answer) => relay.send(answer)))
+  relay.on('start', (message) => void receiveStart(capture, message, { environment, checkouts, onRecordsChange }).then((answer) => relay.send(answer)))
 
   // Each `anyhost attach` on this machine. Its first text message is its attach, and so is each later one, with the
   // same stream, but `localNetwork`, which says what its last direct dial found of its terminal app's Local Network
@@ -924,8 +1041,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     error: (error) => failed(500, error),
   })
   console.log(`unix:${socket}`)
+  setInterval(() => (readyAt === undefined || !watched.has(records) ? recordsChanged() : undefined), READ_MS)
   await watchFolders(true)
-  await settle('catch-up', catchUp)
   const loop = async (): Promise<void> => {
     const started = Date.now()
     await backup().catch((error: unknown) => problems.set('backup', error))

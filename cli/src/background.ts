@@ -2,7 +2,6 @@
 // session outlives anyhost and every viewer, and `claude attach <id>` shows it in any terminal, `id` being the first 8
 // characters of the session's id.
 import type { Subprocess } from 'bun'
-import { watch, type FSWatcher } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -16,11 +15,6 @@ const SHELL_MS = 10_000
 const EXITED_MS = 500
 // a startup file's failure is in the last lines of its errors
 const ERRORS_KEPT = 4096
-// Claude Code renames a new record into `sessions/` under its folder at each change of a session's status, and removes
-// it as the session ends, so the records are read again at each change of the folder, and every READ_MS while the
-// folder is missing. Reading the records themselves, as `claude agents --json` does, takes no process: one `claude
-// agents --json` took 1.2 to 4 s on anyhost-b while a session started there, on the CPU that session needs.
-const READ_MS = 1000
 // what the shell itself sets for the program it runs, which says nothing of the person
 const SHELL_OWN = ['PWD', 'OLDPWD', 'SHLVL', '_', 'BUN_BE_BUN']
 // Claude Code runs one daemon per machine, which runs each background session as processes of its own, and the first
@@ -118,20 +112,21 @@ async function isDaemonRunning(claudeHome: string): Promise<boolean> {
   return stat === undefined || stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] === lock.procStart
 }
 
+// Calls `heard` at each change of Claude Code's records under its folder, until the function it answers is called.
+export type OnRecordsChange = (heard: () => void) => () => void
+
 // Answers the first time `found` finds what it looks for in the sessions Claude Code runs here, read again at each
 // change of their records under `claudeHome`, or undefined once `limitMs` passed.
-export function whenSessions<T>(claudeHome: string, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number): Promise<T | undefined> {
-  const folder = join(claudeHome, 'sessions')
+export function whenSessions<T>(claudeHome: string, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number, onRecordsChange: OnRecordsChange): Promise<T | undefined> {
   return new Promise((resolve, reject) => {
-    let watcher: FSWatcher | undefined
-    let next: ReturnType<typeof setTimeout> | undefined
     let isReading = false
     let isStale = false
     let isDone = false
+    // a change during a read reads again once it ended
+    const stopHearing = onRecordsChange(() => void read())
     const end = (): void => {
       isDone = true
-      watcher?.close()
-      clearTimeout(next)
+      stopHearing()
       clearTimeout(limit)
     }
     const limit = Number.isFinite(limitMs)
@@ -163,19 +158,7 @@ export function whenSessions<T>(claudeHome: string, found: (sessions: readonly R
         isStale = false
         return void read()
       }
-      if (!watchRecords()) next = setTimeout(() => void read(), READ_MS)
     }
-    // A change during a read reads again once it ended. Claude Code makes the folder as its first session starts
-    // here, so with no folder yet the sessions are read every READ_MS until it is there.
-    const watchRecords = (): boolean => {
-      try {
-        watcher ??= watch(folder, () => void read())
-        return true
-      } catch {
-        return false
-      }
-    }
-    watchRecords()
     void read()
   })
 }

@@ -1,11 +1,12 @@
 import { afterEach, expect, jest, setSystemTime, test } from 'bun:test'
 import type { Subprocess } from 'bun'
 import { createDecipheriv, hkdfSync } from 'node:crypto'
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { connect as dialTcp, createServer, type Socket } from 'node:net'
 import type { NetworkInterfaceInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES, cloneFixFor, encodeStream, streamOf } from '../../relay/protocol.ts'
+import { isAlive } from '../src/background.ts'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, uploadSessions, type Problems } from '../src/capture.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device, type MachineRoots } from '../src/device.ts'
 import { cipherOf, dialDirect, listenDirect, offeredAddresses, type DirectLink, type DirectListener, type DirectOffer } from '../src/direct.ts'
@@ -1165,6 +1166,112 @@ test("the program's start stats every captured file, and uploads a line a quiet 
   expect(decoder.decode(decompress(frame))).toEndWith(line('Book the train'))
   // the queue drains every 5 seconds
 }, 20_000)
+
+const OTHER_SESSION = '22222222-3333-4444-5555-666666666666'
+// Whether a frame R2 holds of the session's journal carries `text`.
+const isUploaded = (relay: MemoryRelay, session: string, text: string): boolean =>
+  relay.puts.some(({ key, body }) => key.startsWith(`journals/${session}/hot/`) && decoder.decode(decompress(body)).includes(text))
+const problemsOn = async (socket: string): Promise<readonly string[]> => ((await (await fetch('http://localhost/status', { unix: socket })).json()) as Status).problems
+// The heartbeat of a run of the program an hour ago, which the program's start hears every file written since.
+const ranAnHourAgo = (machine: { readonly env: Record<string, string> }): void => {
+  const heartbeat = join(machine.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'heartbeat')
+  writeFileSync(heartbeat, '')
+  const hourAgo = new Date(Date.now() - 60 * 60_000)
+  utimesSync(heartbeat, hourAgo, hourAgo)
+}
+
+// The suite missed it: no test made a watch hang, as only macOS's fseventsd hangs one, for minutes at a time.
+test("a program whose watcher hangs at its start names the stall in /status, backs up a captured session's line and a new session within one backup pass, and ends at SIGTERM within 5 s", async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, false)
+  const transcriptOf = (session: string): string => join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${session}.jsonl`)
+  const line = (session: string, text: string): string => `{"type":"user","message":{"role":"user","content":"${text}"},"sessionId":"${session}"}\n`
+  ranAnHourAgo(host)
+  mkdirSync(dirname(transcriptOf(SESSION)), { recursive: true })
+  writeFileSync(transcriptOf(SESSION), line(SESSION, 'Plan the trip'))
+
+  const served = await serveOn({ ...host.env, ANYHOST_WATCHER_HANGS: '1' })
+  await waitFor('the stall in /status', async () => (await problemsOn(host.socket)).some((problem) => problem.includes(" watcher: Error: anyhost's watcher heard none of its watches 10 s after its start, as while macOS's fseventsd takes no new watcher")), 30_000)
+  await waitFor('the session the start captured uploaded', () => isUploaded(relay, SESSION, 'Plan the trip'), 30_000)
+  appendFileSync(transcriptOf(SESSION), line(SESSION, 'Book the train'))
+  writeFileSync(transcriptOf(OTHER_SESSION), line(OTHER_SESSION, 'Pack the bags'))
+  // the next backup pass starts 60 s after the one before
+  await waitFor('the line and the new session uploaded', () => isUploaded(relay, SESSION, 'Book the train') && isUploaded(relay, OTHER_SESSION, 'Pack the bags'), 75_000)
+
+  const watchersOf = (pid: number): number[] => Bun.spawnSync(['pgrep', '-P', String(pid), '-f', 'ANYHOST_WATCHER_HANGS']).stdout.toString().split('\n').filter((found) => found !== '').map(Number)
+  await waitFor('a hung watcher', () => watchersOf(served.child.pid).length > 0)
+  const [watcher = 0] = watchersOf(served.child.pid)
+  const signalled = Date.now()
+  served.child.kill('SIGTERM')
+  await served.child.exited
+  expect(Date.now() - signalled).toBeLessThan(5000)
+  expect(served.child.signalCode).toBe('SIGTERM')
+  await waitFor('the hung watcher ending with the program', () => !isAlive(watcher), 5000)
+}, 150_000)
+
+test('a watcher that exits is a problem in /status until the one started after it is ready, which hears a new session', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, false)
+  const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  // each watcher writes its pid to `watcher` in the state folder until it hears that write
+  const probe = join(host.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'watcher')
+  const watcherPid = (): number => (existsSync(probe) ? Number(readFileSync(probe, 'utf8')) || 0 : 0)
+  const served = await serveOn(host.env)
+  await waitFor('the watcher', () => watcherPid() > 0)
+  const first = watcherPid()
+  expect(Bun.spawnSync(['pgrep', '-P', String(served.child.pid)]).stdout.toString().split('\n')).toContain(String(first))
+
+  process.kill(first, 'SIGKILL')
+  await waitFor('the exit in /status', async () => (await problemsOn(host.socket)).some((problem) => problem.includes(" watcher: Error: anyhost's watcher exited with SIGKILL, so each backup pass lists the watched folders")))
+  await waitFor('the problem leaving', async () => !(await problemsOn(host.socket)).some((problem) => problem.includes(' watcher: ')))
+  expect(watcherPid()).not.toBe(first)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
+  // heard by the new watcher, as the backup pass after the start's lists it no sooner than 60 s after the start
+  await waitFor('the new session uploaded', () => isUploaded(relay, SESSION, 'Plan the trip'), 30_000)
+}, 60_000)
+
+test('a listing of the watched folders and of a session\'s files follows no symlink, so a cycle leaves the other files listed, and the log names a folder it cannot read once', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, false)
+  const home = host.env['HOME'] ?? ''
+  // Claude Code's temp root, where a background task of the session wrote its output while the program did not run,
+  // beside a scratchpad that holds a symlink cycle and a folder only its owner may list
+  const sessionFolder = join(realpathSync(host.env['CLAUDE_CODE_TMPDIR'] ?? ''), `claude-${process.getuid?.() ?? 0}`, '-work', SESSION)
+  mkdirSync(join(sessionFolder, 'tasks'), { recursive: true })
+  mkdirSync(join(sessionFolder, 'scratchpad'), { recursive: true })
+  symlinkSync('loop', join(sessionFolder, 'scratchpad', 'loop'))
+  const locked = join(sessionFolder, 'locked')
+  mkdirSync(locked)
+  chmodSync(locked, 0)
+  // A subagent's transcript of the session, older than the heartbeat, so only the first capture of the session, which
+  // reads every file of it from byte 0, finds it, beside another symlink cycle
+  const subagents = join(home, '.claude', 'projects', '-work', SESSION, 'subagents')
+  mkdirSync(subagents, { recursive: true })
+  symlinkSync('loop', join(subagents, 'loop'))
+  const subagent = join(subagents, 'agent-a1.jsonl')
+  writeFileSync(subagent, `{"type":"user","message":{"role":"user","content":"Find the trains"},"sessionId":"${SESSION}"}\n`)
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000)
+  utimesSync(subagent, twoHoursAgo, twoHoursAgo)
+  mkdirSync(join(home, '.codex'), { recursive: true })
+  ranAnHourAgo(host)
+  writeFileSync(join(sessionFolder, 'tasks', 'trip.output'), 'Booked the train\n')
+  try {
+    const served = await serveOn(host.env)
+    await waitFor('the output the start listed uploaded', () => isUploaded(relay, SESSION, 'Booked the train'), 30_000)
+    await waitFor("the subagent's transcript the session's first capture found uploaded", () => isUploaded(relay, SESSION, 'Find the trains'), 30_000)
+    // Codex makes `sessions/` while the program runs, so a new watcher starts, and the listing as it gets ready reads
+    // every watched folder again, the temp root before Codex's sessions
+    const rollout = join(home, '.codex', 'sessions', '2026', '11', '07', `rollout-2026-11-07T09-00-00-${OTHER_SESSION}.jsonl`)
+    mkdirSync(dirname(rollout), { recursive: true })
+    writeFileSync(rollout, `{"type":"session_meta","payload":{"id":"${OTHER_SESSION}","cwd":"/work"}}\n`)
+    await waitFor('the rollout in the new folder uploaded', () => isUploaded(relay, OTHER_SESSION, 'session_meta'), 30_000)
+
+    expect(served.logged().split('\n').filter((logged) => logged.includes(`anyhost lists no file in ${locked}: EACCES`))).toHaveLength(1)
+  } finally {
+    chmodSync(locked, 0o755)
+  }
+}, 60_000)
 
 test("a program whose relay Cloudflare refuses for the daily limit names the limit and its reset at 00:00 UTC in /status", async () => {
   const relay = memoryRelay()

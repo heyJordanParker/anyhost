@@ -1,3 +1,4 @@
+import { readdirSync, statSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, sep } from 'node:path'
@@ -40,14 +41,17 @@ export const linesFiles = (roots: MachineRoots): Map<string, { readonly lines: s
     [join(roots.codexHome, 'session_index.jsonl'), { lines: 'id', tool: 'codex' }],
   ])
 
-// The folders the program watches. `jobs/` holds no file of a session: `jobs/<8 hex>/state.json` is the record of a job
-// this machine's Claude Code daemon ran, which names a job that never ran on any other machine.
-export const watchedFolders = (roots: MachineRoots): { readonly folder: string; readonly isRecursive: boolean }[] => [
-  { folder: claudeFolder(roots), isRecursive: false },
-  ...['projects', 'file-history', 'tasks', 'session-env', 'plans', 'paste-cache'].map((name) => ({ folder: claudeFolder(roots, name), isRecursive: true })),
-  { folder: roots.claudeTmp, isRecursive: true },
-  { folder: roots.codexHome, isRecursive: false },
-  { folder: join(roots.codexHome, 'sessions'), isRecursive: true },
+// The folders the program watches, each with the levels of folders in it that hold a session's files, counting the
+// folder itself: 1 for the lines files beside other files, and 4 for background output in the temp root,
+// `<folder>/<session>/tasks/<task>.output`, as its scratchpads beside `tasks/` hold whole checkouts. A folder of more
+// than one level is watched with every level under it. `jobs/` holds no file of a session: `jobs/<8 hex>/state.json`
+// is the record of a job this machine's Claude Code daemon ran, which names a job that never ran on any other machine.
+export const watchedFolders = (roots: MachineRoots): { readonly folder: string; readonly depth: number }[] => [
+  { folder: claudeFolder(roots), depth: 1 },
+  ...['projects', 'file-history', 'tasks', 'session-env', 'plans', 'paste-cache'].map((name) => ({ folder: claudeFolder(roots, name), depth: Infinity })),
+  { folder: roots.claudeTmp, depth: 4 },
+  { folder: roots.codexHome, depth: 1 },
+  { folder: join(roots.codexHome, 'sessions'), depth: Infinity },
 ]
 
 export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
@@ -78,10 +82,38 @@ export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
   return undefined
 }
 
-async function filesUnder(folder: string): Promise<string[]> {
-  const entries = await readdir(folder, { recursive: true, withFileTypes: true }).catch(() => [])
-  return entries.filter((entry) => entry.isFile() && !entry.name.startsWith('.') && !/\.tmp\.[0-9a-f]+$/.test(entry.name)).map((entry) => join(entry.parentPath, entry.name))
+// each folder and reason a walk of `filesUnder` failed at, which the log names once
+const failedListings = new Set<string>()
+
+// Every file `depth` levels of folders down from `folder` or fewer, counting the folder itself, with its modified time.
+// The walk follows no symlink, as Bun's recursive `readdir` follows one into a cycle and fails the whole listing with
+// ELOOP, which it did 6.4 s into the temp root at a cycle in another agent's scratchpad. A folder that fails costs only
+// its own files, and the log names it once with the reason, but for a folder gone meanwhile. It lists and stats in
+// this thread and yields after each folder, as `changedFiles` stats.
+export async function filesUnder(folder: string, depth = Infinity): Promise<{ readonly path: string; readonly mtimeMs: number }[]> {
+  const files: { path: string; mtimeMs: number }[] = []
+  const left = [{ folder, depth }]
+  for (let next = left.pop(); next !== undefined; next = left.pop()) {
+    await new Promise((resolve) => setImmediate(resolve))
+    try {
+      for (const entry of readdirSync(next.folder, { withFileTypes: true })) {
+        const path = join(next.folder, entry.name)
+        if (entry.isDirectory() && next.depth > 1) left.push({ folder: path, depth: next.depth - 1 })
+        else if (entry.isFile()) files.push({ path, mtimeMs: statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0 })
+      }
+    } catch (error) {
+      const line = `anyhost lists no file in ${next.folder}: ${error instanceof Error ? error.message : String(error)}`
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' || failedListings.has(line)) continue
+      failedListings.add(line)
+      console.error(`${new Date().toISOString()} ${line}`)
+    }
+  }
+  return files
 }
+
+// a session's files under `folder`, but a dotfile such as `.lock`, or the temp file of an atomic write
+const sessionFilesUnder = async (folder: string): Promise<string[]> =>
+  (await filesUnder(folder)).map(({ path }) => path).filter((path) => !basename(path).startsWith('.') && !/\.tmp\.[0-9a-f]+$/.test(path))
 
 const foldersIn = async (folder: string): Promise<string[]> =>
   (await readdir(folder, { withFileTypes: true }).catch(() => [])).filter((entry) => entry.isDirectory()).map((entry) => join(folder, entry.name))
@@ -95,9 +127,9 @@ export async function filesOf(session: string, tool: Tool, roots: MachineRoots):
   const projects = await foldersIn(claudeFolder(roots, 'projects'))
   const temporary = await foldersIn(roots.claudeTmp)
   const found = await Promise.all([
-    ...projects.map(async (project) => [...((await Bun.file(join(project, `${session}.jsonl`)).exists()) ? [join(project, `${session}.jsonl`)] : []), ...(await filesUnder(join(project, session)))]),
-    ...[claudeFolder(roots, 'file-history', session), claudeFolder(roots, 'tasks', session), claudeFolder(roots, 'tasks', `session-${short}`), claudeFolder(roots, 'session-env', session)].map(filesUnder),
-    ...temporary.map(async (folder) => (await filesUnder(join(folder, session, 'tasks'))).filter((path) => path.endsWith('.output'))),
+    ...projects.map(async (project) => [...((await Bun.file(join(project, `${session}.jsonl`)).exists()) ? [join(project, `${session}.jsonl`)] : []), ...(await sessionFilesUnder(join(project, session)))]),
+    ...[claudeFolder(roots, 'file-history', session), claudeFolder(roots, 'tasks', session), claudeFolder(roots, 'tasks', `session-${short}`), claudeFolder(roots, 'session-env', session)].map(sessionFilesUnder),
+    ...temporary.map(async (folder) => (await sessionFilesUnder(join(folder, session, 'tasks'))).filter((path) => path.endsWith('.output'))),
   ])
   return [...found.flat(), ...lines]
 }

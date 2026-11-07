@@ -7,7 +7,7 @@
 import { mkdir, readFile, readlink, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Delivered, Offline, Routed } from '../../relay/protocol.ts'
-import { attachTerminal, backgroundJobOf, isAlive, keptSessions, recordedSessions, run, startInBackground, stopInBackground, whenSessions, type RunningSession } from './background.ts'
+import { attachTerminal, backgroundJobOf, isAlive, keptSessions, recordedSessions, run, startInBackground, stopInBackground, whenSessions, type OnRecordsChange, type RunningSession } from './background.ts'
 import { changedFiles, checkoutOf, holdHere, journalOf, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { HeldElsewhere, takeClaim } from './claims.ts'
 import { devicesOf, machinesOf, otherMachine } from './device.ts'
@@ -45,9 +45,10 @@ export type MoveHere = {
   readonly flush: (session: string) => Promise<void>
   // ends every viewer of a session this program shows, telling each the machine it runs on now
   readonly movedAway: (session: string, to: string) => void
+  readonly onRecordsChange: OnRecordsChange
 }
 // What a machine that receives a session or starts one needs of its program.
-export type ReceiveHere = { readonly environment: Promise<Record<string, string>>; readonly checkouts: string }
+export type ReceiveHere = { readonly environment: Promise<Record<string, string>>; readonly checkouts: string; readonly onRecordsChange: OnRecordsChange }
 
 type MovedAnswer = Extract<Routed, { readonly t: 'moved' }>
 type StartedAnswer = Extract<Routed, { readonly t: 'started' }>
@@ -363,7 +364,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
   void (async () => {
     const env = await here.environment
     if (isBusy) {
-      const idle = whenSessions(capture.roots.claudeHome, (sessions) => isKept || (sessions.find((listed) => listed.sessionId === session)?.status ?? 'idle') === 'idle' || undefined, Infinity)
+      const idle = whenSessions(capture.roots.claudeHome, (sessions) => isKept || (sessions.find((listed) => listed.sessionId === session)?.status ?? 'idle') === 'idle' || undefined, Infinity, here.onRecordsChange)
       if ((await Promise.race([idle, kept.promise])) === 'kept') return say('failed', keptLine)
       say('uploading', `Uploading ${id}.`)
     }
@@ -412,7 +413,7 @@ export async function receiveMove(capture: Capture, asked: Extract<Delivered, { 
     // `claude attach` starts a kept job that stopped again, and the session runs once its record names its process
     const job = await backgroundJobOf(session.id, cwd, env, device.name)
     const terminal = attachTerminal(job.id, job.cwd, env, { cols: 80, rows: 24 }, () => undefined)
-    const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session.id), RUNNING_MS).finally(() => terminal.close())
+    const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session.id), RUNNING_MS, here.onRecordsChange).finally(() => terminal.close())
     if (running === undefined) {
       const kept = (await keptSessions().catch(() => [])).find((entry) => entry.sessionId === session.id)
       throw new Error(`Claude Code listed the session ${session.id.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start, and ${kept === undefined ? 'lists no job of it' : `lists its job ${kept.id ?? ''} as ${kept.state ?? 'neither running nor stopped'}`}`)
@@ -458,7 +459,7 @@ export async function receiveStart(capture: Capture, asked: Extract<Delivered, {
     await mkdir(cwd, { recursive: true })
     if (asked.trusted) await trustHere(capture, cwd, asked.from.name)
     const id = await startInBackground(undefined, cwd, await here.environment)
-    const running = await whenSessions(capture.roots.claudeHome, (sessions) => sessions.find((entry) => entry.id === id && entry.pid !== undefined), RUNNING_MS)
+    const running = await whenSessions(capture.roots.claudeHome, (sessions) => sessions.find((entry) => entry.id === id && entry.pid !== undefined), RUNNING_MS, here.onRecordsChange)
     if (running === undefined) throw new Error(`Claude Code listed the new session ${id} running on ${device.name} no ${RUNNING_MS / 1000} s after its start.`)
     const { sessionId } = running
     await takeClaim(relay, sessionId, { take: false })
