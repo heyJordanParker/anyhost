@@ -1,4 +1,4 @@
-import { afterEach, expect, jest, setSystemTime, test } from 'bun:test'
+import { afterEach, expect, jest, setDefaultTimeout, setSystemTime, test } from 'bun:test'
 import type { Subprocess } from 'bun'
 import { createDecipheriv, hkdfSync } from 'node:crypto'
 import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
@@ -17,6 +17,9 @@ import { openStream, type Link, type Stream } from '../src/stream.ts'
 import { memoryRelay, noCode, stopRelays, temporaryFolder, welcomed, type MemoryRelay } from './memory.ts'
 
 afterEach(stopRelays)
+// A test that runs `anyhost serve` against the relay in workerd took 5.0 s alone on the Mac at a load average of 133,
+// and 8.3 s on anyhost-a, past Bun's 5 s.
+setDefaultTimeout(30_000)
 
 const SESSION = '11111111-2222-3333-4444-555555555555'
 const device: Device = { id: 'device-a', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
@@ -42,7 +45,7 @@ async function waitFor(what: string, isTrue: () => boolean | Promise<boolean>, m
 }
 
 test('a request whose answer the dropped socket lost goes again on the next socket, and its frame is stored once', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const home = join(temporaryFolder(), 'home')
   const capture = openCapture(relay.connect(device, roots(home)), device, roots(home), openDatabase(join(temporaryFolder(), 'state')), noCode)
   const transcript = join(home, '.claude', 'projects', '-work', `${SESSION}.jsonl`)
@@ -58,8 +61,8 @@ test('a request whose answer the dropped socket lost goes again on the next sock
 })
 
 test('a machine with the id of a connected machine and another name, as a clone has, is refused with the fix', async () => {
-  const relay = memoryRelay()
-  const token = relay.join(device, roots('/home/ada'))
+  const relay = await memoryRelay()
+  const token = await relay.join(device, roots('/home/ada'))
   await welcomed(connect({ login: async () => ({ url: relay.url, token }), device, roots: roots('/home/ada'), isPatient: true }))
 
   const clone = connect({ login: async () => ({ url: relay.url, token }), device: { ...device, name: 'anyhost-c' }, roots: roots('/home/ada'), isPatient: true })
@@ -68,8 +71,8 @@ test('a machine with the id of a connected machine and another name, as a clone 
 })
 
 test('a removed machine is refused, and a command of it fails with the reason', async () => {
-  const relay = memoryRelay()
-  const token = relay.join(device, roots('/home/ada'))
+  const relay = await memoryRelay()
+  const token = await relay.join(device, roots('/home/ada'))
   const service = connect({ login: async () => ({ url: relay.url, token }), device, roots: roots('/home/ada'), isPatient: true })
   await welcomed(service)
   relay.remove(device.id)
@@ -82,7 +85,7 @@ test('a removed machine is refused, and a command of it fails with the reason', 
 })
 
 test('a machine that never joined waits for a join in the service, and connects at once when one comes', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   let login: { url: string; token: string } | undefined
   const service = connect({ login: async () => login, device, roots: roots('/home/ada'), isPatient: true })
   await waitFor('the service finding no login', () => service.state.is === 'unjoined')
@@ -91,7 +94,7 @@ test('a machine that never joined waits for a join in the service, and connects 
   await Bun.sleep(50)
   expect(isSettled).toBe(false)
 
-  login = { url: relay.url, token: relay.join(device, roots('/home/ada')) }
+  login = { url: relay.url, token: await relay.join(device, roots('/home/ada')) }
   service.reconnect()
   // the next try waits a second after the first failure, and the join connects well before it
   await waitFor('the join connecting', () => service.state.is === 'connected')
@@ -102,8 +105,8 @@ test('a machine that never joined waits for a join in the service, and connects 
 })
 
 test('each connect brings this machine\'s roots, which the relay lists from then on', async () => {
-  const relay = memoryRelay()
-  const token = relay.join(device, roots('/home/ada'))
+  const relay = await memoryRelay()
+  const token = await relay.join(device, roots('/home/ada'))
   const moved = { ...roots('/home/ada'), claudeHome: '/srv/claude-config' }
   const service = connect({ login: async () => ({ url: relay.url, token }), device, roots: moved, isPatient: true })
   await welcomed(service)
@@ -112,15 +115,16 @@ test('each connect brings this machine\'s roots, which the relay lists from then
 })
 
 test('a removed machine leaves the machines list and stays in devicesOf, so its sessions stay listed', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const other: Device = { id: 'device-b', name: 'anyhost-b', os: 'linux', arch: 'arm64' }
   const here = relay.connect(device, roots('/home/ada'))
   const gone = relay.connect(other, roots('/home/bob'))
   await Promise.all([welcomed(here), welcomed(gone)])
-  relay.put(`sessions/${other.id}/index.json`, new TextEncoder().encode(JSON.stringify([{ id: SESSION, tool: 'claude', cwd: '/home/bob/work', lastActivity: '2026-11-06T00:00:00.000Z' }])))
+  await relay.objects.put(`sessions/${other.id}/index.json`, new TextEncoder().encode(JSON.stringify([{ id: SESSION, tool: 'claude', cwd: '/home/bob/work', lastActivity: '2026-11-06T00:00:00.000Z' }])))
 
   await removeMachine(here, other.id)
-  await waitFor('the removed machine hearing it', () => gone.state.is === 'unjoined')
+  // workerd ends a socket the Pool closes while the socket is idle 10 s after the close: 10,005 to 10,022 ms over 3 runs
+  await waitFor('the removed machine hearing it', () => gone.state.is === 'unjoined', 20_000)
   expect((await machinesOf(here)).map(({ name }) => name)).toEqual(['anyhost-a'])
   expect((await devicesOf(here)).get(other.id)).toMatchObject({ name: 'anyhost-b', roots: roots('/home/bob') })
   expect((await devicesOf(here)).get(other.id)?.removedAt).toBeString()
@@ -129,10 +133,10 @@ test('a removed machine leaves the machines list and stays in devicesOf, so its 
 })
 
 test('an invite is the command that installs anyhost with the invite in the option join, quoted for any shell', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const here = relay.connect(device, roots('/home/ada'))
   const { command, expiresAt } = await inviteMachine(here)
-  expect(command).toMatch(new RegExp(`^cmod install heyJordanParker/anyhost --option 'join=${relay.url}/v1/join#[0-9a-f-]+'$`))
+  expect(command).toMatch(new RegExp(`^cmod install heyJordanParker/anyhost --option 'join=${relay.url}/v1/join#[0-9A-HJKMNP-TV-Z]{26}'$`))
   expect(Date.parse(expiresAt) - Date.now()).toBeGreaterThan(9 * 60_000)
 })
 
@@ -142,7 +146,7 @@ test('a command fails with the relay it could not reach, instead of waiting for 
 })
 
 test('an object over 1 MiB goes by HTTP, and a broken download goes on from the byte it reached', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const client = relay.connect(device, roots('/home/ada'))
   const bytes = crypto.getRandomValues(new Uint8Array(3 * MAX_MESSAGE_BYTES))
   const [put] = client.run([{ op: 'put', key: 'files/big.bin', bytes, if: { none: '*' } }])
@@ -160,15 +164,15 @@ test('an object over 1 MiB goes by HTTP, and a broken download goes on from the 
 const md5 = (bytes: Uint8Array): string => new Bun.CryptoHasher('md5').update(bytes).digest('hex')
 const DAILY_LIMIT = "Cloudflare refuses the relay with its error 1027: the relay's Worker reached the Free plan's limit of 100,000 requests a day, which resets at 00:00 UTC."
 
-// The suite missed it because memoryRelay's join gave a machine that joined before its old token, where the Pool's
-// join gives a new one and refuses the old.
+// The suite missed it because the stand-in relay's join gave a machine that joined before its old token, where the
+// Pool's join gives a new one and refuses the old.
 test('a machine that joins again while connected puts an object over 1 MiB with its new token', async () => {
-  const relay = memoryRelay()
-  let login = { url: relay.url, token: relay.join(device, roots('/home/ada')) }
+  const relay = await memoryRelay()
+  let login = { url: relay.url, token: await relay.join(device, roots('/home/ada')) }
   const service = connect({ login: async () => login, device, roots: roots('/home/ada'), isPatient: true })
   await welcomed(service)
   // as the Add a machine command pasted again on this machine gives it a new token while its socket is open
-  login = { url: relay.url, token: relay.join(device, roots('/home/ada')) }
+  login = { url: relay.url, token: await relay.join(device, roots('/home/ada')) }
   service.reconnect()
 
   const bytes = crypto.getRandomValues(new Uint8Array(2 * MAX_MESSAGE_BYTES))
@@ -177,7 +181,7 @@ test('a machine that joins again while connected puts an object over 1 MiB with 
 
 // The suite missed it because no relay it ran ever left a request unanswered on a socket that stayed open.
 test('a request the relay leaves unanswered goes again on a new socket 40 seconds later, so the seal that ends a backup pass ends', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const home = join(temporaryFolder(), 'home')
   const capture = openCapture(relay.connect(device, roots(home)), device, roots(home), openDatabase(join(temporaryFolder(), 'state')), noCode)
   const transcript = join(home, '.claude', 'projects', '-work', `${SESSION}.jsonl`)
@@ -186,9 +190,12 @@ test('a request the relay leaves unanswered goes again on a new socket 40 second
   await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], failTest).map(([, left]) => left))
   const asked = relay.requests.length
   relay.unanswered = 1
+  // a minute past the 10 quiet minutes after the upload, as a seal counts a session written that very millisecond as
+  // not quiet
+  const quiet = (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000
 
   const started = Date.now()
-  expect(await sealQuiet(capture, failTest, Date.now() + QUIET_MS)).toEqual(new Map())
+  expect(await sealQuiet(capture, failTest, quiet)).toEqual(new Map())
   expect(Date.now() - started).toBeGreaterThanOrEqual(40_000)
   expect(relay.requests.slice(asked, asked + 2)).toEqual([
     [{ op: 'claim', session: SESSION, take: false }],
@@ -198,7 +205,7 @@ test('a request the relay leaves unanswered goes again on a new socket 40 second
 }, 90_000)
 
 test("an object request Cloudflare refuses for the daily limit goes again, and a connect it refuses names the limit and its reset", async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const client = relay.connect(device, roots('/home/ada'))
   await welcomed(client)
   relay.dailyLimited = 1
@@ -599,23 +606,29 @@ const script = (path: string, text: string): string => {
 // and rewrites at each change of its `status`.
 const recordSession = (home: string, pid: number, status = 'busy'): void =>
   writeFileSync(join(home, '.claude', 'sessions', `${pid}.json`), JSON.stringify({ pid, sessionId: SESSION, cwd: '/', kind: 'bg', jobId: SESSION.slice(0, 8), status }))
+// The lock of Claude Code's daemon, which names the test's own process, and on Linux its start, the 22nd field of its
+// stat, as Claude Code writes it there.
+const procStat = existsSync(`/proc/${process.pid}/stat`) ? readFileSync(`/proc/${process.pid}/stat`, 'utf8') : undefined
+const DAEMON_LOCK = JSON.stringify({ pid: process.pid, ...(procStat === undefined ? {} : { procStart: procStat.slice(procStat.lastIndexOf(')') + 2).split(' ')[19] }) })
 
 // A machine's folders, its relay login, the cmod that answers its device token and options, and the Claude Code that
 // runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen, prints the
 // terminal's size at its start, clears the screen and prints it again at each SIGWINCH in one write, as Claude Code
 // paints a frame, prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
-// when its terminal closes. Each run goes into `claude.log` in the machine's folder, with its arguments.
+// when its terminal closes. It reads the lines in a job of its own and waits for it, as a signal it traps ends a `wait`
+// at once, while bash 5 runs the trap of a signal that came during `read` only once a line comes. Each run goes into
+// `claude.log` in the machine's folder, with its arguments.
 // Its record in `sessions/` names the test's own process, which runs as long as the test, and so does the lock of
 // Claude Code's daemon, which a background session needs to run. `claude` replaces that Claude Code with a script of
 // the machine's folder.
-function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, claude?: (folder: string) => string): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
+async function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, claude?: (folder: string) => string): Promise<{ readonly env: Record<string, string>; readonly socket: string; readonly folder: string }> {
   const folder = temporaryFolder()
   const home = join(folder, 'home')
   mkdirSync(join(folder, 'tmp'), { recursive: true })
   // where Claude Code keeps the record of each session it runs, and its transcripts
   mkdirSync(join(home, '.claude', 'sessions'), { recursive: true })
   mkdirSync(join(home, '.claude', 'projects'), { recursive: true })
-  writeFileSync(join(home, '.claude', 'daemon.lock'), JSON.stringify({ pid: process.pid }))
+  writeFileSync(join(home, '.claude', 'daemon.lock'), DAEMON_LOCK)
   const env = {
     // the machine's own programs, such as its herdr, come first
     PATH: `${join(folder, 'bin')}:${process.env['PATH'] ?? ''}`,
@@ -629,6 +642,8 @@ function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, claude?
     ANYHOST_DEVICE_NAME: device.name,
     ANYHOST_DEVICE_OS: device.os,
     ANYHOST_DEVICE_ARCH: device.arch,
+    // the user's systemd, which runs each claude --bg and claude attach in a scope on Linux, as it gives a service
+    ...(process.env['XDG_RUNTIME_DIR'] === undefined ? {} : { XDG_RUNTIME_DIR: process.env['XDG_RUNTIME_DIR'] }),
     CLAUDE_CODE_EXECPATH: script(
       join(folder, 'bin', 'claude'),
       claude?.(folder) ??
@@ -638,16 +653,17 @@ case "$1" in
   agents) printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
   attach)
     printf '\\033[?1049h'
-    trap 'printf "\\033[2Jsize %s\\n" "$(stty size)"' WINCH
     echo "size $(stty size)"
-    while IFS= read -r line; do [ "$line" = leave ] && exit 0; echo "typed $line"; done ;;
+    while IFS= read -r line; do [ "$line" = leave ] && exit 0; echo "typed $line"; done <&0 &
+    trap 'printf "\\033[2Jsize %s\\n" "$(stty size)"' WINCH
+    while kill -0 $! 2>/dev/null; do wait $!; done ;;
   *) exit 2 ;;
 esac
 `,
     ),
   }
   if (isHost && claude === undefined) recordSession(home, process.pid)
-  const token = relay.join(device, roots(home))
+  const token = await relay.join(device, roots(home))
   script(
     join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'),
     `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") printf '{"person":{}}' ;;\n  "device --json") printf '%s' '${JSON.stringify(device)}' ;;\n  *) exit 1 ;;\nesac\n`,
@@ -694,7 +710,7 @@ async function anyhostOn(env: Record<string, string>, args: readonly string[], i
 }
 
 test('anyhost join asks the program that answers on this machine, which joins in turn with its forgets', async () => {
-  const { env, socket } = machineFor(memoryRelay(), HOST, false)
+  const { env, socket } = await machineFor(await memoryRelay(), HOST, false)
   const asked: unknown[] = []
   // the program's /join as serve.ts answers it, at the program's own socket
   const program = Bun.serve({
@@ -715,7 +731,7 @@ test('anyhost join asks the program that answers on this machine, which joins in
 })
 
 test('anyhost join joins in its own process when no program answers on this machine', async () => {
-  const { env } = machineFor(memoryRelay(), HOST, false)
+  const { env } = await machineFor(await memoryRelay(), HOST, false)
   const asked: string[] = []
   const relay = Bun.serve({
     port: 0,
@@ -735,7 +751,7 @@ test('anyhost join joins in its own process when no program answers on this mach
 })
 
 test('anyhost connect asks the program that answers on this machine, prints each line of its run, and answers its question from the terminal', async () => {
-  const { env, socket } = machineFor(memoryRelay(), HOST, false)
+  const { env, socket } = await machineFor(await memoryRelay(), HOST, false)
   const accounts = [{ id: 'a1', name: 'Parker Labs' }, { id: 'a2', name: 'Side Project' }]
   const lines = ['Checking your Cloudflare login', 'Found the bucket anyhost-test in the eu jurisdiction', 'Joined this machine to https://anyhost-test-connect.parker-labs.workers.dev']
   const asked: string[] = []
@@ -762,7 +778,7 @@ test('anyhost connect asks the program that answers on this machine, prints each
 
 // The suite missed it: no test ran anyhost doctor beside a program.
 test('anyhost doctor beside a program that answers unjoined prints one ✘ line with its one fix, and reads no relay itself', async () => {
-  const { env, socket } = machineFor(memoryRelay(), HOST, false)
+  const { env, socket } = await machineFor(await memoryRelay(), HOST, false)
   rmSync(join(env['XDG_STATE_HOME'] ?? '', 'anyhost', 'relay.json'))
   const message = 'This machine is not joined to your relay, so anyhost keeps what its sessions write and uploads nothing.'
   const status: Status = { device: HOST, relay: { url: '', state: 'unjoined', message, bucket: '' }, pending: 0, uploadEvery: 5, capturedAt: '', problems: [], journalGaps: [] }
@@ -778,8 +794,8 @@ test('anyhost doctor beside a program that answers unjoined prints one ✘ line 
 
 // A machine whose cmod answers `join` as its option, keeps the secret it stores, and logs each option it sets, with
 // no relay login yet.
-function unjoinedWithOption(link: string): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
-  const machine = machineFor(memoryRelay(), HOST, false)
+async function unjoinedWithOption(link: string): Promise<{ readonly env: Record<string, string>; readonly socket: string; readonly folder: string }> {
+  const machine = await machineFor(await memoryRelay(), HOST, false)
   const programs = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs')
   script(
     join(programs, 'cmod'),
@@ -806,7 +822,7 @@ test('the option join joins at the program\'s start and empties itself, and one 
   })
   try {
     const origin = `http://127.0.0.1:${relay.port}`
-    const machine = unjoinedWithOption(`cmod install heyJordanParker/anyhost --option 'join=${origin}/v1/join#USED'`)
+    const machine = await unjoinedWithOption(`cmod install heyJordanParker/anyhost --option 'join=${origin}/v1/join#USED'`)
     const programs = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs')
     await serveOn(machine.env)
     const problemsOf = async (): Promise<readonly string[]> => ((await (await fetch('http://localhost/status', { unix: machine.socket })).json()) as Status).problems
@@ -845,8 +861,8 @@ async function viewerOn(relay: MemoryRelay, device: Device, size: { cols: number
 }
 
 test('serve answers at unix:<its state folder>/serve.sock, and two viewers of one session draw it at the smaller size of the two', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   const served = await serveOn(host.env)
   expect(served.address).toBe(`unix:${host.socket}`)
   const status = (await (await fetch('http://localhost/status', { unix: host.socket })).json()) as { device: Device }
@@ -893,10 +909,13 @@ test('serve answers at unix:<its state folder>/serve.sock, and two viewers of on
 })
 
 test('anyhost attach on another machine and on the host share the host\'s one claude attach, at the smaller size', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
-  const viewer = machineFor(relay, VIEWER, false)
-  relay.claims.set(SESSION, HOST.id)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
+  const viewer = await machineFor(relay, VIEWER, false)
+  // the host holds the session, as its program's first upload of it claims it
+  const holder = relay.connect(HOST, roots(host.env['HOME'] ?? ''))
+  expect(await holder.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true })
+  holder.close()
   await Promise.all([serveOn(host.env), serveOn(viewer.env)])
   await waitFor('both machines connecting', () => relay.isConnected(HOST.id) && relay.isConnected(VIEWER.id))
 
@@ -926,8 +945,8 @@ test('anyhost attach on another machine and on the host share the host\'s one cl
 })
 
 test('a viewer hears each change of a session\'s status from its record alone, with no claude agents run', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   const home = host.env['HOME'] ?? ''
   await serveOn(host.env)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
@@ -944,8 +963,8 @@ test('a viewer hears each change of a session\'s status from its record alone, w
 })
 
 test('a session whose record stays gone 10 s through other changes of the records ends its claude attach after one record check, and its viewer once with the reason', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   const served = await serveOn(host.env)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
   const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
@@ -970,8 +989,8 @@ test('a session whose record stays gone 10 s through other changes of the record
 }, 40_000)
 
 test('a claude attach SIGKILL ended while its session runs starts again, and its viewer gets no exit', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   await serveOn(host.env)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
   const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
@@ -989,8 +1008,8 @@ test('a claude attach SIGKILL ended while its session runs starts again, and its
 })
 
 test('a claude attach a signal ended once its session\'s process is gone ends its viewer with the reason', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   const home = host.env['HOME'] ?? ''
   // the session runs as a process of its own
   const session = Bun.spawn(['sleep', '600'])
@@ -1015,8 +1034,8 @@ test('a claude attach a signal ended once its session\'s process is gone ends it
 })
 
 test('a claude attach that ended by itself while Claude Code respawns its session starts again once the session\'s record is back, and its viewer gets no exit', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   const home = host.env['HOME'] ?? ''
   await serveOn(host.env)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
@@ -1037,8 +1056,8 @@ test('a claude attach that ended by itself while Claude Code respawns its sessio
 }, 30_000)
 
 test('a session whose record goes while Claude Code respawns it keeps its claude attach and its viewer once its record is back', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   const home = host.env['HOME'] ?? ''
   await serveOn(host.env)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
@@ -1060,8 +1079,8 @@ test('a session whose record goes while Claude Code respawns it keeps its claude
 }, 30_000)
 
 test('a claude attach a signal ended once Claude Code\'s daemon went ends its viewer with the reason, though the session\'s record is still there', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   const home = host.env['HOME'] ?? ''
   await serveOn(host.env)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
@@ -1081,8 +1100,8 @@ test('a claude attach a signal ended once Claude Code\'s daemon went ends its vi
 })
 
 test('the program\'s own stop ends its viewers\' streams and starts no claude attach', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   const served = await serveOn(host.env)
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
   const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
@@ -1100,9 +1119,9 @@ test('the program\'s own stop ends its viewers\' streams and starts no claude at
 })
 
 test('anyhost attach on the host shows a session its Claude Code runs while the relay is down', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
-  relay.stop()
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
+  await relay.stop()
   await serveOn(host.env)
   let shown = ''
   const terminal = new Bun.Terminal({ cols: 72, rows: 22, data: (_terminal, bytes) => void (shown += decoder.decode(bytes)) })
@@ -1121,8 +1140,8 @@ test('anyhost attach on the host shows a session its Claude Code runs while the 
 }, 30_000)
 
 test('a second serve on one state folder refuses to start, naming the one that runs, a POST of no JSON answers 400, and one to no route 404', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, true)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, true)
   await serveOn(host.env)
   const second = Bun.spawn(['bun', CLI, 'serve'], { env: host.env, stdout: 'pipe', stderr: 'pipe' })
   children.push(second)
@@ -1141,8 +1160,8 @@ test('a second serve on one state folder refuses to start, naming the one that r
 })
 
 test("the program's start stats every captured file, and uploads a line a quiet session gained while the program did not run", async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, false)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, false)
   const home = host.env['HOME'] ?? ''
   const transcript = join(home, '.claude', 'projects', '-work', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
@@ -1182,8 +1201,8 @@ const ranAnHourAgo = (machine: { readonly env: Record<string, string> }): void =
 
 // The suite missed it: no test made a watch hang, as only macOS's fseventsd hangs one, for minutes at a time.
 test("a program whose watcher hangs at its start names the stall in /status, backs up a captured session's line and a new session within one backup pass, and ends at SIGTERM within 5 s", async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, false)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, false)
   const transcriptOf = (session: string): string => join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${session}.jsonl`)
   const line = (session: string, text: string): string => `{"type":"user","message":{"role":"user","content":"${text}"},"sessionId":"${session}"}\n`
   ranAnHourAgo(host)
@@ -1210,8 +1229,8 @@ test("a program whose watcher hangs at its start names the stall in /status, bac
 }, 150_000)
 
 test('a watcher that exits is a problem in /status until the one started after it is ready, which hears a new session', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, false)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, false)
   const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
   // each watcher writes its pid to `watcher` in the state folder until it hears that write
   const probe = join(host.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'watcher')
@@ -1232,8 +1251,8 @@ test('a watcher that exits is a problem in /status until the one started after i
 }, 60_000)
 
 test('a listing of the watched folders and of a session\'s files follows no symlink, so a cycle leaves the other files listed, and the log names a folder it cannot read once', async () => {
-  const relay = memoryRelay()
-  const host = machineFor(relay, HOST, false)
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST, false)
   const home = host.env['HOME'] ?? ''
   // Claude Code's temp root, where a background task of the session wrote its output while the program did not run,
   // beside a scratchpad that holds a symlink cycle and a folder only its owner may list
@@ -1274,9 +1293,9 @@ test('a listing of the watched folders and of a session\'s files follows no syml
 }, 60_000)
 
 test("a program whose relay Cloudflare refuses for the daily limit names the limit and its reset at 00:00 UTC in /status", async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   relay.dailyLimited = Infinity
-  const host = machineFor(relay, HOST, false)
+  const host = await machineFor(relay, HOST, false)
   await serveOn(host.env)
   const status = async (): Promise<Status> => (await (await fetch('http://localhost/status', { unix: host.socket })).json()) as Status
   await waitFor('the refused connect', async () => (await status()).relay.state === 'offline')
@@ -1333,9 +1352,10 @@ const postTo = async (socket: string, path: string, body: object): Promise<{ rea
   const answer = await fetch(`http://localhost${path}`, { unix: socket, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
   return { status: answer.status, body: (await answer.json()) as Record<string, unknown> }
 }
-// Each step the laptop's program showed of the session's move, in order, until it reached `until`.
-async function stepsOf(socket: string, until: ReadonlySet<string> = new Set(['moved', 'failed'])): Promise<{ readonly steps: string[]; readonly last: Moved }> {
-  const steps: string[] = []
+// Each step the laptop's program showed of the session's move, in order, after the steps the test read already, until
+// it reached `until`.
+async function stepsOf(socket: string, until: ReadonlySet<string> = new Set(['moved', 'failed']), read: readonly string[] = []): Promise<{ readonly steps: string[]; readonly last: Moved }> {
+  const steps = [...read]
   for (const started = Date.now(); Date.now() - started < 30_000; await Bun.sleep(10)) {
     const { move } = await claimOn(socket)
     if (move === undefined) continue
@@ -1349,7 +1369,7 @@ async function stepsOf(socket: string, until: ReadonlySet<string> = new Set(['mo
 // says, its Claude Code's process `claude`, and its program captured it. The session works in `work` in the machine's
 // home, which holds one file.
 async function runningOn(relay: MemoryRelay, device = LAPTOP, kind: 'interactive' | 'background' = 'interactive') {
-  const laptop = machineFor(relay, device, false, backgroundClaude)
+  const laptop = await machineFor(relay, device, false, backgroundClaude)
   const home = laptop.env['HOME'] ?? ''
   script(
     join(laptop.folder, 'bin', 'herdr'),
@@ -1378,12 +1398,12 @@ exit 0
   }
   status('idle')
   // the first drain at the default 5 seconds claims the session
-  await waitFor('the machine claiming the session', () => relay.claims.get(SESSION) === device.id, 15_000)
+  await waitFor('the machine claiming the session', async () => (await relay.claims()).get(SESSION) === device.id, 15_000)
   return { ...laptop, cwd, transcript, claude, status }
 }
 
 async function workerOn(relay: MemoryRelay, prepare: (folder: string) => void = () => undefined, device = WORKER) {
-  const worker = machineFor(relay, device, false, backgroundClaude)
+  const worker = await machineFor(relay, device, false, backgroundClaude)
   prepare(worker.folder)
   await serveOn(worker.env)
   await waitFor('the machine connecting', () => relay.isConnected(device.id))
@@ -1391,7 +1411,7 @@ async function workerOn(relay: MemoryRelay, prepare: (folder: string) => void = 
 }
 
 test('a move waits for the turn to end, uploads and seals the session, the worker restores and runs it, and only then the laptop\'s Claude Code ends and its herdr pane shows the session there', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
   laptop.status('busy')
@@ -1401,14 +1421,16 @@ test('a move waits for the turn to end, uploads and seals the session, the worke
   expect(asked.body).toMatchObject({ session: SESSION, to: WORKER.name })
   // the turn runs on, and the move waits for it
   await Bun.sleep(500)
-  expect((await claimOn(laptop.socket)).move).toEqual({ to: WORKER.name, step: 'waiting', line: `Waiting for ${SESSION.slice(0, 8)} to finish its turn.` })
+  const waiting = (await claimOn(laptop.socket)).move
+  expect(waiting).toEqual({ to: WORKER.name, step: 'waiting', line: `Waiting for ${SESSION.slice(0, 8)} to finish its turn.` })
   laptop.status('idle')
-  const { steps, last } = await stepsOf(laptop.socket)
+  // the steps from the one read while the turn ran, as the program may have gone past it before the next read
+  const { steps, last } = await stepsOf(laptop.socket, undefined, [waiting?.step ?? ''])
 
   expect(steps).toEqual(['waiting', 'uploading', 'moving', 'moved'])
   expect(last.line).toMatch(new RegExp(`^${WORKER.name} restored ${SESSION.slice(0, 8)} in \\d+\\.\\d s and runs it\\.$`))
-  expect(relay.claims.get(SESSION)).toBe(WORKER.id)
-  expect([...relay.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/`)).every((key) => key.includes('/sealed/'))).toBe(true)
+  expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)
+  expect((await relay.keys(`journals/${SESSION}/`)).every((key) => key.includes('/sealed/'))).toBe(true)
   // the worker continues the session in its own home, with its transcript and its working folder's file
   const workerHome = worker.env['HOME'] ?? ''
   const workerCwd = join(workerHome, 'work')
@@ -1427,19 +1449,18 @@ test('a move waits for the turn to end, uploads and seals the session, the worke
 }, 60_000)
 
 test('a move of a session whose first frame R2 lost uploads its files whole again, and the worker restores every byte', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  const hot = (): string[] => [...relay.objects.keys()].filter((key) => key.startsWith(`journals/${SESSION}/hot/`))
   writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Book the train"}}\n`, { flag: 'a' })
   await waitFor('the second line uploading', () => relay.puts.some(({ key, body }) => key.includes('/hot/') && decoder.decode(decompress(body)).includes('Book the train')), 15_000)
-  relay.objects.delete(hotKey(SESSION, 0))
+  await relay.objects.delete(hotKey(SESSION, 0))
   const worker = await workerOn(relay)
 
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
   const { last } = await stepsOf(laptop.socket)
 
   expect(last.step).toBe('moved')
-  expect(hot()).toEqual([])
+  expect(await relay.keys(`journals/${SESSION}/hot/`)).toEqual([])
   const workerHome = worker.env['HOME'] ?? ''
   const workerCwd = join(workerHome, 'work')
   const restored = readFileSync(join(workerHome, '.claude', 'projects', workerCwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`), 'utf8')
@@ -1448,21 +1469,21 @@ test('a move of a session whose first frame R2 lost uploads its files whole agai
 }, 60_000)
 
 test('a move to a machine that is offline keeps the session running here, with its claim', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  relay.join(WORKER, roots('/home/worker'))
+  await relay.join(WORKER, roots('/home/worker'))
 
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
   const { last } = await stepsOf(laptop.socket)
 
   expect(last.line).toBe(`${WORKER.name} is offline, so the session keeps running here.`)
-  expect(relay.claims.get(SESSION)).toBe(LAPTOP.id)
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   expect(laptop.claude.exitCode).toBeNull()
 }, 60_000)
 
 test('a move the worker cannot take takes the claim back, and the laptop captures the session again', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay, (folder) => writeFileSync(join(folder, 'fail'), 'Claude Code is not logged in.'))
 
@@ -1472,7 +1493,7 @@ test('a move the worker cannot take takes the claim back, and the laptop capture
   expect(last.line).toStartWith(`${WORKER.name} could not take the session: `)
   expect(last.line).toContain('Claude Code is not logged in.')
   expect(last.line).toEndWith('. It keeps running here.')
-  expect(relay.claims.get(SESSION)).toBe(LAPTOP.id)
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   await waitFor('the worker hearing it lost the session', async () => (await claimOn(worker.socket)).machine === LAPTOP.name)
   expect(laptop.claude.exitCode).toBeNull()
@@ -1483,7 +1504,7 @@ test('a move the worker cannot take takes the claim back, and the laptop capture
 }, 60_000)
 
 test('a move to a worker that took the claim and answers nothing waits for it, and Keep it here takes the session back', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const silent = relay.connect(WORKER, roots('/home/worker'))
   silent.on('move', ({ session }) => void silent.run([{ op: 'claim', session, take: true }]))
@@ -1491,22 +1512,22 @@ test('a move to a worker that took the claim and answers nothing waits for it, a
 
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
   await stepsOf(laptop.socket, new Set(['moving']))
-  await waitFor('the worker taking the claim', () => relay.claims.get(SESSION) === WORKER.id)
+  await waitFor('the worker taking the claim', async () => (await relay.claims()).get(SESSION) === WORKER.id)
   await waitFor('the laptop hearing it', async () => (await claimOn(laptop.socket)).machine === WORKER.name)
   expect((await claimOn(laptop.socket)).move?.step).toBe('moving')
   expect((await postTo(laptop.socket, '/move/keep', { session: SESSION })).status).toBe(200)
   const { last } = await stepsOf(laptop.socket)
 
   expect(last).toEqual({ to: WORKER.name, step: 'failed', line: `${WORKER.name} did not answer, so the session keeps running here.` })
-  expect(relay.claims.get(SESSION)).toBe(LAPTOP.id)
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   expect(laptop.claude.exitCode).toBeNull()
 }, 60_000)
 
 test('Keep it here while the move waits for the turn to end keeps the session here, with its claim', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  relay.join(WORKER, roots('/home/worker'))
+  await relay.join(WORKER, roots('/home/worker'))
   laptop.status('busy')
 
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
@@ -1515,7 +1536,7 @@ test('Keep it here while the move waits for the turn to end keeps the session he
   const { last } = await stepsOf(laptop.socket)
 
   expect(last).toEqual({ to: WORKER.name, step: 'failed', line: `Kept ${SESSION.slice(0, 8)} here, so it does not move to ${WORKER.name}.` })
-  expect(relay.claims.get(SESSION)).toBe(LAPTOP.id)
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   expect(laptop.claude.exitCode).toBeNull()
   // the move is over, so there is nothing more to keep
@@ -1528,9 +1549,9 @@ const DESKTOP: Device = { id: 'device-desktop', name: 'anyhost-c', os: 'linux', 
 // The suite missed it: no move test had the session taken by another machine mid-move, so no drain ever met a stopped
 // journal with code waiting.
 test('a move whose session another machine takes while it waits ends failed within seconds, the program answering meanwhile, and leaves the session with that machine', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  relay.join(WORKER, roots('/home/worker'))
+  await relay.join(WORKER, roots('/home/worker'))
   const desktop = relay.connect(DESKTOP, roots('/home/desktop'))
   await welcomed(desktop)
   laptop.status('busy')
@@ -1550,13 +1571,13 @@ test('a move whose session another machine takes while it waits ends failed with
   expect(last).toEqual({ to: WORKER.name, step: 'failed', line: `${DESKTOP.name} took ${SESSION.slice(0, 8)} over during the move, so it continues there.` })
   const status = await fetch('http://localhost/status', { unix: laptop.socket, signal: AbortSignal.timeout(2000) })
   expect(status.status).toBe(200)
-  expect(relay.claims.get(SESSION)).toBe(DESKTOP.id)
+  expect((await relay.claims()).get(SESSION)).toBe(DESKTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBe(DESKTOP.name)
 }, 60_000)
 
 // The suite missed it: the test Claude Code's `claude stop` never failed, and no test read /status after a move.
 test('a move whose copy here fails to stop ends failed with the reason, never at moved, and leaves no problem in /status', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay, LAPTOP, 'background')
   writeFileSync(join(laptop.folder, 'fail-stop'), 'Claude Code reached no daemon.')
   await workerOn(relay)
@@ -1569,13 +1590,13 @@ test('a move whose copy here fails to stop ends failed with the reason, never at
   expect(last.line).toStartWith(`${WORKER.name} runs ${SESSION.slice(0, 8)} now, and anyhost could not stop its copy here: `)
   expect(last.line).toEndWith('Claude Code reached no daemon.')
   // the session runs on the worker, which holds it
-  expect(relay.claims.get(SESSION)).toBe(WORKER.id)
+  expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)
   const { problems } = (await (await fetch('http://localhost/status', { unix: laptop.socket })).json()) as Status
   expect(problems.filter((problem) => problem.includes(`move ${SESSION}`))).toEqual([])
 }, 60_000)
 
 test('a session the worker keeps a background job of starts again with claude attach, never as a copy from claude --bg --resume', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay, (folder) =>
     writeFileSync(join(folder, 'kept.json'), JSON.stringify([{ id: SESSION.slice(0, 8), sessionId: SESSION, kind: 'background', cwd: join(folder, 'home', 'work'), state: 'stopped' }])),
@@ -1591,7 +1612,7 @@ test('a session the worker keeps a background job of starts again with claude at
 }, 60_000)
 
 test('a session moved back from the worker\'s background tells its viewers where it went, so anyhost attach on the laptop shows it there with no command typed', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const worker = await runningOn(relay, WORKER, 'background')
   const laptop = await workerOn(relay, () => undefined, LAPTOP)
   let shown = ''
@@ -1616,7 +1637,7 @@ test('a session moved back from the worker\'s background tells its viewers where
 }, 60_000)
 
 test('keys typed while a session moves, before its new machine shows it, reach the session there once each', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const worker = await runningOn(relay, WORKER, 'background')
   // the laptop's Claude Code takes 2 s to list its sessions, so its program shows the session 2 s after the attach
   const laptop = await workerOn(relay, (folder) => writeFileSync(join(folder, 'slow'), '2'), LAPTOP)
@@ -1651,7 +1672,7 @@ const trustedIn = (machine: { readonly env: Record<string, string> }): string[] 
 const trust = (machine: { readonly env: Record<string, string> }, folder: string): void => writeFileSync(configOf(machine), JSON.stringify({ projects: { [realpathSync(folder)]: { hasTrustDialogAccepted: true } } }))
 
 test('a move carries the trust of the session\'s folder: the worker trusts the folder it continues in, keeping the rest of its config and its config\'s symlink', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
   // outside git, Claude Code trusts a folder below a trusted one
@@ -1677,7 +1698,7 @@ test('a move carries the trust of the session\'s folder: the worker trusts the f
 // The suite missed it: every trust test's config was readable or missing, and none was a symlink to a missing file,
 // where a read that fails reads as an empty config.
 test('a worker whose Claude Code config it cannot read fails the move with the reason, and the config stays as it was', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
   trust(laptop, laptop.env['HOME'] ?? '')
@@ -1693,11 +1714,11 @@ test('a worker whose Claude Code config it cannot read fails the move with the r
   expect(last.line).toStartWith(`${WORKER.name} could not take the session: EACCES`)
   expect(last.line).toEndWith('. It keeps running here.')
   expect(readFileSync(configOf(worker), 'utf8')).toBe(config)
-  expect(relay.claims.get(SESSION)).toBe(LAPTOP.id)
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
 }, 60_000)
 
 test('a worker whose Claude Code config is a symlink to a missing file trusts the folder in that file, and the config stays a symlink', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
   trust(laptop, laptop.env['HOME'] ?? '')
@@ -1731,8 +1752,8 @@ function tripOn(laptop: { readonly env: Record<string, string> }): string {
 }
 
 test('anyhost new trusts nothing on the worker when the laptop trusts only a folder above the checkout, which Claude Code never counts', async () => {
-  const relay = memoryRelay()
-  const laptop = machineFor(relay, LAPTOP, false, backgroundClaude)
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP, false, backgroundClaude)
   const worker = await workerOn(relay)
   await serveOn(laptop.env)
   await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))
@@ -1741,14 +1762,14 @@ test('anyhost new trusts nothing on the worker when the laptop trusts only a fol
 
   const started = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
   children.push(started)
-  await waitFor('the session starting on the worker', () => relay.claims.get(NEW_SESSION) === WORKER.id, 30_000)
+  await waitFor('the session starting on the worker', async () => (await relay.claims()).get(NEW_SESSION) === WORKER.id, 30_000)
 
   expect(trustedIn(worker)).toEqual([])
 }, 60_000)
 
 test('anyhost new starts a session on the worker in its clone of the same repository, routed by start and started, and shows it', async () => {
-  const relay = memoryRelay()
-  const laptop = machineFor(relay, LAPTOP, false, backgroundClaude)
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP, false, backgroundClaude)
   const worker = await workerOn(relay)
   await serveOn(laptop.env)
   await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))
@@ -1763,7 +1784,7 @@ test('anyhost new starts a session on the worker in its clone of the same reposi
   await waitFor('the new session on the laptop\'s terminal', () => shown.includes('size 24 80'), 30_000)
 
   expect(shown).toContain(`${WORKER.name} started ${NEW_SESSION.slice(0, 8)}.`)
-  expect(relay.claims.get(NEW_SESSION)).toBe(WORKER.id)
+  expect((await relay.claims()).get(NEW_SESSION)).toBe(WORKER.id)
   const workerCwd = join(worker.env['HOME'] ?? '', 'trip', 'plans')
   expect(readFileSync(join(workerCwd, 'route.md'), 'utf8')).toBe('Lisbon, then Porto\n')
   expect(logOf(worker.folder, 'claude.log').find((line) => line.endsWith(' --bg'))?.split(' ')[1]).toBe(realpathSync(workerCwd))
@@ -1787,8 +1808,8 @@ exec "$@"
   )
 
 test('on Linux each claude --bg and each claude attach runs in a scope of a new name inside anyhost-claude.slice, bound to no other unit', async () => {
-  const relay = memoryRelay()
-  const laptop = machineFor(relay, LAPTOP, false, backgroundClaude)
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP, false, backgroundClaude)
   const worker = await workerOn(relay, systemdOn)
   await serveOn(laptop.env)
   await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))

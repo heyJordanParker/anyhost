@@ -540,9 +540,9 @@ test('the device token is read at the first connect, then again only after a joi
 
 const ROOTS = { home: '/home/ada', claudeHome: '/home/ada/.claude', claudeTmp: '/tmp/claude-1000', codexHome: '/home/ada/.codex' }
 const services: Relay[] = []
-afterEach(() => {
+afterEach(async () => {
   for (const relay of services.splice(0)) relay.close()
-  stopRelays()
+  await stopRelays()
 })
 // the service's connection, with the login relay.json and the token hold
 function service(): Relay {
@@ -552,8 +552,8 @@ function service(): Relay {
 }
 
 test('a machine its relay removed forgets relay.json and the token, and is unjoined with the reason', async () => {
-  const relay = memoryRelay()
-  await saveRelayLogin({ url: relay.url, token: relay.join(DEVICE, ROOTS) })
+  const relay = await memoryRelay()
+  await saveRelayLogin({ url: relay.url, token: await relay.join(DEVICE, ROOTS) })
   const here = service()
   await welcomed(here)
 
@@ -566,7 +566,7 @@ test('a machine its relay removed forgets relay.json and the token, and is unjoi
 })
 
 test('a token the relay knows no machine with is forgotten too, and the machine is unjoined with the reason', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   await saveRelayLogin({ url: relay.url, token: 'token-the-relay-never-gave' })
   const here = service()
 
@@ -577,13 +577,13 @@ test('a token the relay knows no machine with is forgotten too, and the machine 
 })
 
 test('a removal that arrives after a newer join saved its login keeps that login, and the machine connects with it', async () => {
-  const old = memoryRelay()
-  await saveRelayLogin({ url: old.url, token: old.join(DEVICE, ROOTS) })
+  const old = await memoryRelay()
+  await saveRelayLogin({ url: old.url, token: await old.join(DEVICE, ROOTS) })
   const here = service()
   await welcomed(here)
   // a join to another relay saves its login while the socket the old login opened is still connected
-  const newer = memoryRelay()
-  const token = newer.join(DEVICE, ROOTS)
+  const newer = await memoryRelay()
+  const token = await newer.join(DEVICE, ROOTS)
   await saveRelayLogin({ url: newer.url, token })
 
   old.remove(DEVICE.id)

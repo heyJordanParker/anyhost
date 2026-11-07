@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join } from 'node:path'
 import { journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture, type Problems } from '../src/capture.ts'
 import { HeldElsewhere, takeClaim } from '../src/claims.ts'
-import type { Device, MachineRoots } from '../src/device.ts'
+import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { restore } from '../src/resume.ts'
 import { downloadJournal, listSessions } from '../src/sessions.ts'
 import { memoryRelay, noCode, stopRelays, temporaryFolder, type MemoryRelay } from './memory.ts'
@@ -39,12 +39,12 @@ async function captured(relay: MemoryRelay, device: Device, session: string, pro
 }
 
 // waits for what the relay tells a machine, which comes on its own socket
-async function until(isTrue: () => boolean): Promise<void> {
-  for (const started = Date.now(); !isTrue(); await Bun.sleep(2)) if (Date.now() - started > 5000) throw new Error('The relay told the machine nothing within 5 s.')
+async function until(isTrue: () => boolean | Promise<boolean>): Promise<void> {
+  for (const started = Date.now(); !(await isTrue()); await Bun.sleep(2)) if (Date.now() - started > 5000) throw new Error('The relay told the machine nothing within 5 s.')
 }
 
 test('the index lists sessions of two devices, each held by the machine that holds it', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   await captured(relay, mac, 'aaaaaaaa-0000-0000-0000-000000000001', 'Plan the release')
   const onServer = await captured(relay, server, 'bbbbbbbb-0000-0000-0000-000000000002', 'Fix the deploy')
   await takeClaim(onServer.relay, 'aaaaaaaa-0000-0000-0000-000000000001', { take: true })
@@ -57,20 +57,20 @@ test('the index lists sessions of two devices, each held by the machine that hol
 })
 
 test("a claimed session lists the holder's entry, even when the old holder wrote later", async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = 'aaaaaaaa-0000-0000-0000-000000000001'
   const entry = { id: session, tool: 'claude', title: '', firstPrompt: 'Plan the release', cwd: '/work', repo: '', repoFolder: '', entrypoint: 'cli', size: 10 }
   machine(mac, relay)
   const onServer = machine(server, relay)
-  relay.put(`sessions/${mac.id}/index.json`, new TextEncoder().encode(JSON.stringify([{ ...entry, lastActivity: '2026-11-03T12:45:00.000Z' }])))
-  relay.put(`sessions/${server.id}/index.json`, new TextEncoder().encode(JSON.stringify([{ ...entry, cwd: '/home/server/work', lastActivity: '2026-11-03T12:44:00.000Z' }])))
+  await relay.objects.put(`sessions/${mac.id}/index.json`, new TextEncoder().encode(JSON.stringify([{ ...entry, lastActivity: '2026-11-03T12:45:00.000Z' }])))
+  await relay.objects.put(`sessions/${server.id}/index.json`, new TextEncoder().encode(JSON.stringify([{ ...entry, cwd: '/home/server/work', lastActivity: '2026-11-03T12:44:00.000Z' }])))
   await takeClaim(onServer.capture.relay, session, { take: false })
 
   expect((await listSessions(onServer.capture.relay)).map(({ machine, holder, cwd, entrypoint }) => ({ machine, holder, cwd, entrypoint }))).toEqual([{ machine: 'server', holder: 'server', cwd: '/home/server/work', entrypoint: 'cli' }])
 })
 
 test('a session another machine resumed refuses resume without --take, and --take takes it back', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = 'aaaaaaaa-0000-0000-0000-000000000001'
   const onMac = await captured(relay, mac, session, 'Plan the release', temporaryFolder())
   const onServer = machine(server, relay)
@@ -80,11 +80,11 @@ test('a session another machine resumed refuses resume without --take, and --tak
   await expect(restore(onMac, session, { take: false })).rejects.toThrow(`This session continues on server. Run anyhost resume ${session} --take to continue it here.`)
   await expect(takeClaim(onMac.relay, session, { take: false })).rejects.toBeInstanceOf(HeldElsewhere)
   await restore(onMac, session, { take: true })
-  expect(relay.claims.get(session)).toBe(mac.id)
+  expect((await relay.claims()).get(session)).toBe(mac.id)
 })
 
 test("a session's upload holds no job record of Claude Code's, and a restore places, checks or deletes none an earlier version uploaded", async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = 'abababab-0000-4000-8000-00000000000a'
   const jobOf = (roots: MachineRoots): string => join(roots.claudeHome, 'jobs', session.slice(0, 8), 'state.json')
   const writer = machine(mac, relay)
@@ -115,7 +115,7 @@ test("a session's upload holds no job record of Claude Code's, and a restore pla
 })
 
 test('restore gives restoreCode the last code header and its parts, places no part as a file, and continues in the folder it answers', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = 'eeeeeeee-0000-4000-8000-000000000005'
   const home = join(temporaryFolder(), 'home')
   const cwd = join(home, 'work', 'shop')
@@ -153,7 +153,7 @@ test('restore gives restoreCode the last code header and its parts, places no pa
 })
 
 test('a new session is listed with its working folder by its first upload, so a takeover right after restores its code there', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = '99999999-0000-4000-8000-000000000009'
   const home = join(temporaryFolder(), 'home')
   const cwd = join(home, 'work', 'anyhost')
@@ -176,7 +176,7 @@ test('a new session is listed with its working folder by its first upload, so a 
 })
 
 test("restore onto another home rewrites the writer's paths, and a /rewind backup of a plan as its plan, while a working folder backup keeps its bytes", async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = 'ffffffff-0000-4000-8000-000000000006'
   const first = join(temporaryFolder(), 'alice')
   const second = join(temporaryFolder(), 'bob')
@@ -215,7 +215,7 @@ test("restore onto another home rewrites the writer's paths, and a /rewind backu
 
 // The other restore tests keep the working folder under the home, the one place restore moved a folder outside git to.
 test("a session that worked in macOS's temp root continues in this machine's, and every path in it names this machine's", async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = '44444444-0000-4000-8000-000000000004'
   const encoded = (path: string): string => path.replace(/[^a-zA-Z0-9]/g, '-')
   const home = join(temporaryFolder(), 'home')
@@ -241,7 +241,7 @@ test("a session that worked in macOS's temp root continues in this machine's, an
 })
 
 test('a session restores on another machine byte for byte from the bucket alone, and that machine continues its journal', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = 'cccccccc-0000-4000-8000-000000000003'
   const other = 'dddddddd-0000-4000-8000-000000000004'
   const home = join(temporaryFolder(), 'home')
@@ -295,14 +295,14 @@ test('a session restores on another machine byte for byte from the bucket alone,
 
   appendFileSync(transcript, line('Continue on server'))
   await upload(b.capture, session, transcript)
-  expect(relay.objects.has(`journals/${session}/hot/${String(end).padStart(16, '0')}.zst`)).toBe(true)
+  expect(await relay.read(`journals/${session}/hot/${String(end).padStart(16, '0')}.zst`)).toBeDefined()
   const replayed = await downloadJournal(b.capture.relay, session, temporaryFolder(), ({ path }) => path)
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '').equals(readFileSync(transcript))).toBe(true)
   expect(replayed.files.get(transcript)?.segments.map(({ device }) => device)).toEqual([mac.id, mac.id, mac.id, server.id])
 })
 
 test("a session comes back to a machine that kept a longer copy, although the history its last writer had holds a prompt the journal never got", async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = '88888888-0000-4000-8000-000000000008'
   const a = machine(mac, relay)
   const b = machine(server, relay)
@@ -332,7 +332,7 @@ test("a session comes back to a machine that kept a longer copy, although the hi
 })
 
 test('a plan and a task the session deleted stay gone after a restore, also on a machine that kept them', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = '66666666-0000-4000-8000-000000000006'
   const a = machine(mac, relay)
   const b = machine(server, relay)
@@ -366,7 +366,7 @@ test('a plan and a task the session deleted stay gone after a restore, also on a
 })
 
 test('resume puts a repository this machine lacks beside the checkouts it has, or in the checkouts folder the person chose', async () => {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = '55555555-0000-4000-8000-000000000005'
   const home = join(temporaryFolder(), 'home')
   const writer = machine(mac, relay, home, undefined, { captureCode: async () => ({ header: new TextEncoder().encode('header'), parts: [] }), restoreCode: async () => '' }).capture
@@ -378,8 +378,8 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
   await writer.codeRuns.get(session)
   await upload(writer, session, `${cwd}/`)
   // the shop repository, as an index that read its remote lists it
-  const index = JSON.parse(new TextDecoder().decode(relay.objects.get(`sessions/${mac.id}/index.json`)?.body)) as Record<string, unknown>[]
-  relay.put(`sessions/${mac.id}/index.json`, new TextEncoder().encode(JSON.stringify(index.map((entry) => ({ ...entry, repo: 'git@github.com:alice/shop.git', repoFolder: '' })))))
+  const index = JSON.parse(new TextDecoder().decode(await relay.read(`sessions/${mac.id}/index.json`))) as Record<string, unknown>[]
+  await relay.objects.put(`sessions/${mac.id}/index.json`,new TextEncoder().encode(JSON.stringify(index.map((entry) => ({ ...entry, repo: 'git@github.com:alice/shop.git', repoFolder: '' })))))
 
   const restoredInto = async (setUp: (folder: string, capture: Capture) => Promise<void>, checkouts?: string): Promise<string> => {
     const folder = join(temporaryFolder(), 'bob')
@@ -414,7 +414,7 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
 
 // The session mac captures, which server then takes over. `isOffline` closes mac's connection first.
 async function takenOver(isOffline: boolean) {
-  const relay = memoryRelay()
+  const relay = await memoryRelay()
   const session = '77777777-0000-4000-8000-000000000007'
   const state = join(temporaryFolder(), 'state')
   const old = machine(mac, relay, undefined, state)
@@ -424,11 +424,10 @@ async function takenOver(isOffline: boolean) {
   writeFileSync(transcript, line('Plan the release'))
   await upload(old.capture, session, transcript)
   await writeIndex(old.capture)
-  if (isOffline) {
-    old.capture.relay.close()
-    await until(() => !relay.isConnected(mac.id))
-  }
+  if (isOffline) old.capture.relay.close()
   const taker = machine(server, relay)
+  // the Pool counts mac offline once it read the end of its socket
+  if (isOffline) await until(async () => (await devicesOf(taker.capture.relay)).get(mac.id)?.connected === false)
   await restore(taker.capture, session, { take: true })
   appendFileSync(transcript, line('Keep going'))
   return { relay, session, old, state, transcript, taker }
