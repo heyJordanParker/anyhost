@@ -7,7 +7,7 @@
 import { mkdir, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import type { Delivered, Offline, Routed } from '../../relay/protocol.ts'
-import { attachTerminal, isAlive, keptSessions, run, runningSessions, startInBackground, stopInBackground, whenSessions, type RunningSession } from './background.ts'
+import { attachTerminal, isAlive, keptSessions, recordedSessions, run, startInBackground, stopInBackground, whenSessions, type RunningSession } from './background.ts'
 import { captureAgainFrom, changedFiles, checkoutOf, holdHere, journalOf, seal, startCode, writeIndex, type Capture, type Problems } from './capture.ts'
 import { HeldElsewhere, takeClaim } from './claims.ts'
 import { devicesOf, machinesOf } from './device.ts'
@@ -253,7 +253,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
 
   const id = session.slice(0, 8)
   // Claude Code's own record of the session: busy during a turn, which the move waits out
-  const entry = (await runningSessions()).find((listed) => listed.sessionId === session)
+  const entry = (await recordedSessions(capture.roots.claudeHome)).find((recorded) => recorded.sessionId === session)
   const isBusy = entry?.status !== undefined && entry.status !== 'idle'
   let keep = (): void => undefined
   const kept = new Promise<'kept'>((resolve) => (keep = () => resolve('kept')))
@@ -365,7 +365,7 @@ export async function receiveMove(capture: Capture, asked: Extract<Delivered, { 
     await runInBackground(capture, session.id, kept, cwd, env)
     await takeClaim(capture.relay, session.id, { take: false }).catch(async (error: unknown) => {
       if (!(error instanceof HeldElsewhere)) throw error
-      const id = (await runningSessions()).find((entry) => entry.sessionId === session.id)?.id
+      const id = (await recordedSessions(capture.roots.claudeHome)).find((entry) => entry.sessionId === session.id)?.id
       if (id !== undefined) await stopInBackground(id, env)
       throw new Error(`${error.holder.name} took the session back`)
     })

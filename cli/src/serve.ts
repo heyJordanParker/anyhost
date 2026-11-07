@@ -3,7 +3,7 @@ import { rmSync, watch } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { encodeStream, streamOf, type Routed } from '../../relay/protocol.ts'
-import { attachTerminal, keptSessions, personEnvironment, recordedSessions, runningSessions, startInBackground, whenSessions, type AttachedTerminal, type RunningSession } from './background.ts'
+import { attachTerminal, keptSessions, personEnvironment, recordedSessions, startInBackground, whenSessions, type AttachedTerminal, type RunningSession } from './background.ts'
 import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
 import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
@@ -27,8 +27,9 @@ const OUTPUT_MS = 20
 // A viewer whose link is gone keeps its place for the longest wait between its tries to attach again.
 const LINGER_MS = 60_000
 // Claude Code rewrites a running session's record in `sessions/` under its folder at each change of its status, once
-// each, so the status of the sessions shown is read again STATE_MS after the folder changed. A read every 2 seconds
-// took a quarter of a core: one `claude agents --json` took 1.15 s of CPU on a test machine running one session.
+// each, so the records of the sessions shown are read again STATE_MS after the folder changed, once for the events of
+// one rewrite. One read of 3 sessions' records took 5.3 ms of CPU on a test machine, and one `claude agents --json`,
+// which reads the same records, 468 times as long.
 const STATE_MS = 200
 // A new viewer of a session already shown gets a redraw: the terminal a row shorter until Claude Code clears the screen
 // to paint it at that size, then back. On a test machine Claude Code set only its modes again when the size came back
@@ -57,6 +58,19 @@ const RUNNING_MS = 2000
 // A redraw repaints the screen and sets every terminal mode again but the alternate screen.
 const ALTERNATE_SCREEN = '\x1b[?1049h'
 const MAIN_SCREEN = '\x1b[?1049l'
+// the bytes of the output kept from one read to the next, all but one of the longest sequence looked for
+const TAIL_BYTES = ALTERNATE_SCREEN.length - 1
+
+// Where `sequence` last begins in a terminal's output, counted from the first byte of `read`, its latest read, so below
+// 0 when it begins in `tail`, the bytes before that read, and -Infinity when no sequence ends in `read`. The read is
+// searched where it lies, and only the sequence's length on each side of its start is joined.
+function lastAt(tail: Buffer, read: Buffer, sequence: string): number {
+  const inside = read.lastIndexOf(sequence)
+  if (inside >= 0) return inside
+  const before = tail.subarray(1 - sequence.length)
+  const across = Buffer.concat([before, read.subarray(0, sequence.length - 1)]).lastIndexOf(sequence)
+  return across < 0 ? -Infinity : across - before.length
+}
 
 // The address the mod and every command of this machine reach the service at.
 export const serveSocket = (): string => join(stateFolder(), 'serve.sock')
@@ -464,9 +478,9 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     flush?: ReturnType<typeof setTimeout> | undefined
     forget?: ReturnType<typeof setTimeout>
   }
-  // `cleared` runs at the next screen Claude Code clears, while a redraw waits for it. `isListed` says `claude agents
-  // --json` listed the session running since this program showed it, as a stopped one it opens is not at first.
-  type Shown = { terminal: AttachedTerminal; size: Size; isAlternateScreen: boolean; state: SessionState; isListed: boolean; cleared?: (() => void) | undefined }
+  // `cleared` runs at the next screen Claude Code clears, while a redraw waits for it. `wasRecorded` says Claude Code's
+  // record said the session runs since this program showed it, as a stopped one it opens has none at first.
+  type Shown = { terminal: AttachedTerminal; size: Size; isAlternateScreen: boolean; state: SessionState; wasRecorded: boolean; cleared?: (() => void) | undefined }
   const viewers = new Map<number, Viewer>()
   const shown = new Map<string, Promise<Shown>>()
   // Every `claude attach` this program runs. Bun's terminal gives them no controlling terminal, so no hangup ends them
@@ -566,19 +580,23 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     return { id: await startInBackground(roots.claudeHome, session, cwd, await environment), cwd }
   }
   const startShowing = (session: string, size: Size): Promise<Shown> => {
-    let tail = ''
+    // the output's last bytes, in which a sequence the next read ends can begin
+    let tail = Buffer.alloc(0)
     let quickEnds = 0
+    // the view once it resolved, which each read of the output takes at once from then on
+    let ready: Shown | undefined
     const isCurrent = (): boolean => shown.get(session) === view
     const took = (bytes: Uint8Array): void => {
       if (!isCurrent()) return
-      void view.then((current) => {
-        const seen = tail + Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('latin1')
-        const [on, off] = [seen.lastIndexOf(ALTERNATE_SCREEN), seen.lastIndexOf(MAIN_SCREEN)]
-        if (on !== off) current.isAlternateScreen = on > off
-        tail = seen.slice(1 - ALTERNATE_SCREEN.length)
-        for (const viewer of viewersOf(session)) output(viewer, bytes)
-        if (seen.includes(CLEAR)) setTimeout(() => current.cleared?.(), PAINT_MS)
-      })
+      // a read before the view resolved waits for it, in its order
+      if (ready === undefined) return void view.then(() => took(bytes))
+      const current = ready
+      const read = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      const [on, off] = [lastAt(tail, read, ALTERNATE_SCREEN), lastAt(tail, read, MAIN_SCREEN)]
+      if (on !== off) current.isAlternateScreen = on > off
+      if (lastAt(tail, read, CLEAR) > -Infinity) setTimeout(() => current.cleared?.(), PAINT_MS)
+      tail = Buffer.from(read.length < TAIL_BYTES ? Buffer.concat([tail, read]).subarray(-TAIL_BYTES) : read.subarray(-TAIL_BYTES))
+      for (const viewer of viewersOf(session)) output(viewer, bytes)
     }
     // in the session's folder, where Claude Code's agents view, which `←` opens in it, has the folder's trust
     const open = async (id: string, cwd: string, env: Record<string, string>, at: Size): Promise<AttachedTerminal> => {
@@ -619,7 +637,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
         // the viewers left meanwhile
         if (!isCurrent()) return terminal.close()
         Object.assign(current, { isAlternateScreen: false, terminal })
-        tail = ''
+        tail = Buffer.alloc(0)
         return
       }
       stop(isRunning ? `claude attach ${id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.` : stoppedOn(session), isRunning ? 1 : 0)
@@ -630,7 +648,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       // a running session has its record in `sessions/`, so the folder is there to watch
       watchStates()
       statesChanged()
-      return { terminal, size, isAlternateScreen: false, state: { session, status: 'unknown' }, isListed: false }
+      ready = { terminal, size, isAlternateScreen: false, state: { session, status: 'unknown' }, wasRecorded: false }
+      return ready
     })()
     shown.set(session, view)
     view.catch(() => {
@@ -736,14 +755,12 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   }
   const readStates = async (): Promise<void> => {
     if (shown.size === 0) return
-    const running = await runningSessions().catch((error: unknown) => void problems.set('claude agents', error))
-    if (running === undefined) return
-    problems.clear('claude agents')
+    const running = await recordedSessions(roots.claudeHome)
     for (const [session, showing] of shown) {
-      const entry = running.find((listed) => listed.sessionId === session)
+      const entry = running.find((recorded) => recorded.sessionId === session)
       void showing.then((view) => {
-        if (entry === undefined && view.isListed) return void stoppedRunning(session, showing, view)
-        view.isListed ||= entry !== undefined
+        if (entry === undefined && view.wasRecorded) return void stoppedRunning(session, showing, view)
+        view.wasRecorded ||= entry !== undefined
         const status = entry?.status ?? 'unknown'
         if (view.state.status === status) return
         view.state = { session, status }
@@ -751,8 +768,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       }, () => undefined)
     }
   }
-  // A session `claude agents --json` lists no more ends its `claude attach` and its viewers, unless its record says it
-  // keeps running: Claude Code's list leaves out a session for a moment as it respawns it.
+  // A session whose record is gone ends its `claude attach` and its viewers, unless the record comes back within
+  // RESPAWN_MS, as Claude Code writes it again when it respawns the session.
   const stoppedRunning = async (session: string, showing: Promise<Shown>, view: Shown): Promise<void> => {
     if (await keepsRunning(session)) return
     if (shown.get(session) !== showing) return
@@ -804,7 +821,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     // With no relay to say which machine holds the session, one Claude Code runs in this machine's background still
     // shows here, as `claude attach` shows it with no relay. Any other waits for the relay.
     const unanswered = async (reply: object): Promise<void> => {
-      const here = (await runningSessions().catch(() => [])).filter((entry) => entry.id !== undefined && entry.sessionId.startsWith(asked.session))
+      const here = (await recordedSessions(roots.claudeHome)).filter((entry) => entry.id !== undefined && entry.sessionId.startsWith(asked.session))
       if (legs.get(stream) !== leg) return
       const [only, ...more] = here
       if (only !== undefined && more.length === 0) return await showHere(only.sessionId)

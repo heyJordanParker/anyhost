@@ -1,4 +1,4 @@
-import { afterEach, expect, setSystemTime, test } from 'bun:test'
+import { afterEach, expect, jest, setSystemTime, test } from 'bun:test'
 import type { Subprocess } from 'bun'
 import { createDecipheriv, hkdfSync } from 'node:crypto'
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -221,6 +221,76 @@ test('a viewer whose host lost the stream, as a restarted host program does, tak
   expect(typed).toBe('y')
 })
 
+// The kind of a stream frame, its first byte: 3 is output, 7 an acknowledgement, which names the offset a side holds in
+// its last 4 bytes, and 8 a side's start.
+const kindOf = (frame: Uint8Array): number => frame[0] ?? 0
+const heldIn = (frame: Uint8Array): number => new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(5)
+// A link to `to` that keeps each frame it carries in `carried`.
+const keptLinkTo = (to: Stream, carried: Uint8Array[]): Link => ({
+  send: (frame) => {
+    carried.push(frame)
+    to.receive(frame)
+  },
+})
+
+test('a stream that takes nothing runs no timer, and one that takes frames acknowledges them once, a second after the first', () => {
+  jest.useFakeTimers()
+  try {
+    const [host, viewer] = [opens(), opens()]
+    const fromViewer: Uint8Array[] = []
+    host.use(linkTo(viewer))
+    viewer.use(keptLinkTo(host, fromViewer))
+    jest.advanceTimersByTime(60_000)
+    expect(jest.getTimerCount()).toBe(0)
+    expect(fromViewer.map(kindOf)).toEqual([8])
+
+    host.write('output', encoder.encode('one '))
+    jest.advanceTimersByTime(400)
+    host.write('output', encoder.encode('two'))
+    jest.advanceTimersByTime(599)
+    expect(fromViewer.map(kindOf)).toEqual([8])
+    jest.advanceTimersByTime(1)
+    expect(fromViewer.map(kindOf)).toEqual([8, 7])
+    expect(heldIn(fromViewer[1] ?? new Uint8Array())).toBe('one two'.length)
+    jest.advanceTimersByTime(60_000)
+    expect(jest.getTimerCount()).toBe(0)
+    expect(fromViewer.map(kindOf)).toEqual([8, 7])
+  } finally {
+    jest.useRealTimers()
+  }
+})
+
+test('a link switch after frames the other side took and has not acknowledged yet loses no byte and doubles none', () => {
+  jest.useFakeTimers()
+  try {
+    const [host, viewer] = [opens(), opens()]
+    let shown = ''
+    viewer.on('output', (bytes) => void (shown += decoder.decode(bytes)))
+    host.use(linkTo(viewer))
+    viewer.use(linkTo(host))
+    host.write('output', encoder.encode('one '))
+    host.write('output', encoder.encode('two '))
+    jest.advanceTimersByTime(500)
+
+    // the host sends both frames again on the next link, and the viewer, which holds them, drops them by their offset
+    const fromHost: Uint8Array[] = []
+    host.use(keptLinkTo(viewer, fromHost))
+    viewer.use(linkTo(host))
+    host.write('output', encoder.encode('three'))
+    expect(fromHost.map(kindOf)).toEqual([7, 3, 3, 3])
+    expect(shown).toBe('one two three')
+
+    // once the viewer acknowledged what it took, a link after it sends nothing again
+    jest.advanceTimersByTime(1000)
+    const again: Uint8Array[] = []
+    host.use(keptLinkTo(viewer, again))
+    expect(again.map(kindOf)).toEqual([7])
+    expect(shown).toBe('one two three')
+  } finally {
+    jest.useRealTimers()
+  }
+})
+
 const randomKey = (): string => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
 // every listener, server and connection a test opened, closed after it
 const closers: (() => void)[] = []
@@ -441,15 +511,16 @@ const script = (path: string, text: string): string => {
   return path
 }
 
-// Claude Code's record of SESSION running in its background as the process `pid`, as Claude Code keeps it while it runs.
-const recordSession = (home: string, pid: number): void =>
-  writeFileSync(join(home, '.claude', 'sessions', `${pid}.json`), JSON.stringify({ pid, sessionId: SESSION, cwd: '/', kind: 'bg', jobId: SESSION.slice(0, 8), status: 'busy' }))
+// Claude Code's record of SESSION running in its background as the process `pid`, as Claude Code keeps it while it runs,
+// and rewrites at each change of its `status`.
+const recordSession = (home: string, pid: number, status = 'busy'): void =>
+  writeFileSync(join(home, '.claude', 'sessions', `${pid}.json`), JSON.stringify({ pid, sessionId: SESSION, cwd: '/', kind: 'bg', jobId: SESSION.slice(0, 8), status }))
 
 // A machine's folders, its relay login, the cmod that answers its device token and options, and the Claude Code that
 // runs SESSION in its background when `isHost` says so. Its `claude attach` enters the alternate screen, prints the
 // terminal's size at its start, clears the screen and prints it again at each SIGWINCH in one write, as Claude Code
 // paints a frame, prints each line typed into it, and ends at the line `leave`, as it ends when a person leaves its agents view, and
-// when its terminal closes. `stopped` in the machine's folder stops the session: `claude agents` lists it no more.
+// when its terminal closes. Each run goes into `claude.log` in the machine's folder, with its arguments.
 // Its record in `sessions/` names the test's own process, which runs as long as the test, and so does the lock of
 // Claude Code's daemon, which a background session needs to run. `claude` replaces that Claude Code with a script of
 // the machine's folder.
@@ -478,8 +549,9 @@ function machineFor(relay: MemoryRelay, device: Device, isHost: boolean, claude?
       join(folder, 'bin', 'claude'),
       claude?.(folder) ??
         `#!/bin/bash
+echo "$*" >> '${join(folder, 'claude.log')}'
 case "$1" in
-  agents) [ -e '${join(folder, 'stopped')}' ] && printf '[]' || printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
+  agents) printf '%s' '${isHost ? `[{"pid":1,"id":"${SESSION.slice(0, 8)}","sessionId":"${SESSION}","kind":"background","cwd":"/","status":"busy","state":"working"}]` : '[]'}' ;;
   attach)
     printf '\\033[?1049h'
     trap 'printf "\\033[2Jsize %s\\n" "$(stty size)"' WINCH
@@ -671,7 +743,25 @@ test('anyhost attach on another machine and on the host share the host\'s one cl
   here.close()
 })
 
-test('a session Claude Code lists no more, whose record stays gone 10 s, ends its claude attach, and its viewer with the reason', async () => {
+test('a viewer hears each change of a session\'s status from its record alone, with no claude agents run', async () => {
+  const relay = memoryRelay()
+  const host = machineFor(relay, HOST, true)
+  const home = host.env['HOME'] ?? ''
+  await serveOn(host.env)
+  await waitFor('the host connecting', () => relay.isConnected(HOST.id))
+  const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
+  await waitFor('the session\'s status', () => viewer.seen.states.includes('busy'))
+  // Claude Code rewrites the record at a permission prompt, and again as the turn ends
+  recordSession(home, process.pid, 'waiting')
+  await waitFor('the permission prompt', () => viewer.seen.states.includes('waiting'))
+  recordSession(home, process.pid, 'idle')
+  await waitFor('the turn\'s end', () => viewer.seen.states.includes('idle'))
+  expect(viewer.seen.states).toEqual(['unknown', 'busy', 'waiting', 'idle'])
+  // the one run is the start's, which finds the background job `claude attach` opens
+  expect(logOf(host.folder, 'claude.log').filter((line) => line.startsWith('agents'))).toEqual(['agents --json --all'])
+})
+
+test('a session whose record stays gone 10 s ends its claude attach, and its viewer with the reason', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
   await serveOn(host.env)
@@ -680,7 +770,6 @@ test('a session Claude Code lists no more, whose record stays gone 10 s, ends it
   await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
   await waitFor('the session\'s status', () => viewer.seen.states.includes('busy'))
   // the session stops, and Claude Code removes its record
-  writeFileSync(join(host.folder, 'stopped'), '')
   const stopped = Date.now()
   rmSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', `${process.pid}.json`))
   await waitFor('the viewer\'s end', () => viewer.seen.exits.length > 0, 20_000)
@@ -723,8 +812,8 @@ test('a claude attach a signal ended once its session\'s process is gone ends it
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
   const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
   await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
-  // as when systemd stops the session's scope: the session's process ends, and its attach by a signal, while
-  // `claude agents` still lists the session
+  // as when systemd stops the session's scope: the session's process ends, and its attach by a signal, while its
+  // record is still there
   session.kill('SIGKILL')
   await session.exited
   const signalled = Date.now()
@@ -759,7 +848,7 @@ test('a claude attach that ended by itself while Claude Code respawns its sessio
   expect(viewer.seen.exits).toEqual([])
 }, 30_000)
 
-test('a session Claude Code\'s list leaves out while it respawns it keeps its claude attach and its viewer once its record is back', async () => {
+test('a session whose record goes while Claude Code respawns it keeps its claude attach and its viewer once its record is back', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
   const home = host.env['HOME'] ?? ''
@@ -770,13 +859,11 @@ test('a session Claude Code\'s list leaves out while it respawns it keeps its cl
   await waitFor('the session\'s status', () => viewer.seen.states.includes('busy'))
   const attaches = (): string => Bun.spawnSync(['pgrep', '-f', `${host.env['CLAUDE_CODE_EXECPATH']} attach`]).stdout.toString().trim()
   const attach = attaches()
-  // the session's process crashed: its record goes, and Claude Code's list leaves it out for a moment
-  writeFileSync(join(host.folder, 'stopped'), '')
+  // the session's process crashed, so its record goes
   rmSync(join(home, '.claude', 'sessions', `${process.pid}.json`))
   await Bun.sleep(1000)
-  // the respawned process writes its record, and the list holds it again
+  // the respawned process writes its record
   recordSession(home, process.pid)
-  rmSync(join(host.folder, 'stopped'))
   // past the 10 s a gone record is followed
   await Bun.sleep(11_000)
   expect(viewer.seen.exits).toEqual([])
@@ -838,10 +925,9 @@ test('anyhost attach on the host shows a session its Claude Code runs while the 
   await waitFor('the session on the host\'s terminal', () => shown.includes('size 22 72'))
   terminal.write('no relay\r')
   await waitFor('the typed line', () => shown.includes('typed no relay'))
-  // the session stops once the host read it listed, 200 ms after it started showing it: anyhost attach says why,
+  // the session stops once the host read its record, 200 ms after it started showing it: anyhost attach says why,
   // gives the terminal back as it was, and ends
   await Bun.sleep(1000)
-  writeFileSync(join(host.folder, 'stopped'), '')
   rmSync(join(host.env['HOME'] ?? '', '.claude', 'sessions', `${process.pid}.json`))
   expect(await attach.exited).toBe(0)
   await waitFor('the reset and the reason', () => shown.includes('\x1b[?1049l\x1b[?25h') && shown.includes(`The session ${SESSION} stopped running on ${HOST.name}.`))

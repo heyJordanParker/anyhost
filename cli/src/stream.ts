@@ -1,11 +1,12 @@
 // The stream between `anyhost attach` and the program on the machine that runs the session, over any link to the other
 // end, such as the relay. Each direction numbers its bytes, and a frame is its kind, the offset of its first byte and
-// its bytes. Each side acknowledges what it took every ACK_MS, keeps what the other has not acknowledged, and takes a
-// frame only at the offset it holds. So on each new link, a side names the offset it holds in its first frame and sends
-// again every frame the other has not acknowledged, and no byte is lost or doubled across links.
+// its bytes. Each side acknowledges what it took ACK_MS after the first frame it has not acknowledged, keeps what the
+// other has not acknowledged, and takes a frame only at the offset it holds. So on each new link, a side names the
+// offset it holds in its first frame and sends again every frame the other has not acknowledged, and no byte is lost
+// or doubled across links.
 
 export type Size = { readonly cols: number; readonly rows: number }
-// Claude Code's own record of the session, as `claude agents --json` names it: its whole id and its `status`, such as
+// Claude Code's own record of the session in `sessions/` under its folder: its whole id and its `status`, such as
 // `busy` during a turn, `waiting` at a question or a permission prompt, and `idle`.
 export type SessionState = { readonly session: string; readonly status: string }
 // The host ended the stream: code 0 once `claude attach` ended, or 1 with the reason it shows nothing.
@@ -38,7 +39,10 @@ const KINDS: readonly Kind[] = ['input', 'resize', 'output', 'state', 'exit', 'm
 const ACK = 7
 const START = 8
 const HEADER = 9
-const ACK_MS = 100
+// Each wakeup of an end cost 2 to 15 ms of Bun's CPU on a test machine, where a viewed busy session sends about 11
+// frames a second. An acknowledgement only lets the other side drop what it keeps for the next link, so a late one
+// costs a resend at most, which this side drops by its offset.
+const ACK_MS = 1000
 // A full 120×40 screen of Claude Code took 6,442 bytes (worker-spec W7), so 8 MiB holds over a thousand screens.
 const MAX_WAITING = 8 * 2 ** 20
 
@@ -95,12 +99,16 @@ export function openStream(): Stream {
   let waiting: { readonly offset: number; readonly size: number; readonly frame: Uint8Array }[] = []
   let waitingBytes = 0
   let isClosed = false
+  // armed by the first frame taken since the last acknowledgement, so a stream that takes nothing runs no timer
+  let acking: ReturnType<typeof setTimeout> | undefined
 
-  const timer = setInterval(() => {
+  // A link that comes later names `received` in its first frame instead.
+  const acknowledge = (): void => {
+    acking = undefined
     if (link === undefined || received === acknowledged) return
     acknowledged = received
     link.send(frameOf(ACK, received))
-  }, ACK_MS)
+  }
 
   // The peer holds every byte before `offset`. A peer that names more than this side sent holds an earlier stream's
   // bytes, and this side keeps all it has.
@@ -114,7 +122,7 @@ export function openStream(): Stream {
   const close = (): void => {
     isClosed = true
     link = undefined
-    clearInterval(timer)
+    clearTimeout(acking)
   }
 
   return {
@@ -158,6 +166,7 @@ export function openStream(): Stream {
       // a frame this side took already, or one past a gap, which the next link's first frame sends again
       if (kind === undefined || offset !== received || bytes.length === 0) return
       received += bytes.length
+      acking ??= setTimeout(acknowledge, ACK_MS)
       emit(kind, valueOf(kind, bytes) as never)
     },
     close,

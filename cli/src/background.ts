@@ -48,8 +48,8 @@ async function loginShell(): Promise<string> {
   return shell
 }
 
-// A session Claude Code runs here, as `claude agents --json` lists it, or a background session it ran, as `--all` adds
-// it. Only a background session has `id`, and only a running one `pid`.
+// A session Claude Code runs here, as its record in `sessions/` names it, or a background session it ran, as `claude
+// agents --json --all` adds it. Only a background session has `id`, and only a running one `pid`.
 export type RunningSession = {
   readonly pid?: number
   readonly id?: string
@@ -77,8 +77,6 @@ export async function run(argv: readonly string[], options: { readonly cwd?: str
   if (code !== 0) throw new Error(`${argv.join(' ')} exited with ${code}: ${error.trim() || output.trim()}`)
   return output
 }
-
-export const runningSessions = async (): Promise<RunningSession[]> => JSON.parse(await run([claude(), 'agents', '--json'])) as RunningSession[]
 
 // The running sessions and every background session Claude Code ran here and keeps, stopped, done or failed. `claude
 // attach <id>` opens a stopped one again under its own id, where `claude --bg --resume` would start a copy of it.
