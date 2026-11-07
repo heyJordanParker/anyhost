@@ -44,9 +44,9 @@ const CLEAR = '\x1b[2J'
 // host stops starting it again. A person who presses `←` and leaves the agents view takes longer than that.
 const QUICK_END_MS = 2000
 const QUICK_ENDS = 3
-// systemd stopping the daemon's scope signals each `claude attach` and session in the same moment, and Claude Code
-// removed the session's record 0.35 to 0.53 s after the attach ended in 4 stops on anyhost-d, at a Mac load average of
-// 140 to 237.
+// systemd stopping `anyhost-claude.slice` signals each `claude attach` and session in the same moment, and Claude Code
+// removed the session's record 0.35 to 0.53 s after the attach ended in 4 stops of the daemon's scope on anyhost-d, at
+// a Mac load average of 140 to 237.
 const STOPPING_MS = 3000
 // Claude Code 2.1.319 respawns a session whose process crashed 10 s later ("restarting this session in 10 seconds",
 // `ht` of its worker), and one it killed because a `claude attach` stalled 5 s at most 6 s after its signal (`Br`):
@@ -577,7 +577,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     if (kept?.id !== undefined) return { id: kept.id, cwd: kept.cwd }
     const cwd = capture.db.query<{ cwd: string }, [string]>('select cwd from sessions where id = ?').get(session)?.cwd ?? ''
     if (cwd === '') throw new Error(`${device.name} knows no folder of the session ${session}, so it cannot start it.`)
-    return { id: await startInBackground(roots.claudeHome, session, cwd, await environment), cwd }
+    return { id: await startInBackground(session, cwd, await environment), cwd }
   }
   const startShowing = (session: string, size: Size): Promise<Shown> => {
     // the output's last bytes, in which a sequence the next read ends can begin
@@ -598,9 +598,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       tail = Buffer.from(read.length < TAIL_BYTES ? Buffer.concat([tail, read]).subarray(-TAIL_BYTES) : read.subarray(-TAIL_BYTES))
       for (const viewer of viewersOf(session)) output(viewer, bytes)
     }
-    // in the session's folder, where Claude Code's agents view, which `←` opens in it, has the folder's trust
+    // in the session's folder, where Claude Code's agents view, which `←` opens in it, has the folder's trust. An attach
+    // that cannot start rejects, which `ended` tells the viewers.
     const open = async (id: string, cwd: string, env: Record<string, string>, at: Size): Promise<AttachedTerminal> => {
-      const terminal = await attachTerminal(roots.claudeHome, id, cwd, env, at, took)
+      const terminal = attachTerminal(id, cwd, env, at, took)
       const started = Date.now()
       terminals.add(terminal)
       void terminal.exited.then((signal) => {
@@ -611,8 +612,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     }
     // `claude attach` ends by itself when a viewer leaves Claude Code's agents view, which `←` opens, or once the
     // session ended, as after `claude stop`. A signal ends it from outside: the OOM killer, a `kill`, or systemd stopping
-    // the daemon's scope, which signals the daemon and its sessions in the same moment, so the session still runs as its
-    // attach ends. So Claude Code's record of the session decides: followed for STOPPING_MS after a signal, then read
+    // `anyhost-claude.slice`, which signals the daemon and its sessions in the same moment, so the session still runs as
+    // its attach ends. So Claude Code's record of the session decides: followed for STOPPING_MS after a signal, then read
     // once more, and for an attach that ended by itself, as `keepsRunning` reads it. While the session runs, this
     // program starts the attach again, which paints the whole screen for every viewer, so no viewer's keys end the
     // others'.

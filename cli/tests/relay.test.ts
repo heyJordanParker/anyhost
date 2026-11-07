@@ -880,7 +880,7 @@ test('a claude attach a signal ended once Claude Code\'s daemon went ends its vi
   await waitFor('the host connecting', () => relay.isConnected(HOST.id))
   const viewer = await viewerOn(relay, VIEWER, { cols: 80, rows: 24 })
   await waitFor('the viewer\'s screen', () => viewer.seen.shown.includes('size 24 80'))
-  // as when systemd stops the daemon's scope: the daemon removes its lock as it ends, and its attaches end by a signal,
+  // as when systemd stops anyhost-claude.slice: the daemon removes its lock as it ends, and its attaches end by a signal,
   // while the session's process still ends, so its record is still there
   rmSync(join(home, '.claude', 'daemon.lock'))
   const signalled = Date.now()
@@ -984,9 +984,8 @@ const NEW_SESSION = 'abcdef12-0000-4000-8000-000000000001'
 // folder holds, and with `--all` what `kept.json` holds, the background jobs it keeps, when there is one. `claude --bg`
 // fails with the text of `fail` when there is one, and else starts the session `--resume` names, or a new one, which it
 // lists running from then on, with its record in `sessions/`, as Claude Code writes one for each session it runs.
-// `claude attach` starts a kept job again, and shows the terminal's size and each line typed. `claude daemon run` takes
-// the daemon's lock and runs as long as the program that started it. Every call goes into `claude.log`: the time, the
-// folder it ran in, and its arguments. A session it runs has the pid of the program that asked for it, which runs as
+// `claude attach` starts a kept job again, and shows the terminal's size and each line typed. Every call goes into
+// `claude.log`: the time, the folder it ran in, and its arguments. A session it runs has the pid of the program that asked for it, which runs as
 // long as the test.
 const backgroundClaude = (folder: string): string => `#!/bin/bash
 F='${folder}'
@@ -1009,9 +1008,6 @@ case "$1" in
     echo "size $(stty size)"
     while IFS= read -r line; do echo "typed $line"; done ;;
   stop) rm -f "$F/agents.json" "$CLAUDE_CONFIG_DIR"/sessions/*.json; echo "stopped $2" ;;
-  daemon)
-    printf '{"pid":%s}' $$ > "$CLAUDE_CONFIG_DIR/daemon.lock"
-    while kill -0 $PPID 2>/dev/null; do sleep 0.2; done ;;
   *) exit 2 ;;
 esac
 `
@@ -1338,14 +1334,10 @@ exec "$@"
 `,
   )
 
-test('on Linux the program starts Claude Code\'s daemon in anyhost-claude.scope before the first claude --bg, every later claude --bg bare, and each claude attach PartOf that scope', async () => {
+test('on Linux each claude --bg and each claude attach runs in a scope of a new name inside anyhost-claude.slice, bound to no other unit', async () => {
   const relay = memoryRelay()
   const laptop = machineFor(relay, LAPTOP, false, backgroundClaude)
-  const worker = await workerOn(relay, (folder) => {
-    systemdOn(folder)
-    // no daemon runs on the worker yet
-    rmSync(join(folder, 'home', '.claude', 'daemon.lock'))
-  })
+  const worker = await workerOn(relay, systemdOn)
   await serveOn(laptop.env)
   await waitFor('the laptop connecting', () => relay.isConnected(LAPTOP.id))
   const checkout = tripOn(laptop)
@@ -1356,7 +1348,7 @@ test('on Linux the program starts Claude Code\'s daemon in anyhost-claude.scope 
   const first = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, terminal })
   children.push(first)
   await waitFor('the new session on the laptop\'s terminal', () => shown.includes('size 24 80'), 30_000)
-  // a later session reaches the daemon that runs
+  // a later session starts in a scope of its own
   const later = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
   children.push(later)
   const calls = (): string[] => logOf(worker.folder, 'claude.log').map((line) => line.split(' ').slice(2).join(' ')).filter((call) => !call.startsWith('agents'))
@@ -1364,10 +1356,14 @@ test('on Linux the program starts Claude Code\'s daemon in anyhost-claude.scope 
 
   const claude = worker.env['CLAUDE_CODE_EXECPATH']
   const id = NEW_SESSION.slice(0, 8)
-  expect(calls()).toEqual(['daemon run --origin transient', '--bg', `attach ${id}`, '--bg'])
+  expect(calls()).toEqual(['--bg', `attach ${id}`, '--bg'])
   const scoped = logOf(worker.folder, 'systemd-run.log')
-  expect(scoped).toHaveLength(2)
-  expect(scoped[0]).toBe(`--user --scope --quiet --collect --unit anyhost-claude.scope ${claude} daemon run --origin transient`)
-  expect(scoped[1]).toMatch(new RegExp(`^--user --scope --quiet --collect -p PartOf=anyhost-claude\\.scope --unit anyhost-attach-${id}-[0-9a-f]{8}\\.scope ${claude} attach ${id}$`))
+  expect(scoped).toHaveLength(3)
+  const inSlice = '--user --scope --quiet --collect --slice anyhost-claude\\.slice --unit'
+  expect(scoped[0]).toMatch(new RegExp(`^${inSlice} anyhost-bg-[0-9a-f]{8}\\.scope ${claude} --bg$`))
+  expect(scoped[1]).toMatch(new RegExp(`^${inSlice} anyhost-attach-${id}-[0-9a-f]{8}\\.scope ${claude} attach ${id}$`))
+  expect(scoped[2]).toMatch(new RegExp(`^${inSlice} anyhost-bg-[0-9a-f]{8}\\.scope ${claude} --bg$`))
+  // a name of its own each time, which no scope that still runs holds
+  expect(scoped[2]).not.toBe(scoped[0])
   terminal.close()
 }, 60_000)

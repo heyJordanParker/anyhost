@@ -24,15 +24,12 @@ const READ_MS = 1000
 // what the shell itself sets for the program it runs, which says nothing of the person
 const SHELL_OWN = ['PWD', 'OLDPWD', 'SHLVL', '_', 'BUN_BE_BUN']
 // Claude Code runs one daemon per machine, which runs each background session as processes of its own, and the first
-// `claude --bg` or `claude attach` that finds none starts it as `claude daemon run --origin transient`, in its own
-// cgroup. On Linux this program starts it first, the same way, in this scope, outside the service's cgroup, which
-// systemd stops as the service restarts (worker-spec W5). The daemon and every session it runs share this scope, and
-// the daemon ends itself once nothing holds it, as Claude Code's own does: 50 s after its start when no client came.
-const DAEMON_SCOPE = 'anyhost-claude.scope'
-// Claude Code's own client waits 30 s for a daemon it started to answer, and the daemon took its lock 41 ms after its
-// start on anyhost-d. Its lock is read again every DAEMON_READ_MS until then.
-const DAEMON_MS = 30_000
-const DAEMON_READ_MS = 50
+// `claude --bg` or `claude attach` that finds none starts it as `claude daemon run --origin transient`, in that
+// client's cgroup. On Linux every Claude Code process this program starts runs in a scope of a new name inside this
+// slice, so the daemon one of them starts, and every session it runs, lives in the slice too, outside the service's
+// cgroup, which systemd stops as the service restarts (worker-spec W5). A stop of the slice ends every daemon, session
+// and attach this program started. systemd nests the slice under `anyhost.slice`, for the dash in its name.
+const CLAUDE_SLICE = 'anyhost-claude.slice'
 
 // The environment the person's own terminal gives a program, and why it is this program's own instead, when it is.
 export type PersonEnvironment = { readonly environment: Record<string, string>; readonly problem?: string }
@@ -249,37 +246,18 @@ async function between(stream: ReadableStream<Uint8Array>, mark: string): Promis
   return undefined
 }
 
-// systemd runs scopes where systemd-run is, as on Linux. systemd-run runs the command itself in the scope, so its
-// process is the command's. A scope `partOf` another stops in the same moment as that one.
-const hasScopes = (): boolean => Bun.which('systemd-run') !== null
-const inScope = (unit: string, command: readonly string[], partOf?: string): string[] =>
-  hasScopes() ? ['systemd-run', '--user', '--scope', '--quiet', '--collect', ...(partOf === undefined ? [] : ['-p', `PartOf=${partOf}`]), '--unit', unit, ...command] : [...command]
-
-// Starts Claude Code's daemon in DAEMON_SCOPE with the person's environment, which every session it runs gets, when
-// systemd runs scopes and no daemon runs, and answers once one runs: this one, or one that took the lock first, from
-// which Claude Code's daemon exits at once. Without systemd the first `claude --bg` or `claude attach` starts it.
-let starting: Promise<void> | undefined
-function ensureDaemon(claudeHome: string, env: Record<string, string>): Promise<void> {
-  starting ??= (async (): Promise<void> => {
-    if (!hasScopes() || (await isDaemonRunning(claudeHome))) return
-    const command = inScope(DAEMON_SCOPE, [claude(), 'daemon', 'run', '--origin', 'transient'])
-    // in a process group of its own, which no signal to this program's group reaches
-    const daemon = Bun.spawn(command, { env, stdio: ['ignore', 'ignore', 'ignore'], detached: true })
-    daemon.unref()
-    for (const started = Date.now(); !(await isDaemonRunning(claudeHome)); await Bun.sleep(DAEMON_READ_MS)) {
-      if (daemon.exitCode !== null || daemon.signalCode !== null) throw new Error(`${command.join(' ')} exited with ${daemon.exitCode ?? daemon.signalCode}, and no daemon of Claude Code's runs.`)
-      if (Date.now() - started > DAEMON_MS) throw new Error(`Claude Code's daemon took no lock within ${DAEMON_MS / 1000} s of ${command.join(' ')}.`)
-    }
-  })().finally(() => (starting = undefined))
-  return starting
-}
+// The command in a scope `anyhost-<name>-<random>.scope` inside CLAUDE_SLICE where systemd-run is, as on Linux. A fixed
+// name stays taken while any process of the scope runs, as a daemon its client started, or while any unit names it,
+// so each scope's name is new. systemd-run runs the command itself in the scope, so its process is the command's.
+const inScope = (name: string, command: readonly string[]): string[] =>
+  Bun.which('systemd-run') === null ? [...command] : ['systemd-run', '--user', '--scope', '--quiet', '--collect', '--slice', CLAUDE_SLICE, '--unit', `anyhost-${name}-${crypto.randomUUID().slice(0, 8)}.scope`, ...command]
 
 // Starts the session in Claude Code's background in `cwd`, the folder it continues in, or a new session there with no
 // `session`, and answers the id `claude attach` takes. `claude --bg` picks a new session's id itself and ignores
-// `--session-id`, so the id is the one it prints.
-export async function startInBackground(claudeHome: string, session: string | undefined, cwd: string, env: Record<string, string>): Promise<string> {
-  await ensureDaemon(claudeHome, env)
-  const printed = await run(session === undefined ? [claude(), '--bg'] : [claude(), '--bg', '--resume', session], { cwd, env })
+// `--session-id`, so the id is the one it prints. A `claude --bg` that finds no daemon starts it with `env`, which
+// every session the daemon runs gets.
+export async function startInBackground(session: string | undefined, cwd: string, env: Record<string, string>): Promise<string> {
+  const printed = await run(inScope('bg', session === undefined ? [claude(), '--bg'] : [claude(), '--bg', '--resume', session]), { cwd, env })
   if (session !== undefined) return session.slice(0, 8)
   const id = /backgrounded · ([0-9a-f]{8})/.exec(printed)?.[1]
   if (id === undefined) throw new Error(`claude --bg printed no session id: ${printed.trim()}`)
@@ -292,12 +270,11 @@ export async function stopInBackground(id: string, env: Record<string, string>):
 }
 
 // `claude attach` reaches Claude Code's daemon, which starts the job again when it is stopped. A `claude attach` whose
-// daemon went starts a new one 163 to 176 ms later on anyhost-d, which starts again every session the last one ran. So
-// each runs in a scope of a new name PartOf DAEMON_SCOPE, which systemd stops in the same moment as the daemon's.
-export async function attachTerminal(claudeHome: string, id: string, cwd: string, env: Record<string, string>, { cols, rows }: { readonly cols: number; readonly rows: number }, onOutput: (bytes: Uint8Array) => void): Promise<AttachedTerminal> {
-  await ensureDaemon(claudeHome, env)
+// daemon went starts a new one 163 ms to 4 s later on anyhost-d, which adopts every session whose process still runs,
+// in the attach's scope inside CLAUDE_SLICE, so a stop of the slice ends it, its sessions and every attach at once.
+export function attachTerminal(id: string, cwd: string, env: Record<string, string>, { cols, rows }: { readonly cols: number; readonly rows: number }, onOutput: (bytes: Uint8Array) => void): AttachedTerminal {
   const terminal = new Bun.Terminal({ cols, rows, name: 'xterm-256color', data: (_terminal, bytes) => onOutput(bytes) })
-  const command = inScope(`anyhost-attach-${id}-${crypto.randomUUID().slice(0, 8)}.scope`, [claude(), 'attach', id], DAEMON_SCOPE)
+  const command = inScope(`attach-${id}`, [claude(), 'attach', id])
   // Claude Code draws truecolor for a terminal that says it takes it, as the viewer's does
   const child = Bun.spawn(command, { cwd, terminal, env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } })
   return {
