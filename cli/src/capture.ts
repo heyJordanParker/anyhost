@@ -315,6 +315,9 @@ export const journalOf = (db: Database, session: string): Journal | undefined =>
   return row === null ? undefined : { session: row.session, tool: row.tool, end: row.end, sealed: row.sealed, writtenAt: row.written_at, stopped: row.stopped, holder: row.holder }
 }
 
+// The folder the session works in, as its index entry names it, or '' before its transcript named one.
+export const workingFolderOf = (db: Database, session: string): string => db.query<{ cwd: string }, [string]>('select cwd from sessions where id = ?').get(session)?.cwd ?? ''
+
 // The sessions a written file belongs to, among those this machine captures. Lines files name new sessions too.
 export async function sessionsOf(capture: Capture, path: string): Promise<{ readonly session: string; readonly tool: Tool }[]> {
   // Codex's database, or its write-ahead log, changed: the sessions a restore placed here whose row anyhost has not read
@@ -743,7 +746,7 @@ function codeRecord(capture: Capture, session: string, path: string, bytes: Uint
 // read runs per session, and none while the last one's records still go up; a change meanwhile reads it again after.
 // A move reads it once more, for a change nothing the session wrote names.
 export function startCode(capture: Capture, session: string, tool: Tool, problems: Problems): void {
-  const folder = capture.db.query<{ cwd: string }, [string]>('select cwd from sessions where id = ?').get(session)?.cwd ?? ''
+  const folder = workingFolderOf(capture.db, session)
   if (folder === '') return
   if (capture.codeRuns.has(session) || capture.codeWaiting.has(session)) {
     capture.codeStale.add(session)
@@ -854,7 +857,7 @@ export async function seal(capture: Capture, session: string): Promise<number> {
 // code again, since a code header past `at` may name a part only the lost frames held. The warning a takeover left for
 // the session's next prompt stays. Answers the session's files, which the caller uploads. A session whose transcript
 // is gone here leaves the problem `journal <session>`, which names the span a restore lacks.
-export function captureAgainFrom(capture: Capture, session: string, tool: Tool, at: number, end: number, problems: Problems): Set<string> {
+function captureAgainFrom(capture: Capture, session: string, tool: Tool, at: number, end: number, problems: Problems): Set<string> {
   const { db, device, roots } = capture
   const paths = db
     .query<{ path: string }, [string]>('select path from files where session = ?')
@@ -876,22 +879,35 @@ export function captureAgainFrom(capture: Capture, session: string, tool: Tool, 
   return new Set(paths)
 }
 
+// Seals the session's journal up to the end this machine counted, which `journals.sealed` then records, and answers no
+// file. A journal whose chain in R2 ends short of that end goes on from where the chain ends (`captureAgainFrom`), and
+// the answer is the session's files, which the caller uploads whole.
+export async function sealJournal(capture: Capture, session: string, tool: Tool, problems: Problems): Promise<Set<string>> {
+  const end = journalOf(capture.db, session)?.end ?? 0
+  const at = await seal(capture, session)
+  if (at !== end) return captureAgainFrom(capture, session, tool, at, end, problems)
+  capture.db.query('update journals set sealed = ? where session = ?').run(at, session)
+  return new Set()
+}
+
 // Seals every session quiet for QUIET_MS that this machine holds. A journal whose chain in R2 ends elsewhere than this
 // machine counted goes on from where the chain ends, with every file whole, once, so it is not read again each minute.
 // Answers the files of those sessions, for the upload queue.
 export async function sealQuiet(capture: Capture, problems: Problems, now = Date.now()): Promise<Map<string, Set<string>>> {
   const { db, relay, device } = capture
-  const quiet = db.query<{ session: string; tool: Tool; end: number }, [number]>("select session, tool, end from journals where stopped = '' and end > sealed and written_at < ?").all(now - QUIET_MS)
+  const quiet = db.query<{ session: string; tool: Tool }, [number]>("select session, tool from journals where stopped = '' and end > sealed and written_at < ?").all(now - QUIET_MS)
   const again = new Map<string, Set<string>>()
-  for (const { session, tool, end } of quiet) {
+  for (const { session, tool } of quiet) {
     try {
       // a session another machine holds is that machine's to seal
       const claim = await relay.run([{ op: 'claim', session, take: false }])[0]
       if (claim?.status === 409) holdElsewhere(db, session, claim.holder.name, `${new Date().toISOString()} ${claim.holder.name} holds the session ${session}, so ${device.name} stops capturing it.`, tool)
-      const at = claim?.status === 200 ? await seal(capture, session) : end
+      else if (claim?.status !== 200) throw new Error(`The relay answered ${claim?.status ?? 'nothing'} to the claim of ${session}, so ${device.name} sealed nothing of it.`)
+      else {
+        const files = await sealJournal(capture, session, tool, problems)
+        if (files.size > 0) again.set(session, files)
+      }
       problems.clear(`seal ${session}`)
-      if (at === end) db.query('update journals set sealed = ? where session = ?').run(at, session)
-      else again.set(session, captureAgainFrom(capture, session, tool, at, end, problems))
     } catch (error) {
       problems.set(`seal ${session}`, error)
     }

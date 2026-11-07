@@ -5,9 +5,9 @@ import type * as Protocol from '../../relay/protocol.ts'
 import { attach } from './attach.ts'
 import { openCapture, type Capture } from './capture.ts'
 import { connectCloudflare, join, type Progress } from './connect.ts'
-import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
+import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, otherMachine, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
-import { startNew } from './move.ts'
+import { startNew, type Moving } from './move.ts'
 import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, restore } from './resume.ts'
 import { serve, serveSocket } from './serve.ts'
@@ -60,8 +60,6 @@ const machineTable = (machines: readonly Protocol.Device[], here: string): strin
     machines.map((machine) => [machine.id === here ? `${machine.name} (this machine)` : machine.name, `${machine.os}-${machine.arch}`, machine.connected ? 'connected' : `last seen ${minute(machine.seenAt)}`]),
   )
 
-// The program's answer about a move it runs, from its /claims/<session>, as serve.ts serves it.
-type Followed = { readonly move?: { readonly step: string; readonly line: string } }
 // how often anyhost move reads the step of the move, as the mod's /move does
 const FOLLOW_MS = 1000
 
@@ -75,7 +73,8 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
   if (!asked.ok) throw new Error(started.message)
   let said = ''
   for (;;) {
-    const { move } = (await (await fetch(`http://localhost/claims/${started.session}`, { unix })).json()) as Followed
+    // the program's /claims/<session> answer carries the move it runs, as serve.ts serves it
+    const { move } = (await (await fetch(`http://localhost/claims/${started.session}`, { unix })).json()) as { readonly move?: Pick<Moving, 'step' | 'line'> }
     if (move === undefined) throw new Error(`The anyhost program at ${unix} restarted during the move, so it no longer knows where ${session} is.`)
     if (move.line !== said) (move.step === 'failed' ? console.error : console.log)(move.line)
     said = move.line
@@ -155,9 +154,7 @@ async function main(argv: string[]): Promise<number> {
   if (command === 'machines' && rest.length === 0 && values.remove !== undefined && values.invite !== true) {
     const name = values.remove
     const removed = await connected(async ({ relay, device }) => {
-      const machine = (await machinesOf(relay)).find((each) => each.name === name)
-      if (machine === undefined) throw new Error(`No machine joined to your relay is named ${name}. anyhost machines lists them.`)
-      if (machine.id === device.id) throw new Error(`${name} is this machine. Remove it from another machine.`)
+      const machine = await otherMachine(relay, device, name, 'Remove it from another machine.')
       await removeMachine(relay, machine.id)
       return machine
     })

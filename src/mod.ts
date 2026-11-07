@@ -119,8 +119,8 @@ export const anyhost = defineMod({
     )
 
     // /move asks the program, which drains, seals and sends the session, and its toast follows each step: the
-    // session's own Claude Code ends once the session runs there, or refuses each prompt outside herdr. While the move
-    // waits for the machine, Keep it here takes the session back.
+    // session's own Claude Code ends once the session runs there, or refuses each prompt outside herdr. Until the machine
+    // answers, Keep it here ends the move and keeps the session here.
     const follow = (): void => {
       const session = sessions.current.id
       const toast = `move-${session}`
@@ -147,7 +147,7 @@ export const anyhost = defineMod({
         else if (move.step === 'failed') mod.toast.error(move.line, { id: toast, duration: Infinity })
         else {
           const keep = { label: 'Keep it here', onClick: () => askProgram(mod, '/move/keep', { session }) }
-          mod.toast.loading(`Moving to ${move.to}…`, { id: toast, description: move.line, ...(move.step === 'moving' ? { action: keep } : {}) })
+          mod.toast.loading(`Moving to ${move.to}…`, { id: toast, description: move.line, action: keep })
         }
         if (!MOVING.has(move.step)) timer.stop()
       })

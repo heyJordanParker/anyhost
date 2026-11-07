@@ -4,15 +4,14 @@
 // itself after the link or either machine's program went away, until that `claude attach` ends for good. Once the host
 // answers with its addresses, this process dials it directly, as macOS judges a dial to the local network by the
 // terminal app that started the process, and the stream goes over that connection while it lasts.
-import { networkInterfaces } from 'node:os'
-import { dialDirect, isTailscale, LocalNetworkRefused, type DirectLink, type DirectOffer } from './direct.ts'
+import { run } from './background.ts'
+import { dialDirect, isTailscale, LocalNetworkRefused, offeredAddresses, type DirectLink, type DirectOffer } from './direct.ts'
+import { waitAfter } from './relay.ts'
 import { serveSocket } from './serve.ts'
 import { openStream, type Link, type Size } from './stream.ts'
 
-// The waits between tries to attach again, as the relay's socket waits between its tries, and between the starts of
-// tries to reach the host directly.
-const RETRY_MS = [1000, 2000, 4000, 8000, 16_000, 32_000, 60_000]
-// A viewer waiting to dial the host again dials at once when this machine's addresses changed, as on a new network.
+// A viewer waiting to dial the host again dials at once when the addresses this machine dials from changed, as on a
+// new network.
 const ADDRESSES_MS = 1000
 // The state herdr shows of an agent, by Claude Code's `status` of the session. `claude agents` names a session that
 // waits for its first prompt `blocked` in its `state` too, which herdr shows as a question to answer, so its status
@@ -20,11 +19,8 @@ const ADDRESSES_MS = 1000
 const HERDR_STATES: Readonly<Record<string, string>> = { busy: 'working', waiting: 'blocked', idle: 'idle' }
 
 const sizeHere = (): Size => ({ cols: process.stdout.columns ?? 80, rows: process.stdout.rows ?? 24 })
-const addressesHere = (): string =>
-  Object.values(networkInterfaces())
-    .flatMap((infos) => (infos ?? []).filter((info) => !info.internal).map((info) => info.address))
-    .sort()
-    .join(' ')
+// the Tailscale and private LAN addresses a direct dial goes from, so a Docker `veth` coming or going starts none
+const addressesHere = (): string => offeredAddresses().join(' ')
 
 // The terminal modes Claude Code sets, off again: the alternate screen, a hidden cursor, the modes Claude Code's
 // daemon records for a session (bracketed paste, color scheme reports, focus, mouse), the kitty keyboard flags it pushes
@@ -38,9 +34,10 @@ async function reportToHerdr(session: string, status: string): Promise<string | 
   const pane = process.env['HERDR_PANE_ID']
   if (pane === undefined || pane === '') return undefined
   const argv = ['herdr', 'pane', 'report-agent', '--source', 'anyhost', '--agent', 'claude', '--state', HERDR_STATES[status] ?? 'unknown', '--agent-session-id', session, pane, '--', 'anyhost', 'attach', session]
-  const child = Bun.spawn(argv, { stdin: 'ignore', stdout: 'ignore', stderr: 'pipe' })
-  const [error, code] = await Promise.all([new Response(child.stderr).text(), child.exited])
-  return code === 0 ? undefined : `herdr pane report-agent exited with ${code}: ${error.trim()}`
+  return await run(argv).then(
+    () => undefined,
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  )
 }
 
 const newStream = (): number => new DataView(crypto.getRandomValues(new Uint8Array(4)).buffer).getUint32(0)
@@ -99,6 +96,7 @@ export function attach(asked: string): Promise<number> {
       dialDirect(offer, id, key, (frame) => frames.receive(frame)).then(
         (link) => {
           isDialing = false
+          if (link === undefined) return dialAgain(started, addresses)
           // a session that moved meanwhile runs on another machine, which the next attach's offer names
           if (isDone || dialed !== id) return link.close()
           direct = link
@@ -126,8 +124,8 @@ export function attach(asked: string): Promise<number> {
     // addresses changed since it
     const dialAgain = (since: number, addresses: string): void => {
       if (isDone) return
-      const due = since + (RETRY_MS[Math.min(dials, RETRY_MS.length - 1)] ?? 0)
       dials += 1
+      const due = since + waitAfter(dials)
       const check = (): void => {
         if (Date.now() >= due || addressesHere() !== addresses) return dial()
         redial = setTimeout(check, Math.min(ADDRESSES_MS, due - Date.now()))
@@ -138,9 +136,8 @@ export function attach(asked: string): Promise<number> {
       leg = undefined
       if (direct === undefined) frames.use(undefined)
       clearTimeout(retry)
-      const wait = RETRY_MS[Math.min(failures, RETRY_MS.length - 1)]
       failures += 1
-      retry = setTimeout(() => (socket?.readyState === WebSocket.OPEN ? socket.send(attachMessage()) : connect()), wait)
+      retry = setTimeout(() => (socket?.readyState === WebSocket.OPEN ? socket.send(attachMessage()) : connect()), waitAfter(failures))
     }
     const connect = (): void => {
       const ws = new WebSocket(`ws+unix://${serveSocket()}:/attach`)
@@ -179,7 +176,7 @@ export function attach(asked: string): Promise<number> {
     })
     frames.on('exit', ({ code, message }) => finish(code, message))
     // The session moved to another machine, which holds it now: this machine's program attaches it again where it went,
-    // on a new stream, whose host starts it over from its first byte.
+    // on a new stream to its new host, which starts from its first byte, so the keys typed meanwhile reach it there.
     frames.on('moved', () => {
       clearTimeout(redial)
       offer = undefined
@@ -187,7 +184,7 @@ export function attach(asked: string): Promise<number> {
       const link = direct
       direct = undefined
       link?.close()
-      frames.use(undefined)
+      frames.startOver()
       id = newStream()
       key = newKey()
       if (socket?.readyState === WebSocket.OPEN) socket.send(attachMessage())

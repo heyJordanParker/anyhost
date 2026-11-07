@@ -118,6 +118,14 @@ export async function devicesOf(relay: Relay): Promise<Map<string, Protocol.Devi
 // The machines joined now, as `/machines` and `anyhost machines` show them.
 export const machinesOf = async (relay: Relay): Promise<Protocol.Device[]> => [...(await devicesOf(relay)).values()].filter((device) => device.removedAt === undefined)
 
+// The machine joined now that is named `name`, refused when it is `here`, with `instead`, what to do instead.
+export async function otherMachine(relay: Relay, here: Device, name: string, instead: string): Promise<Protocol.Device> {
+  const machine = (await machinesOf(relay)).find((each) => each.name === name)
+  if (machine === undefined) throw new Error(`No machine joined to your relay is named ${name}. anyhost machines lists them.`)
+  if (machine.id === here.id) throw new Error(`${name} is this machine. ${instead}`)
+  return machine
+}
+
 // The command that joins one more machine: cmod installs anyhost with the option `join`, which the program exchanges
 // at its first start. Its invite joins one machine before `expiresAt`. The link is quoted, because zsh's extendedglob
 // reads its `#` as a pattern.

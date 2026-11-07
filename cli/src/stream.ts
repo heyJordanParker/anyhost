@@ -12,12 +12,12 @@ export type SessionState = { readonly session: string; readonly status: string }
 // The host ended the stream: code 0 once `claude attach` ended, or 1 with the reason it shows nothing.
 export type Exit = { readonly code: number; readonly message: string }
 // The session runs on the machine `to` names from now on, and the viewer attaches to it there.
-export type Moved = { readonly to: string }
+type Moved = { readonly to: string }
 
 // What each kind of frame carries: the viewer sends `input` and `resize`, and the host `output`, `state`, `exit` and
-// `moved`.
+// `moved`. The terminal's bytes go as they are, and every other kind as JSON.
 type Values = { readonly input: Uint8Array; readonly resize: Size; readonly output: Uint8Array; readonly state: SessionState; readonly exit: Exit; readonly moved: Moved }
-export type Kind = keyof Values
+type Kind = keyof Values
 // `lost` says why the stream ended on this side, as when its peer acknowledged nothing for MAX_WAITING bytes.
 type Events = Values & { readonly lost: string }
 
@@ -29,6 +29,10 @@ export type Stream = {
   on<K extends keyof Events>(kind: K, listener: (value: Events[K]) => void): void
   // the way to the other end from now on, or none, while frames wait for the next one
   use(link: Link | undefined): void
+  // A new peer from now on, as the session's new machine is after `moved`: the stream starts over from its first byte
+  // with no link, and what it writes meanwhile waits for that peer's first link. It takes nothing until the new peer's
+  // `start`, as the last peer's frames may still come. What the last peer never acknowledged goes nowhere.
+  startOver(): void
   // a frame the link brought
   receive(frame: Uint8Array): void
   close(): void
@@ -49,31 +53,8 @@ const MAX_WAITING = 8 * 2 ** 20
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
-function bytesOf<K extends Kind>(kind: K, value: Values[K]): Uint8Array {
-  if (value instanceof Uint8Array) return value
-  if (kind === 'resize') {
-    const { cols, rows } = value as Size
-    const bytes = new Uint8Array(4)
-    new DataView(bytes.buffer).setUint16(0, cols)
-    new DataView(bytes.buffer).setUint16(2, rows)
-    return bytes
-  }
-  if (kind === 'exit') {
-    const { code, message } = value as Exit
-    return new Uint8Array([code, ...encoder.encode(message)])
-  }
-  return encoder.encode(JSON.stringify(value))
-}
-
-function valueOf(kind: Kind, bytes: Uint8Array): Values[Kind] {
-  if (kind === 'input' || kind === 'output') return bytes
-  if (kind === 'resize') {
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-    return { cols: view.getUint16(0), rows: view.getUint16(2) }
-  }
-  if (kind === 'exit') return { code: bytes[0] ?? 1, message: decoder.decode(bytes.subarray(1)) }
-  return JSON.parse(decoder.decode(bytes)) as SessionState | Moved
-}
+const bytesOf = (value: Values[Kind]): Uint8Array => (value instanceof Uint8Array ? value : encoder.encode(JSON.stringify(value)))
+const valueOf = (kind: Kind, bytes: Uint8Array): Values[Kind] => (kind === 'input' || kind === 'output' ? bytes : (JSON.parse(decoder.decode(bytes)) as Values[Kind]))
 
 function frameOf(code: number, offset: number, bytes: Uint8Array = new Uint8Array()): Uint8Array {
   const frame = new Uint8Array(HEADER + bytes.length)
@@ -99,8 +80,11 @@ export function openStream(): Stream {
   let waiting: { readonly offset: number; readonly size: number; readonly frame: Uint8Array }[] = []
   let waitingBytes = 0
   let isClosed = false
+  // from `startOver` to the new peer's `start`
+  let isStarting = false
   // armed by the first frame taken since the last acknowledgement, so a stream that takes nothing runs no timer
   let acking: ReturnType<typeof setTimeout> | undefined
+  const fromNothing = (): void => void ([sent, received, acknowledged, waiting, waitingBytes] = [0, 0, 0, [], 0])
 
   // A link that comes later names `received` in its first frame instead.
   const acknowledge = (): void => {
@@ -127,7 +111,7 @@ export function openStream(): Stream {
 
   return {
     write(kind, value) {
-      const bytes = bytesOf(kind, value)
+      const bytes = bytesOf(value)
       if (isClosed || bytes.length === 0) return
       const frame = frameOf(KINDS.indexOf(kind) + 1, sent, bytes)
       waiting.push({ offset: sent, size: bytes.length, frame })
@@ -151,15 +135,25 @@ export function openStream(): Stream {
       acknowledged = received
       for (const { frame } of waiting) link.send(frame)
     },
+    startOver() {
+      fromNothing()
+      link = undefined
+      wasLinked = false
+      isStarting = true
+      clearTimeout(acking)
+      acking = undefined
+    },
     receive(frame) {
       if (isClosed || frame.length < HEADER) return
       const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
       const code = frame[0] ?? 0
       const offset = view.getUint32(1) * 2 ** 32 + view.getUint32(5)
+      if (isStarting && code !== START) return
+      isStarting = false
       // A peer that starts after this side took its bytes lost the stream, as a restarted program does, so this side
       // starts over from nothing too. What it sent and the peer never acknowledged may have reached the peer's
       // terminal, so it goes nowhere again.
-      if (code === START && received > 0) [sent, received, acknowledged, waiting, waitingBytes] = [0, 0, 0, [], 0]
+      if (code === START && received > 0) fromNothing()
       if (code === START || code === ACK) return peerHolds(offset)
       const kind = KINDS[code - 1]
       const bytes = frame.subarray(HEADER)

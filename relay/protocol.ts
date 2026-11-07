@@ -97,13 +97,14 @@ export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceR
 // `detach` name only their stream, whose two machines the Pool knows from the `attach` that opened it. `key` is the
 // base64 of the 32 random bytes that key the stream's direct connection, and `attached` is the host's answer, with the
 // port and the addresses that connection reaches it at. `move` asks `to` to take the session and run it in Claude
-// Code's background, and `moved`, with the same `id`, answers whether it does. `start` asks `to` to start a new
-// session in its checkout of `repo` on `branch`, in `folder` inside it, or outside git in the folder at `folder` on the
-// asking machine, and `started` answers the session, or why it started none. `trusted` says the asking machine's Claude
-// Code trusts the session's folder, so `to` trusts the folder the session runs in there.
+// Code's background, and `moved`, with the same `id`, answers that it runs it, or why it does not. `start` asks `to` to
+// start a new session in its checkout of `repo` on `branch`, in `folder` inside it, or outside git in the folder at
+// `folder` on the asking machine, and `started` answers the session, or why it started none. `trusted` says the asking
+// machine's Claude Code trusts the session's folder, so `to` trusts the folder the session runs in there.
 export type Routed =
-  | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly t3: boolean; readonly trusted: boolean }
-  | { readonly t: 'moved'; readonly id: string; readonly to: string; readonly ok: boolean; readonly error?: string }
+  | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly trusted: boolean }
+  | { readonly t: 'moved'; readonly id: string; readonly to: string }
+  | { readonly t: 'moved'; readonly id: string; readonly to: string; readonly error: string }
   | { readonly t: 'start'; readonly id: string; readonly to: string; readonly repo: string; readonly branch: string; readonly folder: string; readonly trusted: boolean }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly session: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly error: string }

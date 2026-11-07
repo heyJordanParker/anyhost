@@ -39,6 +39,9 @@ const PONG_MS = 40_000
 // A socket opened in 494 to 689 ms on a home link (R16).
 const CONNECT_MS = 10_000
 const RETRY_MS = [1000, 2000, 4000, 8000, 16_000, 32_000, 60_000]
+// The wait before the next try after `failures` tries in a row failed: 1, 2, 4 and up to 60 seconds, none before a
+// failure. `anyhost attach` waits as long between its tries to attach again and to dial the host directly.
+export const waitAfter = (failures: number): number => RETRY_MS[Math.min(failures, RETRY_MS.length) - 1] ?? 0
 // A write gets REQUEST_MS and as long again as its bytes take at 100 KB/s. A Mac whose uploads moved at 0.4 to 0.9 MB/s
 // failed a frame holding a 67 MB tool result, 50 MB compressed, at 120 s on every try. Bun never ends an upload that
 // stopped moving, so only a total limit ends one the network dropped.
@@ -195,7 +198,7 @@ export function connectRelay(options: RelayOptions): Relay {
     if (wasConnected && 'message' in next) console.error(`${new Date().toISOString()} ${next.message}${next.is === 'unjoined' ? '' : ' anyhost connects again.'}`)
     if (!wasConnected) failures += 1
     if (!wasConnected && !options.isPatient && 'message' in next) failPending(next.message)
-    reopen = setTimeout(() => void open(), wasConnected ? 0 : (RETRY_MS[Math.min(failures, RETRY_MS.length) - 1] ?? 0))
+    reopen = setTimeout(() => void open(), wasConnected ? 0 : waitAfter(failures))
   }
 
   const answered = (message: Uint8Array): void => {
@@ -319,7 +322,7 @@ export function connectRelay(options: RelayOptions): Relay {
       })
       if (done !== undefined) return done
       if (tries === OBJECT_TRIES) throw new Error(`The relay failed ${what} ${OBJECT_TRIES} times${last === '' ? '' : `, the last time with ${last}`}.`)
-      await Bun.sleep(RETRY_MS[tries - 1] ?? 0)
+      await Bun.sleep(waitAfter(tries))
     }
   }
 

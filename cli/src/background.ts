@@ -32,7 +32,7 @@ const SHELL_OWN = ['PWD', 'OLDPWD', 'SHLVL', '_', 'BUN_BE_BUN']
 const CLAUDE_SLICE = 'anyhost-claude.slice'
 
 // The environment the person's own terminal gives a program, and why it is this program's own instead, when it is.
-export type PersonEnvironment = { readonly environment: Record<string, string>; readonly problem?: string }
+type PersonEnvironment = { readonly environment: Record<string, string>; readonly problem?: string }
 
 // The shell the person's account names. Bun's os.userInfo() reads it from SHELL, which a service lacks, so it comes
 // from the account database: Directory Services on macOS, getent elsewhere.
@@ -119,8 +119,8 @@ async function isDaemonRunning(claudeHome: string): Promise<boolean> {
 }
 
 // Answers the first time `found` finds what it looks for in the sessions Claude Code runs here, read again at each
-// change of their records under `claudeHome`, or rejects once `limitMs` passed.
-export function whenSessions<T>(claudeHome: string, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number, late: string): Promise<T> {
+// change of their records under `claudeHome`, or undefined once `limitMs` passed.
+export function whenSessions<T>(claudeHome: string, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number): Promise<T | undefined> {
   const folder = join(claudeHome, 'sessions')
   return new Promise((resolve, reject) => {
     let watcher: FSWatcher | undefined
@@ -137,7 +137,7 @@ export function whenSessions<T>(claudeHome: string, found: (sessions: readonly R
     const limit = Number.isFinite(limitMs)
       ? setTimeout(() => {
           end()
-          reject(new Error(late))
+          resolve(undefined)
         }, limitMs)
       : undefined
     const read = async (): Promise<void> => {
@@ -262,6 +262,19 @@ export async function startInBackground(session: string | undefined, cwd: string
   const id = /backgrounded · ([0-9a-f]{8})/.exec(printed)?.[1]
   if (id === undefined) throw new Error(`claude --bg printed no session id: ${printed.trim()}`)
   return id
+}
+
+// The id `claude attach` takes for a session this machine holds, and the folder it runs in. A background job Claude Code
+// keeps of the session, running or stopped, opens with `claude attach`, which starts a stopped one again under its own
+// id, as `claude --bg --resume` would start a copy under a new one. Any other session starts in Claude Code's background
+// in `cwd`, the folder it continues in here. A session Claude Code runs in a terminal of its own shows only there.
+// `machine` names this machine in the refusals.
+export async function backgroundJobOf(session: string, cwd: string, env: Record<string, string>, machine: string): Promise<{ readonly id: string; readonly cwd: string }> {
+  const kept = (await keptSessions()).find((entry) => entry.sessionId === session)
+  if (kept?.kind === 'interactive') throw new Error(`${machine} runs the session ${session} in a terminal of its own, so only that terminal shows it.`)
+  if (kept?.id !== undefined) return { id: kept.id, cwd: kept.cwd }
+  if (cwd === '') throw new Error(`${machine} knows no folder of the session ${session}, so it cannot start it.`)
+  return { id: await startInBackground(session, cwd, env), cwd }
 }
 
 // Stops a background session Claude Code runs here. Claude Code keeps its job, which `claude attach` starts again.

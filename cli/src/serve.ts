@@ -3,14 +3,14 @@ import { rmSync, watch } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { encodeStream, streamOf, type Routed } from '../../relay/protocol.ts'
-import { attachTerminal, keptSessions, personEnvironment, recordedSessions, startInBackground, whenSessions, type AttachedTerminal, type RunningSession } from './background.ts'
-import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Problems } from './capture.ts'
+import { attachTerminal, backgroundJobOf, personEnvironment, recordedSessions, whenSessions, type AttachedTerminal, type RunningSession } from './background.ts'
+import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, workingFolderOf, writeIndex, type Problems } from './capture.ts'
 import { claimsOf } from './claims.ts'
 import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { listenDirect, type DirectLink, type DirectOffer } from './direct.ts'
 import { move, receiveMove, receiveStart, type MoveHere, type Moving } from './move.ts'
-import { connectRelay, type RelayState } from './relay.ts'
+import { connectRelay, waitAfter, type RelayState } from './relay.ts'
 import { openStream, type Exit, type Link, type SessionState, type Size, type Stream } from './stream.ts'
 import { codexState, watchedFolders, type Tool } from './transcript.ts'
 
@@ -20,7 +20,6 @@ const BACKUP_MS = 60_000
 // as Syncthing pairs its watcher with an hourly full rescan. Each other minute it stats the files of the sessions
 // written in the last QUIET_MS alone, so a quiet session costs nothing.
 const SWEEP_ALL_MS = 60 * 60_000
-const RETRY_MS = 1000
 // The relay carries a terminal's output at most once per OUTPUT_MS, so a full-screen redraw is one message, not
 // hundreds (relay-spec "Control messages"). A direct connection and this machine's own socket carry it at once.
 const OUTPUT_MS = 20
@@ -109,7 +108,8 @@ type Upload = (sessions: ReadonlyMap<string, Queued>) => ReadonlyMap<string, Pro
 export class UploadQueue {
   private readonly queued = new Map<string, { tool: Tool; paths: Set<string> }>()
   private readonly uploading = new Set<string>()
-  private readonly retryMs = new Map<string, number>()
+  // the uploads of each session that failed in a row
+  private readonly failures = new Map<string, number>()
   // what waits for each session's upload in flight to end, with its failure
   private readonly ended = new Map<string, ((failure: { readonly error: unknown } | undefined) => void)[]>()
   private timer: ReturnType<typeof setInterval> | undefined
@@ -190,7 +190,7 @@ export class UploadQueue {
       ;(uploads.get(session) ?? Promise.reject(new Error(`The drain uploaded nothing of the session ${session}.`))).then(
         (left) => {
           this.uploading.delete(session)
-          this.retryMs.delete(session)
+          this.failures.delete(session)
           for (const path of left) this.add(session, queued.tool, path)
           if (this.every === 0) this.drainSessions([session])
           this.uploaded(session)
@@ -201,9 +201,9 @@ export class UploadQueue {
           const now = this.queued.get(session) ?? { tool: queued.tool, paths: new Set() }
           this.queued.set(session, { tool: now.tool, paths: new Set([...queued.paths, ...now.paths]) })
           this.onFailure(session, error)
-          const wait = this.retryMs.get(session) ?? RETRY_MS
-          this.retryMs.set(session, Math.min(2 * wait, BACKUP_MS))
-          if (this.every === 0) setTimeout(() => this.drainSessions([session]), wait)
+          const failures = (this.failures.get(session) ?? 0) + 1
+          this.failures.set(session, failures)
+          if (this.every === 0) setTimeout(() => this.drainSessions([session]), waitAfter(failures))
           this.uploaded(session, { error })
         },
       )
@@ -375,12 +375,14 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   }
   // Each move this program ran since it started, by its whole session id, which its session and `anyhost move` follow.
   const moves = new Map<string, Moving>()
+  // a move as /claims and /move answer it
+  const shownMove = ({ to, step, line }: Moving): Pick<Moving, 'to' | 'step' | 'line'> => ({ to, step, line })
   // What a prompt waits for: this machine's own record of who holds the session, which the relay's `released` and each
   // upload keep, so the answer never waits on the relay, and the move of it this program runs or ran. `untold` names,
   // once, the machine this machine took the session from while that machine had no connection to the relay.
   const holderOf = (session: string): { machine?: string; problem?: string; untold?: string; move?: Pick<Moving, 'to' | 'step' | 'line'> } => {
     const moving = moves.get(session)
-    const move = moving === undefined ? {} : { move: { to: moving.to, step: moving.step, line: moving.line } }
+    const move = moving === undefined ? {} : { move: shownMove(moving) }
     const { state } = relay
     if (state.is === 'refused' || state.is === 'outdated') return { problem: state.message, ...move }
     const holder = journalOf(capture.db, session)?.holder ?? ''
@@ -442,17 +444,14 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       case '/machines/remove':
         if (id === device.id) return failed(400, `${device.name} is this machine. Remove it from another machine's /machines.`)
         return await throughRelay(() => removeMachine(relay, id))
-      case '/move': {
-        const moving = await move(capture, session, machine, mover).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
-        if (moving instanceof Error) return failed(400, moving)
-        return Response.json({ session: moving.session, to: moving.to, step: moving.step, line: moving.line })
-      }
-      case '/move/keep': {
-        const moving = moves.get(session)
-        if (moving?.step !== 'moving') return failed(400, `No move of ${session} waits for its machine.`)
-        moving.keep()
+      case '/move':
+        return await move(capture, session, machine, mover).then(
+          (moving) => Response.json({ session: moving.session, ...shownMove(moving) }),
+          (error: unknown) => failed(400, error),
+        )
+      case '/move/keep':
+        if (moves.get(session)?.keep() !== true) return failed(400, `No move of ${session} can keep it here now: none runs, or its machine answered already.`)
         return Response.json({})
-      }
       default:
         return new Response(`anyhost takes no ${pathname}.`, { status: 404 })
     }
@@ -480,7 +479,9 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   }
   // `cleared` runs at the next screen Claude Code clears, while a redraw waits for it. `wasRecorded` says Claude Code's
   // record said the session runs since this program showed it, as a stopped one it opens has none at first.
-  type Shown = { terminal: AttachedTerminal; size: Size; isAlternateScreen: boolean; state: SessionState; wasRecorded: boolean; cleared?: (() => void) | undefined }
+  // `recordCheck` answers whether the session runs, from Claude Code's records followed for a while, and is the one
+  // check of the session that runs, which every end of its attach and every change of the records shares.
+  type Shown = { terminal: AttachedTerminal; size: Size; isAlternateScreen: boolean; state: SessionState; wasRecorded: boolean; cleared?: (() => void) | undefined; recordCheck?: Promise<boolean> | undefined }
   const viewers = new Map<number, Viewer>()
   const shown = new Map<string, Promise<Shown>>()
   // Every `claude attach` this program runs. Bun's terminal gives them no controlling terminal, so no hangup ends them
@@ -499,10 +500,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   // Whether Claude Code runs the session here: its record says so now, or again within RESPAWN_MS, as Claude Code
   // respawns a session whose process crashed or that it killed.
   const keepsRunning = (session: string): Promise<boolean> =>
-    whenSessions(roots.claudeHome, (sessions) => (sessions.some((entry) => entry.sessionId === session) ? true : undefined), RESPAWN_MS, '').then(
-      () => true,
-      () => false,
-    )
+    whenSessions(roots.claudeHome, (sessions) => sessions.some((entry) => entry.sessionId === session) || undefined, RESPAWN_MS).then((found) => found === true)
+  // The record check of a shown session that runs already, or `check` as the new one.
+  const checkRecord = (view: Shown, check: () => Promise<boolean>): Promise<boolean> =>
+    (view.recordCheck ??= check().finally(() => (view.recordCheck = undefined)))
   const throughRelayTo = (stream: number, offer: DirectOffer): Carrier => ({
     attached: () => void relay.send({ t: 'attached', stream, ...offer }),
     link: { send: (frame) => void relay.send(encodeStream(stream, frame)) },
@@ -531,7 +532,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     flushOutput(viewer)
     viewer.stream.write('output', bytes)
   }
-  const endViewers = (session: string, exit: Exit): void => {
+  // The one end of showing a session, after its `claude attach` ended or before it closes: every viewer gets `exit`.
+  const stopShowing = (session: string, exit: Exit): void => {
+    shown.delete(session)
+    console.error(`${new Date().toISOString()} ${exit.message}`)
     for (const viewer of viewersOf(session)) {
       flushOutput(viewer)
       viewer.stream.write('exit', exit)
@@ -565,19 +569,13 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     view.cleared = back
     view.terminal.resize(view.size.cols, view.size.rows - 1)
   }
-  // The id `claude attach` takes for a session this machine holds, and the folder it runs in. A background session
-  // Claude Code ran here, running or stopped, opens with `claude attach`, which starts a stopped one again under its own
-  // id, as `claude --bg --resume` would start a copy of it under a new one. Any other starts in Claude Code's
-  // background, in the folder this machine knows it in.
+  // The id `claude attach` takes for a session this machine holds, and the folder it runs in, as `backgroundJobOf`
+  // answers it, starting it in Claude Code's background in the folder this machine knows it in when Claude Code keeps no
+  // job of it.
   const runHere = async (session: string): Promise<{ readonly id: string; readonly cwd: string }> => {
     const holder = journalOf(capture.db, session)?.holder ?? ''
     if (holder !== '') throw new Error(`The session ${session} continues on ${holder}.`)
-    const kept = (await keptSessions()).find((entry) => entry.sessionId === session)
-    if (kept?.kind === 'interactive') throw new Error(`${device.name} runs the session ${session} in a terminal of its own, so only that terminal shows it.`)
-    if (kept?.id !== undefined) return { id: kept.id, cwd: kept.cwd }
-    const cwd = capture.db.query<{ cwd: string }, [string]>('select cwd from sessions where id = ?').get(session)?.cwd ?? ''
-    if (cwd === '') throw new Error(`${device.name} knows no folder of the session ${session}, so it cannot start it.`)
-    return { id: await startInBackground(session, cwd, await environment), cwd }
+    return await backgroundJobOf(session, workingFolderOf(capture.db, session), await environment, device.name)
   }
   const startShowing = (session: string, size: Size): Promise<Shown> => {
     // the output's last bytes, in which a sequence the next read ends can begin
@@ -623,25 +621,21 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       const current = await view
       const isGone = (sessions: readonly RunningSession[]): true | undefined => (sessions.some((entry) => entry.sessionId === session) ? undefined : true)
       const isRecorded = async (): Promise<boolean> => isGone(await recordedSessions(roots.claudeHome)) === undefined
-      const isRunning = signal === null ? await keepsRunning(session) : await whenSessions(roots.claudeHome, isGone, STOPPING_MS, '').then(() => false, isRecorded)
+      const stopping = async (): Promise<boolean> => (await whenSessions(roots.claudeHome, isGone, STOPPING_MS)) === undefined && (await isRecorded())
+      const isRunning = await checkRecord(current, signal === null ? () => keepsRunning(session) : stopping)
       if (!isCurrent()) return
-      const stop = (message: string, code: number): void => {
-        shown.delete(session)
-        console.error(`${new Date().toISOString()} ${message}`)
-        endViewers(session, { code, message })
-      }
       quickEnds = lived < QUICK_END_MS ? quickEnds + 1 : 0
       if (isRunning && quickEnds < QUICK_ENDS) {
         console.error(`${new Date().toISOString()} claude attach ${id} ended${signal === null ? '' : ` by ${signal}`} while ${session} runs, so anyhost starts it again for its viewers.`)
         const terminal = await open(id, cwd, await environment, current.size).catch((error: unknown) => new Error(`anyhost could not start claude attach ${id} again: ${error instanceof Error ? error.message : String(error)}`))
-        if (terminal instanceof Error) return isCurrent() ? stop(terminal.message, 1) : undefined
+        if (terminal instanceof Error) return isCurrent() ? stopShowing(session, { code: 1, message: terminal.message }) : undefined
         // the viewers left meanwhile
         if (!isCurrent()) return terminal.close()
         Object.assign(current, { isAlternateScreen: false, terminal })
         tail = Buffer.alloc(0)
         return
       }
-      stop(isRunning ? `claude attach ${id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.` : stoppedOn(session), isRunning ? 1 : 0)
+      stopShowing(session, isRunning ? { code: 1, message: `claude attach ${id} ended ${QUICK_ENDS} times within ${QUICK_END_MS / 1000} s of its start, so ${device.name} stops showing ${session}.` } : { code: 0, message: stoppedOn(session) })
     }
     const view = (async (): Promise<Shown> => {
       const { id, cwd } = await runHere(session)
@@ -770,14 +764,14 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     }
   }
   // A session whose record is gone ends its `claude attach` and its viewers, unless the record comes back within
-  // RESPAWN_MS, as Claude Code writes it again when it respawns the session.
+  // RESPAWN_MS, as Claude Code writes it again when it respawns the session. A record check that runs already, this
+  // one's or the one an end of the attach started, decides alone.
   const stoppedRunning = async (session: string, showing: Promise<Shown>, view: Shown): Promise<void> => {
-    if (await keepsRunning(session)) return
-    if (shown.get(session) !== showing) return
-    shown.delete(session)
+    if (view.recordCheck !== undefined) return
+    console.error(`${new Date().toISOString()} Claude Code's record of ${session} is gone, so ${device.name} waits ${RESPAWN_MS / 1000} s for Claude Code to write it again, as it does when it respawns a session.`)
+    if ((await checkRecord(view, () => keepsRunning(session))) || shown.get(session) !== showing) return
+    stopShowing(session, { code: 0, message: stoppedOn(session) })
     view.terminal.close()
-    console.error(`${new Date().toISOString()} ${stoppedOn(session)}`)
-    endViewers(session, { code: 0, message: stoppedOn(session) })
   }
   // The session moved to `to` and stops here: each viewer hears where it went, and attaches to it there, before its
   // `claude attach` here closes, so none of them sees it end.

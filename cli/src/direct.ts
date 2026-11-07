@@ -57,10 +57,10 @@ export type DirectListener = {
   release(stream: number): void
   close(): void
 }
-export type Direction = 'viewer to host' | 'host to viewer'
+type Direction = 'viewer to host' | 'host to viewer'
 // One direction of a connection: `seal` frames one, with its length before it, and `open` takes a sealed frame without
 // its length, in the order sealed, and throws at one that does not open.
-export type Cipher = { seal(frame: Uint8Array): Buffer; open(sealed: Uint8Array): Buffer }
+type Cipher = { seal(frame: Uint8Array): Buffer; open(sealed: Uint8Array): Buffer }
 
 // macOS refused a dial to the local network that its own programs make, as it does while the terminal app that started
 // this process has no Local Network access (worker-spec W6).
@@ -192,7 +192,7 @@ async function portIn(folder: string): Promise<number> {
   const file = Bun.file(join(folder, 'direct.json'))
   if (await file.exists()) {
     const { port } = (await file.json()) as { port?: unknown }
-    if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`${file.name} names no port in port.`)
+    if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`${file.name} names no port: its port is ${JSON.stringify(port)}, not a whole number from 1 to 65535.`)
     return port
   }
   const free = createServer()
@@ -307,49 +307,54 @@ async function isLocalNetworkRefusal(address: string, port: number, code: string
   return (await nc.exited) === 0
 }
 
-// The viewer's side: dials every address the host offered, Tailscale's first, DIAL_APART_MS apart, and answers the link
-// of the first whose hello opens, closing the others. Each address gets SILENCE_MS to answer.
-export function dialDirect(offer: DirectOffer, stream: number, key: string, receive: (frame: Uint8Array) => void): Promise<DirectLink> {
+// The viewer's side: dials every address the host offered, Tailscale's first, DIAL_APART_MS apart, and sends its hello
+// on the first connection whose host answers with its salt, closing the others, so the host links one connection of
+// the dial, the one this side keeps. It answers that link once the host's hello comes back, within SILENCE_MS of its
+// dial. It answers undefined when no address answered, as on a network with no route to the host, and rejects with
+// LocalNetworkRefused when macOS refused this process the local network.
+export function dialDirect(offer: DirectOffer, stream: number, key: string, receive: (frame: Uint8Array) => void): Promise<DirectLink | undefined> {
   const secret = Buffer.from(key, 'base64')
   const addresses = [...offer.addresses.filter(isTailscale), ...offer.addresses.filter((address) => !isTailscale(address))]
-  if (addresses.length === 0) return Promise.reject(new Error('The host offers no address to reach it at directly.'))
   return new Promise((resolve, reject) => {
-    const failures: { readonly address: string; readonly why: string; readonly code: string | undefined }[] = []
+    // the error code of each address that answered no salt
+    const failures: { readonly address: string; readonly code: string | undefined }[] = []
     const sockets = new Set<Socket>()
-    let isWon = false
-    const failed = (address: string, why: string, code: string | undefined): void => {
-      failures.push({ address, why, code })
-      if (isWon || failures.length < addresses.length) return
+    let chosen: Socket | undefined
+    const failed = (address: string, code: string | undefined): void => {
+      failures.push({ address, code })
+      if (chosen !== undefined || failures.length < addresses.length) return
       void (async () => {
         for (const failure of failures) {
           if (await isLocalNetworkRefusal(failure.address, offer.port, failure.code)) {
             return reject(new LocalNetworkRefused(`macOS refused anyhost attach a connection to ${at(failure.address, offer.port)} with ${failure.code}, while /usr/bin/nc reaches it, so the terminal app anyhost attach runs in has no Local Network access.`))
           }
         }
-        reject(new Error(`No address of the host answered: ${failures.map((failure) => `${at(failure.address, offer.port)} ${failure.why}`).join(', ')}.`))
+        resolve(undefined)
       })()
     }
     const dial = (address: string): void => {
-      if (isWon) return
+      if (chosen !== undefined) return
       const viewerSalt = randomBytes(SALT_BYTES)
-      // both directions' ciphers, once the host's salt came
-      let seal: Cipher | undefined
-      let open: Cipher | undefined
+      // both directions' ciphers, from the host's salt on
+      let seal: Cipher
+      let open: Cipher
       const socket = connect({ host: address, port: offer.port })
       sockets.add(socket)
       let isOver = false
-      const fail = (why: string, code?: string): void => {
+      const fail = (code?: string): void => {
         if (isOver) return
         isOver = true
         clearTimeout(late)
         sockets.delete(socket)
         socket.destroy()
-        failed(address, why, code)
+        // the connection this side sent its hello on ends the dial
+        if (socket === chosen) resolve(undefined)
+        else failed(address, code)
       }
-      const late = setTimeout(() => fail(`answered no hello within ${SILENCE_MS / 1000} s`), SILENCE_MS)
+      const late = setTimeout(() => fail(), SILENCE_MS)
       socket.setNoDelay(true)
-      socket.on('error', (error: NodeJS.ErrnoException) => fail(error.message, error.code))
-      socket.on('close', () => fail('closed the connection'))
+      socket.on('error', (error: NodeJS.ErrnoException) => fail(error.code))
+      socket.on('close', () => fail())
       socket.on('connect', () => {
         const opening = Buffer.alloc(OPENING_BYTES)
         opening.writeUInt32BE(stream)
@@ -361,31 +366,27 @@ export function dialDirect(offer: DirectOffer, stream: number, key: string, rece
         socket,
         SALT_BYTES,
         () => (heard === undefined ? TAG_BYTES : MAX_SEALED_BYTES),
-        // the host's salt: this side's hello, sealed under the keys both salts give, proves it holds the stream's key
+        // The host's salt: this side's hello, sealed under the keys both salts give, proves it holds the stream's key.
+        // The host links each connection whose hello opens, the last in place of the one before, so only one gets it.
         (hostSalt) => {
+          if (chosen !== undefined) return false
+          chosen = socket
+          for (const other of sockets) if (other !== socket) other.destroy()
           seal = cipherOf(secret, stream, viewerSalt, hostSalt, 'viewer to host')
           open = cipherOf(secret, stream, viewerSalt, hostSalt, 'host to viewer')
           socket.write(seal.seal(EMPTY))
           return true
         },
+        // the host's hello, empty, which opens under the stream's key
         (body) => {
           if (heard !== undefined) return heard(body)
-          if (seal === undefined || open === undefined) return false
           try {
-            if (open.open(body).length > 0) throw new Error('a hello is empty')
+            if (open.open(body).length > 0) return false
           } catch {
-            fail('answered under another key')
             return false
           }
-          if (isWon) {
-            fail('answered after another address')
-            return false
-          }
-          isWon = true
           isOver = true
           clearTimeout(late)
-          for (const other of sockets) if (other !== socket) other.destroy()
-          sockets.clear()
           const linked = linkOn(socket, address, seal, open, receive)
           heard = linked.heard
           resolve(linked.link)
