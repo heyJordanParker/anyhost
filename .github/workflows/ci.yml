@@ -13,7 +13,11 @@ concurrency:
 
 jobs:
   check:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
@@ -33,6 +37,13 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install -g @cmodjs/cli
 
+      - name: Start the user's systemd, which runs each claude --bg and claude attach in a scope on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          timeout 30 bash -c 'until [ -S "/run/user/$(id -u)/bus" ]; do sleep 1; done'
+
       - name: Install the packages of the mod, the program and the relay
         run: |
           bun install --frozen-lockfile
@@ -50,8 +61,37 @@ jobs:
       - name: Check and test the mod
         run: cmod check .
 
+  # A release goes out only once the Mac and Linux both passed.
+  release:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Install Claude Code and cmod, which publish the mod
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          npm install -g @cmodjs/cli
+
+      - name: Install the packages of the mod, the program and the relay
+        run: |
+          bun install --frozen-lockfile
+          bun install --cwd cli --frozen-lockfile
+          bun install --cwd relay --frozen-lockfile
+
       - name: Release the version when it is new
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           version=$(node -p "require('./.claude-plugin/plugin.json').version")
           tag="v$version"
