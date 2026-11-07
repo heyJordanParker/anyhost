@@ -23,6 +23,13 @@ export const CLOSE_UNKNOWN_TOKEN = 4401
 export const CLOSE_REMOVED = 4403
 export const CLOSE_DEVICE_LIVE = 4409
 
+// The close reason of a removed machine's sockets, and the refusal its requests and its program show.
+export const REMOVED_REASON = 'This machine was removed from your machines.'
+export const REMOVED_MESSAGE = `${REMOVED_REASON} Join it again with a link from Add a machine.`
+
+// The device token of an Authorization header, `Bearer <token>`, or '' without one.
+export const tokenOf = (authorization: string | null): string => authorization?.replace(/^Bearer /, '') ?? ''
+
 export type ErrorCode =
   | 'invalid'
   | 'unknown_token'
@@ -56,13 +63,17 @@ export type Joined = Health & { readonly token: string; readonly device: DeviceR
 // `none` is create-only, `match` an etag as R2 answers it, unquoted.
 export type Condition = { readonly none: '*' } | { readonly match: string }
 
+// A condition as the HTTP headers that carry it, which a PUT of an object sends and the R2 binding's `onlyIf` takes.
+export const conditionHeaders = (condition: Condition): Record<string, string> => ('none' in condition ? { 'if-none-match': '*' } : { 'if-match': `"${condition.match}"` })
+
+// `claims` with a `prefix` answers only the sessions whose id begins with it.
 export type Op =
   | { readonly op: 'get'; readonly key: string }
   | { readonly op: 'put'; readonly key: string; readonly size: number; readonly if?: Condition; readonly holder?: string }
   | { readonly op: 'list'; readonly prefix: string; readonly cursor?: string }
   | { readonly op: 'delete'; readonly keys: readonly string[] }
   | { readonly op: 'claim'; readonly session: string; readonly take: boolean }
-  | { readonly op: 'claims' }
+  | { readonly op: 'claims'; readonly prefix?: string }
   | { readonly op: 'devices' }
   | { readonly op: 'invite' }
   | { readonly op: 'remove'; readonly device: string }
@@ -70,21 +81,21 @@ export type Op =
 export type Listed = { readonly key: string; readonly size: number; readonly modified: string }
 export type Claim = DeviceRef & { readonly at: string }
 
-// Each op's answer, in the position of its op. A `get` answered 200 carries `size` bytes in the answer's bytes.
-export type Result =
-  | { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string }
-  | { readonly status: 200; readonly etag: string }
-  | { readonly status: 200; readonly objects: readonly Listed[]; readonly cursor?: string }
-  | { readonly status: 200; readonly previous?: DeviceRef; readonly told: boolean }
-  | { readonly status: 200; readonly claims: Readonly<Record<string, Claim>> }
-  | { readonly status: 200; readonly devices: readonly Device[] }
-  | { readonly status: 200; readonly link: string; readonly expiresAt: string }
-  | { readonly status: 200 }
-  | { readonly status: 404 }
-  | { readonly status: 412; readonly etag?: string }
-  | { readonly status: 409; readonly holder: DeviceRef }
-  | { readonly status: 413; readonly size: number; readonly etag: string }
-  | ({ readonly status: 400 | 404 | 500 } & Refusal)
+// What each op answers, by the op. A `get` answered 200 carries `size` bytes in the answer's bytes, and one the answer
+// has no room for answers 413.
+export type Results = {
+  readonly get: { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
+  readonly put: { readonly status: 200; readonly etag: string } | { readonly status: 412; readonly etag?: string } | { readonly status: 409; readonly holder: DeviceRef }
+  readonly list: { readonly status: 200; readonly objects: readonly Listed[]; readonly cursor?: string }
+  readonly delete: { readonly status: 200 }
+  readonly claim: { readonly status: 200; readonly previous?: DeviceRef; readonly told: boolean } | { readonly status: 409; readonly holder: DeviceRef }
+  readonly claims: { readonly status: 200; readonly claims: Readonly<Record<string, Claim>> }
+  readonly devices: { readonly status: 200; readonly devices: readonly Device[] }
+  readonly invite: { readonly status: 200; readonly link: string; readonly expiresAt: string }
+  readonly remove: { readonly status: 200 }
+}
+// Each op's answer, in the position of its op: its op's result, or the refusal of an op the relay could not run.
+export type Result = Results[Op['op']] | ({ readonly status: 400 | 404 | 500 } & Refusal)
 
 export type Request = { readonly id: number; readonly ops: readonly Op[] }
 // A request the Pool refuses whole, as one over MAX_OPS, answers `error` instead of `results`.

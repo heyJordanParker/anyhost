@@ -12,7 +12,8 @@ const HEALTH_MS = 10_000
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
-// This machine joined a relay, and that relay answers the protocol this program speaks.
+// This machine joined a relay, and that relay answers the protocol this program speaks, read here only while no
+// program answers, as a running program's relay state says it already.
 async function relayChecks(): Promise<Check[]> {
   const login = await relayLogin().catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
   if (login instanceof Error) return [{ problem: `anyhost cannot read which relay this machine joined: ${login.message}`, fix: JOIN }]
@@ -34,17 +35,14 @@ async function deviceCheck(): Promise<Check> {
   return { ok: `This machine is ${device.name}, ${device.id}.` }
 }
 
-async function programChecks(): Promise<Check[]> {
-  const address = serveSocket()
-  const status = await fetch('http://localhost/status', { unix: address, signal: AbortSignal.timeout(3000) })
-    .then(async (response) => (await response.json()) as Status)
-    .catch(() => undefined)
+// The program's own checks, and its relay's from its /status, one line per cause.
+function programChecks(address: string, status: Status | undefined): Check[] {
   if (status === undefined) return [{ problem: `The anyhost program does not answer at ${address}.`, fix: START_CLAUDE }]
-  const { state, message, bucket } = status.relay
+  const { url, state, message, bucket } = status.relay
   const connection: Check =
     state === 'connected'
       ? {
-          ok: `The anyhost program runs at ${address}: it uploads to ${bucket} ${status.uploadEvery === 0 ? 'every write' : `every ${status.uploadEvery} seconds`}, its last upload was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.`,
+          ok: `The anyhost program runs at ${address}: it uploads to ${bucket} through the relay at ${url} ${status.uploadEvery === 0 ? 'every write' : `every ${status.uploadEvery} seconds`}, its last upload was at ${status.capturedAt || 'none yet'}, and ${status.pending} files wait for the next one.`,
         }
       : state === 'connecting'
         ? { wait: `The anyhost program at ${address} connects to the relay, and ${status.pending} files wait for it.` }
@@ -69,7 +67,11 @@ async function programChecks(): Promise<Check[]> {
 }
 
 export async function doctor(): Promise<number> {
-  const checks = [...(await relayChecks()), await deviceCheck(), ...(await programChecks())]
+  const address = serveSocket()
+  const status = await fetch('http://localhost/status', { unix: address, signal: AbortSignal.timeout(3000) })
+    .then(async (response) => (await response.json()) as Status)
+    .catch(() => undefined)
+  const checks = [...(status === undefined ? await relayChecks() : []), await deviceCheck(), ...programChecks(address, status)]
   for (const check of checks) console.log('ok' in check ? `✔ ${check.ok}` : 'wait' in check ? `… ${check.wait}` : `✘ ${check.problem}\n  ${check.fix}`)
   return checks.some((check) => 'problem' in check) ? 1 : 0
 }

@@ -4,10 +4,10 @@ import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { encodeStream, streamOf, type Routed } from '../../relay/protocol.ts'
 import { attachTerminal, backgroundJobOf, personEnvironment, recordedSessions, whenSessions, type AttachedTerminal, type RunningSession } from './background.ts'
-import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, workingFolderOf, writeIndex, type Problems } from './capture.ts'
+import { changedFiles, countedBucket, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, workingFolderOf, writeIndex, type Changed, type Problems } from './capture.ts'
 import { claimsOf } from './claims.ts'
-import { connectForStep, join as joinRelay, joinWithOption, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
-import { forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
+import { connectForStep, join as joinRelay, updateRelay, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
+import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { listenDirect, type DirectLink, type DirectOffer } from './direct.ts'
 import { move, receiveMove, receiveStart, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, waitAfter, type RelayState } from './relay.ts'
@@ -54,6 +54,8 @@ const STOPPING_MS = 3000
 const RESPAWN_MS = 10_000
 // A running program answers /status in milliseconds over its socket.
 const RUNNING_MS = 2000
+// What the program's 404 names, every route it serves.
+const ROUTES = 'anyhost serves GET /status, /machines and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/invite, /machines/remove, /move and /move/keep, and a WebSocket at /attach'
 // A redraw repaints the screen and sets every terminal mode again but the alternate screen.
 const ALTERNATE_SCREEN = '\x1b[?1049h'
 const MAIN_SCREEN = '\x1b[?1049l'
@@ -97,8 +99,10 @@ export type Status = {
   // the Connect Cloudflare the mod's Step started, while the program runs
   readonly connecting?: Connecting
 }
-type Queued = { readonly tool: Tool; readonly paths: ReadonlySet<string> }
-type Upload = (sessions: ReadonlyMap<string, Queued>) => ReadonlyMap<string, Promise<Set<string>>>
+// The answer to POST /join: the address of the relay this machine joined.
+export type JoinedRelay = { readonly url: string }
+// A drain's upload of the sessions, which answers each one with its paths left for the next drain.
+type Upload = (sessions: readonly Changed[]) => readonly (readonly [Changed, Promise<Set<string>>])[]
 
 // The upload queue: one per machine, filled on every write the watcher names, and drained every `every` seconds, or on
 // every write at 0. A drain uploads every queued session once, in one upload, with everything written since its last
@@ -176,18 +180,18 @@ export class UploadQueue {
 
   private drainSessions(sessions: readonly string[]): void {
     if (!this.isReady()) return
-    const drained = new Map<string, { tool: Tool; paths: Set<string> }>()
+    const drained: Changed[] = []
     for (const session of sessions) {
       const queued = this.queued.get(session)
       if (queued === undefined || this.uploading.has(session)) continue
       this.queued.delete(session)
       this.uploading.add(session)
-      drained.set(session, queued)
+      drained.push({ session, ...queued })
     }
-    if (drained.size === 0) return
-    const uploads = this.upload(drained)
-    for (const [session, queued] of drained) {
-      ;(uploads.get(session) ?? Promise.reject(new Error(`The drain uploaded nothing of the session ${session}.`))).then(
+    if (drained.length === 0) return
+    for (const [queued, upload] of this.upload(drained)) {
+      const { session } = queued
+      upload.then(
         (left) => {
           this.uploading.delete(session)
           this.failures.delete(session)
@@ -230,7 +234,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   const roots = rootsHere()
   const relay = connectRelay({ login: relayLogin, forget: forgetRelayLogin, device, roots, isPatient: true })
   const db = openDatabase()
-  const counted = countedBucket(db)
+  // the bucket the database counts, which each welcome names from then on
+  let counted = countedBucket(db)
   // a session's code that captureCode read after an upload goes up in the session's next drains
   const capture = openCapture(relay, device, roots, db, undefined, (session, tool, folder) => queue.add(session, tool, `${folder}/`))
   const heartbeat = join(stateFolder(), 'heartbeat')
@@ -239,7 +244,6 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   let shellProblem: string | undefined
   let localNetworkProblem: string | undefined
   let capturedAt = ''
-  let lastIndex = ''
   // when the backup last statted every file of every session, which the program's start has not yet
   let sweptAllAt = 0
   // the person's `checkouts` option, read with the others, where a session moved or started here clones its repository
@@ -265,27 +269,27 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   const queue = new UploadQueue(
     uploadEveryOf(undefined),
     (sessions) =>
-      new Map(
-        [...uploadSessions(capture, sessions, problems, queue.uploadEvery === 0)].map(([session, upload]) => [
-          session,
-          upload.then((left) => {
-            problems.clear(`upload ${session}`)
-            capturedAt = new Date().toISOString()
-            return left
-          }),
-        ]),
-      ),
+      uploadSessions(capture, sessions, problems, queue.uploadEvery === 0).map(([changed, upload]) => [
+        changed,
+        upload.then((left) => {
+          problems.clear(`upload ${changed.session}`)
+          capturedAt = new Date().toISOString()
+          return left
+        }),
+      ]),
     (session, error) => problems.set(`upload ${session}`, error),
     () => relay.state.is === 'connected',
   )
   // The welcome's sessions another machine took are in the database by now, so the queue drains what waited for the
   // relay. The database counts what one bucket holds, so a relay of another bucket takes a new start, which the
-  // service gives the program.
+  // service gives the program. A machine the relay welcomes is joined, so a join that failed before is no problem now.
   relay.on('welcome', ({ bucket }) => {
     if (counted !== undefined && bucket !== counted) {
       console.error(`${new Date().toISOString()} The relay keeps sessions in ${bucket} now, not ${counted}, so anyhost exits, and its service starts it again on that bucket.`)
       process.exit(0)
     }
+    counted = bucket
+    problems.clear('join')
     queue.drain()
   })
   const heard = (path: string): void => {
@@ -330,7 +334,8 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
   }
   let connecting: ConnectRun | undefined
   // A relay older than this program is updated once a run, with this machine's cf login, which only a person may
-  // refresh. Without a usable login the mod's Step shows Connect Cloudflare.
+  // refresh. Without a usable login the mod's Step shows Connect Cloudflare. The update's calls and its wait for the
+  // relay to answer steadily take minutes at worst, so the backup goes on without it.
   let isUpdateTried = false
   const keepRelayCurrent = async (): Promise<void> => {
     if (relay.state.is !== 'outdated' || isUpdateTried) return
@@ -355,10 +360,19 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       queue.uploadEvery = uploadEveryOf(uploadEvery)
       checkouts = chosen ?? ''
       if (link === undefined || link === '') return
+      // The link `cmod install … --option join=<link>` set joins once, and the option empties whether it joined or
+      // not, so a refused or expired invite is not tried again and the next machine's command needs nothing else. A
+      // join that failed stays a problem until the machine joins, and a machine the relay welcomes is joined already,
+      // so its failure is only logged.
       await settle('join', async () => {
-        await joinWithOption(link)
+        try {
+          await joinRelay(link)
+        } finally {
+          await cmod(['option', 'anyhost', 'join', ''])
+        }
         joined()
       })
+      if (relay.state.is === 'connected') problems.clear('join')
     })
     // the queue keeps what the sweep finds until the relay welcomes this machine
     await settle('backup', async () => {
@@ -367,10 +381,10 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       queueFiles(await changedFiles(capture, isAll ? 0 : started - QUIET_MS))
       if (isAll) sweptAllAt = started
     })
-    await keepRelayCurrent()
+    void keepRelayCurrent()
     if (relay.state.is !== 'connected') return
     if (queue.uploadEvery === 0) queue.drain()
-    await settle('index', async () => void (lastIndex = await writeIndex(capture, lastIndex)))
+    await settle('index', () => writeIndex(capture))
     queueFiles(await sealQuiet(capture, problems))
   }
   // Each move this program ran since it started, by its whole session id, which its session and `anyhost move` follow.
@@ -437,7 +451,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       case '/join': {
         const url = await joinRelay(link)
         joined()
-        return Response.json({ url })
+        return Response.json({ url } satisfies JoinedRelay)
       }
       case '/machines/invite':
         return await throughRelay(() => inviteMachine(relay))
@@ -453,7 +467,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
         if (moves.get(session)?.keep() !== true) return failed(400, `No move of ${session} can keep it here now: none runs, or its machine answered already.`)
         return Response.json({})
       default:
-        return new Response(`anyhost takes no ${pathname}.`, { status: 404 })
+        return failed(404, `${ROUTES}, not POST ${pathname}.`)
     }
   }
 
@@ -826,12 +840,12 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
     const { state } = relay
     if (state.is === 'connecting' || state.is === 'offline') return await unanswered(offline)
     if (state.is !== 'connected') return await unanswered({ t: 'invalid', message: state.message })
-    const claims = await claimsOf(relay).catch(() => undefined)
+    const claims = await claimsOf(relay, asked.session).catch(() => undefined)
     // an `anyhost attach` that ended meanwhile attaches nothing
     if (legs.get(stream) !== leg) return
     if (claims === undefined) return await unanswered(offline)
     const exact = claims.get(asked.session)
-    const matches = exact === undefined ? [...claims].filter(([session]) => session.startsWith(asked.session)) : [[asked.session, exact] as const]
+    const matches = exact === undefined ? [...claims] : [[asked.session, exact] as const]
     const [found, ...more] = matches
     if (found === undefined || more.length > 0) {
       const message = found === undefined ? `No machine holds the session ${asked.session}. anyhost list shows every session.` : `${matches.length} sessions' ids begin with ${asked.session}. Give more of it.`
@@ -880,7 +894,7 @@ export async function serve(device: Device, names?: RelayNames): Promise<void> {
       if (request.method === 'GET' && pathname === '/machines') return await throughRelay(async () => ({ here: device.id, machines: await machinesOf(relay) }))
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]
       if (request.method === 'GET' && claim !== undefined) return Response.json(holderOf(claim))
-      if (request.method !== 'POST') return failed(404, `anyhost serves GET /status, /claims/<session> and /machines, POST /connect, /join, /machines and /move, and a WebSocket at /attach, not ${request.method} ${pathname}.`)
+      if (request.method !== 'POST') return failed(404, `${ROUTES}, not ${request.method} ${pathname}.`)
       const body = await request.json().catch((error: unknown) => new Error(`anyhost takes a JSON object at POST ${pathname}, and this body is none: ${error instanceof Error ? error.message : String(error)}`))
       if (body instanceof Error) return failed(400, body)
       return await act(pathname, body as Asked)

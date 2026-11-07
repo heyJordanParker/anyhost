@@ -11,11 +11,14 @@ import {
   MAX_MESSAGE_BYTES,
   PROTOCOL_VERSION,
   RELAY_VERSION,
+  REMOVED_MESSAGE,
+  REMOVED_REASON,
   REQUEST,
   STREAM,
   decodeMessage,
   encodeMessage,
   streamOf,
+  tokenOf,
   type Condition,
   type DeviceRef,
   type Op,
@@ -40,7 +43,9 @@ type Socket = ServerWebSocket<{ readonly device: string; readonly name: string; 
 // the machines, the claims and the messages waiting for an offline machine in memory, and messages and attach streams
 // routed between machines as the Pool routes them. `refuse` fails the ops it names
 // as R2 would, `delayMs` answers each request that much later, `stalled` holds every answer back, `dropAnswers` runs
-// that many requests and drops the socket instead of answering them, and `cutDownloads` breaks that many GETs.
+// that many requests and drops the socket instead of answering them, `unanswered` runs that many requests and never
+// answers them on a socket that stays open, `cutDownloads` breaks that many GETs, and `dailyLimited` answers that many
+// HTTP requests, a connect too, as Cloudflare answers a Worker past its daily requests.
 export type MemoryRelay = {
   readonly url: string
   readonly bucket: string
@@ -53,6 +58,8 @@ export type MemoryRelay = {
   delayMs: number
   stalled: boolean
   dropAnswers: number
+  unanswered: number
+  dailyLimited: number
   // GETs of an object that break after half its bytes, and the Range header of every GET
   cutDownloads: number
   readonly ranges: (string | null)[]
@@ -60,6 +67,7 @@ export type MemoryRelay = {
   mostAtOnce: number
   // an object put straight into the bucket, as another program's write
   put(key: string, body: Uint8Array): void
+  // a new token for the machine, which the Pool's join gives a machine that joins again too, refusing the one before
   join(device: Device, roots: MachineRoots): string
   // whether a socket of the machine is open
   isConnected(device: string): boolean
@@ -148,8 +156,10 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
         if (live.length === 0) waiting.set(held, [...(waiting.get(held) ?? []), released])
         return { status: 200, previous: refOf(held), told: live.length > 0 }
       }
-      case 'claims':
-        return { status: 200, claims: Object.fromEntries([...claims].map(([session, id]) => [session, { ...refOf(id), at: new Date().toISOString() }])) }
+      case 'claims': {
+        const asked = [...claims].filter(([session]) => session.startsWith(op.prefix ?? ''))
+        return { status: 200, claims: Object.fromEntries(asked.map(([session, id]) => [session, { ...refOf(id), at: new Date().toISOString() }])) }
+      }
       case 'devices':
         return {
           status: 200,
@@ -196,6 +206,10 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
         socket.terminate()
         return
       }
+      if (relay.unanswered > 0) {
+        relay.unanswered -= 1
+        return
+      }
       let room = MAX_MESSAGE_BYTES
       const parts: Uint8Array[] = []
       const results = done.map((result): Result => {
@@ -236,9 +250,9 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
   }
 
   async function object(request: globalThis.Request, key: string): Promise<Response> {
-    const device = deviceOf(request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '')
+    const device = deviceOf(tokenOf(request.headers.get('authorization')))
     if (device === undefined) return Response.json({ error: 'unknown_token', message: 'The relay knows no machine with this token.' }, { status: 401 })
-    if (device.removedAt !== undefined) return Response.json({ error: 'removed', message: 'This machine was removed from your machines.' }, { status: 403 })
+    if (device.removedAt !== undefined) return Response.json({ error: 'removed', message: REMOVED_MESSAGE }, { status: 403 })
     const there = objects.get(key)
     if (request.method === 'PUT') {
       const holder = request.headers.get('x-anyhost-holder')
@@ -267,19 +281,23 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
     hostname: '127.0.0.1',
     async fetch(request, server) {
       const { pathname } = new URL(request.url)
+      if (relay.dailyLimited > 0) {
+        relay.dailyLimited -= 1
+        return new Response('error code: 1027', { status: 429, headers: { 'content-type': 'text/plain' } })
+      }
       if (pathname === '/v1/health') return Response.json({ relay: RELAY_VERSION, protocol: PROTOCOL_VERSION, bucket })
       if (pathname.startsWith('/v1/objects/')) return await object(request, decodeURIComponent(pathname.slice('/v1/objects/'.length)))
       if (pathname !== '/v1/connect') return new Response('no route', { status: 404 })
       const name = request.headers.get('x-anyhost-name') ?? ''
       const roots = JSON.parse(request.headers.get('x-anyhost-roots') ?? 'null') as Roots | null
       if (roots === null) return Response.json({ error: 'invalid', message: 'A connect names its machine\'s roots as JSON in X-Anyhost-Roots.' }, { status: 400 })
-      const device = deviceOf(request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '')
+      const device = deviceOf(tokenOf(request.headers.get('authorization')))
       const live = device === undefined ? undefined : socketsOf(device.id).find((socket) => socket.data.name !== name)
       const refuse =
         device === undefined
           ? { code: CLOSE_UNKNOWN_TOKEN, reason: 'The relay knows no machine with this token.' }
           : device.removedAt !== undefined
-            ? { code: CLOSE_REMOVED, reason: 'This machine was removed from your machines.' }
+            ? { code: CLOSE_REMOVED, reason: REMOVED_REASON }
             : live !== undefined
               ? { code: CLOSE_DEVICE_LIVE, reason: `${live.data.name} is connected with this machine's id.` }
               : undefined
@@ -338,13 +356,13 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
     delayMs: 0,
     stalled: false,
     dropAnswers: 0,
+    unanswered: 0,
     cutDownloads: 0,
+    dailyLimited: 0,
     ranges: [],
     mostAtOnce: 0,
     put: (key, body) => void store(key, body),
     join(device, roots) {
-      const known = devices.get(device.id)
-      if (known !== undefined) return known.token
       const token = crypto.randomUUID()
       const now = new Date().toISOString()
       devices.set(device.id, { ...device, roots, token, joinedAt: now, seenAt: now })
@@ -354,10 +372,11 @@ export function memoryRelay(bucket = MEMORY): MemoryRelay {
     remove(id) {
       const device = devices.get(id)
       if (device !== undefined) device.removedAt = new Date().toISOString()
-      for (const socket of socketsOf(id)) socket.close(CLOSE_REMOVED, 'This machine was removed from your machines.')
+      for (const socket of socketsOf(id)) socket.close(CLOSE_REMOVED, REMOVED_REASON)
     },
+    // a client of the machine's token, which a machine joined before keeps
     connect(device, roots) {
-      const token = relay.join(device, roots)
+      const token = devices.get(device.id)?.token ?? relay.join(device, roots)
       const client = connectRelay({ login: async () => ({ url, token }), forget: async () => undefined, device, roots, isPatient: true })
       clients.push(client)
       return client

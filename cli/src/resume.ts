@@ -240,8 +240,8 @@ export async function openSession(session: ListedSession, cwd: string): Promise<
 export async function restore(capture: Capture, id: string, options: { take: boolean; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
   const { relay, db, roots } = capture
   const devices = await devicesOf(relay)
-  const [listed, indexes] = await Promise.all([listSessions(relay, devices), indexesOf(relay, devices.keys())])
-  const session = listed.find((entry) => entry.id === id)
+  const indexes = await indexesOf(relay, devices.keys())
+  const session = (await listSessions(relay, { devices, indexes })).find((entry) => entry.id === id)
   if (session === undefined) throw new Error(`No machine lists the session ${id}. anyhost list shows every session.`)
   // A session only the machine it started on wrote is that machine's by capture alone, so a resume takes it. Once
   // another machine resumed it, which lists it then, taking it needs --take.

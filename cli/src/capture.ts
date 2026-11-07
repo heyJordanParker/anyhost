@@ -14,7 +14,7 @@ import zlib from 'node:zlib'
 import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type Listed } from '../../relay/protocol.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type Device, type MachineRoots } from './device.ts'
-import type { Call, Ran, Relay } from './relay.ts'
+import type { Call, RanOf, Relay } from './relay.ts'
 import { codexNameOf, codexState, filesOf, linesFiles, namedIn, ownerOf, summarize, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
@@ -28,7 +28,7 @@ export const CODE_PIECES = 4
 // A session written within QUIET_MS is active: the backup checks its files every minute, and seals it once it is not.
 export const QUIET_MS = 10 * 60_000
 // The full sweep yields to the program's other work every SWEEP_BATCH files: a stat of the Architect's Mac's 40,898
-// captured files took 0.53 to 0.63 s, so a batch holds a prompt's check for about 15 ms.
+// captured files took 0.21 s of CPU in the program's thread, so a batch holds a prompt's check for about 5 ms.
 const SWEEP_BATCH = 1000
 // A seal that fetched 1110 frames at once held every connection the machine had, so every upload on it timed out
 // connecting once a minute. Requests of up to MAX_MESSAGE_BYTES of frames go at most this many ahead of the one read.
@@ -54,6 +54,7 @@ export type Code = { readonly captureCode: typeof captureCode; readonly restoreC
 // the files', so no drain waits on git. `codeRuns` holds the one `captureCode` running per session. A session in
 // `codeStale` changed while its code was read or went up, so its code is read again once that ends. `claimed` holds
 // the sessions this program claimed since it started, so a takeover tells this machine of each one it captures.
+// `lastIndex` is the index.json this program last put, which `writeIndex` puts again only once it changed.
 export type Capture = Code & {
   readonly relay: Relay
   readonly db: Database
@@ -67,6 +68,7 @@ export type Capture = Code & {
   // the working folders found missing, each logged once
   readonly missingFolders: Set<string>
   readonly onCode: (session: string, tool: Tool, folder: string) => void
+  lastIndex: string
 }
 export type Problems = { set(key: string, error: unknown): void; clear(key: string): void }
 // `after` is null on a deletion record: the file is gone from its writer's machine.
@@ -159,7 +161,7 @@ export function openCapture(
     for (const message of waiting) released(message)
   })
   relay.on('released', released)
-  return { ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), claimed: new Set(), missingFolders: new Set(), onCode }
+  return { ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), claimed: new Set(), missingFolders: new Set(), onCode, lastIndex: '' }
 }
 
 // A path that names a code part is no file on any machine: restore hands it to `restoreCode` instead of placing it.
@@ -245,7 +247,10 @@ export async function* chainOf(relay: Relay, frames: readonly Frame[], from: num
     const request = requestOf[index] ?? 0
     for (let ahead = request; ahead < Math.min(requests.length, request + REQUESTS_AHEAD); ahead += 1) void fetchRequest(ahead).catch(() => undefined)
     const fetched = await fetchRequest(request)
-    const bytes = decompress(fetched.get(frame.key) ?? new Uint8Array())
+    const frameBytes = fetched.get(frame.key)
+    // each frame's bytes are taken once, and a chain holds no frame twice
+    if (frameBytes === undefined) throw new Error(`The journal's chain holds ${frame.key} twice.`)
+    const bytes = decompress(frameBytes)
     fetched.delete(frame.key)
     if (frame.end !== undefined && frame.start + bytes.length !== frame.end) throw new Error(`${frame.key} holds ${bytes.length} bytes, not the ${frame.end - frame.start} its name says.`)
     yield { frame, bytes }
@@ -506,52 +511,51 @@ type Upload = {
   readonly left: Set<string>
 }
 
+// The paths of one session a drain reads.
+export type Changed = { readonly session: string; readonly tool: Tool; readonly paths: ReadonlySet<string> }
+// One frame of a drain: its position in the journal, its bytes, the records they hold, and the relay's answer to its put.
+type Put = { readonly start: number; readonly body: Uint8Array; readonly records: readonly Change[]; readonly put: Promise<RanOf<'put'>> }
+
 // A drain: every session's frames go up in one request, after each session read what its files gained, and a frame
 // over MAX_MESSAGE_BYTES goes by HTTP beside it, so it holds back no other frame. The first drain of a session since
 // the program started claims it in the same request, before its frames, so a takeover tells this machine. Answers
-// each session's paths left for the next drain.
-export function uploadSessions(
-  capture: Capture,
-  sessions: ReadonlyMap<string, { readonly tool: Tool; readonly paths: ReadonlySet<string> }>,
-  problems: Problems,
-  isEveryWrite = false,
-): Map<string, Promise<Set<string>>> {
-  const read = [...sessions].map(([session, { tool, paths }]) => [session, readUpload(capture, session, tool, paths, problems, isEveryWrite)] as const)
+// each session with its paths left for the next drain.
+export function uploadSessions(capture: Capture, sessions: readonly Changed[], problems: Problems, isEveryWrite = false): (readonly [Changed, Promise<Set<string>>])[] {
+  const read = sessions.map((changed) => [changed, readUpload(capture, changed.session, changed.tool, changed.paths, problems, isEveryWrite)] as const)
   const sent = Promise.allSettled(read.map(([, upload]) => upload)).then((all) => {
     const calls: Call[] = []
-    const positions = new Map<string, { readonly claim?: number; readonly frames: readonly number[]; readonly bodies: readonly Uint8Array[] }>()
+    const asked: { readonly session: string; readonly claim: number | undefined; readonly frames: readonly (Omit<Put, 'put'> & { readonly call: number })[] }[] = []
     for (const done of all) {
       if (done.status === 'rejected' || done.value instanceof Set) continue
-      const { session, frames } = done.value
+      const { session, end, frames } = done.value
       const claim = capture.claimed.has(session) ? undefined : calls.push({ op: 'claim', session, take: false }) - 1
-      const bodies = frames.map((records) => Buffer.concat(records.flatMap((record) => encodeRecord(record.header, record.bytes))))
-      let at = done.value.end
-      const indexes = bodies.map((body) => {
-        const start = at
-        at += body.length
-        return calls.push({ op: 'put', key: hotKey(session, start), bytes: compressHot(body), if: { none: '*' }, holder: session }) - 1
+      let start = end
+      const framed = frames.map((records) => {
+        const body = Buffer.concat(records.flatMap((record) => encodeRecord(record.header, record.bytes)))
+        const frame = { start, body, records, call: calls.push({ op: 'put', key: hotKey(session, start), bytes: compressHot(body), if: { none: '*' }, holder: session }) - 1 }
+        start += body.length
+        return frame
       })
-      positions.set(session, { ...(claim === undefined ? {} : { claim }), frames: indexes, bodies })
+      asked.push({ session, claim, frames: framed })
     }
+    // the relay answers each call in its position, a put's with a put's result
     const answers = capture.relay.run(calls)
-    return new Map([...positions].map(([session, { claim, frames, bodies }]) => [session, { claim: claim === undefined ? undefined : answers[claim], puts: frames.map((index) => answers[index] as Promise<Ran>), bodies }]))
+    return new Map(
+      asked.map(({ session, claim, frames }) => [
+        session,
+        { claim: claim === undefined ? undefined : (answers[claim] as Promise<RanOf<'claim'>>), puts: frames.map(({ call, ...frame }): Put => ({ ...frame, put: answers[call] as Promise<RanOf<'put'>> })) },
+      ]),
+    )
   })
-  return new Map(
-    read.map(([session, reading]) => [
-      session,
-      reading.then(async (upload) => {
-        if (upload instanceof Set) return upload
-        const answers = (await sent).get(session)
-        if (answers === undefined) throw new Error(`The drain sent nothing of the session ${session}.`)
-        return await finishUpload(capture, upload, answers, problems)
-      }),
-    ]),
-  )
-}
-
-// One session's drain, as a drain of that session alone.
-export async function uploadSession(capture: Capture, session: string, tool: Tool, paths: ReadonlySet<string>, problems: Problems, isEveryWrite = false): Promise<Set<string>> {
-  return (await uploadSessions(capture, new Map([[session, { tool, paths }]]), problems, isEveryWrite).get(session)) ?? new Set()
+  return read.map(([changed, reading]) => [
+    changed,
+    reading.then(async (upload) => {
+      if (upload instanceof Set) return upload
+      const answers = (await sent).get(changed.session)
+      if (answers === undefined) throw new Error(`The drain sent nothing of the session ${changed.session}.`)
+      return await finishUpload(capture, upload, answers, problems)
+    }),
+  ])
 }
 
 // Reads everything a session's files gained since its last upload and its waiting code, as one hot frame at the
@@ -581,7 +585,8 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
       left.add(path)
       continue
     }
-    // A file that fails to read waits for the 60-second backup, so it never holds up the session's other files.
+    // A file that fails to read waits for the backup's next stat of it, so it never holds up the session's other files:
+    // within a minute while the session wrote in the last QUIET_MS, else at the hourly sweep of every file.
     const change = await changeOf(capture, session, path, budget).then(
       (found) => (problems.clear(path), found),
       (error: unknown) => void problems.set(path, error),
@@ -607,30 +612,37 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
 async function finishUpload(
   capture: Capture,
   upload: Upload,
-  answers: { readonly claim: Promise<Ran> | undefined; readonly puts: readonly Promise<Ran>[]; readonly bodies: readonly Uint8Array[] },
+  answers: { readonly claim: Promise<RanOf<'claim'>> | undefined; readonly puts: readonly Put[] },
   problems: Problems,
 ): Promise<Set<string>> {
   const { db, roots, relay } = capture
-  const { session, tool, frames, changes, code, waiting, left } = upload
-  const { bodies } = answers
-  const starts = bodies.map((_, index) => upload.end + bodies.slice(0, index).reduce((total, body) => total + body.length, 0))
+  const { session, tool, changes, code, waiting, left } = upload
   // a claim another machine holds refuses the frames after it too, which say who holds the session
   if ((await answers.claim)?.status === 200) capture.claimed.add(session)
-  const puts = await Promise.allSettled(answers.puts.map(async (put, index) => await frameWritten(capture, session, tool, starts[index] ?? 0, bodies[index] ?? new Uint8Array(), await put)))
-  if (puts.some((put) => put.status === 'fulfilled' && !put.value)) return new Set()
+  type Outcome = { readonly frame: Put; readonly isHere: boolean } | { readonly frame: Put; readonly error: unknown }
+  const outcomes = await Promise.all(
+    answers.puts.map((frame) =>
+      frame.put.then((put) => frameWritten(capture, session, tool, frame.start, frame.body, put)).then(
+        (isHere): Outcome => ({ frame, isHere }),
+        (error: unknown): Outcome => ({ frame, error }),
+      ),
+    ),
+  )
+  if (outcomes.some((outcome) => 'isHere' in outcome && !outcome.isHere)) return new Set()
   // The journal counts the frames up to the first that failed. The frames after it are never read, and the next drain
   // writes over them; the code stays in codeWaiting, since captureCode counts every part it returned as written.
-  const failed = puts.findIndex((put) => put.status === 'rejected')
-  const counted = failed < 0 ? frames.length : failed
-  const after = puts.slice(failed + 1).flatMap((put, index) => (put.status === 'fulfilled' ? [hotKey(session, starts[failed + 1 + index] ?? 0)] : []))
-  if (failed >= 0 && after.length > 0) await Promise.all(relay.run([{ op: 'delete', keys: after }])).catch(() => undefined)
-  const records = frames.slice(0, counted).flat()
-  const end = upload.end + bodies.slice(0, counted).reduce((total, body) => total + body.length, 0)
+  const failure = outcomes.find((outcome) => 'error' in outcome)
+  const counted = failure === undefined ? outcomes : outcomes.slice(0, outcomes.indexOf(failure))
+  const after = failure === undefined ? [] : outcomes.slice(outcomes.indexOf(failure) + 1).flatMap((outcome) => ('error' in outcome ? [] : [hotKey(session, outcome.frame.start)]))
+  if (after.length > 0) await relay.runOne({ op: 'delete', keys: after }).catch(() => undefined)
+  const records = counted.flatMap(({ frame }) => frame.records)
+  const last = counted.at(-1)?.frame
+  const end = last === undefined ? upload.end : last.start + last.body.length
   const transcript = changes.find((change) => {
     const owner = ownerOf(change.header.path, roots)
     return owner !== undefined && 'isTranscript' in owner && owner.isTranscript
   })
-  if (counted > 0) {
+  if (counted.length > 0) {
     db.transaction(() => {
       db.query(`insert into journals (session, tool, end, written_at) values (?, ?, ?, ?)
         on conflict (session) do update set end = excluded.end, written_at = excluded.written_at`).run(session, tool, end, Date.now())
@@ -638,8 +650,7 @@ async function finishUpload(
     })()
     for (const record of records) capture.hashers.set(`${session}\0${record.header.path}`, record.hasher)
   }
-  const failure = puts[failed]
-  if (failure?.status === 'rejected') throw failure.reason
+  if (failure !== undefined && 'error' in failure) throw failure.error
   // the session's own files say when it last worked; a lines file or Codex's database changes for every session
   const own = changes.filter(({ header }) => !linesFiles(roots).has(header.path) && header.path !== codexState(roots))
   const lastActivity = new Date(own.length === 0 ? Date.now() : Math.max(...own.map((change) => change.state.mtime))).toISOString()
@@ -659,24 +670,23 @@ async function finishUpload(
 // bytes there went up past a position that failed, or before a crash, and the journal never counted them, so this
 // frame replaces them. Another machine's bytes there make this machine's lines a fork, and a session another machine
 // holds refuses the frame: either way this machine stops capturing the session.
-async function frameWritten(capture: Capture, session: string, tool: Tool, start: number, body: Uint8Array, put: Ran): Promise<boolean> {
+async function frameWritten(capture: Capture, session: string, tool: Tool, start: number, body: Uint8Array, put: RanOf<'put'>): Promise<boolean> {
   const { relay, db, device } = capture
   const key = hotKey(session, start)
   const heldBy = (holder: string, reason: string): false => {
     holdElsewhere(db, session, holder, reason, tool)
     return false
   }
-  const putAgain = async (): Promise<Ran> => await (relay.run([{ op: 'put', key, bytes: compressHot(body), if: { none: '*' }, holder: session }])[0] ?? Promise.reject(new Error(`The relay answered no put of ${key}.`)))
   let answer = put
   if (answer.status === 412) {
-    const there = await relay.run([{ op: 'get', key }])[0]
-    const written = there !== undefined && 'bytes' in there ? decompress(there.bytes) : undefined
+    const there = await relay.runOne({ op: 'get', key })
+    const written = there.status === 200 ? decompress(there.bytes) : undefined
     if (written !== undefined && sameBytes(written, body)) return true
     // the frame's first record names the machine that wrote it
     const writer = written === undefined ? undefined : (JSON.parse(new TextDecoder().decode(written.subarray(0, written.indexOf(10)))) as RecordHeader).device
     if (writer === device.id || writer === undefined) {
-      await Promise.all(relay.run([{ op: 'delete', keys: [key] }]))
-      answer = await putAgain()
+      await relay.runOne({ op: 'delete', keys: [key] })
+      answer = await relay.runOne({ op: 'put', key, bytes: compressHot(body), if: { none: '*' }, holder: session })
     }
     if (answer.status === 412) {
       const fork = `${new Date().toISOString()} Another machine wrote byte ${start} of the session ${session}'s journal first, so ${device.name} stops capturing it, and its lines from here are a fork of the session.`
@@ -687,7 +697,6 @@ async function frameWritten(capture: Capture, session: string, tool: Tool, start
     }
   }
   if (answer.status === 409) return heldBy(answer.holder.name, `${new Date().toISOString()} ${answer.holder.name} took the session ${session} over, so ${device.name} stops capturing it.`)
-  if (answer.status !== 200) throw new Error(`The relay answered ${answer.status} to the put of ${key}.`)
   return true
 }
 
@@ -831,10 +840,13 @@ export async function seal(capture: Capture, session: string): Promise<number> {
   let at = sealedEnd
   let run: Uint8Array[] = []
   let runBytes = 0
-  // a sealed frame already there holds these bytes, from a seal that failed before its delete
+  // A sealed frame already there holds these bytes, from a seal that failed before its delete, and counts as written.
+  // One that holds other bytes deletes no hot frame.
   const flush = async (): Promise<void> => {
     if (runBytes === 0) return
-    await relay.run([{ op: 'put', key: sealedKey(session, at, at + runBytes), bytes: await compressSealed(Buffer.concat(run)), if: { none: '*' } }])[0]
+    const key = sealedKey(session, at, at + runBytes)
+    const put = await relay.runOne({ op: 'put', key, bytes: await compressSealed(Buffer.concat(run)), if: { none: '*' } })
+    if (put.status !== 200) throw new Error(`The relay answered ${put.status} to the put of ${key}, so anyhost deletes no hot frame of ${session}.`)
     ;[at, run, runBytes] = [at + runBytes, [], 0]
   }
   for await (const { bytes } of chainOf(relay, hot, sealedEnd)) {
@@ -900,9 +912,8 @@ export async function sealQuiet(capture: Capture, problems: Problems, now = Date
   for (const { session, tool } of quiet) {
     try {
       // a session another machine holds is that machine's to seal
-      const claim = await relay.run([{ op: 'claim', session, take: false }])[0]
-      if (claim?.status === 409) holdElsewhere(db, session, claim.holder.name, `${new Date().toISOString()} ${claim.holder.name} holds the session ${session}, so ${device.name} stops capturing it.`, tool)
-      else if (claim?.status !== 200) throw new Error(`The relay answered ${claim?.status ?? 'nothing'} to the claim of ${session}, so ${device.name} sealed nothing of it.`)
+      const claim = await relay.runOne({ op: 'claim', session, take: false })
+      if (claim.status === 409) holdElsewhere(db, session, claim.holder.name, `${new Date().toISOString()} ${claim.holder.name} holds the session ${session}, so ${device.name} stops capturing it.`, tool)
       else {
         const files = await sealJournal(capture, session, tool, problems)
         if (files.size > 0) again.set(session, files)
@@ -962,8 +973,10 @@ function indexOf(db: Database): IndexedSession[] {
     }))
 }
 
-export async function writeIndex(capture: Capture, written = ''): Promise<string> {
+// Puts this machine's index.json, once it differs from the one this program last put.
+export async function writeIndex(capture: Capture): Promise<void> {
   const index = JSON.stringify(indexOf(capture.db))
-  if (index !== written) await capture.relay.run([{ op: 'put', key: `sessions/${capture.device.id}/index.json`, bytes: new TextEncoder().encode(index) }])[0]
-  return index
+  if (index === capture.lastIndex) return
+  await capture.relay.runOne({ op: 'put', key: `sessions/${capture.device.id}/index.json`, bytes: new TextEncoder().encode(index) })
+  capture.lastIndex = index
 }

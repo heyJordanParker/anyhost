@@ -6,7 +6,7 @@ import { rmSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { RELAY_VERSION, type Health, type JoinRequest, type Joined, type Refusal } from '../../relay/protocol.ts'
 import relayModule from '../../relay/dist/relay.js' with { type: 'text' }
-import { cmod, cmodDevice, rootsHere, saveRelayLogin, stateFolder } from './device.ts'
+import { cmodDevice, rootsHere, saveRelayLogin, stateFolder } from './device.ts'
 
 // The Worker that runs the relay, and the R2 bucket it keeps every session in. Test relays pass their own.
 export type RelayNames = { readonly worker: string; readonly bucket: string }
@@ -28,11 +28,13 @@ export type Progress = {
 type CfEnvironment = Readonly<Record<string, string | undefined>>
 
 // What setup reaches beyond this program: Cloudflare's API and the relay over `fetch`, cf, and the clock the setup
-// waits on. Tests pass stand-ins.
+// waits on, which `now` reads and `sleep` moves. Tests pass stand-ins.
 export type Cloudflare = {
   readonly fetch: (url: string, init?: RequestInit) => Promise<Response>
-  // runs cf with `args` and answers what it printed to stdout, handing every line it prints to `say` when given
+  // Runs cf with `args` and answers what it printed to stdout. A run that waits on the person, as a login does, hands
+  // every line it prints to `say`, and any other ends after CF_MS.
   readonly cf: (args: readonly string[], env: CfEnvironment, say?: (line: string) => void) => Promise<string>
+  readonly now: () => number
   readonly sleep: (ms: number) => Promise<void>
 }
 
@@ -47,6 +49,15 @@ const STEADY_MS = 30_000
 const HEALTH_LIMIT_MS = 10 * 60_000
 const HEALTH_EVERY_MS = 1000
 const REQUEST_MS = 60_000
+const TRIES = 6
+// A cf run that needs no person, such as `cf auth whoami`, ends after CF_MS, so a cf that never exits holds nothing for
+// good. A first `bun x` of cf downloaded its 184 packages in 5.2 s on the Architect's Mac at a load average around
+// 100, and a cached one ran in 0.13 s.
+const CF_MS = 2 * 60_000
+// A new setup code secret deploys a new version of the Worker, and a Durable Object busy with requests keeps its old
+// code for up to 300 s (durable-objects/deployments/durable-objects-code-updates), so the join after it waits up to
+// SECRET_LIMIT_MS for the Pool to take the code, asking again every HEALTH_EVERY_MS.
+const SECRET_LIMIT_MS = 10 * 60_000
 
 const INVALID_TOKEN = 9109
 const R2_NOT_ENTITLED = 10042
@@ -55,6 +66,12 @@ const NO_WORKER = 10007
 const SUBDOMAIN_TAKEN = 10031
 const SUBDOMAIN_FREE = 10032
 const NO_BUCKET = 10006
+// "Bucket name already exists." (r2/api/error-codes), as a make whose answer was lost and that was sent again finds it
+const BUCKET_EXISTS = 10073
+
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+// where the calls of a setup no person watches say what they wait for: the program's log, or the command's terminal
+const logLine = (line: string): void => console.error(`${new Date().toISOString()} ${line}`)
 
 async function linesOf(stream: ReadableStream<Uint8Array>, say?: (line: string) => void): Promise<string> {
   const decoder = new TextDecoder()
@@ -73,21 +90,27 @@ async function linesOf(stream: ReadableStream<Uint8Array>, say?: (line: string) 
 }
 
 // cf runs pinned through this program: a compiled Bun program runs as `bun` with BUN_BE_BUN set, so a machine needs
-// neither Node nor a cf of its own.
-async function runCf(args: readonly string[], env: CfEnvironment, say?: (line: string) => void): Promise<string> {
+// neither Node nor a cf of its own. A run without `say` needs no person, and Bun kills it after `limitMs`, which only a
+// test sets.
+export async function runCf(args: readonly string[], env: CfEnvironment, say?: (line: string) => void, limitMs = CF_MS): Promise<string> {
   const environment: Record<string, string> = {}
   for (const [name, value] of Object.entries({ ...process.env, ...env, BUN_BE_BUN: '1', NO_COLOR: '1' })) if (value !== undefined) environment[name] = value
-  const child = Bun.spawn([process.execPath, 'x', '--bun', CF, ...args], { env: environment, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
-  const [output, error, code] = await Promise.all([linesOf(child.stdout, say), linesOf(child.stderr, say), child.exited])
-  if (code !== 0) throw new Error(`cf ${args.join(' ')} exited with ${code}: ${error.trim().split('\n').slice(-3).join(' ')}`)
-  return output
+  const started = Date.now()
+  const child = Bun.spawn([process.execPath, 'x', '--bun', CF, ...args], { env: environment, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', ...(say === undefined ? { timeout: limitMs, killSignal: 'SIGKILL' } : {}) })
+  const [output, error] = [linesOf(child.stdout, say), linesOf(child.stderr, say)]
+  const code = await child.exited
+  // a process cf left holds the pipes open, so a killed run's output is not waited for
+  if (say === undefined && child.signalCode === 'SIGKILL' && Date.now() - started >= limitMs) throw new Error(`cf ${args.join(' ')} ran past its limit of ${limitMs / 1000} s, so anyhost stopped it.`)
+  const [printed, failed] = await Promise.all([output, error])
+  if (code !== 0) throw new Error(`cf ${args.join(' ')} exited with ${code}: ${failed.trim().split('\n').slice(-3).join(' ')}`)
+  return printed
 }
 
-const CLOUDFLARE: Cloudflare = { fetch: (url, init) => fetch(url, init), cf: runCf, sleep: Bun.sleep }
+const CLOUDFLARE: Cloudflare = { fetch: (url, init) => fetch(url, init), cf: runCf, now: Date.now, sleep: Bun.sleep }
 
-// A cf login anyhost reads: the environment cf runs in, its accounts, and the access token it keeps, read again
-// before each call because only cf refreshes it.
-type Login = { readonly env: CfEnvironment; readonly accounts: readonly Account[]; readonly token: () => Promise<string> }
+// A cf login anyhost reads: the environment cf runs in, its accounts, the access token it keeps, read again before
+// each call because only cf refreshes it, and where its calls say what they wait for.
+type Login = { readonly env: CfEnvironment; readonly accounts: readonly Account[]; readonly token: () => Promise<string>; readonly say: (line: string) => void }
 type WhoAmI = { readonly authenticated: boolean; readonly authSource?: string; readonly accounts?: readonly Account[] }
 
 async function whoami(cloudflare: Cloudflare, env: CfEnvironment): Promise<WhoAmI> {
@@ -125,7 +148,8 @@ async function loginOf(cloudflare: Cloudflare, progress?: Progress): Promise<Log
     if (!who.authenticated) throw new Error('cf is still logged in to no Cloudflare account. Approve cf on Cloudflare\'s page, then connect again.')
   }
   const token = readableToken(who)
-  if (token !== undefined) return { env: {}, accounts: who.accounts ?? [], token }
+  const say = progress?.say ?? logLine
+  if (token !== undefined) return { env: {}, accounts: who.accounts ?? [], token, say }
   if (progress === undefined) throw new Error(`cf keeps its login encrypted (${who.authSource ?? 'no source'}), which anyhost cannot read with no one watching. Connect Cloudflare logs cf in for the update.`)
   // cf honours XDG_CONFIG_HOME, so this login lands in a folder of anyhost's own, in plain JSON, and the person's
   // encrypted login stays as it is
@@ -135,7 +159,7 @@ async function loginOf(cloudflare: Cloudflare, progress?: Progress): Promise<Log
   const own = await whoami(cloudflare, env)
   const ownToken = readableToken(own)
   if (!own.authenticated || ownToken === undefined) throw new Error(`cf's login for this setup left no token anyhost can read: ${own.authSource ?? 'no login'}.`)
-  return { env, accounts: own.accounts ?? [], token: ownToken }
+  return { env, accounts: own.accounts ?? [], token: ownToken, say }
 }
 
 type Envelope<T> = { readonly success: boolean; readonly errors: readonly { readonly code: number; readonly message: string }[]; readonly result: T }
@@ -150,13 +174,16 @@ const resultOf = <T>(envelope: Envelope<T>, what: string): T => (envelope.succes
 
 // The Architect's Mac's link reset 2 of 4 calls to Cloudflare's API in a row on 2026-11-05 (ECONNRESET), so a request
 // that gets no answer tries again after 1, 2, 4, 8 and 16 seconds, as relay.ts retries an object. fetch waits forever
-// by itself, and the slowest call of the test deploys, the relay's upload, took 2.7 s, so a try ends after 60 s.
-async function answerTo(cloudflare: Cloudflare, url: string, init: RequestInit): Promise<Response> {
-  for (let wait = 1000; ; wait *= 2) {
+// by itself, and the slowest call of the test deploys, the relay's upload, took 2.7 s, so a try ends after 60 s. Each
+// try again says on `say` what it waits for and how long.
+async function answerTo(cloudflare: Cloudflare, url: string, init: RequestInit, say: (line: string) => void): Promise<Response> {
+  const what = `${init.method ?? 'GET'} ${url}`
+  for (let tried = 1, wait = 1000; ; tried += 1, wait *= 2) {
     try {
       return await cloudflare.fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_MS) })
     } catch (error) {
-      if (wait > 16_000) throw new Error(`${init.method ?? 'GET'} ${url} got no answer in 6 tries of up to ${REQUEST_MS / 1000} s: ${error instanceof Error ? error.message : String(error)}`)
+      if (tried === TRIES) throw new Error(`${what} got no answer in ${TRIES} tries of up to ${REQUEST_MS / 1000} s: ${messageOf(error)}`)
+      say(`${what} got no answer within ${REQUEST_MS / 1000} s (${messageOf(error)}), so anyhost asks again in ${wait / 1000} s, try ${tried + 1} of ${TRIES}.`)
       await cloudflare.sleep(wait)
     }
   }
@@ -167,11 +194,16 @@ async function answerTo(cloudflare: Cloudflare, url: string, init: RequestInit):
 // tries once more.
 async function call<T>(cloudflare: Cloudflare, login: Login, method: string, path: string, body?: { readonly json: object } | { readonly form: FormData }, headers: Record<string, string> = {}): Promise<Envelope<T>> {
   const send = async (): Promise<{ readonly status: number; readonly envelope: Envelope<T> | undefined }> => {
-    const answer = await answerTo(cloudflare, `${API}${path}`, {
-      method,
-      headers: { authorization: `Bearer ${await login.token()}`, ...(body !== undefined && 'json' in body ? { 'content-type': 'application/json' } : {}), ...headers },
-      ...(body === undefined ? {} : { body: 'json' in body ? JSON.stringify(body.json) : body.form }),
-    })
+    const answer = await answerTo(
+      cloudflare,
+      `${API}${path}`,
+      {
+        method,
+        headers: { authorization: `Bearer ${await login.token()}`, ...(body !== undefined && 'json' in body ? { 'content-type': 'application/json' } : {}), ...headers },
+        ...(body === undefined ? {} : { body: 'json' in body ? JSON.stringify(body.json) : body.form }),
+      },
+      login.say,
+    )
     const envelope = (await answer.json().catch(() => undefined)) as Envelope<T> | undefined
     return { status: answer.status, envelope: typeof envelope?.success === 'boolean' ? envelope : undefined }
   }
@@ -199,7 +231,8 @@ async function findOrMakeBucket(cloudflare: Cloudflare, login: Login, account: A
   }
   progress?.say(`Making the bucket ${name}`)
   const made = await call(cloudflare, login, 'POST', `/accounts/${account.id}/r2/buckets`, { json: { name } })
-  if (made.success) return { name, jurisdiction: 'default' }
+  // a make with no jurisdiction makes the bucket in the default one
+  if (made.success || hasError(made, BUCKET_EXISTS)) return { name, jurisdiction: 'default' }
   return hasError(made, R2_NOT_ENTITLED) ? 'off' : refused(made, `Making the bucket ${name}`)
 }
 
@@ -229,20 +262,36 @@ async function subdomainOf(cloudflare: Cloudflare, login: Login, account: Accoun
   return resultOf(await call<{ subdomain: string }>(cloudflare, login, 'PUT', `/accounts/${account.id}/workers/subdomain`, { json: { subdomain } }), `Registering the workers.dev subdomain ${subdomain}`).subdomain
 }
 
-async function workerExists(cloudflare: Cloudflare, login: Login, account: Account, worker: string): Promise<boolean> {
-  const settings = await call(cloudflare, login, 'GET', `/accounts/${account.id}/workers/scripts/${worker}/settings`)
-  if (!settings.success && !hasError(settings, NO_WORKER)) refused(settings, `Looking for the Worker ${worker}`)
-  return settings.success
+// The accounts of the login that hold the Worker `worker`, in the login's order.
+async function accountsHolding(cloudflare: Cloudflare, login: Login, worker: string): Promise<Account[]> {
+  const holding: Account[] = []
+  for (const account of login.accounts) {
+    const settings = await call(cloudflare, login, 'GET', `/accounts/${account.id}/workers/scripts/${worker}/settings`)
+    if (!settings.success && !hasError(settings, NO_WORKER)) refused(settings, `Looking for the Worker ${worker} in ${account.name}`)
+    if (settings.success) holding.push(account)
+  }
+  return holding
+}
+
+// The address the Worker answers at, on the account's workers.dev subdomain.
+const relayUrlOf = async (cloudflare: Cloudflare, login: Login, account: Account, worker: string, progress?: Progress): Promise<string> =>
+  `https://${worker}.${await subdomainOf(cloudflare, login, account, progress)}.workers.dev`
+
+// The relay version the Worker at `url` answers in /v1/health, or 0 for an answer that is no relay's, as from a
+// Worker whose route is off.
+async function relayVersionAt(cloudflare: Cloudflare, url: string, say: (line: string) => void): Promise<number> {
+  const answer = await answerTo(cloudflare, `${url}/v1/health`, {}, say)
+  const health = answer.ok ? ((await answer.json().catch(() => undefined)) as Partial<Health> | undefined) : undefined
+  return typeof health?.relay === 'number' ? health.relay : 0
 }
 
 const sha256 = (text: string): string => new Bun.CryptoHasher('sha256').update(text).digest('hex')
 
-// Uploads the relay this program carries and turns on its workers.dev route, then waits for it to answer steadily.
-// A first upload makes the Pool's SQLite class. With no `setupCode`, the upload keeps the setup code secret the last
-// one set (R15). Answers the relay's address.
-async function deploy(cloudflare: Cloudflare, login: Login, account: Account, names: RelayNames, isFirst: boolean, setupCode: string | undefined, progress?: Progress): Promise<string> {
+// Uploads the relay this program carries as the Worker at `url` and turns on its workers.dev route, then waits for it
+// to answer steadily. A first upload makes the Pool's SQLite class. With no `setupCode`, the upload keeps the setup
+// code secret the last one set (R15).
+async function deploy(cloudflare: Cloudflare, login: Login, account: Account, names: RelayNames, url: string, isFirst: boolean, setupCode: string | undefined, progress?: Progress): Promise<void> {
   const bucket = await bucketOf(cloudflare, login, account, names.bucket, progress)
-  const subdomain = await subdomainOf(cloudflare, login, account, progress)
   const metadata = {
     main_module: 'relay.js',
     compatibility_date: '2026-11-01',
@@ -261,44 +310,56 @@ async function deploy(cloudflare: Cloudflare, login: Login, account: Account, na
   form.set('relay.js', new Blob([relayModule], { type: 'application/javascript+module' }), 'relay.js')
   progress?.say(`Uploading the relay as the Worker ${names.worker}`)
   resultOf(await call(cloudflare, login, 'PUT', `/accounts/${account.id}/workers/scripts/${names.worker}`, { form }), `Uploading the Worker ${names.worker}`)
-  const url = `https://${names.worker}.${subdomain}.workers.dev`
   progress?.say(`Turning on ${url}`)
   resultOf(await call(cloudflare, login, 'POST', `/accounts/${account.id}/workers/scripts/${names.worker}/subdomain`, { json: { enabled: true, previews_enabled: false } }), `Turning on ${url}`)
-  progress?.say(`Waiting until ${url} answers for 30 seconds straight`)
+  progress?.say(`Waiting until ${url} answers for ${STEADY_MS / 1000} seconds straight, for up to ${HEALTH_LIMIT_MS / 60_000} minutes`)
   await waitForHealth(cloudflare, url, bucket.name)
-  return url
 }
 
 // Waits until the relay this program carries answers /v1/health for its bucket for STEADY_MS without a break.
 async function waitForHealth(cloudflare: Cloudflare, url: string, bucket: string): Promise<void> {
-  const started = Date.now()
+  const started = cloudflare.now()
   let steadySince = started
   let last = 'no answer'
-  while (Date.now() - steadySince < STEADY_MS) {
-    if (Date.now() - started > HEALTH_LIMIT_MS) throw new Error(`${url}/v1/health answered steadily for less than ${STEADY_MS / 1000} s within ${HEALTH_LIMIT_MS / 60_000} minutes of the upload. Its last answer: ${last}.`)
+  while (cloudflare.now() - steadySince < STEADY_MS) {
+    if (cloudflare.now() - started > HEALTH_LIMIT_MS) throw new Error(`${url}/v1/health answered steadily for less than ${STEADY_MS / 1000} s within ${HEALTH_LIMIT_MS / 60_000} minutes of the upload. Its last answer: ${last}.`)
     const answer = await cloudflare.fetch(`${url}/v1/health`, { signal: AbortSignal.timeout(REQUEST_MS) }).catch((error: unknown) => String(error))
     const health = typeof answer === 'string' || answer.status !== 200 ? undefined : ((await answer.json().catch(() => undefined)) as Health | undefined)
     if (health?.relay !== RELAY_VERSION || health.bucket !== bucket) {
       last = typeof answer === 'string' ? answer : `${answer.status} ${JSON.stringify(health ?? null)}`
-      steadySince = Date.now()
+      steadySince = cloudflare.now()
     }
     await cloudflare.sleep(HEALTH_EVERY_MS)
   }
 }
 
-// Sets the relay up in the person's Cloudflare account and joins this machine to it. On an account whose relay exists,
-// it uploads a new setup code and joins with it, since the Pool takes each setup code once, so any machine with the
-// person's Cloudflare login joins without an invite.
+// Sets the relay up in the person's Cloudflare account and joins this machine to it, in the one account of the login
+// that holds the relay, else the login's one account, else the account the person picks. A relay at this program's
+// RELAY_VERSION or newer gets only a new setup code secret, and a missing or older one this program's upload with it.
+// The Pool takes each setup code from one machine, so any machine with the person's Cloudflare login joins without an
+// invite.
 export async function connectCloudflare(progress: Progress, names: RelayNames = RELAY, cloudflare: Cloudflare = CLOUDFLARE): Promise<void> {
   try {
     const login = await loginOf(cloudflare, progress)
-    const [only, ...more] = login.accounts
-    if (only === undefined) throw new Error('Your Cloudflare login reaches no account.')
-    const account = more.length === 0 ? only : await progress.pickAccount(login.accounts)
-    const isFirst = !(await workerExists(cloudflare, login, account, names.worker))
+    if (login.accounts.length === 0) throw new Error('Your Cloudflare login reaches no account.')
+    const holding = await accountsHolding(cloudflare, login, names.worker)
+    const choices = holding.length === 0 ? login.accounts : holding
+    const [only, ...more] = choices
+    const account = only !== undefined && more.length === 0 ? only : await progress.pickAccount(choices)
+    const url = await relayUrlOf(cloudflare, login, account, names.worker, progress)
     const setupCode = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url')
-    const url = await deploy(cloudflare, login, account, names, isFirst, setupCode, progress)
-    await join(`${url}/v1/join#${setupCode}`, cloudflare)
+    const isFirst = !holding.some(({ id }) => id === account.id)
+    const version = isFirst ? 0 : await relayVersionAt(cloudflare, url, progress.say)
+    if (version >= RELAY_VERSION) {
+      progress.say(`${url} runs relay ${version}, as new as this anyhost's or newer, so anyhost gives it a new setup code and uploads nothing`)
+      const secret = { name: 'SETUP_CODE_SHA256', text: sha256(setupCode), type: 'secret_text' }
+      resultOf(await call(cloudflare, login, 'PUT', `/accounts/${account.id}/workers/scripts/${names.worker}/secrets`, { json: secret }), `Setting the setup code of the Worker ${names.worker}`)
+      progress.say(`Joining ${url} once it takes the new setup code, for up to ${SECRET_LIMIT_MS / 60_000} minutes`)
+      await exchangeCode(url, setupCode, cloudflare, progress.say, SECRET_LIMIT_MS)
+    } else {
+      await deploy(cloudflare, login, account, names, url, isFirst, setupCode, progress)
+      await exchangeCode(url, setupCode, cloudflare, progress.say)
+    }
     progress.say(`Joined this machine to ${url}`)
   } finally {
     rmSync(ownLoginFolder(), { recursive: true, force: true })
@@ -366,17 +427,20 @@ export function connectForStep(names: RelayNames = RELAY, cloudflare: Cloudflare
   }
 }
 
-// Uploads the relay this program carries over the one deployed, keeping its setup code secret, with the cf login this
-// machine has. It asks the person nothing: a machine without a usable login fails, and the caller shows Connect Cloudflare.
+// Uploads the relay this program carries over the one deployed when that one is older, keeping its setup code secret,
+// with the cf login this machine has, so a machine never puts an older relay over the one a newer machine put up. It
+// asks the person nothing: a machine without a usable login fails, and the caller shows Connect Cloudflare.
 export async function updateRelay(names: RelayNames = RELAY, cloudflare: Cloudflare = CLOUDFLARE): Promise<void> {
   const login = await loginOf(cloudflare)
-  const holding = []
-  for (const account of login.accounts) if (await workerExists(cloudflare, login, account, names.worker)) holding.push(account)
+  const holding = await accountsHolding(cloudflare, login, names.worker)
   const [account, ...more] = holding
   if (account === undefined || more.length > 0) {
     throw new Error(`${holding.length} accounts of your Cloudflare login hold the Worker ${names.worker}${holding.length > 0 ? `: ${holding.map(({ name }) => name).join(', ')}` : ''}, so anyhost updates none. Connect Cloudflare deploys it.`)
   }
-  await deploy(cloudflare, login, account, names, false, undefined)
+  const url = await relayUrlOf(cloudflare, login, account, names.worker)
+  const version = await relayVersionAt(cloudflare, url, login.say)
+  if (version >= RELAY_VERSION) return login.say(`${url} runs relay ${version} already, so anyhost uploads nothing.`)
+  await deploy(cloudflare, login, account, names, url, false, undefined)
 }
 
 // Joins this machine with an invite link, or with the setup code in the same form, `https://<relay>/v1/join#<code>`,
@@ -386,27 +450,30 @@ export async function join(link: string, cloudflare: Cloudflare = CLOUDFLARE): P
   const url = URL.parse(/https?:\/\/[^\s'"]+\/v1\/join#[\w-]+/.exec(link)?.[0] ?? link.trim())
   const code = url?.hash.slice(1) ?? ''
   if (url === null || url.pathname !== '/v1/join' || code === '') throw new Error(`${link} is no invite link, which reads https://<relay>/v1/join#<code>.`)
-  const device = await cmodDevice()
-  const request: JoinRequest = { invite: code, device: { ...device, roots: rootsHere() } }
-  const answer = await answerTo(cloudflare, `${url.origin}/v1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) })
-  const text = await answer.text()
-  let body: Partial<Joined & Refusal>
-  try {
-    body = JSON.parse(text) as Partial<Joined & Refusal>
-  } catch {
-    throw new Error(`${url.origin} answered the join with ${answer.status} and no relay answer: ${text.slice(0, 200)}`)
-  }
-  if (!answer.ok || body.token === undefined) throw new Error(`${url.origin} refused to join ${device.name}: ${body.message ?? `${answer.status} ${text.slice(0, 200)}`}`)
-  await saveRelayLogin({ url: url.origin, token: body.token })
+  await exchangeCode(url.origin, code, cloudflare, logLine)
   return url.origin
 }
 
-// The link `cmod install … --option join=<link>` set: the program joins with it once at its start, then empties the
-// option, so a refused or expired invite is not tried again and the next machine's command needs nothing else.
-export async function joinWithOption(link: string, cloudflare: Cloudflare = CLOUDFLARE): Promise<string> {
-  try {
-    return await join(link, cloudflare)
-  } finally {
-    await cmod(['option', 'anyhost', 'join', ''])
+// Exchanges an invite's code or the setup code at the relay `origin` for this machine's device token, which
+// saveRelayLogin keeps. A join whose answer was lost goes again, and the Pool joins the same machine again. A setup code
+// set as a secret just now reaches the Pool within `patienceMs`, so until then its `invite_unknown` is asked again.
+async function exchangeCode(origin: string, code: string, cloudflare: Cloudflare, say: (line: string) => void, patienceMs = 0): Promise<void> {
+  const device = await cmodDevice()
+  const request: JoinRequest = { invite: code, device: { ...device, roots: rootsHere() } }
+  const started = cloudflare.now()
+  for (;;) {
+    const answer = await answerTo(cloudflare, `${origin}/v1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) }, say)
+    const text = await answer.text()
+    let body: Partial<Joined & Refusal>
+    try {
+      body = JSON.parse(text) as Partial<Joined & Refusal>
+    } catch {
+      throw new Error(`${origin} answered the join with ${answer.status} and no relay answer: ${text.slice(0, 200)}`)
+    }
+    if (answer.ok && body.token !== undefined) return await saveRelayLogin({ url: origin, token: body.token })
+    const refusal = body.message ?? `${answer.status} ${text.slice(0, 200)}`
+    if (body.error !== 'invite_unknown' || patienceMs === 0) throw new Error(`${origin} refused to join ${device.name}: ${refusal}`)
+    if (cloudflare.now() - started >= patienceMs) throw new Error(`${origin} still took no new setup code ${patienceMs / 60_000} minutes after anyhost set it: ${refusal}`)
+    await cloudflare.sleep(HEALTH_EVERY_MS)
   }
 }

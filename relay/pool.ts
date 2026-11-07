@@ -14,15 +14,18 @@ import {
   MAX_OPS,
   PROTOCOL_VERSION,
   RELAY_VERSION,
+  REMOVED_MESSAGE,
+  REMOVED_REASON,
   REQUEST,
   STREAM,
   cloneFixFor,
+  conditionHeaders,
   decodeMessage,
   encodeMessage,
   streamOf,
+  tokenOf,
   type Answer,
   type Claim,
-  type Condition,
   type DeviceRef,
   type ErrorCode,
   type Health,
@@ -77,7 +80,6 @@ create table if not exists meta (key text primary key, value text not null);`
 
 // How many R2 reads the first start's import runs at once.
 const IMPORT_READS = 50
-const REMOVED = 'This machine was removed from your machines. Join it again with a link from Add a machine.'
 // Crockford's base32 leaves out I, L, O and U, so an invite read aloud or typed has no look-alike letters.
 const INVITE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
@@ -132,8 +134,12 @@ function joiningOf(value: unknown): JoiningDevice | undefined {
   return isText(id) && isText(name) && isText(os) && isText(arch) && roots !== undefined ? { id, name, os, arch, roots } : undefined
 }
 
-const conditionOf = (condition: Condition): Headers =>
-  'none' in condition ? new Headers({ 'if-none-match': '*' }) : new Headers({ 'if-match': `"${condition.match}"` })
+// R2's put of the object when `onlyIf` holds, else the etag of the object there, which a refusal names, or undefined
+// when the key holds none.
+export async function conditionalPut(bucket: R2Bucket, key: string, body: ReadableStream | Uint8Array | null, onlyIf: Headers): Promise<{ readonly stored: R2Object } | { readonly etag: string | undefined }> {
+  const stored = await bucket.put(key, body, { onlyIf })
+  return stored === null ? { etag: (await bucket.head(key))?.etag } : { stored }
+}
 
 // The Worker holds one while it streams a journal frame into R2, so a takeover of the frame's session waits for the
 // frame. Its stub is disposed when the write ends, or when the Worker's request does.
@@ -272,11 +278,14 @@ export class Pool extends DurableObject<Env> {
     const now = Date.now()
     const invite = this.#sql.exec<{ expires_at: number | null; used_by: string | null; used_at: number | null }>('select expires_at, used_by, used_at from invites where code_sha256 = ?', codeSha256).toArray()[0]
     if (invite === undefined && codeSha256 !== this.env.SETUP_CODE_SHA256) return refuse(403, 'invite_unknown', 'The relay made no invite with that code. Make a new one with Add a machine.')
-    if (invite?.used_by != null) {
-      const usedBy = this.#sql.exec<{ name: string }>('select name from devices where id = ?', invite.used_by).toArray()[0]?.name ?? invite.used_by
-      return refuse(403, 'invite_used', `The invite already joined ${usedBy} at ${iso(invite.used_at ?? 0)}. Make a new one with Add a machine.`)
+    // A machine whose join answer was lost sends the join again, so the machine that used the code joins again with it
+    // for INVITE_MS after that use, unless it was removed since. Any other machine is refused.
+    const usedBy = invite?.used_by == null ? undefined : this.#sql.exec<{ name: string; removed_at: number | null }>('select name, removed_at from devices where id = ?', invite.used_by).toArray()[0]
+    const isRepeat = invite?.used_by === device.id && now - (invite.used_at ?? 0) <= INVITE_MS && usedBy !== undefined && usedBy.removed_at === null
+    if (invite?.used_by != null && !isRepeat) {
+      return refuse(403, 'invite_used', `The invite already joined ${usedBy?.name ?? invite.used_by} at ${iso(invite.used_at ?? 0)}. Make a new one with Add a machine.`)
     }
-    if (invite?.expires_at != null && now > invite.expires_at) return refuse(403, 'invite_expired', `The invite expired at ${iso(invite.expires_at)}, 10 minutes after it was made. Make a new one with Add a machine.`)
+    if (!isRepeat && invite?.expires_at != null && now > invite.expires_at) return refuse(403, 'invite_expired', `The invite expired at ${iso(invite.expires_at)}, 10 minutes after it was made. Make a new one with Add a machine.`)
     const live = this.#liveOtherThan(device.id, device.name)
     if (live !== undefined) {
       return refuse(409, 'device_live', `This machine, ${device.name}, has the id of ${live}, which is connected now, as a machine cloned from it is. ${cloneFixFor(device.os)}`)
@@ -297,9 +306,10 @@ export class Pool extends DurableObject<Env> {
         now,
         now,
       )
-      // A setup code is an invite that never expires, kept once used, so the same code never joins again.
+      // A setup code is an invite that never expires, kept once used, so no other machine joins with it. A repeated join
+      // keeps the first use's time, so its window never moves.
       this.#sql.exec(
-        'insert into invites (code_sha256, used_by, used_at) values (?, ?, ?) on conflict (code_sha256) do update set used_by = excluded.used_by, used_at = excluded.used_at',
+        'insert into invites (code_sha256, used_by, used_at) values (?, ?, ?) on conflict (code_sha256) do update set used_by = excluded.used_by, used_at = coalesce(invites.used_at, excluded.used_at)',
         codeSha256,
         device.id,
         now,
@@ -313,7 +323,7 @@ export class Pool extends DurableObject<Env> {
   async authorize(token: string, holder?: string): Promise<{ refused: Reply } | { device: DeviceRef; write?: Write }> {
     const row = this.#deviceOf(await sha256(token))
     if (row === undefined) return { refused: refuse(401, 'unknown_token', 'The relay knows no machine with this token. Join it with a link from Add a machine.') }
-    if (row.removed_at !== null) return { refused: refuse(403, 'removed', REMOVED) }
+    if (row.removed_at !== null) return { refused: refuse(403, 'removed', REMOVED_MESSAGE) }
     const device = { id: row.id, name: row.name }
     if (holder === undefined) return { device }
     const held = this.#holderOf(holder)
@@ -338,9 +348,9 @@ export class Pool extends DurableObject<Env> {
     // a machine's roots follow it, as a CLAUDE_CONFIG_DIR set since its join moves Claude Code's folder
     const roots = rootsOf(jsonOf(request.headers.get('x-anyhost-roots')))
     if (roots === undefined) return Response.json({ error: 'invalid', message: 'A connect names its machine\'s roots as JSON in X-Anyhost-Roots.' } satisfies Refusal, { status: 400 })
-    const row = this.#deviceOf(await sha256(request.headers.get('authorization')?.replace(/^Bearer /, '') ?? ''))
+    const row = this.#deviceOf(await sha256(tokenOf(request.headers.get('authorization'))))
     if (row === undefined) return closeWith(CLOSE_UNKNOWN_TOKEN, 'The relay knows no machine with this token.')
-    if (row.removed_at !== null) return closeWith(CLOSE_REMOVED, 'This machine was removed from your machines.')
+    if (row.removed_at !== null) return closeWith(CLOSE_REMOVED, REMOVED_REASON)
     // a close reason holds at most 123 bytes
     const live = this.#liveOtherThan(row.id, name)
     if (live !== undefined) return closeWith(CLOSE_DEVICE_LIVE, `${live.slice(0, 64)} is connected with this machine's id.`)
@@ -481,14 +491,20 @@ export class Pool extends DurableObject<Env> {
         continue
       }
       const { object } = result
-      if (object.size > room) {
-        await object.body.cancel()
-        results.push({ status: 413, size: object.size, etag: object.etag })
-        continue
+      // a body R2 fails to stream answers its get as the error, so the request is answered still
+      try {
+        if (object.size > room) {
+          await object.body.cancel()
+          results.push({ status: 413, size: object.size, etag: object.etag })
+          continue
+        }
+        parts.push(new Uint8Array(await object.arrayBuffer()))
+        room -= object.size
+        results.push({ status: 200, etag: object.etag, size: object.size, modified: object.uploaded.toISOString() })
+      } catch (error) {
+        console.error(`The relay failed to read ${object.key}: ${String(error)}`)
+        results.push({ status: 500, error: 'storage', message: String(error) })
       }
-      room -= object.size
-      parts.push(new Uint8Array(await object.arrayBuffer()))
-      results.push({ status: 200, etag: object.etag, size: object.size, modified: object.uploaded.toISOString() })
     }
     send({ id, results }, parts)
   }
@@ -515,12 +531,11 @@ export class Pool extends DurableObject<Env> {
           const held = this.#holderOf(op.holder)
           if (held !== undefined && held.id !== device.id) return { status: 409, holder: held }
         }
-        const write = this.env.BUCKET.put(op.key, bytes, op.if === undefined ? {} : { onlyIf: conditionOf(op.if) })
+        const write = conditionalPut(this.env.BUCKET, op.key, bytes, new Headers(op.if === undefined ? {} : conditionHeaders(op.if)))
         if (op.holder !== undefined) this.#track(op.holder, write)
-        const stored = await write
-        if (stored !== null) return { status: 200, etag: stored.etag }
-        const there = await this.env.BUCKET.head(op.key)
-        return there === null ? { status: 412 } : { status: 412, etag: there.etag }
+        const written = await write
+        if ('stored' in written) return { status: 200, etag: written.stored.etag }
+        return written.etag === undefined ? { status: 412 } : { status: 412, etag: written.etag }
       }
       case 'list': {
         if (typeof op.prefix !== 'string') return invalid('A list names its prefix.')
@@ -537,8 +552,15 @@ export class Pool extends DurableObject<Env> {
         if (!isText(op.session) || typeof op.take !== 'boolean') return invalid('A claim names its session and whether it takes it from another machine.')
         return await this.#claim(device, op.session, op.take)
       case 'claims': {
+        if (op.prefix !== undefined && typeof op.prefix !== 'string') return invalid('A claims names the start of the sessions it asks for in prefix.')
+        // A range on the primary key reads only the rows under the prefix, as each one costs a row read of the free
+        // plan's 5 million a day. No UTF-8 text holds the byte 0xff, so every id that begins with the prefix sorts below
+        // the prefix followed by it.
         const rows = this.#sql
-          .exec<{ session: string; id: string; name: string | null; at: number }>('select session, claims.device as id, devices.name, at from claims left join devices on devices.id = claims.device')
+          .exec<{ session: string; id: string; name: string | null; at: number }>(
+            "select session, claims.device as id, devices.name, at from claims left join devices on devices.id = claims.device where session >= ?1 and session < ?1 || x'ff'",
+            op.prefix ?? '',
+          )
           .toArray()
         return { status: 200, claims: Object.fromEntries(rows.map(({ session, id, name, at }) => [session, { id, name: name ?? id, at: iso(at) } satisfies Claim])) }
       }
@@ -567,7 +589,7 @@ export class Pool extends DurableObject<Env> {
         if (!isText(op.device)) return invalid('A remove names the device id.')
         const removed = this.#sql.exec('update devices set removed_at = ? where id = ? and removed_at is null', Date.now(), op.device).rowsWritten
         if (removed === 0) return { status: 404, error: 'unknown_device', message: `No machine with the id ${op.device} is joined.` }
-        for (const socket of this.ctx.getWebSockets(op.device)) socket.close(CLOSE_REMOVED, 'This machine was removed from your machines.')
+        for (const socket of this.ctx.getWebSockets(op.device)) socket.close(CLOSE_REMOVED, REMOVED_REASON)
         return { status: 200 }
       }
       default:

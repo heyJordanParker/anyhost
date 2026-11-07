@@ -12,9 +12,11 @@ import {
   MAX_MESSAGE_BYTES,
   MAX_OPS,
   PROTOCOL_VERSION,
+  REMOVED_MESSAGE,
   REQUEST,
   STREAM,
   cloneFixFor,
+  conditionHeaders,
   decodeMessage,
   encodeMessage,
   type Answer,
@@ -27,6 +29,7 @@ import {
   type Op,
   type Released,
   type Result,
+  type Results,
   type Roots,
   type Routed,
   type Welcome,
@@ -36,6 +39,12 @@ import {
 // by then, and one pinged every 30 seconds had every pong back within 40 seconds over 50 minutes (relay-spec R16).
 const PING_MS = 30_000
 const PONG_MS = 40_000
+// A request the relay has not answered ANSWER_MS after it went out counts as a drop of its socket, and goes again on
+// the next one, as no ping finds a lost answer: the Pool answers pings without waking. A drain was answered in 1,714 ms
+// at p90 and 2,098 ms at most over 20 drains (relay-spec R10), and a request carries up to MAX_MESSAGE_BYTES each way,
+// 21 s at the 100 KB/s a write counts as the slowest link. So only a lost answer waits this long, as one did once R2
+// failed a get's body, and so does nothing else on a dropped socket (PONG_MS).
+const ANSWER_MS = 40_000
 // A socket opened in 494 to 689 ms on a home link (R16).
 const CONNECT_MS = 10_000
 const RETRY_MS = [1000, 2000, 4000, 8000, 16_000, 32_000, 60_000]
@@ -57,8 +66,10 @@ export type Login = { readonly url: string; readonly token: string }
 // A put carries its bytes, whose length its op names as `size`.
 export type Call = Exclude<Op, { readonly op: 'put' }> | { readonly op: 'put'; readonly key: string; readonly bytes: Uint8Array; readonly if?: Condition; readonly holder?: string }
 export type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly modified: string; readonly bytes: Uint8Array }
-// An op's answer, a get's with its bytes. A result that names an error, as a failed R2 call does, rejects instead.
-export type Ran = Exclude<Result, { readonly error: string } | { readonly status: 200; readonly size: number; readonly modified: string } | { readonly status: 413 }> | Got
+// An op's answer, a get's with its bytes, which come by HTTP when the relay's answer had no room for them. A result that
+// names an error, as a failed R2 call does, rejects instead.
+export type RanOf<K extends Op['op']> = K extends 'get' ? Got | { readonly status: 404 } : Results[K]
+export type Ran = RanOf<Op['op']>
 // `connected` once the welcome came. `unjoined` is no login, as before a join or after the relay refused the login for
 // good, `outdated` a relay older than this program needs, and `refused` a clone of a connected machine.
 export type RelayState =
@@ -78,6 +89,8 @@ export type Relay = {
   // Runs the ops in as few requests as MAX_OPS and MAX_MESSAGE_BYTES allow, in their order, and answers each in its
   // position. A put over MAX_MESSAGE_BYTES goes by HTTP beside them, and so does a get the answer had no room for.
   run(calls: readonly Call[]): Promise<Ran>[]
+  // one op, answered with its own op's result
+  runOne<C extends Call>(call: C): Promise<RanOf<C['op']>>
   // every object under the prefix, a page of list at a time
   list(prefix: string): Promise<Listed[]>
   // one object by HTTP, which a broken download's next try goes on with from the byte it reached
@@ -86,7 +99,7 @@ export type Relay = {
   // no socket is, and the message goes nowhere.
   send(message: Routed | Uint8Array): boolean
   on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): void
-  // connects at once instead of after the wait, as after this machine joined
+  // connects at once on the login read now, closing the socket open on the last one, as after this machine joined
   reconnect(): void
   close(): void
 }
@@ -107,6 +120,12 @@ export type RelayOptions = {
 class Refused extends Error {}
 
 const NOT_JOINED = 'This machine is not joined to your relay, so anyhost keeps what its sessions write and uploads nothing.'
+// Cloudflare answers a Worker past the Free plan's 100,000 requests a day with 429 and `error code: 1027` until midnight
+// UTC (workers/platform/limits, "Daily requests"), while open sockets go on carrying requests, which are no Worker
+// requests. Cloudflare's documentation names no status or body for 1027: 429 and that body are what workers.dev answered
+// a client that is no browser (github.com/rancher/rke2/issues/11326).
+const DAILY_LIMIT = 'Cloudflare refuses the relay with its error 1027: the relay\'s Worker reached the Free plan\'s limit of 100,000 requests a day, which resets at 00:00 UTC.'
+const isDailyLimit = (status: number, body: string): boolean => status === 429 && body.includes('error code: 1027')
 const md5 = (bytes: Uint8Array): string => new Bun.CryptoHasher('md5').update(bytes).digest('hex')
 const objectUrl = (login: Login, key: string): string => `${login.url}/v1/objects/${key.split('/').map(encodeURIComponent).join('/')}`
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -119,20 +138,27 @@ const toOp = (call: Call): Op =>
 // bytes an earlier try already put there.
 const written = (call: Call, result: Ran): Ran => (call.op === 'put' && result.status === 412 && 'etag' in result && result.etag === md5(call.bytes) ? { status: 200, etag: result.etag } : result)
 
-// An HTTP answer the next try may fix, as a relay error a redeploy or a daily limit gives, answers undefined.
-async function failureOf(answer: Response): Promise<undefined> {
-  if (answer.status >= 500) {
-    await answer.body?.cancel()
-    return undefined
-  }
-  const body = (await answer.json().catch(() => ({}))) as { message?: string }
-  throw new Refused(body.message ?? `The relay answered ${answer.status}.`)
+// Throws why an HTTP answer failed: an Error the next try may fix, which the try records, as a relay error a redeploy
+// gives, Cloudflare's daily limit, or a range past the end of an object written again shorter, which the next try reads
+// from byte 0; and a Refused no try fixes.
+async function failureOf(answer: Response): Promise<never> {
+  const body = await answer.text().catch(() => '')
+  if (isDailyLimit(answer.status, body)) throw new Error(DAILY_LIMIT)
+  const message = ((): string | undefined => {
+    try {
+      return (JSON.parse(body) as { message?: string } | null)?.message
+    } catch {
+      return undefined
+    }
+  })() ?? `The relay answered ${answer.status}.`
+  if (answer.status >= 500 || answer.status === 429 || answer.status === 416) throw new Error(message)
+  throw new Refused(message)
 }
 
 // The state a refusal no try fixes leaves. A removed machine's token and one the relay never knew are the relay's final
 // answer for that login, so the machine forgets it and is unjoined.
 function refusedBy(code: number, reason: string, device: RelayOptions['device']): RelayState | undefined {
-  if (code === CLOSE_REMOVED) return { is: 'unjoined', message: 'This machine was removed from your machines. Join it again with a link from Add a machine.' }
+  if (code === CLOSE_REMOVED) return { is: 'unjoined', message: REMOVED_MESSAGE }
   if (code === CLOSE_UNKNOWN_TOKEN) return { is: 'unjoined', message: 'The relay knows no machine with this token. Join it again with a link from Add a machine.' }
   if (code === CLOSE_DEVICE_LIVE) return { is: 'refused', message: `The relay refused ${device.name}: ${reason} A machine cloned from another keeps its id, so anyhost captures nothing here. ${cloneFixFor(device.os)}` }
   return undefined
@@ -141,7 +167,14 @@ function refusedBy(code: number, reason: string, device: RelayOptions['device'])
 // A header holds Latin-1 alone, so a root's other characters go as JSON escapes, which the relay reads back the same.
 const rootsHeader = (roots: Roots): string => JSON.stringify(roots).replace(/[^\x20-\x7e]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
 
-type Pending = { readonly message: Uint8Array; wasSent: boolean; readonly resolve: (answer: { results: readonly Result[]; bytes: Uint8Array }) => void; readonly reject: (error: Error) => void }
+// `due` drops the socket the request last went on once ANSWER_MS passed with no answer.
+type Pending = {
+  readonly message: Uint8Array
+  wasSent: boolean
+  due?: ReturnType<typeof setTimeout>
+  readonly resolve: (answer: { results: readonly Result[]; bytes: Uint8Array }) => void
+  readonly reject: (error: Error) => void
+}
 
 export function connectRelay(options: RelayOptions): Relay {
   const listeners: Partial<Record<keyof Events, ((message: never) => void)[]>> = {}
@@ -160,6 +193,8 @@ export function connectRelay(options: RelayOptions): Relay {
   let socket: WebSocket | undefined
   let nextId = 1
   let failures = 0
+  // counts the opens, so only the latest one opens a socket once its login is read
+  let opens = 0
   let isClosed = false
   let reopen: ReturnType<typeof setTimeout> | undefined
   let pinger: ReturnType<typeof setInterval> | undefined
@@ -168,14 +203,20 @@ export function connectRelay(options: RelayOptions): Relay {
   const failPending = (message: string): void => {
     for (const [id, request] of pending) {
       pending.delete(id)
+      clearTimeout(request.due)
       request.reject(new Error(message))
     }
     for (const waiter of waiting) waiter.reject(new Error(message))
     waiting.clear()
   }
   const send = (request: Pending): void => {
-    socket?.send(request.message)
+    const on = socket
+    on?.send(request.message)
     request.wasSent = true
+    clearTimeout(request.due)
+    request.due = setTimeout(() => {
+      if (socket === on) drop({ is: 'offline', message: `The relay at ${login?.url} left a request unanswered for ${ANSWER_MS / 1000} seconds.` })
+    }, ANSWER_MS)
   }
   const welcomedLogin = (): Promise<Login> => {
     if (state.is === 'connected' && login !== undefined) return Promise.resolve(login)
@@ -210,6 +251,7 @@ export function connectRelay(options: RelayOptions): Relay {
       return
     }
     pending.delete(answer.id)
+    clearTimeout(request.due)
     if ('error' in answer) request.reject(new Error(`The relay refused the request: ${answer.message}`))
     else request.resolve({ results: answer.results, bytes })
   }
@@ -244,13 +286,15 @@ export function connectRelay(options: RelayOptions): Relay {
   }
 
   const open = async (): Promise<void> => {
+    const attempt = (opens += 1)
     state = { is: 'connecting' }
     await forgetting
-    login = await options.login().catch((error: unknown) => {
+    const read = await options.login().catch((error: unknown) => {
       console.error(`${new Date().toISOString()} anyhost could not read this machine's relay login: ${messageOf(error)}`)
       return undefined
     })
-    if (isClosed) return
+    if (isClosed || attempt !== opens) return
+    login = read
     if (login === undefined) return drop({ is: 'unjoined', message: unjoined })
     unjoined = NOT_JOINED
     const used = login
@@ -295,7 +339,15 @@ export function connectRelay(options: RelayOptions): Relay {
         unjoined = refusal.message
         forgetting = options.forget(used).catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not forget the relay login the relay refused: ${messageOf(error)}`))
       }
-      drop(refusal ?? { is: 'offline', message: `The relay at ${url} closed the connection with ${event.code}${why === '' ? '' : `: ${why}`}.` })
+      const offline: RelayState = { is: 'offline', message: `The relay at ${url} closed the connection with ${event.code}${why === '' ? '' : `: ${why}`}.` }
+      // Bun names the status of a connect Cloudflare refused, never its body, so a 429 reads the relay's health for the
+      // body that says the daily limit
+      if (refusal !== undefined || !failed.endsWith('status code: 429')) return drop(refusal ?? offline)
+      void fetch(`${url}/v1/health`, { signal: AbortSignal.timeout(CONNECT_MS) })
+        .then(async (answer) => isDailyLimit(answer.status, await answer.text()), () => false)
+        .then((isLimit) => {
+          if (socket === ws) drop(isLimit ? { is: 'offline', message: DAILY_LIMIT } : offline)
+        })
     })
   }
 
@@ -328,18 +380,19 @@ export function connectRelay(options: RelayOptions): Relay {
 
   const putObject = (call: Extract<Call, { readonly op: 'put' }>): Promise<Ran> =>
     tryObject(`PUT ${call.key}`, async (from): Promise<Ran | undefined> => {
-      const headers = new Headers({ authorization: `Bearer ${from.token}`, 'content-type': 'application/octet-stream' })
-      if (call.if !== undefined) {
-        if ('none' in call.if) headers.set('if-none-match', '*')
-        else headers.set('if-match', `"${call.if.match}"`)
-      }
-      if (call.holder !== undefined) headers.set('x-anyhost-holder', call.holder)
+      const headers = new Headers({
+        authorization: `Bearer ${from.token}`,
+        'content-type': 'application/octet-stream',
+        ...(call.if === undefined ? {} : conditionHeaders(call.if)),
+        ...(call.holder === undefined ? {} : { 'x-anyhost-holder': call.holder }),
+      })
       const answer = await fetch(objectUrl(from, call.key), { method: 'PUT', headers, body: call.bytes, signal: AbortSignal.timeout(REQUEST_MS + Math.ceil(call.bytes.length / SLOWEST_UPLOAD_BYTES_PER_MS)) })
       if (answer.status !== 200 && answer.status !== 409 && answer.status !== 412) return await failureOf(answer)
       const body = (await answer.json()) as { etag?: string; holder?: DeviceRef }
       if (answer.status === 409 && body.holder !== undefined) return { status: 409, holder: body.holder }
       if (answer.status === 412) return written(call, body.etag === undefined ? { status: 412 } : { status: 412, etag: body.etag })
-      return { status: 200, etag: body.etag ?? '' }
+      if (answer.status === 200 && body.etag !== undefined) return { status: 200, etag: body.etag }
+      throw new Refused(`The relay answered ${answer.status} with no ${answer.status === 409 ? 'holder' : 'etag'} to the PUT of ${call.key}.`)
     })
 
   const getObject = async (key: string): Promise<Got | undefined> => {
@@ -352,16 +405,19 @@ export function connectRelay(options: RelayOptions): Relay {
       try {
         const answer = await fetch(objectUrl(from, key), { headers: { authorization: `Bearer ${from.token}`, ...(got > 0 ? { range: `bytes=${got}-` } : {}) }, signal: controller.signal })
         if (answer.status === 404) return 'missing'
-        if (answer.status !== 200 && answer.status !== 206 && answer.status !== 416) return await failureOf(answer)
-        // an object written again between two tries starts over
-        if (answer.status !== 206 || unquoted(answer.headers.get('etag')) !== etag) {
+        // An object written again between two tries starts over from byte 0: one shorter than the bytes read refuses
+        // their range, and a longer one answers it with its new etag. A whole object is the answer to no range, or to a
+        // range the relay did not serve.
+        const isNew = answer.status === 416 || (answer.status === 206 && unquoted(answer.headers.get('etag')) !== etag)
+        if (answer.status === 200 || isNew) {
           parts.length = 0
           got = 0
-          if (answer.status !== 200) {
-            await answer.body?.cancel()
-            return undefined
-          }
         }
+        if (answer.status === 206 && isNew) {
+          await answer.body?.cancel()
+          throw new Error(`${key} was written again while anyhost read it`)
+        }
+        if (answer.status !== 200 && answer.status !== 206) return await failureOf(answer)
         etag = unquoted(answer.headers.get('etag'))
         const range = answer.headers.get('content-range')
         const size = range === null ? Number(answer.headers.get('content-length')) : Number(range.split('/')[1])
@@ -372,7 +428,7 @@ export function connectRelay(options: RelayOptions): Relay {
           clearTimeout(idle)
           idle = setTimeout(() => controller.abort(new Error(`no byte came for ${IDLE_MS / 1000} seconds`)), IDLE_MS)
         }
-        if (got !== size) return undefined
+        if (got !== size) throw new Error(`the download of ${key} ended at byte ${got} of ${size}`)
         return { status: 200, etag, size, modified: new Date(answer.headers.get('last-modified') ?? 0).toISOString(), bytes: Buffer.concat(parts) }
       } finally {
         clearTimeout(idle)
@@ -422,6 +478,8 @@ export function connectRelay(options: RelayOptions): Relay {
     flush()
     return answers
   }
+  // The relay answers each op with the result Results names for it, so the one call's answer is its op's.
+  const runOne = <C extends Call>(call: C): Promise<RanOf<C['op']>> => run([call])[0] as Promise<RanOf<C['op']>>
 
   void open()
   return {
@@ -432,12 +490,12 @@ export function connectRelay(options: RelayOptions): Relay {
       return login?.url ?? ''
     },
     run,
+    runOne,
     async list(prefix) {
       const listed: Listed[] = []
       let cursor: string | undefined
       do {
-        const page = await run([{ op: 'list', prefix, ...(cursor === undefined ? {} : { cursor }) }])[0]
-        if (page === undefined || !('objects' in page)) throw new Error(`The relay answered no list of ${prefix}.`)
+        const page = await runOne({ op: 'list', prefix, ...(cursor === undefined ? {} : { cursor }) })
         listed.push(...page.objects)
         cursor = page.cursor
       } while (cursor !== undefined)
@@ -452,9 +510,12 @@ export function connectRelay(options: RelayOptions): Relay {
     on(kind, listener) {
       listeners[kind] = [...(listeners[kind] ?? []), listener]
     },
-    // a state with a message waits to open again, and a connecting or connected socket needs nothing
+    // The socket open or opening on the login read before closes, as its object requests would use that login, which a
+    // join since replaced, and the next opens at once on the login read now. Every request it had not answered goes
+    // again on the next socket.
     reconnect() {
-      if (isClosed || !('message' in state)) return
+      if (isClosed) return
+      drop({ is: 'connecting' })
       clearTimeout(reopen)
       failures = 0
       void open()

@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSession, writeIndex, type Capture, type Problems } from '../src/capture.ts'
+import { journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture, type Problems } from '../src/capture.ts'
 import { HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { restore } from '../src/resume.ts'
@@ -18,6 +18,9 @@ const failTest: Problems = {
   },
   clear: () => undefined,
 }
+// a drain of the Claude Code session's paths, answering the paths it left
+const upload = (capture: Capture, session: string, ...paths: string[]): Promise<Set<string>[]> =>
+  Promise.all(uploadSessions(capture, [{ session, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
 
 function machine(device: Device, relay: MemoryRelay, home = join(temporaryFolder(), 'home'), state = join(temporaryFolder(), 'state'), code = noCode) {
   const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') }
@@ -30,7 +33,7 @@ async function captured(relay: MemoryRelay, device: Device, session: string, pro
   const transcript = join(roots.home, '.claude', 'projects', '-work', `${session}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":${JSON.stringify(prompt)}},"cwd":"${cwd}","sessionId":"${session}"}\n`)
-  await uploadSession(capture, session, 'claude', new Set([transcript]), failTest)
+  await upload(capture, session, transcript)
   await writeIndex(capture)
   return capture
 }
@@ -93,14 +96,14 @@ test("a session's upload holds no job record of Claude Code's, and a restore pla
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"cwd":"${cwd}","sessionId":"${session}"}\n`)
   writeFileSync(jobOf(writer.roots), `{"state":"done","cwd":"${cwd}"}`)
   // the first upload of a session takes every file it has
-  await uploadSession(writer.capture, session, 'claude', new Set([transcript]), failTest)
+  await upload(writer.capture, session, transcript)
   const paths = async (): Promise<string[]> => [...(await downloadJournal(relay.connect(server, writer.roots), session, temporaryFolder(), ({ path }) => path)).files.keys()]
   expect(await paths()).toEqual([transcript])
 
   // what an earlier version uploaded: the job record, then its deletion
-  await uploadSession(writer.capture, session, 'claude', new Set([jobOf(writer.roots)]), failTest)
+  await upload(writer.capture, session, jobOf(writer.roots))
   rmSync(jobOf(writer.roots))
-  await uploadSession(writer.capture, session, 'claude', new Set([jobOf(writer.roots)]), failTest)
+  await upload(writer.capture, session, jobOf(writer.roots))
   await writeIndex(writer.capture)
   const restorer = machine(server, relay)
   mkdirSync(dirname(jobOf(restorer.roots)), { recursive: true })
@@ -123,13 +126,13 @@ test('restore gives restoreCode the last code header and its parts, places no pa
   let captures = 0
   const writer = machine(mac, relay, home, undefined, { captureCode: async () => ({ header: new TextEncoder().encode(`header ${(captures += 1)}`), parts: [part] }), restoreCode: async () => '' }).capture
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Ship it"},"cwd":${JSON.stringify(cwd)},"sessionId":"${session}"}\n`)
-  await uploadSession(writer, session, 'claude', new Set([transcript]), failTest)
+  await upload(writer, session, transcript)
   await writer.codeRuns.get(session)
-  await uploadSession(writer, session, 'claude', new Set([`${cwd}/`]), failTest)
+  await upload(writer, session, `${cwd}/`)
   appendFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Again"},"cwd":${JSON.stringify(cwd)},"sessionId":"${session}"}\n`)
-  await uploadSession(writer, session, 'claude', new Set([transcript]), failTest)
+  await upload(writer, session, transcript)
   await writer.codeRuns.get(session)
-  await uploadSession(writer, session, 'claude', new Set([`${cwd}/`]), failTest)
+  await upload(writer, session, `${cwd}/`)
   await writeIndex(writer)
 
   const worktree = join(home, 'work', 'shop-eeeeeeee')
@@ -159,11 +162,11 @@ test('a new session is listed with its working folder by its first upload, so a 
   mkdirSync(cwd, { recursive: true })
   const writer = machine(mac, relay, home, undefined, { captureCode: async () => ({ header: new TextEncoder().encode('header'), parts: [] }), restoreCode: async () => '' }).capture
   writeFileSync(transcript, `{"type":"permission-mode","permissionMode":"default","sessionId":"${session}"}\n`)
-  await uploadSession(writer, session, 'claude', new Set([transcript]), failTest)
+  await upload(writer, session, transcript)
   appendFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Ship it"},"cwd":${JSON.stringify(cwd)},"sessionId":"${session}"}\n`)
-  await uploadSession(writer, session, 'claude', new Set([transcript]), failTest)
+  await upload(writer, session, transcript)
   await writer.codeRuns.get(session)
-  await uploadSession(writer, session, 'claude', new Set([`${cwd}/`]), failTest)
+  await upload(writer, session, `${cwd}/`)
 
   expect((await listSessions(writer.relay)).map(({ id, cwd: listed }) => ({ id, cwd: listed }))).toEqual([{ id: session, cwd }])
   const given: string[] = []
@@ -198,7 +201,7 @@ test("restore onto another home rewrites the writer's paths, and a /rewind backu
   writeFileSync(there.plan, plan)
   writeFileSync(there.planBackup, plan)
   writeFileSync(there.notesBackup, `notes kept at ${first}/work/shop\n`)
-  await uploadSession(a.capture, session, 'claude', new Set(Object.values(there)), failTest)
+  await upload(a.capture, session, ...Object.values(there))
   await writeIndex(a.capture)
 
   await restore(b.capture, session, { take: false })
@@ -225,7 +228,7 @@ test("a session that worked in macOS's temp root continues in this machine's, an
   const transcript = join(roots.claudeHome, 'projects', encoded(there), `${session}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, line(there, scratchpad('/tmp/claude-501', roots.home)))
-  await uploadSession(writer, session, 'claude', new Set([transcript]), failTest)
+  await upload(writer, session, transcript)
   await writeIndex(writer)
 
   const b = machine(server, relay)
@@ -253,25 +256,25 @@ test('a session restores on another machine byte for byte from the bucket alone,
   const history = join(claude, 'history.jsonl')
   for (const path of [transcript, plan, task, toolResult, output]) mkdirSync(dirname(path), { recursive: true })
   const line = (text: string): string => `{"type":"user","message":{"role":"user","content":${JSON.stringify(text)}},"cwd":${JSON.stringify(cwd)},"entrypoint":"cli","sessionId":"${session}"}\n`
-  const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(a.capture, session, 'claude', new Set(paths), failTest)
+  const uploadA = (...paths: string[]): Promise<Set<string>[]> => upload(a.capture, session, ...paths)
 
   writeFileSync(transcript, `${line('Plan the trip')}{"type":"attachment","attachment":{"planFilePath":${JSON.stringify(plan)}},"sessionId":"${session}"}\n`)
   writeFileSync(plan, '# Trip\n')
   writeFileSync(task, '{"status":"pending","subject":"book the train"}')
   writeFileSync(history, `{"display":"elsewhere","project":"/work","sessionId":"${other}"}\n{"display":"Plan the trip","project":${JSON.stringify(cwd)},"sessionId":"${session}"}\n`)
-  await upload(transcript, history)
+  await uploadA(transcript, history)
   writeFileSync(toolResult, 'a long Bash output\n'.repeat(1000))
   writeFileSync(output, 'started\n')
   const silent = join(dirname(output), 'b3.output')
   writeFileSync(silent, '')
   appendFileSync(transcript, line('Run the build'))
-  await upload(transcript, toolResult, output, silent)
+  await uploadA(transcript, toolResult, output, silent)
   await seal(a.capture, session)
   writeFileSync(task, '{"status":"done"}')
   appendFileSync(output, 'finished\n')
   writeFileSync(plan, '# Trip\n\n1. Book the 08:15 train\n')
   appendFileSync(transcript, line('Book it'))
-  await upload(transcript, task, output, plan)
+  await uploadA(transcript, task, output, plan)
   await writeIndex(a.capture)
   const originals = new Map([transcript, plan, task, toolResult, output, silent].map((path) => [path, readFileSync(path)]))
 
@@ -291,7 +294,7 @@ test('a session restores on another machine byte for byte from the bucket alone,
   expect(end).toBeGreaterThan(0)
 
   appendFileSync(transcript, line('Continue on server'))
-  await uploadSession(b.capture, session, 'claude', new Set([transcript]), failTest)
+  await upload(b.capture, session, transcript)
   expect(relay.objects.has(`journals/${session}/hot/${String(end).padStart(16, '0')}.zst`)).toBe(true)
   const replayed = await downloadJournal(b.capture.relay, session, temporaryFolder(), ({ path }) => path)
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '').equals(readFileSync(transcript))).toBe(true)
@@ -309,7 +312,7 @@ test("a session comes back to a machine that kept a longer copy, although the hi
   mkdirSync(dirname(there.transcript), { recursive: true })
   writeFileSync(there.transcript, `{"type":"user","message":{"role":"user","content":"Plan the release"},"cwd":${JSON.stringify(join(a.roots.home, 'work'))},"sessionId":"${session}"}\n`)
   writeFileSync(there.history, prompt('Plan the release'))
-  await uploadSession(a.capture, session, 'claude', new Set(Object.values(there)), failTest)
+  await upload(a.capture, session, ...Object.values(there))
   await writeIndex(a.capture)
   // server refused this prompt while mac held the session, and its history keeps it
   const here = at(b.roots.home)
@@ -317,7 +320,7 @@ test("a session comes back to a machine that kept a longer copy, although the hi
   writeFileSync(here.history, prompt('Refused on server'))
   await restore(b.capture, session, { take: true })
   appendFileSync(here.history, prompt('Ship it'))
-  await uploadSession(b.capture, session, 'claude', new Set([here.history]), failTest)
+  await upload(b.capture, session, here.history)
   await writeIndex(b.capture)
 
   // mac took one more prompt before it heard of the takeover: its transcript runs longer than the journal's
@@ -343,7 +346,7 @@ test('a plan and a task the session deleted stay gone after a restore, also on a
   writeFileSync(there.transcript, `{"type":"attachment","attachment":{"planFilePath":${JSON.stringify(there.plan)}},"cwd":${JSON.stringify(a.roots.home)},"sessionId":"${session}"}\n`)
   writeFileSync(there.task, '{"subject":"book the train"}')
   writeFileSync(there.plan, '# Trip\n')
-  await uploadSession(a.capture, session, 'claude', new Set(Object.values(there)), failTest)
+  await upload(a.capture, session, ...Object.values(there))
   await writeIndex(a.capture)
   await restore(b.capture, session, { take: true })
   const here = at(b.roots.home)
@@ -351,7 +354,7 @@ test('a plan and a task the session deleted stay gone after a restore, also on a
   // server's /rewind takes the plan back and Claude Code deletes the task
   rmSync(here.plan)
   rmSync(here.task)
-  await uploadSession(b.capture, session, 'claude', new Set([here.plan, here.task]), failTest)
+  await upload(b.capture, session, here.plan, here.task)
   await writeIndex(b.capture)
 
   await restore(a.capture, session, { take: true })
@@ -371,9 +374,9 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
   const transcript = join(home, '.claude', 'projects', '-work-shop', `${session}.jsonl`)
   for (const folder of [cwd, dirname(transcript)]) mkdirSync(folder, { recursive: true })
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Ship it"},"cwd":${JSON.stringify(cwd)},"sessionId":"${session}"}\n`)
-  await uploadSession(writer, session, 'claude', new Set([transcript]), failTest)
+  await upload(writer, session, transcript)
   await writer.codeRuns.get(session)
-  await uploadSession(writer, session, 'claude', new Set([`${cwd}/`]), failTest)
+  await upload(writer, session, `${cwd}/`)
   // the shop repository, as an index that read its remote lists it
   const index = JSON.parse(new TextDecoder().decode(relay.objects.get(`sessions/${mac.id}/index.json`)?.body)) as Record<string, unknown>[]
   relay.put(`sessions/${mac.id}/index.json`, new TextEncoder().encode(JSON.stringify(index.map((entry) => ({ ...entry, repo: 'git@github.com:alice/shop.git', repoFolder: '' })))))
@@ -419,7 +422,7 @@ async function takenOver(isOffline: boolean) {
   const transcript = join(old.roots.home, '.claude', 'projects', '-work', `${session}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, line('Plan the release'))
-  await uploadSession(old.capture, session, 'claude', new Set([transcript]), failTest)
+  await upload(old.capture, session, transcript)
   await writeIndex(old.capture)
   if (isOffline) {
     old.capture.relay.close()
@@ -438,7 +441,7 @@ test('a takeover tells the old machine at once, which refuses its next prompt an
   relay.stalled = true
 
   const asked = performance.now()
-  expect(await uploadSession(old.capture, session, 'claude', new Set([transcript]), failTest)).toEqual(new Set())
+  expect(await upload(old.capture, session, transcript)).toEqual([new Set()])
   expect(performance.now() - asked).toBeLessThan(100)
   expect(journalOf(old.capture.db, session)?.stopped).toContain('server took the session')
 })

@@ -2,12 +2,15 @@ import type { RenderElement } from 'claude-code'
 import { clipboard, http, messageOf, type Mod, type Page, type PageInit, type Step } from '../../node_modules/@cmodjs/core/mod.js'
 import type { Program } from '../../node_modules/@cmodjs/core/jobs/program.js'
 import { Box, Button, Input, Link, Text } from '../../node_modules/@cmodjs/core/ui/elements.js'
+import type { Device as Machine } from '../../relay/protocol.ts'
 
-// What the anyhost program answers, as `cli/src/serve.ts` serves it.
+// What the anyhost program answers, as `cli/src/serve.ts` serves it. `cmod check`'s compile against Claude Code's API
+// type-checks every file a type comes from, and refuses `cli/src/`, whose files import with `.ts` paths and use Bun, so
+// these copy the program's `Connecting`, `Status` and `JoinedRelay`. `relay/protocol.ts` uses nothing but the language.
 type Account = { readonly id: string; readonly name: string }
 type Connecting = { readonly is: 'running' | 'joined' | 'failed'; readonly lines: readonly string[]; readonly accounts?: readonly Account[]; readonly r2Page?: string; readonly error?: string }
 type Status = { readonly relay: { readonly state: string; readonly message: string }; readonly connecting?: Connecting }
-type Machine = { readonly id: string; readonly name: string; readonly os: string; readonly arch: string; readonly connected: boolean; readonly seenAt: string }
+type JoinedRelay = { readonly url: string }
 type Machines = { readonly here: string; readonly machines: readonly Machine[] }
 type Invite = { readonly command: string; readonly expiresAt: string }
 
@@ -16,7 +19,7 @@ export type AnyhostState = {
     connecting: Connecting | null
     isFollowing: boolean
     // the program's answer to the invite link pasted on the Step: the relay joined, or why not
-    joined: { readonly url: string } | { readonly problem: string } | null
+    joined: JoinedRelay | { readonly problem: string } | null
     machines: Machines | null
     invite: Invite | null
     removing: string | null
@@ -33,7 +36,8 @@ export const initialState: AnyhostState = {
 const NEEDS_STEP = new Set(['unjoined', 'outdated'])
 // The relay welcomes a joined machine within CONNECT_MS, 10 seconds, of the program asking (cli/src/relay.ts).
 const CONNECT_WAIT_MS = 15_000
-const FOLLOW_MS = 1000
+// how often the Step follows Connect Cloudflare and /move follows its move
+export const FOLLOW_MS = 1000
 
 // The anyhost program of each started mod, which its setup hands over.
 const programs = new WeakMap<object, Program>()
@@ -85,7 +89,7 @@ async function connectAsk(mod: Mod<AnyhostState>, path: string, body: object): P
 }
 
 async function joinWith(mod: Mod<AnyhostState>, link: string): Promise<void> {
-  mod.state.memory.joined = await askProgram<{ url: string }>(mod, '/join', { link }).catch((error: unknown) => ({ problem: messageOf(error) }))
+  mod.state.memory.joined = await askProgram<JoinedRelay>(mod, '/join', { link }).catch((error: unknown) => ({ problem: messageOf(error) }))
 }
 
 // Done once this machine is joined to a relay that answers the program's protocol. A program that just started

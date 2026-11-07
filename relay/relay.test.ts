@@ -300,7 +300,9 @@ describe('joining', () => {
     await relay.setSetupCode(nextCode)
     // the restart dropped the first machine's socket
     mac.socket = await connect(mac.token, mac.device.name, mac.device.roots)
-    await joinWith(nextCode, machine('setup'))
+    const setup = await joinWith(nextCode, machine('setup'))
+    // the setup machine's join whose answer it never got, sent again, joins it again
+    expect(await json(await post('/v1/join', { invite: nextCode, device: setup.device }))).toMatchObject({ status: 200, device: { id: setup.device.id } })
     expect(await json(await post('/v1/join', { invite: nextCode, device: machine('third') }))).toMatchObject({ status: 403, error: 'invite_used' })
     expect(await json(await post('/v1/join', { invite: firstCode, device: machine('third') }))).toMatchObject({ status: 403, error: 'invite_used' })
   })
@@ -316,6 +318,23 @@ describe('joining', () => {
     expect(used['message']).toContain(joined.device.name)
     expect(await json(await post('/v1/join', { invite: 'K7QX2M4W9TPR6ZC3HN8JD5VB00', device: machine('stranger') }))).toMatchObject({ status: 403, error: 'invite_unknown' })
     expect(await json(await post('/v1/join', { invite: codeOf(made!['link']) }))).toMatchObject({ status: 400, error: 'invalid' })
+  })
+
+  test('a join the same machine sends again within 10 minutes of its use, as after a lost answer, joins it with a new token, and the invite still refuses any other', async () => {
+    const code = await invite(mac)
+    const first = await joinWith(code, machine('repeated'))
+    first.socket.close()
+    await first.socket.closed
+    const again = await json(await post('/v1/join', { invite: code, device: first.device }))
+    expect(again).toMatchObject({ status: 200, device: { id: first.device.id, name: first.device.name } })
+    expect(again['token']).not.toBe(first.token)
+    const stale = await connect(first.token, first.device.name, first.device.roots)
+    expect(await stale.closed).toMatchObject({ code: CLOSE_UNKNOWN_TOKEN })
+    const current = await connect(again['token'], first.device.name, first.device.roots)
+    expect(await current.message('welcome')).toMatchObject({ device: { id: first.device.id } })
+    const other = await json(await post('/v1/join', { invite: code, device: machine('other') }))
+    expect(other).toMatchObject({ status: 403, error: 'invite_used' })
+    expect(other['message']).toContain(first.device.name)
   })
 
   test.skipIf(process.env['ANYHOST_RELAY_SLOW'] !== '1')(
@@ -467,6 +486,20 @@ describe('ops', () => {
     expect(claims!['claims'][session]).toEqual({ id: other.device.id, name: other.device.name, at: expect.any(String) })
   })
 
+  test('claims with a prefix answers only the sessions whose id begins with it', async () => {
+    const stem = hex(4)
+    const under = [`${stem}-${crypto.randomUUID()}`, `${stem}${'f'.repeat(4)}-${crypto.randomUUID()}`]
+    // the ids that sort right before and right after the prefix's
+    const before = `${stem.slice(0, -1)}-${crypto.randomUUID()}`
+    const after = `${stem.slice(0, -1)}${String.fromCharCode(stem.charCodeAt(stem.length - 1) + 1)}-${crypto.randomUUID()}`
+    for (const session of [...under, before, after]) expect(await mac.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true }])
+    const [claims] = await mac.socket.results({ op: 'claims', prefix: stem })
+    expect(Object.keys(claims!['claims']).sort()).toEqual([...under].sort())
+    expect(claims!['claims'][under[0]!]).toEqual({ id: mac.device.id, name: mac.device.name, at: expect.any(String) })
+    const [all] = await mac.socket.results({ op: 'claims' })
+    expect(Object.keys(all!['claims'])).toEqual(expect.arrayContaining([...under, before, after]))
+  })
+
   test('devices lists every joined machine with its roots and whether it is connected', async () => {
     const [devices] = await mac.socket.results({ op: 'devices' })
     expect((devices!['devices'] as Json[]).find((device) => device['id'] === mac.device.id)).toEqual({
@@ -523,9 +556,24 @@ describe('objects over HTTP', () => {
     const tail = await getObject(mac.token, key, { range: 'bytes=-4' })
     expect(tail.headers.get('content-range')).toBe('bytes 252-255/256')
     expect(new Uint8Array(await tail.arrayBuffer())).toEqual(body.subarray(252))
-    expect(await json(await getObject(mac.token, key, { range: 'bytes=300-' }))).toMatchObject({ status: 416 })
-    expect(await json(await getObject(mac.token, key, { range: 'bytes=0-1,5-6' }))).toMatchObject({ status: 416 })
     expect(await json(await getObject(mac.token, `${prefix}http/none`))).toMatchObject({ status: 404, error: 'missing' })
+  })
+
+  test('a GET whose range starts past the object\'s end answers 416, and any other error of R2 on a ranged GET 503', async () => {
+    const key = `${prefix}http/short.bin`
+    const body = Uint8Array.from({ length: 256 }, (_, index) => index)
+    expect((await putObject(mac.token, key, body)).status).toBe(200)
+    const past = await getObject(mac.token, key, { range: 'bytes=300-' })
+    // Miniflare's R2 serves the whole object for a range past its end, which R2 refuses with its error 10039
+    if (target === undefined) {
+      expect(past.status).toBe(200)
+      expect(past.headers.get('content-range')).toBeNull()
+      expect(new Uint8Array(await past.arrayBuffer())).toEqual(body)
+    } else expect(await json(past)).toMatchObject({ status: 416, error: 'invalid', message: `${key} has no bytes in bytes=300-.` })
+    // R2 refuses a key over 1,024 bytes with its error 10020, which no range causes
+    const failed = await json(await getObject(mac.token, `${prefix}http/${'k'.repeat(1100)}`, { range: 'bytes=10-' }))
+    expect(failed).toMatchObject({ status: 503, error: 'unavailable' })
+    expect(failed['message']).toContain('(10020)')
   })
 
   test('an unknown token is refused with 401', async () => {

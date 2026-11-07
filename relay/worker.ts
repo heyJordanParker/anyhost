@@ -1,7 +1,7 @@
 // The relay's Worker: the HTTP routes under /v1. It streams each object over 1 MiB straight between the machine and
 // R2, and hands everything else to the Pool, the one Durable Object of the person's machines.
-import { Pool, healthOf, type Env, type Reply } from './pool.ts'
-import type { ErrorCode, Refusal } from './protocol.ts'
+import { Pool, conditionalPut, healthOf, type Env, type Reply } from './pool.ts'
+import { tokenOf, type ErrorCode, type Refusal } from './protocol.ts'
 
 export { Pool }
 
@@ -9,57 +9,49 @@ const OBJECTS = '/v1/objects/'
 
 const reply = ({ status, body }: Reply): Response => Response.json(body, { status })
 const refuse = (status: number, error: ErrorCode, message: string): Response => reply({ status, body: { error, message } satisfies Refusal })
-const tokenOf = (request: Request): string => request.headers.get('authorization')?.replace(/^Bearer /, '') ?? ''
 
-// Streams the request's body into R2. A journal frame names its session in X-Anyhost-Holder: the Pool refuses it once
-// another machine holds the session, and a takeover waits until the write ends.
+// Streams the request's body into R2, which reads its If-Match and If-None-Match as the binding's `onlyIf`. A journal
+// frame names its session in X-Anyhost-Holder: the Pool refuses it once another machine holds the session, and a
+// takeover waits until the write ends.
 async function putObject(env: Env, pool: DurableObjectStub<Pool>, key: string, request: Request): Promise<Response> {
   // the R2 binding refuses a stream of unknown length
   if (!request.headers.has('content-length')) return refuse(411, 'length_required', 'A PUT of an object names its Content-Length.')
   const holder = request.headers.get('x-anyhost-holder') ?? undefined
-  using authorized = await pool.authorize(tokenOf(request), holder)
+  using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')), holder)
   if ('refused' in authorized) return reply(authorized.refused)
-  const onlyIf = new Headers()
-  for (const name of ['if-none-match', 'if-match']) {
-    const value = request.headers.get(name)
-    if (value !== null) onlyIf.set(name, value)
-  }
-  const stored = await env.BUCKET.put(key, request.body, { onlyIf })
-  if (stored !== null) return Response.json({ etag: stored.etag, size: stored.size })
-  const there = await env.BUCKET.head(key)
-  return Response.json({ error: 'precondition', message: `${key} failed the request's ${[...onlyIf.keys()].join(' and ')}.`, ...(there === null ? {} : { etag: there.etag }) }, { status: 412 })
+  const written = await conditionalPut(env.BUCKET, key, request.body, request.headers)
+  if ('stored' in written) return Response.json({ etag: written.stored.etag, size: written.stored.size })
+  return Response.json({ error: 'precondition', message: `${key} failed the request's If-Match or If-None-Match.`, ...(written.etag === undefined ? {} : { etag: written.etag }) }, { status: 412 })
 }
 
-// Streams an object from R2, or the part its Range names, so a broken download resumes.
+// Streams an object from R2, or the part its Range names, which R2 reads from the request's headers, so a broken
+// download resumes. R2 serves the whole object for a range it does not serve, as one of several ranges, and refuses a
+// range past the object's end with its error 10039, "Requested byte range is not satisfiable" (r2/api/error-codes),
+// which names its code at the end of the message. Every other error of R2 answers 503, which the program tries again.
 async function getObject(env: Env, pool: DurableObjectStub<Pool>, key: string, request: Request): Promise<Response> {
-  using authorized = await pool.authorize(tokenOf(request))
+  using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')))
   if ('refused' in authorized) return reply(authorized.refused)
-  const header = request.headers.get('range')
-  const range = header === null ? undefined : rangeOf(header)
-  if (range === null) return refuse(416, 'invalid', `The relay serves one range of bytes, as bytes=0-99, bytes=100- or bytes=-100, not ${header}.`)
-  const object = await env.BUCKET.get(key, range === undefined ? {} : { range }).catch((error: unknown) => {
-    if (range === undefined) throw error
-    return undefined
+  const object = await env.BUCKET.get(key, { range: request.headers }).catch((error: unknown) => {
+    if (error instanceof Error && error.message.endsWith('(10039)')) return undefined
+    throw error
   })
-  if (object === undefined) return refuse(416, 'invalid', `${key} has no bytes in ${header}.`)
+  if (object === undefined) return refuse(416, 'invalid', `${key} has no bytes in ${request.headers.get('range')}.`)
   if (object === null) return refuse(404, 'missing', `No object ${key} is in the bucket.`)
   // an object without a type is text to Cloudflare, which compresses it and drops its Content-Length
   const headers = new Headers({ 'content-type': 'application/octet-stream', etag: object.httpEtag, 'last-modified': object.uploaded.toUTCString(), 'accept-ranges': 'bytes' })
-  if (range === undefined) return new Response(object.body, { headers })
-  const offset = 'suffix' in range ? Math.max(0, object.size - range.suffix) : range.offset
-  const end = 'length' in range ? Math.min(object.size, offset + range.length) : object.size
+  const { offset, end } = servedOf(object.range, object.size)
+  if (offset === 0 && end === object.size) return new Response(object.body, { headers })
   headers.set('content-range', `bytes ${offset}-${end - 1}/${object.size}`)
   return new Response(object.body, { status: 206, headers })
 }
 
-// The one range a Range header names, or null for one the relay does not serve.
-function rangeOf(header: string): { offset: number; length?: number } | { suffix: number } | null {
-  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
-  if (match === null || (match[1] === '' && match[2] === '')) return null
-  const [first, last] = [match[1] === '' ? undefined : Number(match[1]), match[2] === '' ? undefined : Number(match[2])]
-  if (first === undefined) return last === 0 ? null : { suffix: last! }
-  if (last === undefined) return { offset: first }
-  return last < first ? null : { offset: first, length: last - first + 1 }
+// The bytes R2 served of an object of `size` bytes, as its `range` names them: from an offset, up to a length, or the
+// last `suffix` bytes. workerd names all three on every range it serves, `suffix` with no value, which R2Range's
+// types, one kind of range each, do not allow.
+function servedOf(range: R2Range | undefined, size: number): { readonly offset: number; readonly end: number } {
+  const { offset = 0, length, suffix } = (range ?? {}) as { readonly offset?: number; readonly length?: number; readonly suffix?: number }
+  if (suffix !== undefined) return { offset: Math.max(0, size - suffix), end: size }
+  return { offset, end: length === undefined ? size : Math.min(size, offset + length) }
 }
 
 async function route(request: Request, env: Env): Promise<Response> {

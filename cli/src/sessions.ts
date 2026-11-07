@@ -35,10 +35,16 @@ export async function indexesOf(relay: Relay, devices: Iterable<string>): Promis
   }))
 }
 
-export async function listSessions(relay: Relay, devices?: ReadonlyMap<string, Protocol.Device>): Promise<ListedSession[]> {
-  const [known, claims] = await Promise.all([devices ?? devicesOf(relay), claimsOf(relay)])
+// Every session the machines' indexes name, each from the index of the machine that holds it, else the latest. `read`
+// is the machines and their indexes a caller read already.
+export async function listSessions(
+  relay: Relay,
+  read?: { readonly devices: ReadonlyMap<string, Protocol.Device>; readonly indexes: ReadonlyMap<string, readonly IndexedSession[]> },
+): Promise<ListedSession[]> {
+  const known = read?.devices ?? (await devicesOf(relay))
+  const [indexes, claims] = await Promise.all([read?.indexes ?? indexesOf(relay, known.keys()), claimsOf(relay)])
   const latest = new Map<string, ListedSession>()
-  for (const [device, index] of await indexesOf(relay, known.keys())) {
+  for (const [device, index] of indexes) {
     for (const session of index) {
       const earlier = latest.get(session.id)
       const holder = claims.get(session.id)

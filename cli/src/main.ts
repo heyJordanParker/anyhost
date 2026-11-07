@@ -4,13 +4,13 @@ import plugin from '../../.claude-plugin/plugin.json'
 import type * as Protocol from '../../relay/protocol.ts'
 import { attach } from './attach.ts'
 import { openCapture, type Capture } from './capture.ts'
-import { connectCloudflare, join, type Progress } from './connect.ts'
+import { connectCloudflare, join, type Connecting, type Progress } from './connect.ts'
 import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, otherMachine, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
 import { startNew, type Moving } from './move.ts'
 import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, restore } from './resume.ts'
-import { serve, serveSocket } from './serve.ts'
+import { serve, serveSocket, type JoinedRelay, type Status } from './serve.ts'
 import { listSessions, type ListedSession } from './sessions.ts'
 
 const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex session of every machine in your own Cloudflare account.
@@ -60,7 +60,7 @@ const machineTable = (machines: readonly Protocol.Device[], here: string): strin
     machines.map((machine) => [machine.id === here ? `${machine.name} (this machine)` : machine.name, `${machine.os}-${machine.arch}`, machine.connected ? 'connected' : `last seen ${minute(machine.seenAt)}`]),
   )
 
-// how often anyhost move reads the step of the move, as the mod's /move does
+// how often anyhost move and anyhost connect read the program's step, as the mod's /move and Step do
 const FOLLOW_MS = 1000
 
 // Asks this machine's program to move the session, as /move in the session does, since only the program holds the
@@ -89,9 +89,43 @@ async function joinThroughProgram(link: string): Promise<string> {
   const unix = serveSocket()
   const asked = await fetch('http://localhost/join', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ link }) }).catch(() => undefined)
   if (asked === undefined) return await join(link)
-  const joined = (await asked.json()) as { readonly url?: string; readonly message?: string }
+  const joined = (await asked.json()) as Partial<JoinedRelay> & { readonly message?: string }
   if (!asked.ok || joined.url === undefined) throw new Error(joined.message ?? `The anyhost program at ${unix} answered the join with ${asked.status}.`)
   return joined.url
+}
+
+// The Connect Cloudflare the program's answer carries, or why it gave none.
+async function connectingOf(unix: string, answer: Response): Promise<Connecting> {
+  const read = (await answer.json()) as Connecting & { readonly message?: string }
+  if (!answer.ok) throw new Error(read.message ?? `The anyhost program at ${unix} answered Connect Cloudflare with ${answer.status}.`)
+  return read
+}
+
+// Asks this machine's program to run Connect Cloudflare, as the Step does, since the program saves the login in turn
+// with its forget of a login the relay refused, and follows it once a second, printing each line and asking each
+// question on the terminal. With no program answering, Connect Cloudflare runs here.
+async function connectThroughProgram(): Promise<void> {
+  const unix = serveSocket()
+  const post = (path: string, body: object): Promise<Response> => fetch(`http://localhost${path}`, { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const started = await post('/connect', {}).catch(() => undefined)
+  if (started === undefined) return await connectCloudflare(TERMINAL)
+  let view = await connectingOf(unix, started)
+  for (let said = 0; ; ) {
+    for (const line of view.lines.slice(said)) TERMINAL.say(line)
+    said = view.lines.length
+    if (view.is === 'joined') return
+    if (view.is === 'failed') throw new Error(view.error ?? 'Connect Cloudflare failed.')
+    if (view.accounts !== undefined) view = await connectingOf(unix, await post('/connect/account', { id: (await TERMINAL.pickAccount(view.accounts)).id }))
+    else if (view.r2Page !== undefined) {
+      await TERMINAL.enableR2(view.r2Page)
+      view = await connectingOf(unix, await post('/connect/r2', {}))
+    } else {
+      await Bun.sleep(FOLLOW_MS)
+      const { connecting } = (await (await fetch('http://localhost/status', { unix })).json()) as Status
+      if (connecting === undefined) throw new Error(`The anyhost program at ${unix} restarted during Connect Cloudflare. Run anyhost connect again.`)
+      view = connecting
+    }
+  }
 }
 
 // The person answers each question Connect Cloudflare asks on the terminal, one line each.
@@ -139,7 +173,7 @@ async function main(argv: string[]): Promise<number> {
     }
   }
   if (command === 'connect' && rest.length === 0) {
-    await connectCloudflare(TERMINAL)
+    await connectThroughProgram()
     return 0
   }
   if (command === 'join' && rest.length === 1 && rest[0] !== undefined) {

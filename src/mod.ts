@@ -2,9 +2,10 @@ import { defineMod, device, messageOf, sessions } from '../node_modules/@cmodjs/
 import { program } from '../node_modules/@cmodjs/core/jobs/program.js'
 import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
 import { option } from '../node_modules/@cmodjs/core/options.js'
-import { askProgram, connectStep, initialState, machinesPage, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
+import { askProgram, connectStep, FOLLOW_MS, initialState, machinesPage, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
 
-// A move of the session the program runs or ran: the machine it goes to, its step and the line that says it.
+// A move of the session the program runs or ran: the machine it goes to, its step and the line that says it. It copies
+// `Moving` of `cli/src/move.ts`, as `cmod check`'s compile against Claude Code's API refuses `cli/src/`.
 type Move = { readonly to: string; readonly step: 'waiting' | 'uploading' | 'moving' | 'moved' | 'failed'; readonly line: string }
 // The program's /claims/<session> answer: the machine that took the session over, or why this machine captures nothing,
 // and the session's move. `untold`, answered once, is the machine this one took the session from while that machine was
@@ -13,8 +14,6 @@ type Holder = { readonly machine?: string; readonly problem?: string; readonly u
 
 // The machines list reads again while /machines is open, as a machine connects or leaves.
 const MACHINES_EVERY_MS = 10_000
-// /move reads the step of its move once a second, as the Step follows Connect Cloudflare.
-const FOLLOW_MS = 1000
 // The program answers /claims from its memory in milliseconds, so only a program that is busy or starting keeps a
 // prompt waiting past PROMPT_ASK_MS, and the prompt then goes on with the mod's last answer of it. PROMPT_MS bounds the
 // listener itself, so nothing holds a prompt longer.

@@ -46,8 +46,9 @@ export const cmodDevice = async (): Promise<Device> => JSON.parse(await cmod(['d
 const lastWriteOf = async (path: string): Promise<string> => await stat(path).then(({ mtimeMs, size }) => `${path} ${mtimeMs} ${size}`, () => path)
 
 // The values the person set in /config, which cmod keeps in Claude Code's settings.json. An option they never set is
-// absent, and its default applies. One `cmod options` runs `claude plugin list` and a git for each project Claude Code
-// knows, 228 ms to 11 s of CPU on the Architect's Mac, so the options are read again only after a write to that file.
+// absent, and its default applies. One `cmod options` of cmod 5.13.0 runs `claude plugin list` and a git for each
+// project that has an `options.json`, 0.48 to 0.53 s of CPU on the Architect's Mac, so the options are read again only
+// after a write to that file.
 type PersonOptions = { readonly uploadEvery?: number; readonly checkouts?: string; readonly join?: string }
 let optionsRead: { readonly write: string; readonly options: PersonOptions } | undefined
 export async function personOptions(): Promise<PersonOptions> {
@@ -110,9 +111,8 @@ export async function forgetRelayLogin(refused: Login): Promise<void> {
 // Every machine that ever joined the relay, by its device id, with its roots as it last connected. A removed machine
 // stays, so the sessions it wrote stay listed and resumable.
 export async function devicesOf(relay: Relay): Promise<Map<string, Protocol.Device>> {
-  const answer = await relay.run([{ op: 'devices' }])[0]
-  if (answer === undefined || !('devices' in answer)) throw new Error('The relay answered no list of machines.')
-  return new Map(answer.devices.map((device) => [device.id, device]))
+  const { devices } = await relay.runOne({ op: 'devices' })
+  return new Map(devices.map((device) => [device.id, device]))
 }
 
 // The machines joined now, as `/machines` and `anyhost machines` show them.
@@ -130,12 +130,11 @@ export async function otherMachine(relay: Relay, here: Device, name: string, ins
 // at its first start. Its invite joins one machine before `expiresAt`. The link is quoted, because zsh's extendedglob
 // reads its `#` as a pattern.
 export async function inviteMachine(relay: Relay): Promise<{ readonly command: string; readonly expiresAt: string }> {
-  const answer = await relay.run([{ op: 'invite' }])[0]
-  if (answer === undefined || !('link' in answer)) throw new Error('The relay answered no invite.')
-  return { command: `cmod install ${new URL(plugin.repository).pathname.slice(1)} --option 'join=${answer.link}'`, expiresAt: answer.expiresAt }
+  const { link, expiresAt } = await relay.runOne({ op: 'invite' })
+  return { command: `cmod install ${new URL(plugin.repository).pathname.slice(1)} --option 'join=${link}'`, expiresAt }
 }
 
 // Takes the machine's token back and closes its connections. Its sessions stay listed and resumable.
 export async function removeMachine(relay: Relay, id: string): Promise<void> {
-  await relay.run([{ op: 'remove', device: id }])[0]
+  await relay.runOne({ op: 'remove', device: id })
 }

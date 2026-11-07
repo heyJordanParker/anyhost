@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import {
   changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, hotKey, isCodePart, journalOf, markUntold, openCapture, openDatabase, QUIET_MS, seal, sealQuiet, sessionsOf,
-  startLineOffsets, takeUntold, uploadSession, uploadSessions, type Problems, type RecordHeader,
+  startLineOffsets, takeUntold, uploadSessions, type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
@@ -42,7 +42,7 @@ function machine(device: Device, relay: MemoryRelay, folder = temporaryFolder(),
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   const capture = openCapture(relay.connect(device, roots), device, roots, openDatabase(join(folder, 'state')), code, onCode)
-  const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(capture, SESSION, 'claude', new Set(paths), failTest)
+  const upload = (...paths: string[]): Promise<Set<string>[]> => Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
   return { roots, transcript, capture, upload }
 }
 
@@ -159,15 +159,15 @@ test('replay of append, write-once and rewrite records', async () => {
 
 test('a drain of several sessions goes up in one request, each session claimed before its frames', async () => {
   const relay = memoryRelay()
-  const { roots, transcript, capture } = machine(deviceA, relay)
+  const { roots, transcript, capture, upload } = machine(deviceA, relay)
   const other = join(roots.home, '.claude', 'projects', '-work-trip', `${OTHER}.jsonl`)
   writeFileSync(transcript, lines[0] ?? '')
   writeFileSync(other, `{"type":"user","message":{"role":"user","content":"Pack"},"sessionId":"${OTHER}"}\n`)
-  const sessions = new Map([
-    [SESSION, { tool: 'claude' as const, paths: new Set([transcript]) }],
-    [OTHER, { tool: 'claude' as const, paths: new Set([other]) }],
-  ])
-  await Promise.all(uploadSessions(capture, sessions, failTest).values())
+  const sessions = [
+    { session: SESSION, tool: 'claude' as const, paths: new Set([transcript]) },
+    { session: OTHER, tool: 'claude' as const, paths: new Set([other]) },
+  ]
+  await Promise.all(uploadSessions(capture, sessions, failTest).map(([, left]) => left))
 
   expect(relay.requests[0]?.map((op) => (op.op === 'claim' ? `claim ${op.session}` : op.op === 'put' ? `put ${op.key}` : op.op))).toEqual([
     `claim ${SESSION}`,
@@ -178,7 +178,7 @@ test('a drain of several sessions goes up in one request, each session claimed b
   expect(relay.claims).toEqual(new Map([[SESSION, deviceA.id], [OTHER, deviceA.id]]))
   // the next drain claims nothing again
   appendFileSync(transcript, lines[1] ?? '')
-  await uploadSession(capture, SESSION, 'claude', new Set([transcript]), failTest)
+  await upload(transcript)
   expect(relay.requests.flat().filter(({ op }) => op === 'claim')).toHaveLength(2)
 })
 
@@ -205,7 +205,7 @@ test("a drain never waits on git: the files go up at once, the code follows in i
   const part = { path: `anyhost:code/${SESSION}/parts/aa11`, bytes: new TextEncoder().encode('a large binary diff') }
   const releases: (() => void)[] = []
   const heard: string[] = []
-  const { transcript, capture } = machine(
+  const { transcript, capture, upload } = machine(
     deviceA,
     relay,
     temporaryFolder(),
@@ -215,7 +215,6 @@ test("a drain never waits on git: the files go up at once, the code follows in i
     },
     (_session, _tool, at) => void heard.push(at),
   )
-  const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(capture, SESSION, 'claude', new Set(paths), failTest)
   writeFileSync(transcript, lines[1] ?? '')
 
   // git answers only when the test says, and the upload has returned before it
@@ -253,8 +252,7 @@ test('a code record whose upload failed goes up with the next drain, since captu
     { header: new TextEncoder().encode('header 1'), parts: [bundle] },
     { header: new TextEncoder().encode('header 2'), parts: [] },
   ]
-  const { transcript, capture } = machine(deviceA, relay, temporaryFolder(), { captureCode: async () => captures.shift(), restoreCode: async (_header, _readPart, at) => at })
-  const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(capture, SESSION, 'claude', new Set(paths), failTest)
+  const { transcript, capture, upload } = machine(deviceA, relay, temporaryFolder(), { captureCode: async () => captures.shift(), restoreCode: async (_header, _readPart, at) => at })
   writeFileSync(transcript, lines[1] ?? '')
   await upload(transcript)
   await capture.codeRuns.get(SESSION)
@@ -280,13 +278,13 @@ test('at uploadEvery 0 a line goes up alone, and a long code part in pieces, sev
     captureCode: async () => ({ header: new TextEncoder().encode(`header ${++reads}`), parts: reads === 1 ? [bundle] : [] }),
     restoreCode: async (_header, _readPart, at) => at,
   })
-  const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(capture, SESSION, 'claude', new Set(paths), failTest, true)
+  const upload = (...paths: string[]): Promise<Set<string>[]> => Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set(paths) }], failTest, true).map(([, left]) => left))
   writeFileSync(transcript, lines[1] ?? '')
   await upload(transcript)
   await capture.codeRuns.get(SESSION)
-  expect(await upload(`${TRIP}/`)).toEqual(new Set([`${TRIP}/`]))
+  expect(await upload(`${TRIP}/`)).toEqual([new Set([`${TRIP}/`])])
   appendFileSync(transcript, lines[2] ?? '')
-  expect(await upload(transcript, `${TRIP}/`)).toEqual(new Set([`${TRIP}/`]))
+  expect(await upload(transcript, `${TRIP}/`)).toEqual([new Set([`${TRIP}/`])])
   await upload(`${TRIP}/`)
   // the line changed the session while its code went up, so the code is read again once it is up
   await upload(`${TRIP}/`)
@@ -321,7 +319,7 @@ test('a refused position stops the machine that lost it, and its lines from ther
   await welcomed(a.capture.relay)
   const logged = spyOn(console, 'error').mockImplementation(() => undefined)
 
-  expect(await b.upload(b.transcript)).toEqual(new Set())
+  expect(await b.upload(b.transcript)).toEqual([new Set()])
   appendFileSync(b.transcript, lines[2] ?? '')
   await b.upload(b.transcript)
 
@@ -343,7 +341,7 @@ test('a session another machine holds refuses this machine\'s frames, and it sto
   writeFileSync(b.transcript, lines[1] ?? '')
   await a.upload(a.transcript)
 
-  expect(await b.upload(b.transcript)).toEqual(new Set())
+  expect(await b.upload(b.transcript)).toEqual([new Set()])
   expect(hotFrames(relay)).toEqual([hotKey(SESSION, 0)])
   expect(journalOf(b.capture.db, SESSION)).toMatchObject({ holder: 'anyhost-a', stopped: expect.stringContaining('anyhost-a took the session') })
 })
@@ -391,7 +389,7 @@ test('a code frame that fails leaves the journal at the frames before it, and th
     captureCode: async () => ({ header: new TextEncoder().encode('header'), parts: [bundle] }),
     restoreCode: async (_header, _readPart, at) => at,
   })
-  const upload = (...paths: string[]): Promise<Set<string>> => uploadSession(capture, SESSION, 'claude', new Set(paths), failTest, true)
+  const upload = (...paths: string[]): Promise<Set<string>[]> => Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set(paths) }], failTest, true).map(([, left]) => left))
   writeFileSync(transcript, lines[1] ?? '')
   await upload(transcript)
   await capture.codeRuns.get(SESSION)
@@ -452,7 +450,7 @@ test('a session whose working folder this machine lacks uploads its lines, keeps
   const logged = spyOn(console, 'error').mockImplementation(() => undefined)
   for (const text of ['one', 'two']) {
     appendFileSync(transcript, line(text))
-    await uploadSession(capture, SESSION, 'claude', new Set([transcript]), failTest, true)
+    await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], failTest, true).map(([, left]) => left))
     await capture.codeRuns.get(SESSION)
   }
 
@@ -519,12 +517,13 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
 test("a Codex thread on a machine with no Codex database gets its name into the row Codex makes, as Codex writes it", async () => {
   const relay = memoryRelay()
   const { roots, capture } = machine(deviceA, relay)
+  const upload = (path: string): Promise<Set<string>[]> => Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'codex', paths: new Set([path]) }], failTest).map(([, left]) => left))
   const rollout = join(roots.codexHome, 'sessions', '2026', '11', '04', `rollout-2026-11-04T14-54-13-${SESSION}.jsonl`)
   mkdirSync(dirname(rollout), { recursive: true })
   writeFileSync(rollout, `{"type":"session_meta","payload":{"id":"${SESSION}","cwd":${JSON.stringify(TRIP)}}}\n`)
   const index = (name: string): string => `{"id":"${SESSION}","thread_name":"${name}","updated_at":"2026-11-04T13:15:48Z"}\n`
   writeFileSync(join(roots.codexHome, 'session_index.jsonl'), `${index('Trip notes')}${index('Osprey sighting notes')}`)
-  await uploadSession(capture, SESSION, 'codex', new Set([rollout]), failTest)
+  await upload(rollout)
   const wal = `${codexState(roots)}-wal`
   expect(await sessionsOf(capture, wal)).toEqual([{ session: SESSION, tool: 'codex' }])
 
@@ -532,7 +531,7 @@ test("a Codex thread on a machine with no Codex database gets its name into the 
   const codex = new Database(codexState(roots))
   codex.run('create table threads (id text primary key, title text not null, name text)')
   codex.query('insert into threads values (?, ?, null)').run(SESSION, 'What bird is named in notes.md?')
-  await uploadSession(capture, SESSION, 'codex', new Set([codexState(roots)]), failTest)
+  await upload(codexState(roots))
 
   expect(codex.query<{ name: string }, [string]>('select name from threads where id = ?').get(SESSION)?.name).toBe('Osprey sighting notes')
   codex.close()
@@ -666,20 +665,16 @@ test('a lines file names the sessions that wrote new lines, and never the lines 
   expect(await sessionsOf(capture, history)).toEqual([])
 })
 
-type Queued = ReadonlyMap<string, { readonly paths: ReadonlySet<string> }>
-
 test('the queue at 0 uploads on every write, one upload in flight per session', async () => {
   const uploads: { session: string; paths: string[] }[] = []
   const ends: (() => void)[] = []
   const queue = new UploadQueue(
     0,
-    (sessions: Queued) =>
-      new Map(
-        [...sessions].map(([session, { paths }]) => {
-          uploads.push({ session, paths: [...paths] })
-          return [session, new Promise<Set<string>>((resolve) => ends.push(() => resolve(new Set())))]
-        }),
-      ),
+    (sessions) =>
+      sessions.map((changed) => {
+        uploads.push({ session: changed.session, paths: [...changed.paths] })
+        return [changed, new Promise<Set<string>>((resolve) => ends.push(() => resolve(new Set())))] as const
+      }),
     (_session, error) => {
       throw error
     },
@@ -704,15 +699,13 @@ test('the queue at 0 tries a failed upload again by itself, 1 second later and t
   const started = Date.now()
   const queue = new UploadQueue(
     0,
-    (sessions: Queued) =>
-      new Map(
-        [...sessions].map(([session, { paths }]) => {
-          tries.push(Date.now() - started)
-          if (tries.length < 3) return [session, Promise.reject(new Error('connect ECONNREFUSED'))]
-          expect([...paths]).toEqual(['/a'])
-          return [session, Promise.resolve(new Set<string>())]
-        }),
-      ),
+    (sessions) =>
+      sessions.map((changed) => {
+        tries.push(Date.now() - started)
+        if (tries.length < 3) return [changed, Promise.reject(new Error('connect ECONNREFUSED'))] as const
+        expect([...changed.paths]).toEqual(['/a'])
+        return [changed, Promise.resolve(new Set<string>())] as const
+      }),
     (session) => void failures.push(session),
   )
   queue.add(SESSION, 'claude', '/a')
@@ -727,9 +720,9 @@ test('the queue at N uploads every session written meanwhile in one drain, once 
   const started = Date.now()
   const queue = new UploadQueue(
     0.3,
-    (sessions: Queued) => {
-      uploads.push({ sessions: [...sessions.keys()], paths: [...sessions.values()].map(({ paths }) => [...paths]), at: Date.now() - started })
-      return new Map([...sessions.keys()].map((session) => [session, Promise.resolve(new Set<string>())]))
+    (sessions) => {
+      uploads.push({ sessions: sessions.map(({ session }) => session), paths: sessions.map(({ paths }) => [...paths]), at: Date.now() - started })
+      return sessions.map((changed) => [changed, Promise.resolve(new Set<string>())] as const)
     },
     (_session, error) => {
       throw error

@@ -1,8 +1,8 @@
-import { afterAll, afterEach, beforeAll, beforeEach, expect, setSystemTime, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { PROTOCOL_VERSION, RELAY_VERSION } from '../../relay/protocol.ts'
-import { connectCloudflare, connectForStep, join as joinRelay, joinWithOption, updateRelay, type Account, type Cloudflare, type Progress } from '../src/connect.ts'
+import { connectCloudflare, connectForStep, join as joinRelay, runCf, updateRelay, type Account, type Cloudflare, type Progress } from '../src/connect.ts'
 import { forgetRelayLogin, personOptions, relayLogin, saveRelayLogin } from '../src/device.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
 import { memoryRelay, stopRelays, temporaryFolder, welcomed } from './memory.ts'
@@ -27,7 +27,7 @@ beforeAll(() => {
   mkdirSync(dirname(cmod), { recursive: true })
   writeFileSync(
     cmod,
-    `#!/bin/sh\ncase "$1 $2" in\n  device*) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  "secret get") echo "secret get" >> "$(dirname "$0")/calls"; cat "$(dirname "$0")/secret-$3-$4" ;;\n  "secret delete") rm -f "$(dirname "$0")/secret-$3-$4" ;;\n  secret*) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  options*) echo options >> "$(dirname "$0")/calls"; printf '{"person":%s}' "$(cat "$(dirname "$0")/settings.json")" ;;\n  option*) printf '%s=%s\\n' "$3" "$4" >> "$(dirname "$0")/option-$2" ;;\n  *) exit 2 ;;\nesac\n`,
+    `#!/bin/sh\ncase "$1 $2" in\n  device*) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  "secret get") echo "secret get" >> "$(dirname "$0")/calls"; cat "$(dirname "$0")/secret-$3-$4" ;;\n  "secret delete") rm -f "$(dirname "$0")/secret-$3-$4" ;;\n  secret*) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  options*) echo options >> "$(dirname "$0")/calls"; printf '{"person":%s}' "$(cat "$(dirname "$0")/settings.json")" ;;\n  *) exit 2 ;;\nesac\n`,
   )
   chmodSync(cmod, 0o755)
   for (const [name, value] of Object.entries({ XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: undefined, CLAUDE_CONFIG_DIR: undefined, CLOUDFLARE_API_TOKEN: undefined })) {
@@ -45,33 +45,32 @@ afterAll(() => {
 })
 
 const secretFile = (): string => join(home, 'data', 'cmod', 'programs', 'secret-anyhost-token')
-// every `cmod option anyhost <key> <value>` the program ran, one `<key>=<value>` line each
-const optionsSet = (): string[] => (existsSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost')) ? readFileSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost'), 'utf8').split('\n').filter(Boolean) : [])
 
 // every `cmod secret get` and `cmod options` the program ran, in order
 const cmodCalls = (): string[] => (existsSync(join(home, 'data', 'cmod', 'programs', 'calls')) ? readFileSync(join(home, 'data', 'cmod', 'programs', 'calls'), 'utf8').split('\n').filter(Boolean) : [])
 
-// each test starts with an empty state folder and Claude Code folder, no token, no option set and no cmod call
+// each test starts with an empty state folder and Claude Code folder, no token and no cmod call
 beforeEach(() => {
   process.env['XDG_STATE_HOME'] = temporaryFolder()
   process.env['CLAUDE_CONFIG_DIR'] = temporaryFolder()
   rmSync(secretFile(), { force: true })
-  rmSync(join(home, 'data', 'cmod', 'programs', 'option-anyhost'), { force: true })
   rmSync(join(home, 'data', 'cmod', 'programs', 'calls'), { force: true })
 })
-
-afterEach(() => setSystemTime())
 
 const stateFile = (name: string): string => join(process.env['XDG_STATE_HOME'] ?? '', 'anyhost', name)
 const storedToken = (): string => readFileSync(secretFile(), 'utf8')
 const sha256 = (text: string): string => new Bun.CryptoHasher('sha256').update(text).digest('hex')
 
-type Worker = { metadata: Record<string, unknown>; module: string; secret: string | undefined; route: boolean }
+// `relay` is the relay version the Worker's module answers in /v1/health
+type Worker = { metadata: Record<string, unknown>; module: string; secret: string | undefined; route: boolean; relay: number }
 type Envelope = { success: boolean; errors: { code: number; message: string }[]; result: unknown }
 
-// Cloudflare as anyhost meets it: the API of one account, the relay each upload runs at its workers.dev address, and
-// cf, whose login is a JSON file of its access token or, under `keyring`, a file no other program reads.
-function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; buckets?: Record<string, string>; keyring?: boolean; loggedIn?: boolean; expired?: 403 | 401; notFoundHealth?: number; resets?: number; others?: Account[] } = { r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' } }) {
+// Cloudflare as anyhost meets it: the API of the login's accounts, of which ACCOUNT holds the buckets and Workers, the
+// relay each upload runs at its workers.dev address, and cf, whose login is a JSON file of its access token or, under
+// `keyring`, a file no other program reads. `relay` is a relay of that version deployed before, `secretLag` the joins a
+// new setup code secret answers `invite_unknown` before it reaches the Pool, `resets` the API calls the link resets, and
+// `timeouts` the API calls that get no answer until their time limit ends them.
+function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; buckets?: Record<string, string>; keyring?: boolean; apiToken?: boolean; loggedIn?: boolean; expired?: 403 | 401; notFoundHealth?: number; resets?: number; timeouts?: number; others?: Account[]; relay?: number; secretLag?: number; loseBucketMake?: boolean } = { r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' } }) {
   const loginFile = join(temporaryFolder(), 'default.json')
   writeFileSync(loginFile, JSON.stringify({ oauth_token: account.expired === undefined ? 'fresh' : 'expired' }))
   let isLoggedIn = account.loggedIn ?? true
@@ -81,8 +80,17 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
   let subdomain = account.subdomain
   let notFound = account.notFoundHealth ?? 0
   let resets = account.resets ?? 0
+  let timeouts = account.timeouts ?? 0
+  // the clock the setup waits on, which moves only as it waits
+  let at = Date.parse('2026-11-07T09:00:00.000Z')
+  // the joins left before the setup code secret set last reaches the Pool
+  let lagging = 0
   const buckets = new Map(Object.entries(account.buckets ?? {}))
   const workers = new Map<string, Worker>()
+  if (account.relay !== undefined) {
+    const metadata = { bindings: [{ type: 'plain_text', name: 'BUCKET_NAME', text: 'anyhost-test' }] }
+    workers.set(NAMES.worker, { metadata, module: 'class Pool {}', secret: sha256('an earlier setup code'), route: true, relay: account.relay })
+  }
   const joined: string[] = []
   const calls: string[] = []
   const cfRuns: { args: readonly string[]; env: CfEnvironment }[] = []
@@ -97,6 +105,8 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
     if (!valid.has(headers.get('authorization')?.replace('Bearer ', '') ?? '')) {
       return account.expired === 401 ? new Response('{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}', { status: 401 }) : envelope(403, null, [9109, 'Invalid access token'])
     }
+    // the login's other accounts hold no Worker
+    if (account.others?.some(({ id }) => new RegExp(`^/accounts/${id}/workers/scripts/[^/]+/settings$`).test(path)) === true) return envelope(404, null, [10007, 'This Worker does not exist on your account.'])
     const prefix = `/accounts/${ACCOUNT.id}`
     const bucket = new RegExp(`^${prefix}/r2/buckets/([^/]+)$`).exec(path)?.[1]
     if (method === 'GET' && bucket !== undefined) {
@@ -107,7 +117,9 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
     if (method === 'POST' && path === `${prefix}/r2/buckets`) {
       if (!r2) return envelope(403, null, [10042, 'Account not entitled to this feature.'])
       const { name } = JSON.parse(String(init.body)) as { name: string }
+      if (buckets.has(name)) return envelope(409, null, [10073, 'Bucket name already exists.'])
       buckets.set(name, 'default')
+      if (account.loseBucketMake === true) throw new Error('ECONNRESET: The socket connection was closed unexpectedly.')
       return envelope(200, { name })
     }
     if (method === 'GET' && path === `${prefix}/workers/subdomain`) return subdomain === undefined ? envelope(404, null, [10007, 'This account has no workers.dev subdomain.']) : envelope(200, { subdomain })
@@ -123,8 +135,17 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
       const form = init.body as FormData
       const metadata = JSON.parse(await (form.get('metadata') as Blob).text()) as { bindings: { type: string; text?: string }[]; keep_bindings?: string[] }
       const secret = metadata.bindings.find(({ type }) => type === 'secret_text')?.text ?? (metadata.keep_bindings?.includes('secret_text') === true ? workers.get(worker)?.secret : undefined)
-      workers.set(worker, { metadata, module: await (form.get('relay.js') as Blob).text(), secret, route: workers.get(worker)?.route ?? false })
+      workers.set(worker, { metadata, module: await (form.get('relay.js') as Blob).text(), secret, route: workers.get(worker)?.route ?? false, relay: RELAY_VERSION })
       return envelope(200, {})
+    }
+    if (worker !== undefined && method === 'PUT' && rest === '/secrets') {
+      const uploaded = workers.get(worker)
+      if (uploaded === undefined) return envelope(404, null, [10007, 'This Worker does not exist on your account.'])
+      const { name, text, type } = JSON.parse(String(init.body)) as { name: string; text: string; type: string }
+      if (name !== 'SETUP_CODE_SHA256' || type !== 'secret_text') return envelope(400, null, [10021, `The stand-in keeps no secret ${name} of type ${type}.`])
+      uploaded.secret = text
+      lagging = account.secretLag ?? 0
+      return envelope(200, { name, type })
     }
     if (worker !== undefined && method === 'POST' && rest === '/subdomain') {
       const uploaded = workers.get(worker)
@@ -138,12 +159,14 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
   // the relay as its Pool answers: its health for its bucket, and a join with the setup code its secret names, once
   async function relay(worker: Worker, method: string, path: string, init: RequestInit): Promise<Response> {
     const bucketName = (worker.metadata['bindings'] as { name: string; text?: string }[]).find(({ name }) => name === 'BUCKET_NAME')?.text ?? ''
-    const health = { relay: RELAY_VERSION, protocol: PROTOCOL_VERSION, bucket: bucketName }
+    const health = { relay: worker.relay, protocol: PROTOCOL_VERSION, bucket: bucketName }
     if (method === 'GET' && path === '/v1/health') return Response.json(health)
     if (method === 'POST' && path === '/v1/join') {
       const { invite, device } = JSON.parse(String(init.body)) as { invite: string; device: { id: string; name: string } }
       const code = sha256(invite)
-      if (code !== worker.secret || joined.includes(code)) return Response.json({ error: 'invite_unknown', message: 'The relay made no invite with that code. Make a new one with Add a machine.' }, { status: 403 })
+      const isLive = lagging === 0
+      lagging = Math.max(0, lagging - 1)
+      if (!isLive || code !== worker.secret || joined.includes(code)) return Response.json({ error: 'invite_unknown', message: 'The relay made no invite with that code. Make a new one with Add a machine.' }, { status: 403 })
       joined.push(code)
       return Response.json({ ...health, token: `token-of-${device.name}`, device: { id: device.id, name: device.name } })
     }
@@ -157,6 +180,11 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
       if (resets > 0) {
         resets -= 1
         throw new Error('ECONNRESET: The socket connection was closed unexpectedly.')
+      }
+      // what fetch rejects with once the AbortSignal.timeout of its call ends it
+      if (timeouts > 0) {
+        timeouts -= 1
+        throw new DOMException('The operation timed out.', 'TimeoutError')
       }
       calls.push(`${method} ${url.slice(API.length)}${new Headers(init.headers).has('cf-r2-jurisdiction') ? ` (${new Headers(init.headers).get('cf-r2-jurisdiction')})` : ''}`)
       return await api(method, url.slice(API.length), init)
@@ -185,7 +213,9 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
       writeFileSync(loginFile, JSON.stringify({ oauth_token: 'fresh' }))
       isExpired = false
     }
-    return JSON.stringify({ authenticated: true, authSource: `OAuth token from ${account.keyring === true ? loginFile.replace('.json', '.enc') : loginFile}`, accounts: [...(account.others ?? []), ACCOUNT] })
+    // cf logged in with an API token names its source as cf's own `authSource` does
+    const source = account.apiToken === true ? 'CLOUDFLARE_API_TOKEN environment variable' : `OAuth token from ${account.keyring === true ? loginFile.replace('.json', '.enc') : loginFile}`
+    return JSON.stringify({ authenticated: true, authSource: source, accounts: [...(account.others ?? []), ACCOUNT] })
   }
 
   const cloudflare: Cloudflare = {
@@ -206,15 +236,16 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
       throw new Error(`The stand-in runs no cf ${args.join(' ')}.`)
     },
     // the clock moves as the setup waits, so a 30-second wait takes no time
+    now: () => at,
     sleep: async (ms) => {
-      setSystemTime(new Date(Date.now() + ms))
+      at += ms
     },
   }
   const enabled: string[] = []
   const progress: Progress = {
     say: (line) => said.push(line),
     pickAccount: async () => {
-      throw new Error('The login reaches one account.')
+      throw new Error('Connect Cloudflare asked the person for an account.')
     },
     enableR2: async (page) => {
       enabled.push(page)
@@ -240,9 +271,9 @@ test('deploys the relay from nothing into the bucket it finds in the EU, waits f
   const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
   expect([...new Set(cloudflare.calls)]).toEqual([
     `GET /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/settings`,
+    `GET /accounts/${ACCOUNT.id}/workers/subdomain`,
     `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test (default)`,
     `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test (eu)`,
-    `GET /accounts/${ACCOUNT.id}/workers/subdomain`,
     `PUT /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect`,
     `POST /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/subdomain`,
     `GET ${relayUrl}/v1/health`,
@@ -286,12 +317,31 @@ test('a call the link reset tries again after 1, 2, 4, 8 and 16 seconds, and fai
   )
 })
 
+test('a call that gets no answer within its time limit says on the Step what it waits for and how long, before each try again', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, timeouts: 2 })
+  await connectCloudflare(cloudflare.progress, NAMES, cloudflare.cloudflare)
+  const settings = `GET ${API}/accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/settings`
+  expect(cloudflare.said.slice(1, 3)).toEqual([
+    `${settings} got no answer within 60 s (The operation timed out.), so anyhost asks again in 1 s, try 2 of 6.`,
+    `${settings} got no answer within 60 s (The operation timed out.), so anyhost asks again in 2 s, try 3 of 6.`,
+  ])
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
 test('makes the bucket when no jurisdiction has it, and binds it with no jurisdiction', async () => {
   const cloudflare = standIn({ r2: true, subdomain: 'parker-labs' })
   await connectCloudflare(cloudflare.progress, { worker: 'anyhost-test-connect', bucket: 'anyhost-test-connect' }, cloudflare.cloudflare)
   expect(cloudflare.calls).toContain(`POST /accounts/${ACCOUNT.id}/r2/buckets`)
   expect(cloudflare.buckets.get('anyhost-test-connect')).toBe('default')
   expect((cloudflare.workers.get('anyhost-test-connect')?.metadata['bindings'] as unknown[])[0]).toEqual({ type: 'r2_bucket', name: 'BUCKET', bucket_name: 'anyhost-test-connect' })
+})
+
+test('a bucket make whose answer was lost, sent again and answered "already exists" (10073), counts as the bucket made', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', loseBucketMake: true })
+  await connectCloudflare(cloudflare.progress, { worker: 'anyhost-test-connect', bucket: 'anyhost-test-connect' }, cloudflare.cloudflare)
+  expect(cloudflare.calls.filter((call) => call === `POST /accounts/${ACCOUNT.id}/r2/buckets`)).toHaveLength(2)
+  expect((cloudflare.workers.get('anyhost-test-connect')?.metadata['bindings'] as unknown[])[0]).toEqual({ type: 'r2_bucket', name: 'BUCKET', bucket_name: 'anyhost-test-connect' })
+  expect(storedToken()).toBe('token-of-macbook')
 })
 
 test('an account with R2 off (10042) sends the person to turn it on, then tries the bucket again', async () => {
@@ -329,6 +379,33 @@ test.each([403, 401] as const)('an expired access token (%d) runs cf, which refr
   expect(storedToken()).toBe('token-of-macbook')
 })
 
+test('a cf logged in with an API token gets its calls made with the token CLOUDFLARE_API_TOKEN holds', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, apiToken: true })
+  // the stand-in API takes the token `fresh`
+  process.env['CLOUDFLARE_API_TOKEN'] = 'fresh'
+  try {
+    await connectCloudflare(cloudflare.progress, NAMES, cloudflare.cloudflare)
+  } finally {
+    delete process.env['CLOUDFLARE_API_TOKEN']
+  }
+  expect(cloudflare.cfRuns.map(({ args }) => args.join(' '))).toEqual(['auth whoami'])
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
+test('a cf run that needs no person and never exits is stopped at its limit, which its error names', async () => {
+  // a package registry that takes the request and never answers, so `bun x` waits for cf for good
+  const registry = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: () => new Promise<Response>(() => undefined) })
+  try {
+    const started = Date.now()
+    await expect(runCf(['auth', 'whoami'], { BUN_INSTALL_CACHE_DIR: temporaryFolder(), NPM_CONFIG_REGISTRY: `http://127.0.0.1:${registry.port}/` }, undefined, 2000)).rejects.toThrow(
+      'cf auth whoami ran past its limit of 2 s, so anyhost stopped it.',
+    )
+    expect(Date.now() - started).toBeLessThan(15_000)
+  } finally {
+    await registry.stop(true)
+  }
+})
+
 test('logs cf in when nobody is, showing the person the link and code cf prints', async () => {
   const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, loggedIn: false })
   await connectCloudflare(cloudflare.progress, NAMES, cloudflare.cloudflare)
@@ -352,28 +429,70 @@ test('a login cf keeps encrypted logs cf in to a folder of anyhost\'s own for th
   expect(JSON.parse(readFileSync(cloudflare.loginFile, 'utf8'))).toEqual({ oauth_token: 'fresh' })
 })
 
-test('setup on an account whose relay exists uploads a new setup code, no migration, and joins with it', async () => {
-  const cloudflare = standIn()
+// The suite missed it: every stand-in relay answered this program's own RELAY_VERSION, so an upload over it changed nothing.
+test.each([RELAY_VERSION, RELAY_VERSION + 1])('setup on an account whose relay answers relay %d sets only a new setup code, uploads no module, and joins once the Pool takes it', async (version) => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: version, secretLag: 3 })
+  const before = cloudflare.workers.get(NAMES.worker)
   await connectCloudflare(cloudflare.progress, NAMES, cloudflare.cloudflare)
-  const first = cloudflare.workers.get('anyhost-test-connect')?.secret
+  const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
+  expect(cloudflare.calls).toEqual([
+    `GET /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/settings`,
+    `GET /accounts/${ACCOUNT.id}/workers/subdomain`,
+    `GET ${relayUrl}/v1/health`,
+    `PUT /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/secrets`,
+    // the Pool answers the new code invite_unknown until the secret reaches it
+    ...Array.from({ length: 4 }, () => `POST ${relayUrl}/v1/join`),
+  ])
+  const after = cloudflare.workers.get(NAMES.worker)
+  expect(after?.module).toBe(before?.module)
+  expect(after?.relay).toBe(version)
+  expect(after?.secret).not.toBe(sha256('an earlier setup code'))
+  expect(cloudflare.said).toContain(`Joining ${relayUrl} once it takes the new setup code, for up to 10 minutes`)
+  expect(storedToken()).toBe('token-of-macbook')
+  expect(cloudflare.said.at(-1)).toBe(`Joined this machine to ${relayUrl}`)
+})
+
+test('setup on an account whose relay is older than this program uploads this one with a new setup code, no migration, and joins', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION - 1 })
   await connectCloudflare(cloudflare.progress, NAMES, cloudflare.cloudflare)
-  const again = cloudflare.workers.get('anyhost-test-connect')
-  expect(again?.secret).not.toBe(first)
+  const again = cloudflare.workers.get(NAMES.worker)
+  expect(again?.relay).toBe(RELAY_VERSION)
+  expect(again?.module).toContain('class Pool')
+  expect(again?.secret).not.toBe(sha256('an earlier setup code'))
   expect(again?.metadata['migrations']).toBeUndefined()
   expect(again?.metadata['keep_bindings']).toBeUndefined()
   expect(storedToken()).toBe('token-of-macbook')
 })
 
-test('updateRelay uploads the relay again with keep_bindings and no secret, so the setup code secret stays', async () => {
-  const cloudflare = standIn()
+// The suite missed it: the stand-in's login reached one account, so no test had a login on several.
+test('with a login on two accounts, one of which holds the Worker, Connect Cloudflare asks nothing and joins that account', async () => {
+  const other: Account = { id: 'f00dfeed', name: 'Side Project' }
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, others: [other], relay: RELAY_VERSION })
+  // the stand-in's pickAccount fails the setup when it is asked
   await connectCloudflare(cloudflare.progress, NAMES, cloudflare.cloudflare)
-  const secret = cloudflare.workers.get('anyhost-test-connect')?.secret
+  expect(cloudflare.calls.slice(0, 2)).toEqual([`GET /accounts/${other.id}/workers/scripts/anyhost-test-connect/settings`, `GET /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/settings`])
+  expect(cloudflare.calls.some((call) => call.startsWith(`PUT /accounts/${other.id}`) || call.startsWith(`POST /accounts/${other.id}`))).toBe(false)
+  expect(JSON.parse(readFileSync(stateFile('relay.json'), 'utf8'))).toEqual({ url: 'https://anyhost-test-connect.parker-labs.workers.dev' })
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
+test('updateRelay uploads the relay over an older one with keep_bindings and no secret, so the setup code secret stays', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION - 1 })
+  const secret = cloudflare.workers.get(NAMES.worker)?.secret
   await updateRelay(NAMES, cloudflare.cloudflare)
-  const updated = cloudflare.workers.get('anyhost-test-connect')
+  const updated = cloudflare.workers.get(NAMES.worker)
+  expect(updated?.relay).toBe(RELAY_VERSION)
   expect(updated?.metadata['keep_bindings']).toEqual(['secret_text'])
   expect((updated?.metadata['bindings'] as { type: string }[]).map(({ type }) => type)).toEqual(['r2_bucket', 'durable_object_namespace', 'plain_text'])
   expect(updated?.metadata['migrations']).toBeUndefined()
   expect(updated?.secret).toBe(secret)
+})
+
+test('updateRelay uploads nothing over a relay as new as this program\'s or newer, as a newer machine put up', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION + 1 })
+  await updateRelay(NAMES, cloudflare.cloudflare)
+  expect(cloudflare.workers.get(NAMES.worker)?.relay).toBe(RELAY_VERSION + 1)
+  expect(cloudflare.calls.filter((call) => call.startsWith('PUT') || call.startsWith('POST'))).toEqual([])
 })
 
 test('updateRelay asks nothing: with cf logged out, or no relay to update, it fails and logs nobody in', async () => {
@@ -385,26 +504,6 @@ test('updateRelay asks nothing: with cf logged out, or no relay to update, it fa
   expect(keyring.cfRuns.map(({ args }) => args.join(' '))).toEqual(['auth whoami'])
   const none = standIn()
   await expect(updateRelay(NAMES, none.cloudflare)).rejects.toThrow('0 accounts of your Cloudflare login hold the Worker anyhost-test-connect, so anyhost updates none. Connect Cloudflare deploys it.')
-})
-
-test('the option join joins this machine at the program\'s start, then empties itself, and a refused one empties too', async () => {
-  const cloudflare = standIn()
-  await connectCloudflare(cloudflare.progress, NAMES, cloudflare.cloudflare)
-  const relayUrl = 'https://anyhost-test-connect.parker-labs.workers.dev'
-  rmSync(secretFile(), { force: true })
-  rmSync(stateFile('relay.json'), { force: true })
-  // a setup code is a join link in the same form, which the stand-in relay takes once
-  const code = 'second-setup-code'
-  const worker = cloudflare.workers.get('anyhost-test-connect')
-  if (worker !== undefined) worker.secret = sha256(code)
-
-  expect(await joinWithOption(`${relayUrl}/v1/join#${code}`, cloudflare.cloudflare)).toBe(relayUrl)
-  expect(storedToken()).toBe('token-of-macbook')
-  expect(JSON.parse(readFileSync(stateFile('relay.json'), 'utf8'))).toEqual({ url: relayUrl })
-  expect(optionsSet()).toEqual(['join='])
-
-  await expect(joinWithOption(`${relayUrl}/v1/join#${code}`, cloudflare.cloudflare)).rejects.toThrow('The relay made no invite with that code.')
-  expect(optionsSet()).toEqual(['join=', 'join='])
 })
 
 test("the options are read at the first ask, then again only after a write to Claude Code's settings.json, also through a symlink", async () => {

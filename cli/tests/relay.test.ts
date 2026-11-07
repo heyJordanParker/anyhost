@@ -6,7 +6,7 @@ import { connect as dialTcp, createServer, type Socket } from 'node:net'
 import type { NetworkInterfaceInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES, cloneFixFor, encodeStream, streamOf } from '../../relay/protocol.ts'
-import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSession, type Problems } from '../src/capture.ts'
+import { decompress, hotKey, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, uploadSessions, type Problems } from '../src/capture.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device, type MachineRoots } from '../src/device.ts'
 import { cipherOf, dialDirect, listenDirect, offeredAddresses, type DirectLink, type DirectListener, type DirectOffer } from '../src/direct.ts'
 import { connectRelay, type Relay, type RelayOptions } from '../src/relay.ts'
@@ -49,7 +49,7 @@ test('a request whose answer the dropped socket lost goes again on the next sock
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
   relay.dropAnswers = 1
 
-  await uploadSession(capture, SESSION, 'claude', new Set([transcript]), failTest)
+  await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], failTest).map(([, left]) => left))
   const frame = hotKey(SESSION, 0)
   expect(relay.requests.filter((ops) => ops.some((op) => op.op === 'put' && op.key === frame))).toHaveLength(2)
   expect(relay.puts.filter(({ key }) => key === frame)).toHaveLength(1)
@@ -154,6 +154,60 @@ test('an object over 1 MiB goes by HTTP, and a broken download goes on from the 
   expect(relay.ranges[0]).toBeNull()
   expect(relay.ranges[1]).toMatch(/^bytes=\d+-$/)
   expect(Number(relay.ranges[1]?.slice('bytes='.length, -1))).toBeGreaterThan(0)
+})
+
+const md5 = (bytes: Uint8Array): string => new Bun.CryptoHasher('md5').update(bytes).digest('hex')
+const DAILY_LIMIT = "Cloudflare refuses the relay with its error 1027: the relay's Worker reached the Free plan's limit of 100,000 requests a day, which resets at 00:00 UTC."
+
+// The suite missed it because memoryRelay's join gave a machine that joined before its old token, where the Pool's
+// join gives a new one and refuses the old.
+test('a machine that joins again while connected puts an object over 1 MiB with its new token', async () => {
+  const relay = memoryRelay()
+  let login = { url: relay.url, token: relay.join(device, roots('/home/ada')) }
+  const service = connect({ login: async () => login, device, roots: roots('/home/ada'), isPatient: true })
+  await welcomed(service)
+  // as the Add a machine command pasted again on this machine gives it a new token while its socket is open
+  login = { url: relay.url, token: relay.join(device, roots('/home/ada')) }
+  service.reconnect()
+
+  const bytes = crypto.getRandomValues(new Uint8Array(2 * MAX_MESSAGE_BYTES))
+  expect(await service.runOne({ op: 'put', key: 'files/big.bin', bytes })).toEqual({ status: 200, etag: md5(bytes) })
+})
+
+// The suite missed it because no relay it ran ever left a request unanswered on a socket that stayed open.
+test('a request the relay leaves unanswered goes again on a new socket 40 seconds later, so the seal that ends a backup pass ends', async () => {
+  const relay = memoryRelay()
+  const home = join(temporaryFolder(), 'home')
+  const capture = openCapture(relay.connect(device, roots(home)), device, roots(home), openDatabase(join(temporaryFolder(), 'state')), noCode)
+  const transcript = join(home, '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
+  await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], failTest).map(([, left]) => left))
+  const asked = relay.requests.length
+  relay.unanswered = 1
+
+  const started = Date.now()
+  expect(await sealQuiet(capture, failTest, Date.now() + QUIET_MS)).toEqual(new Map())
+  expect(Date.now() - started).toBeGreaterThanOrEqual(40_000)
+  expect(relay.requests.slice(asked, asked + 2)).toEqual([
+    [{ op: 'claim', session: SESSION, take: false }],
+    [{ op: 'claim', session: SESSION, take: false }],
+  ])
+  expect(journalOf(capture.db, SESSION)?.sealed).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
+}, 90_000)
+
+test("an object request Cloudflare refuses for the daily limit goes again, and a connect it refuses names the limit and its reset", async () => {
+  const relay = memoryRelay()
+  const client = relay.connect(device, roots('/home/ada'))
+  await welcomed(client)
+  relay.dailyLimited = 1
+  const bytes = crypto.getRandomValues(new Uint8Array(2 * MAX_MESSAGE_BYTES))
+  expect(await client.runOne({ op: 'put', key: 'files/big.bin', bytes })).toEqual({ status: 200, etag: md5(bytes) })
+
+  relay.dailyLimited = Infinity
+  client.reconnect()
+  await waitFor('the refused connect', () => client.state.is === 'offline')
+  expect(client.state).toEqual({ is: 'offline', message: DAILY_LIMIT })
 })
 
 const encoder = new TextEncoder()
@@ -629,9 +683,10 @@ async function serveOn(env: Record<string, string>): Promise<{ readonly address:
   return { address: printed.slice(0, printed.indexOf('\n')), child, logged: () => logged }
 }
 
-// Runs `anyhost join <link>` on the machine, and answers its exit code and what it printed.
-async function joinOn(env: Record<string, string>, link: string): Promise<{ readonly code: number; readonly out: string; readonly err: string }> {
-  const child = Bun.spawn(['bun', CLI, 'join', link], { env, stdout: 'pipe', stderr: 'pipe' })
+// Runs the anyhost command `args` on the machine with `input` typed into its terminal, and answers its exit code and
+// what it printed.
+async function anyhostOn(env: Record<string, string>, args: readonly string[], input = ''): Promise<{ readonly code: number; readonly out: string; readonly err: string }> {
+  const child = Bun.spawn(['bun', CLI, ...args], { env, stdin: new TextEncoder().encode(input), stdout: 'pipe', stderr: 'pipe' })
   children.push(child)
   const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   return { code, out, err }
@@ -651,7 +706,7 @@ test('anyhost join asks the program that answers on this machine, which joins in
   try {
     // no relay answers at this link, so only the program's answer joins
     const link = "cmod install heyJordanParker/anyhost --option 'join=http://127.0.0.1:9/v1/join#K7QX2M4W9TPR6ZC3'"
-    expect(await joinOn(env, link)).toEqual({ code: 0, out: 'Joined this machine to https://anyhost-test-join.parker-labs.workers.dev\n', err: '' })
+    expect(await anyhostOn(env, ['join', link])).toEqual({ code: 0, out: 'Joined this machine to https://anyhost-test-join.parker-labs.workers.dev\n', err: '' })
     expect(asked).toEqual([{ method: 'POST', path: '/join', body: { link } }])
   } finally {
     await program.stop(true)
@@ -670,13 +725,103 @@ test('anyhost join joins in its own process when no program answers on this mach
     },
   })
   try {
-    const { code, err } = await joinOn(env, `http://127.0.0.1:${relay.port}/v1/join#K7QX2M4W9TPR6ZC3`)
+    const { code, err } = await anyhostOn(env, ['join', `http://127.0.0.1:${relay.port}/v1/join#K7QX2M4W9TPR6ZC3`])
     expect({ code, err }).toEqual({ code: 1, err: `http://127.0.0.1:${relay.port} refused to join anyhost-a: The relay made no invite with that code. Make a new one with Add a machine.\n` })
     expect(asked).toEqual(['POST /v1/join'])
   } finally {
     await relay.stop(true)
   }
 })
+
+test('anyhost connect asks the program that answers on this machine, prints each line of its run, and answers its question from the terminal', async () => {
+  const { env, socket } = machineFor(memoryRelay(), HOST, false)
+  const accounts = [{ id: 'a1', name: 'Parker Labs' }, { id: 'a2', name: 'Side Project' }]
+  const lines = ['Checking your Cloudflare login', 'Found the bucket anyhost-test in the eu jurisdiction', 'Joined this machine to https://anyhost-test-connect.parker-labs.workers.dev']
+  const asked: string[] = []
+  // the program's /connect, /connect/account and /status as serve.ts answers them, at the program's own socket
+  const program = Bun.serve({
+    unix: socket,
+    async fetch(request) {
+      const { pathname } = new URL(request.url)
+      asked.push(`${request.method} ${pathname}${request.method === 'POST' ? ` ${await request.text()}` : ''}`)
+      if (pathname === '/connect') return Response.json({ is: 'running', lines: lines.slice(0, 1), accounts })
+      if (pathname === '/connect/account') return Response.json({ is: 'running', lines: lines.slice(0, 2) })
+      return Response.json({ relay: { url: '', state: 'unjoined', message: '', bucket: '' }, connecting: { is: 'joined', lines } })
+    },
+  })
+  try {
+    const { code, out, err } = await anyhostOn(env, ['connect'], '2\n')
+    expect({ code, err }).toEqual({ code: 0, err: '' })
+    expect(out).toBe(`${lines[0]}\nYour Cloudflare login reaches 2 accounts:\n  1  Parker Labs\n  2  Side Project\nType the number of the account your relay goes in:\n${lines[1]}\n${lines[2]}\n`)
+    expect(asked).toEqual(['POST /connect {}', 'POST /connect/account {"id":"a2"}', 'GET /status'])
+  } finally {
+    await program.stop(true)
+  }
+})
+
+// The suite missed it: no test ran anyhost doctor beside a program.
+test('anyhost doctor beside a program that answers unjoined prints one ✘ line with its one fix, and reads no relay itself', async () => {
+  const { env, socket } = machineFor(memoryRelay(), HOST, false)
+  rmSync(join(env['XDG_STATE_HOME'] ?? '', 'anyhost', 'relay.json'))
+  const message = 'This machine is not joined to your relay, so anyhost keeps what its sessions write and uploads nothing.'
+  const status: Status = { device: HOST, relay: { url: '', state: 'unjoined', message, bucket: '' }, pending: 0, uploadEvery: 5, capturedAt: '', problems: [], journalGaps: [] }
+  const program = Bun.serve({ unix: socket, fetch: () => Response.json(status) })
+  try {
+    const { code, out } = await anyhostOn(env, ['doctor'])
+    expect(code).toBe(1)
+    expect(out.split('\n').filter((line) => line.startsWith('✘'))).toEqual([`✘ The anyhost program at ${socket} uploads nothing: ${message}`])
+  } finally {
+    await program.stop(true)
+  }
+})
+
+// A machine whose cmod answers `join` as its option, keeps the secret it stores, and logs each option it sets, with
+// no relay login yet.
+function unjoinedWithOption(link: string): { readonly env: Record<string, string>; readonly socket: string; readonly folder: string } {
+  const machine = machineFor(memoryRelay(), HOST, false)
+  const programs = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs')
+  script(
+    join(programs, 'cmod'),
+    `#!/bin/sh\ncase "$1 $2" in\n  "secret get") cat '${programs}/token' ;;\n  "secret store") cat > '${programs}/token' ;;\n  "options anyhost") printf '%s' '${JSON.stringify({ person: { join: link } })}' ;;\n  "option anyhost") echo "$3=$4" >> '${programs}/options-set' ;;\n  "device --json") printf '%s' '${JSON.stringify(HOST)}' ;;\n  *) exit 1 ;;\nesac\n`,
+  )
+  rmSync(join(machine.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'relay.json'))
+  return machine
+}
+
+test('the option join joins at the program\'s start and empties itself, and one the relay refused empties too and stays a problem until the machine joins', async () => {
+  // a relay that refuses the option's invite and takes the next one, and serves nothing else, as the program's
+  // connect to it once it joined
+  const joins: string[] = []
+  const relay = Bun.serve({
+    port: 0,
+    hostname: '127.0.0.1',
+    async fetch(request) {
+      if (request.method !== 'POST' || new URL(request.url).pathname !== '/v1/join') return Response.json({ error: 'missing', message: 'The stand-in serves only POST /v1/join.' }, { status: 404 })
+      const { invite } = (await request.json()) as { invite: string }
+      joins.push(invite)
+      if (invite === 'USED') return Response.json({ error: 'invite_used', message: 'The invite already joined anyhost-c at 2026-11-07T09:00:00.000Z. Make a new one with Add a machine.' }, { status: 403 })
+      return Response.json({ relay: 1, protocol: 1, bucket: 'anyhost-test', token: 'token-of-anyhost-a', device: { id: HOST.id, name: HOST.name } })
+    },
+  })
+  try {
+    const origin = `http://127.0.0.1:${relay.port}`
+    const machine = unjoinedWithOption(`cmod install heyJordanParker/anyhost --option 'join=${origin}/v1/join#USED'`)
+    const programs = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs')
+    await serveOn(machine.env)
+    const problemsOf = async (): Promise<readonly string[]> => ((await (await fetch('http://localhost/status', { unix: machine.socket })).json()) as Status).problems
+    await waitFor('the refused join in /status', async () => (await problemsOf()).some((problem) => problem.includes(` join: Error: ${origin} refused to join anyhost-a: The invite already joined anyhost-c`)))
+    expect(readFileSync(join(programs, 'options-set'), 'utf8')).toBe('join=\n')
+    expect(existsSync(join(programs, 'token'))).toBe(false)
+
+    const joined = await fetch('http://localhost/join', { unix: machine.socket, method: 'POST', body: JSON.stringify({ link: `${origin}/v1/join#FRESH` }) })
+    expect(await joined.json()).toEqual({ url: origin })
+    expect((await problemsOf()).filter((problem) => problem.includes(' join: Error: '))).toEqual([])
+    expect(readFileSync(join(programs, 'token'), 'utf8')).toBe('token-of-anyhost-a')
+    expect(joins).toEqual(['USED', 'FRESH'])
+  } finally {
+    await relay.stop(true)
+  }
+}, 30_000)
 
 // A viewer on its own machine, attached to SESSION on HOST through the relay as `anyhost serve` sends an attach.
 async function viewerOn(relay: MemoryRelay, device: Device, size: { cols: number; rows: number }) {
@@ -974,7 +1119,7 @@ test('anyhost attach on the host shows a session its Claude Code runs while the 
   terminal.close()
 }, 30_000)
 
-test('a second serve on one state folder refuses to start, naming the one that runs, and a POST of no JSON answers 400', async () => {
+test('a second serve on one state folder refuses to start, naming the one that runs, a POST of no JSON answers 400, and one to no route 404', async () => {
   const relay = memoryRelay()
   const host = machineFor(relay, HOST, true)
   await serveOn(host.env)
@@ -986,6 +1131,12 @@ test('a second serve on one state folder refuses to start, naming the one that r
   const answer = await fetch('http://localhost/machines/invite', { unix: host.socket, method: 'POST', body: 'not json' })
   expect(answer.status).toBe(400)
   expect(((await answer.json()) as { message: string }).message).toStartWith('anyhost takes a JSON object at POST /machines/invite, and this body is none:')
+  // an unknown route answers JSON as every other refusal does, naming every route the program serves
+  const unknown = await fetch('http://localhost/machines/rename', { unix: host.socket, method: 'POST', body: '{}' })
+  expect(unknown.status).toBe(404)
+  expect(await unknown.json()).toEqual({
+    message: 'anyhost serves GET /status, /machines and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/invite, /machines/remove, /move and /move/keep, and a WebSocket at /attach, not POST /machines/rename.',
+  })
 })
 
 test("the program's start stats every captured file, and uploads a line a quiet session gained while the program did not run", async () => {
@@ -1001,7 +1152,7 @@ test("the program's start stats every captured file, and uploads a line a quiet 
   const capture = openCapture(relay.connect(HOST, roots(home)), HOST, roots(home), db, noCode)
   await welcomed(capture.relay)
   setSystemTime(new Date(Date.now() - 60 * 60_000))
-  await uploadSession(capture, SESSION, 'claude', new Set([transcript]), failTest)
+  await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], failTest).map(([, left]) => left))
   setSystemTime()
   const end = journalOf(db, SESSION)?.end ?? 0
   capture.relay.close()
@@ -1014,6 +1165,17 @@ test("the program's start stats every captured file, and uploads a line a quiet 
   expect(decoder.decode(decompress(frame))).toEndWith(line('Book the train'))
   // the queue drains every 5 seconds
 }, 20_000)
+
+test("a program whose relay Cloudflare refuses for the daily limit names the limit and its reset at 00:00 UTC in /status", async () => {
+  const relay = memoryRelay()
+  relay.dailyLimited = Infinity
+  const host = machineFor(relay, HOST, false)
+  await serveOn(host.env)
+  const status = async (): Promise<Status> => (await (await fetch('http://localhost/status', { unix: host.socket })).json()) as Status
+  await waitFor('the refused connect', async () => (await status()).relay.state === 'offline')
+
+  expect((await status()).relay).toMatchObject({ state: 'offline', message: DAILY_LIMIT })
+})
 
 const LAPTOP: Device = { id: 'device-laptop', name: 'anyhost-b', os: 'linux', arch: 'arm64' }
 const WORKER: Device = { id: 'device-worker', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
