@@ -20,6 +20,10 @@ const RESTART =
   process.platform === 'darwin'
     ? 'Restart the program with launchctl kickstart -k gui/$(id -u)/com.claudemodmanager.anyhost.anyhost.'
     : 'Restart the program with systemctl --user restart com.claudemodmanager.anyhost.anyhost, or, where no systemd user session runs it, close every Claude Code session and start one.'
+// A relay that answers an older protocol with no failed update: Cloudflare runs a busy Pool's older code for up to 300 s
+// after an upload, as the Step says, while an update no machine ran needs Connect Cloudflare. The program's /status
+// says nothing of when this machine last uploaded the relay, so the fix says to wait first.
+const OUTDATED = 'Wait 5 minutes first: after an upload of the relay, from this machine or another, Cloudflare runs its older version for up to 5 minutes, and the program connects again within a minute. If this line is still here then, Connect Cloudflare again in the anyhost mod, or run anyhost connect, which updates the relay.'
 // The relay answered /v1/health in under a second from the test machines (relay-spec R11).
 const HEALTH_MS = 10_000
 
@@ -71,11 +75,13 @@ function programChecks(address: string, status: Status | undefined): Check[] {
         ? { wait: `The anyhost program at ${address} connects to the relay, and ${status.pending} files wait for it.` }
         : isOutdatedUpdate
           ? { problem: `The anyhost program at ${address} captures nothing: ${message} Its own update of the relay failed: ${updateProblem}`, fix: UPDATE }
-          : state === 'refused' || state === 'outdated'
-            ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Do what the line says. The program connects again within a minute.' }
-            : state === 'unjoined'
-              ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
-              : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
+          : state === 'outdated'
+            ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: OUTDATED }
+            : state === 'refused'
+              ? { problem: `The anyhost program at ${address} captures nothing: ${message}`, fix: 'Do what the line says. The program connects again within a minute.' }
+              : state === 'unjoined'
+                ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
+                : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
   // the program reads the shell's environment once at its start, so a fix takes a restart
   const shell: Check = status.shellProblem === undefined ? { ok: 'The sessions the program starts get the environment your login shell sets up.' } : { problem: status.shellProblem, fix: `Make your login shell start with no terminal and no input. ${RESTART}` }
   // a stream macOS keeps off the local network still runs, through the relay

@@ -1,8 +1,10 @@
 // The Durable Object every machine of one person connects to: SQLite holds the machines, invites, claims and each
 // `released` its old holder has not said it heard, and each machine's hibernating WebSocket carries its requests, whose
 // ops the Pool runs on R2, and its messages to the other machines. Hibernation resets memory, so nothing the Pool needs
-// later lives only there: each socket's machine, connect time and open attach streams are in its attachment. Only an
-// idle socket hibernates, so the time the Pool last heard a socket, which a busy one needs, lives in memory.
+// later lives only there: each socket's machine, connect time and open attach streams are in its attachment. Cloudflare
+// takes the whole Pool out of memory once no event ran in it for a short while, whatever its sockets still carry, so the
+// time the Pool last heard each socket lives in memory only as a socket's proof between two pings, and LIVE_MS holds
+// for the pings alone.
 import { DurableObject, RpcTarget } from 'cloudflare:workers'
 import {
   ANSWER,
@@ -76,7 +78,8 @@ create table if not exists devices (id text primary key, name text not null, os 
   roots text not null, token_sha256 text unique, joined_at integer not null, seen_at integer not null, removed_at integer);
 create table if not exists invites (code_sha256 text primary key, made_by text, expires_at integer, used_by text, used_at integer);
 create table if not exists claims (session text primary key, device text not null, at integer not null);
-create table if not exists waiting (id integer primary key, device text not null, message text not null, at integer not null);
+create table if not exists waiting (id integer primary key, device text not null, session text not null, taker text not null, message text not null, at integer not null);
+create index if not exists waiting_by_session on waiting (session, taker);
 create table if not exists meta (key text primary key, value text not null);`
 
 // How many R2 reads the first start's import runs at once.
@@ -260,10 +263,12 @@ export class Pool extends DurableObject<Env> {
   }
 
   // A frame's write, which names its session: refused with the machine that holds the session when another one does,
-  // else counted in flight until `done`, so a takeover waits for it.
+  // else counted in flight until `done`, so a takeover waits for it. The first frame of a session no machine holds
+  // claims it for its writer, as a claim does, so the session is held from its first frame with no claim of its own.
   #startWrite(device: DeviceRef, session: string): { readonly holder: DeviceRef } | { readonly done: () => void } {
     const held = this.#holderOf(session)
     if (held !== undefined && held.id !== device.id) return { holder: held }
+    if (held === undefined) this.#sql.exec('insert into claims (session, device, at) values (?, ?, ?)', session, device.id, Date.now())
     const writes = this.#writes.get(session) ?? new Set()
     this.#writes.set(session, writes)
     let done = (): void => undefined
@@ -582,9 +587,12 @@ export class Pool extends DurableObject<Env> {
         if (op.keys.length > 0) await this.env.BUCKET.delete([...op.keys])
         return { status: 200 }
       }
-      case 'claim':
+      case 'claim': {
         if (!isText(op.session) || typeof op.take !== 'boolean') return invalid('A claim names its session and whether it takes it from another machine.')
-        return await this.#claim(device, op.session, op.take)
+        const condition: unknown = op.if
+        if (condition !== undefined && !(isRecord(condition) && isText(condition['at']))) return invalid('A claim\'s if is {"at":"<the at of the claim it takes>"}.')
+        return await this.#claim(device, op.session, op.take, op.if?.at)
+      }
       case 'claims': {
         if (op.prefix !== undefined && typeof op.prefix !== 'string') return invalid('A claims names the start of the sessions it asks for in prefix.')
         // A range on the primary key reads only the rows under the prefix, as each one costs a row read of the free
@@ -642,33 +650,39 @@ export class Pool extends DurableObject<Env> {
   // `released` of that session waiting for it is over. Every take then waits for the session's frames in flight, a take
   // sent again after a lost answer too, which finds the session its own already, and up to HEARD_MS for a live old
   // holder's `heard`, so `told` says the old holder applied the take, and a repeat answers as the first did. A removed
-  // machine connects no more until it joins again, so it is no machine to warn of.
-  async #claim(device: DeviceRef, session: string, take: boolean): Promise<Result> {
+  // machine connects no more until it joins again, so it is no machine to warn of. The claim's `at` is when its machine
+  // took the session: every take writes a new one, later than the one before, as does a claim of a free session, and a
+  // claim of a session the machine holds keeps it, as the program's seal of a quiet session claims it again. So the `at` a
+  // machine read stays until a take, its own included, which is the fence of a take with `ifAt`: one that finds the
+  // session another machine's under another `at` is refused, as that machine gave up on the move the take was for.
+  async #claim(device: DeviceRef, session: string, take: boolean, ifAt?: string): Promise<Result> {
     const held = this.#holderOf(session)
-    if (held !== undefined && held.id !== device.id && !take) return { status: 409, holder: held }
-    const at = Date.now()
-    this.#sql.exec('insert into claims (session, device, at) values (?, ?, ?) on conflict (session) do update set device = excluded.device, at = excluded.at', session, device.id, at)
-    this.#sql.exec("delete from waiting where device = ? and json_extract(message, '$.session') = ?", device.id, session)
+    const before = this.#sql.exec<{ at: number }>('select at from claims where session = ?', session).toArray()[0]?.at
+    if (held !== undefined && held.id !== device.id && (!take || (ifAt !== undefined && iso(before ?? 0) !== ifAt))) return { status: 409, holder: held }
+    const isKept = held?.id === device.id && !take
+    const at = isKept && before !== undefined ? before : Math.max(Date.now(), (before ?? 0) + 1)
+    if (!isKept) this.#sql.exec('insert into claims (session, device, at) values (?, ?, ?) on conflict (session) do update set device = excluded.device, at = excluded.at', session, device.id, at)
+    this.#sql.exec('delete from waiting where device = ? and session = ?', device.id, session)
     if (held !== undefined && held.id !== device.id) {
       const released = JSON.stringify({ t: 'released', session, to: device, at: iso(at) } satisfies Released)
-      this.#sql.exec('insert into waiting (device, message, at) values (?, ?, ?)', held.id, released, at)
+      this.#sql.exec('insert into waiting (device, session, taker, message, at) values (?, ?, ?, ?, ?)', held.id, session, device.id, released, at)
       this.#deliver(held.id, released)
     }
-    if (!take) return { status: 200, told: true }
+    if (!take) return { status: 200, told: true, at: iso(at) }
     await Promise.all([...(this.#writes.get(session) ?? [])])
     let untold = this.#untold(session, device.id)
     if (untold !== undefined && this.ctx.getWebSockets(untold.id).some((socket) => this.#isLive(socket))) {
       await this.#heardWithin(untold.id, session, device.id)
       untold = this.#untold(session, device.id)
     }
-    return untold === undefined ? { status: 200, told: true } : { status: 200, previous: untold, told: false }
+    return untold === undefined ? { status: 200, told: true, at: iso(at) } : { status: 200, previous: untold, told: false, at: iso(at) }
   }
 
   // The machine not removed whose `released` of the session `taker` took waits for its `heard`.
   #untold(session: string, taker: string): DeviceRef | undefined {
     return this.#sql
       .exec<{ id: string; name: string }>(
-        "select waiting.device as id, devices.name from waiting join devices on devices.id = waiting.device where json_extract(message, '$.session') = ? and json_extract(message, '$.to.id') = ? and devices.removed_at is null",
+        "select waiting.device as id, devices.name from waiting join devices on devices.id = waiting.device where waiting.session = ? and waiting.taker = ? and devices.removed_at is null",
         session,
         taker,
       )
@@ -684,7 +698,7 @@ export class Pool extends DurableObject<Env> {
       const done = (): void => {
         clearTimeout(late)
         waiters.delete(done)
-        if (waiters.size === 0 && this.#hearing.get(key) === waiters) this.#hearing.delete(key)
+        if (waiters.size === 0) this.#hearing.delete(key)
         resolve()
       }
       const late = setTimeout(done, HEARD_MS)
@@ -695,7 +709,7 @@ export class Pool extends DurableObject<Env> {
   // A machine applied the `released` that says `taker` took the session: it waits no more, and the takes waiting for it
   // answer.
   #heard(holder: string, session: string, taker: string): void {
-    this.#sql.exec("delete from waiting where device = ? and json_extract(message, '$.session') = ? and json_extract(message, '$.to.id') = ?", holder, session, taker)
+    this.#sql.exec('delete from waiting where device = ? and session = ? and taker = ?', holder, session, taker)
     for (const done of [...(this.#hearing.get(hearingKey(holder, session, taker)) ?? [])]) done()
   }
 }

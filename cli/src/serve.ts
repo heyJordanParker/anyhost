@@ -11,7 +11,7 @@ import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relay
 import { listenDirect, type DirectLink, type DirectListener, type DirectOffer } from './direct.ts'
 import { move, receiveMove, receiveReleased, receiveStart, startNew, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, waitAfter, type RelayState } from './relay.ts'
-import { offsetOf, openStream, randomStreamId, type Exit, type Link, type SessionState, type Size, type Stream } from './stream.ts'
+import { endOf, isAcknowledgement, offsetOf, openStream, randomStreamId, type Exit, type Link, type SessionState, type Size, type Stream } from './stream.ts'
 import { codexState, filesUnder, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
@@ -43,9 +43,14 @@ const STATE_MS = 200
 // Claude Code renames a new record into `sessions/` at each change of a session's status, and removes it as the
 // session ends, once each, so whatever waits on the records reads them again at each change of the folder the watcher
 // heard. A watcher drops a change with no word of it, as Bun 1.4.4's on macOS does, which would leave the wait on it
-// waiting, so the records are read every READ_MS too while anything waits on them, whatever the watcher's state, and
-// while no ready watcher hears the folder, for the status of the sessions shown: one read a second, of 5.3 ms of CPU for
-// 3 records (STATE_MS), and none on a machine where nothing waits and a watcher hears. Reading the records themselves,
+// waiting, so the records are read every READ_MS too while anything waits on them, whatever the watcher's state, while
+// a session is shown, for its status, as a pane's herdr state follows it, and while no ready watcher hears the folder:
+// one read a second, and none on a machine where nothing waits, nothing is shown and a watcher hears. With one session
+// shown and idle on anyhost-a at a load average near 1.5, the program took 0.07 to 0.27 s of CPU a minute, against 0.11
+// to 0.71 s side by side when `recordedSessions` read through Bun's thread pool, and 0.05 to 0.15 s with no session
+// shown: one read of one record took 0.014 to 0.020 ms of CPU in the program's thread, and 0.18 to 0.24 ms through the
+// pool. At a load average near 7, where other test suites ran, the poll through the pool took about 1 s a minute more.
+// Reading the records themselves,
 // as `claude agents --json` does, takes no process: one `claude agents --json` took 1.2 to 4 s on anyhost-b while a
 // session started there, on the CPU that session needs.
 const READ_MS = 1000
@@ -61,7 +66,8 @@ const READ_MS = 1000
 // no name, as Bun's recursive watch on Linux gives the removal of the watched folder itself, and an inotify overflow
 // to every watch of the process, is `unnamed` and that watch's folder as a JSON string. A folder it cannot watch, as
 // one gone since the program found it, which `watch()` throws at, or one it may not list, which Bun's recursive watch
-// on Linux fails with EACCES, costs only that folder, and the log names it. It ends by SIGKILL once its input closes,
+// on Linux fails with EACCES, costs only that folder: the log names it, and the watcher prints `lost` and the folder as
+// a JSON string, which the listings then hear in its place. It ends by SIGKILL once its input closes,
 // as the program's end closes it, since its exit would wait on the lock too. For tests, `ANYHOST_WATCHER_HANGS=1` blocks it before its watches, as a stall does, and
 // `ANYHOST_WATCHER_DROPS=1` makes it drop every change its watches hear, as macOS's watcher drops events.
 const WATCHER = `
@@ -72,7 +78,10 @@ if (process.env.ANYHOST_WATCHER_HANGS === '1') Atomics.wait(new Int32Array(new S
 const isDropping = process.env.ANYHOST_WATCHER_DROPS === '1'
 const say = (line) => process.stdout.write(line + '\\n')
 for (const { folder, depth } of folders) {
-  const failed = (error) => console.error(new Date().toISOString() + ' anyhost hears no change in a folder under ' + folder + ': ' + error.message)
+  const failed = (error) => {
+    console.error(new Date().toISOString() + ' anyhost hears no change in a folder under ' + folder + ': ' + error.message)
+    say('lost ' + JSON.stringify(folder))
+  }
   const heard = (_event, name) => {
     if (isDropping) return
     if (typeof name !== 'string') return say('unnamed ' + JSON.stringify(folder))
@@ -103,8 +112,9 @@ const WATCHER_MS = 10_000
 // to paint it at that size, then back. On a test machine Claude Code set only its modes again when the size came back
 // within 50 ms, and 1 of 7 redraws with the size back after 300 ms painted nothing, so the size comes back once the
 // screen was cleared, or after REDRAW_MS when it never is. The paint goes on after the clear, which can come in a read
-// of its own, so the size comes back PAINT_MS after the clear, the longest a clear waited while every viewer's output
-// went out once per OUTPUT_MS.
+// of its own, so the size comes back PAINT_MS after the terminal's read that held the clear, whatever OUTPUT_MS the
+// viewers' output goes at: the 20 ms the host gathered a terminal's reads for before it looked for the clear, when every
+// viewer's output went out once per 20 ms.
 const REDRAW_MS = 2000
 const PAINT_MS = 20
 const CLEAR = '\x1b[2J'
@@ -193,6 +203,8 @@ export class UploadQueue {
   private readonly failures = new Map<string, number>()
   // what waits for each session's upload in flight to end
   private readonly ended = new Map<string, ((end: Uploaded) => void)[]>()
+  // each flush that waits for the relay, which the next drain wakes
+  private readonly relayWaits = new Set<() => void>()
   private timer: ReturnType<typeof setInterval> | undefined
   private every: number
   private readonly upload: Upload
@@ -228,22 +240,29 @@ export class UploadQueue {
     if (this.every === 0) this.drainSessions([session])
   }
 
+  // Drains every queued session, and wakes each flush that waits for the relay, as the relay's welcome drains the queue.
   drain(): void {
+    for (const wake of [...this.relayWaits]) wake()
     this.drainSessions([...this.queued.keys()])
   }
 
   // Drains what of the session is queued or goes up as it is called, and again the paths those uploads left for a later
   // drain, as a line still being written or code pieces. A write after the call waits for the next drain the queue runs
-  // itself, so the flush of a session that keeps writing ends. Answers once that is up, or rejects with the failure of
-  // an upload, or with the signal's reason once it aborts.
-  async flush(session: string, signal: AbortSignal): Promise<void> {
+  // itself, so the flush of a session that keeps writing ends. A relay that is not connected holds the flush until a
+  // drain finds it connected, as the welcome's does, and `onRelay` hears as that wait starts and ends. Answers once that
+  // is up, or rejects with the failure of an upload, or with the signal's reason once it aborts.
+  async flush(session: string, signal: AbortSignal, onRelay: (isConnected: boolean) => void): Promise<void> {
     // whether the queue holds paths the flush waits for, and whether the upload it waits for next is the one in flight
     // as it was called, which carries none of them
     let isOwed = this.queued.has(session)
     let isInFlight = this.uploading.has(session)
     while (isOwed || isInFlight) {
       signal.throwIfAborted()
-      if (!this.isReady()) throw new Error('anyhost is not connected to the relay, so it uploads nothing.')
+      if (!this.isReady()) {
+        onRelay(false)
+        while (!this.isReady()) await this.nextDrain(signal)
+        onRelay(true)
+      }
       if (!this.uploading.has(session)) this.drainSessions([session])
       // nothing of the session waits or goes up
       if (!this.uploading.has(session)) return
@@ -252,6 +271,23 @@ export class UploadQueue {
       isOwed = (isOwed && isInFlight) || end.left.size > 0
       isInFlight = false
     }
+  }
+
+  // The next drain, or the signal's reason once it aborts, which takes this wait out of `relayWaits`.
+  private nextDrain(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const woken = (): void => {
+        this.relayWaits.delete(woken)
+        signal.removeEventListener('abort', aborted)
+        resolve()
+      }
+      const aborted = (): void => {
+        this.relayWaits.delete(woken)
+        reject(signal.reason)
+      }
+      signal.addEventListener('abort', aborted, { once: true })
+      this.relayWaits.add(woken)
+    })
   }
 
   // How the session's upload in flight ends, or the signal's reason once it aborts, which takes this wait out of `ended`.
@@ -339,10 +375,14 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const db = openDatabase()
   // A session's code that captureCode read after an upload goes up in the session's next drains. The database counts
   // what one relay's bucket holds, so a welcome from another relay starts it over and the program exits, and its
-  // service starts it again on that relay.
+  // service starts it again on that relay. Another machine holds a session, and its background job here stops: the
+  // program sets `release` below, once it can stop a job, and then stops each job a release before that missed, as a
+  // welcome can come while the program starts.
+  let release = (_session: string, _holder: string): void => undefined
   const capture = openCapture(relay, device, roots, {
     db,
     onCode: (session, tool, folder) => queue.add(session, tool, `${folder}/`),
+    onReleased: (session, holder) => release(session, holder),
     onOtherRelay: (url, bucket) => {
       console.error(`${new Date().toISOString()} This machine connects to the relay at ${url}, whose bucket is ${bucket}, not to the one its database counts, so anyhost exits, and its service starts it again on that relay.`)
       process.exit(0)
@@ -433,22 +473,28 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   // The folders the watcher watches once they are there, each by its inode and birth time, as a folder removed and made
   // again is another, which a filesystem may give the inode number it had. The watcher is a process that runs WATCHER:
-  // `ready` is the one that hears, with the folders it watches and when it got ready, and `starting` the newest one,
-  // from its start until it is ready or ended, while the one before goes on hearing, as a new watcher can wait minutes
-  // on fseventsd.
+  // `ready` is the one that hears, with each folder it watches by the inode and birth time it had at the watcher's
+  // start, less the folders it lost, and when it got ready, and `starting` the newest one, from its start until it is
+  // ready or ended, while the one before goes on hearing, as a new watcher can wait minutes on fseventsd.
   const watched = new Map<string, string>()
   const probe = join(stateFolder(), 'watcher')
-  let ready: { readonly child: Subprocess; readonly folders: ReadonlySet<string>; readonly at: number } | undefined
+  let ready: { readonly child: Subprocess; readonly folders: ReadonlyMap<string, string>; readonly at: number } | undefined
   let starting: Subprocess | undefined
   let watcherFailures = 0
   let nextWatcher: ReturnType<typeof setTimeout> | undefined
-  const hears = (folder: string): boolean => ready?.folders.has(folder) === true && watched.has(folder)
-  // Reads Claude Code's records every READ_MS while anything waits on them or no ready watcher hears `sessions/`, and
-  // runs no timer otherwise.
+  // A folder made again where the ready watcher watched is no folder it hears, as Bun's watch on Linux hears nothing of
+  // it, until the watcher started on it is ready.
+  const hears = (folder: string): boolean => watched.has(folder) && ready?.folders.get(folder) === watched.get(folder)
+  // Reads Claude Code's records every READ_MS while anything waits on them, a session is shown, or no ready watcher
+  // hears `sessions/`, and runs no timer from the first read after none of them holds.
   let pollingRecords: ReturnType<typeof setInterval> | undefined
   const followRecords = (): void => {
-    if (recordsHeard.size > 0 || !hears(records)) pollingRecords ??= setInterval(recordsChanged, READ_MS)
-    else {
+    if (recordsHeard.size > 0 || shown.size > 0 || !hears(records)) {
+      pollingRecords ??= setInterval(() => {
+        recordsChanged()
+        followRecords()
+      }, READ_MS)
+    } else {
       clearInterval(pollingRecords)
       pollingRecords = undefined
     }
@@ -469,18 +515,18 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const endReady = (): void => {
     if (ready === undefined) return
     ready.child.kill('SIGKILL')
-    unheardFrom(Date.now(), [...ready.folders])
+    unheardFrom(Date.now(), [...ready.folders.keys()])
     ready = undefined
     followRecords()
   }
   // When each folder's last listing started, which heard every file written there before it.
   const listedAt = new Map<string, number>()
-  // A change the ready watcher could not name in `folder` may be of any file written there since the watcher got
-  // ready, or since the folder's last listing after that, so the next listing hears each of those, as Watchman crawls
-  // again after an overflow. Bun gives an inotify overflow to every watch, so each folder whose writes it dropped says
-  // so.
-  const unnamed = (folder: string): void => {
-    unheardFrom(Math.max(listedAt.get(folder) ?? 0, ready?.at ?? Date.now()), [folder])
+  // A change a watcher could not name in `folder` may be of any file written there since that watcher got ready at
+  // `readyAt`, or since the folder's last listing after that, so the next listing hears each of those, as Watchman
+  // crawls again after an overflow. Bun gives an inotify overflow to every watch, so each folder whose writes it dropped
+  // says so.
+  const unnamed = (folder: string, readyAt: number): void => {
+    unheardFrom(Math.max(listedAt.get(folder) ?? 0, readyAt), [folder])
     void watchFolders()
     void listWritten()
   }
@@ -493,7 +539,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     starting?.kill('SIGKILL')
     clearTimeout(nextWatcher)
     const settled = Promise.withResolvers<void>()
-    const folders = watchable.flatMap(({ folder, depth }) => (watched.has(folder) ? [{ folder, depth: Number.isFinite(depth) ? depth : null }] : []))
+    // each folder the watcher hears, by its inode and birth time as the watcher starts, less each folder it lost
+    const hearing = new Map(watched)
+    const folders = watchable.flatMap(({ folder, depth }) => (hearing.has(folder) ? [{ folder, depth: Number.isFinite(depth) ? depth : null }] : []))
     const child = Bun.spawn([process.execPath, '-e', WATCHER, JSON.stringify({ probe, folders })], { env: { ...process.env, BUN_BE_BUN: '1' }, stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' })
     starting = child
     const ended = (why: string): void => {
@@ -512,19 +560,33 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     }
     const limit = setTimeout(() => ended(`heard none of its watches ${WATCHER_MS / 1000} s after its start, as while macOS's fseventsd takes no new watcher`), WATCHER_MS)
     void child.exited.then(() => ended(`exited with ${child.signalCode ?? child.exitCode}`))
+    // when the watcher got ready, from which its changes count
+    let readyAt: number | undefined
     const gotReady = (): void => {
       clearTimeout(limit)
       starting = undefined
       const before = ready
-      ready = { child, folders: new Set(folders.map(({ folder }) => folder)), at: Date.now() }
+      readyAt = Date.now()
+      ready = { child, folders: hearing, at: readyAt }
       before?.child.kill('SIGKILL')
+      // the watcher before heard the folders this one lost at its start until now at most
+      unheardFrom(readyAt, folders.map(({ folder }) => folder).filter((folder) => !hearing.has(folder)))
       watcherFailures = 0
       problems.clear('watcher')
       followRecords()
       void listWritten()
       settled.resolve()
     }
-    // A watcher's changes count from its `ready` on: the ready watcher before it hears them until then.
+    // A folder the ready watcher lost is heard by no watch: the listings hear it in the watcher's place from the time
+    // `unnamed` names, and the records are read every READ_MS when it is `sessions/`.
+    const lose = (folder: string): void => {
+      hearing.delete(folder)
+      if (child !== ready?.child || readyAt === undefined) return
+      followRecords()
+      unnamed(folder, readyAt)
+    }
+    // A watcher's changes count from its `ready` on, as the ready watcher before it hears them until then, and until its
+    // output closes, as one the next ready watcher replaced may still have lines in its pipe.
     void (async () => {
       const decoder = new TextDecoder()
       let left = ''
@@ -532,10 +594,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         const lines = (left + decoder.decode(chunk, { stream: true })).split('\n')
         left = lines.pop() ?? ''
         for (const line of lines) {
-          if (child === starting) {
-            if (line === 'ready') gotReady()
-          } else if (child !== ready?.child) return
-          else if (line.startsWith('unnamed ')) unnamed(JSON.parse(line.slice('unnamed '.length)) as string)
+          if (line.startsWith('lost ')) lose(JSON.parse(line.slice('lost '.length)) as string)
+          else if (readyAt === undefined) {
+            if (line === 'ready' && child === starting) gotReady()
+          } else if (line.startsWith('unnamed ')) unnamed(JSON.parse(line.slice('unnamed '.length)) as string, readyAt)
           else heard(JSON.parse(line) as string)
         }
       }
@@ -810,7 +872,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   // `cleared` runs at the next screen Claude Code clears, while a redraw waits for it. `wasRecorded` says Claude Code's
   // record said the session runs since this program showed it, as a stopped one it opens has none at first.
   // `recordCheck` answers whether the session runs, from Claude Code's records followed for a while, and is the one
-  // check of the session that runs, which every end of its attach and every change of the records shares. `held` keeps
+  // check of the session that runs, which every end of its attach and every change of the records shares, but an end
+  // by a signal, whose check takes its place. `held` keeps
   // the keys typed while no attach drew yet: from the start of an attach, or the end of the one before it, until its
   // first output, as a closed terminal takes none, and a terminal still cooked takes Enter in as a newline.
   type Shown = { terminal: AttachedTerminal; size: Size; isAlternateScreen: boolean; state: SessionState; wasRecorded: boolean; cleared?: (() => void) | undefined; recordCheck?: Promise<boolean> | undefined; held?: Uint8Array[] | undefined }
@@ -841,9 +904,18 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   // respawns a session whose process crashed or that it killed.
   const keepsRunning = (session: string): Promise<boolean> =>
     whenSessions(roots.claudeHome, (sessions) => sessions.some((entry) => entry.sessionId === session) || undefined, RESPAWN_MS, onRecordsChange).then((found) => found === true)
-  // The record check of a shown session that runs already, or `check` as the new one.
-  const checkRecord = (view: Shown, check: () => Promise<boolean>): Promise<boolean> =>
-    (view.recordCheck ??= check().finally(() => (view.recordCheck = undefined)))
+  // The record check of a shown session that runs already, or `check` as the new one, which with `replaces` takes the
+  // place of one that runs: systemd stopping the slice ends the session's process and its attach in the same moment,
+  // so the STOPPING_MS check of the attach's end by a signal decides, not the RESPAWN_MS one that a read of the records
+  // every READ_MS started as the process went.
+  const checkRecord = (view: Shown, check: () => Promise<boolean>, replaces = false): Promise<boolean> => {
+    if (view.recordCheck !== undefined && !replaces) return view.recordCheck
+    const checking = check().finally(() => {
+      if (view.recordCheck === checking) view.recordCheck = undefined
+    })
+    view.recordCheck = checking
+    return checking
+  }
   // A viewer on another machine, which the relay reaches, and whose `attached` offers the addresses it dials: from then on
   // a direct connection under its key becomes its stream's link. The stream is held for a connection only once
   // `attached` went, as one before it would carry a new stream before the viewer heard that this program holds a new
@@ -990,7 +1062,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       const isGone = (sessions: readonly RunningSession[]): true | undefined => (sessions.some((entry) => entry.sessionId === session) ? undefined : true)
       const isRecorded = async (): Promise<boolean> => isGone(await recordedSessions(roots.claudeHome)) === undefined
       const stopping = async (): Promise<boolean> => (await whenSessions(roots.claudeHome, isGone, STOPPING_MS, onRecordsChange)) === undefined && (await isRecorded())
-      const isRunning = await checkRecord(current, signal === null ? () => keepsRunning(session) : stopping)
+      const isRunning = await (signal === null ? checkRecord(current, () => keepsRunning(session)) : checkRecord(current, stopping, true))
       if (!isCurrent()) return
       quickEnds = lived < QUICK_END_MS ? quickEnds + 1 : 0
       if (isRunning && quickEnds < QUICK_ENDS) {
@@ -1013,6 +1085,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       return ready
     })()
     shown.set(session, view)
+    // A watcher drops a change with no word of it, so the records are read every READ_MS while a session is shown, and
+    // its viewers hear its status within a second of each change.
+    followRecords()
     view.catch(() => {
       if (isCurrent()) shown.delete(session)
     })
@@ -1144,34 +1219,52 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     }
     void showing?.then((view) => view.terminal.close(), () => undefined)
   }
-  const mover: MoveHere = { moves, problems, environment, queue: (session, tool, path) => queue.add(session, tool, path), flush: (session, signal) => queue.flush(session, signal), movedAway, onRecordsChange }
+  // what every move, received move and start, and take of a session from here uses of this program, built once, with
+  // the `checkouts` option as the last options read left it
+  const mover: MoveHere = {
+    moves,
+    answers: new Map(),
+    problems,
+    environment,
+    get checkouts() {
+      return checkouts
+    },
+    queue: (session, tool, path) => queue.add(session, tool, path),
+    flush: (session, signal, onRelay) => queue.flush(session, signal, onRelay),
+    movedAway,
+    onRecordsChange,
+  }
   // Another machine moves a session here, or starts a new one here, and hears whether it runs.
-  relay.on('move', (message) => void receiveMove(capture, message, { environment, checkouts, onRecordsChange }))
-  relay.on('start', (message) => void receiveStart(capture, message, { environment, checkouts, onRecordsChange }))
-  // Another machine took a session, and its background job here stops: at the `released` this socket takes, and at
-  // each welcome of it for every job of a session the database names another holder of, as every program process here
-  // writes the `released` it takes into the database, a command's connect too, whose `heard` ends the Pool's. The
-  // database keeps the holder's name alone, which is all `receiveReleased` takes. Each job stops once, whichever comes.
+  relay.on('move', (message) => void receiveMove(capture, message, mover))
+  relay.on('start', (message) => void receiveStart(capture, message, mover))
+  // Another machine holds a session, and its background job here stops: at each `released` this socket takes and each
+  // 409 a frame or a seal of this program meets (`onReleased`), now for every job a release before missed, and at each
+  // welcome for every job of a session the database names another holder of, as every program process here writes
+  // the `released` it takes into the database, a command's connect too, whose `heard` ends the Pool's. The database
+  // keeps the holder's name alone, which is all `receiveReleased` takes. Each job stops once, whichever comes.
   const releasing = new Set<string>()
-  const release = (session: string, holder: string): void => {
+  release = (session, holder) => {
     if (releasing.has(session)) return
     releasing.add(session)
     void receiveReleased(capture, session, holder, mover).finally(() => releasing.delete(session))
   }
-  relay.on('released', ({ session, to }) => release(session, to.name))
-  relay.on('welcome', async () => {
+  const releaseHeld = async (): Promise<void> => {
     for (const { sessionId, kind } of await recordedSessions(roots.claudeHome)) {
       const holder = journalOf(db, sessionId)?.holder ?? ''
       if (kind === 'background' && holder !== '') release(sessionId, holder)
     }
-  })
+  }
+  relay.on('welcome', releaseHeld)
+  void releaseHeld()
 
   // Each `anyhost attach` on this machine. Its first text message is its attach, and so is each later one, with the
   // same stream, but `localNetwork`, which says what its last direct dial found of its terminal app's Local Network
   // access. A session this machine holds, this program shows it as it shows any viewer. Any other goes through
   // this program's one socket to the relay, to the machine that holds the session, and what the relay answers about
-  // the stream goes back as it came. `isHere` says this program shows the leg's stream.
-  type Leg = ServerWebSocket<{ stream?: number; isHere?: boolean }>
+  // the stream goes back as it came. `isHere` says this program shows the leg's stream, `isRefused` that the relay
+  // refused a frame of the leg since its last attach, which its one `offline` told, and `carriedTo` the end of the
+  // viewer's bytes the relay took from the leg since that attach, after which its stream links anew.
+  type Leg = ServerWebSocket<{ stream?: number; isHere?: boolean; isRefused?: boolean; carriedTo?: number }>
   const legs = new Map<number, Leg>()
   const toLeg = (stream: number, message: object | Uint8Array): void => void legs.get(stream)?.send(message instanceof Uint8Array ? message : JSON.stringify(message))
   const attachFrom = async (leg: Leg, asked: Omit<Extract<Routed, { readonly t: 'attach' }>, 'to'>): Promise<void> => {
@@ -1277,11 +1370,20 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         const { stream, isHere } = leg.data
         if (stream === undefined) return
         const frame = new Uint8Array(message)
-        if (isHere === true) viewers.get(stream)?.stream.receive(frame)
-        // A frame the relay refused, as while this machine's socket is down, went nowhere, so `anyhost attach` hears
-        // `offline` with its offset and counts no frame from there on as carried, nor the keys it takes until it links
-        // again: a new host stream gets them all.
-        else if (!relay.send(encodeStream(stream, frame))) toLeg(stream, { t: 'offline', stream, to: '', at: offsetOf(frame) })
+        if (isHere === true) return viewers.get(stream)?.stream.receive(frame)
+        if (relay.send(encodeStream(stream, frame))) {
+          if (!isAcknowledgement(frame)) leg.data.carriedTo = endOf(frame)
+          return
+        }
+        if (leg.data.isRefused === true) return
+        // A frame the relay refused, as while this machine's socket is down, went nowhere, so `anyhost attach` hears one
+        // `offline` until its next attach, with the offset from which the relay took none of its bytes, and counts no
+        // frame from there on as carried, nor the keys it takes until it links again: a new host stream gets them all.
+        // That is a refused frame's own offset, and for an acknowledgement, whose offset counts the host's bytes, the end
+        // of the viewer's bytes the leg carried, as a link sends its frames in order, or none before any.
+        leg.data.isRefused = true
+        const at = isAcknowledgement(frame) ? leg.data.carriedTo : offsetOf(frame)
+        toLeg(stream, { t: 'offline', stream, to: '', ...(at === undefined ? {} : { at }) })
       },
       // `anyhost attach` ended, so the machine that shows it the session stops
       close(leg) {

@@ -1,7 +1,8 @@
 // The one connection between this program and the person's relay: a WebSocket that carries every request of ops and
 // every message, and HTTPS for each object over MAX_MESSAGE_BYTES, which the relay's Worker streams to and from R2.
 // The socket pings every PING_MS, counts PONG_MS with nothing heard while a ping waits as a drop, and opens again at
-// once, then after 1, 2, 4 and up to 60 seconds. A request the relay never answered goes again on the next socket, and
+// once, then after 1, 2, 4 and up to 60 seconds. A socket whose last ping is so old that the Pool may have counted it
+// not live, as after the machine slept, carries nothing more: the next ping or send opens a new socket instead. A request the relay never answered goes again on the next socket, and
 // a put that finds its own bytes there counts as written, so a dropped answer writes nothing twice.
 import plugin from '../../.claude-plugin/plugin.json'
 import {
@@ -9,6 +10,7 @@ import {
   CLOSE_DEVICE_LIVE,
   CLOSE_REMOVED,
   CLOSE_UNKNOWN_TOKEN,
+  LIVE_MS,
   MAX_MESSAGE_BYTES,
   MAX_OPS,
   PING_MS,
@@ -60,6 +62,12 @@ export const waitAfter = (failures: number): number => RETRY_MS[Math.min(failure
 // stopped moving, so only a total limit ends one the network dropped.
 const REQUEST_MS = 120_000
 const SLOWEST_UPLOAD_BYTES_PER_MS = 100
+// A ping arrives up to 10.49 s after it went, behind 1 MiB at the slowest link, so one that goes more than LATE_PING_MS
+// (34.51 s) after the ping before it may reach the Pool past LIVE_MS after that one, which then counted the socket not
+// live, as while this machine slept with its socket open. A takeover meanwhile sent its `released` only to live
+// sockets, and an idle machine's pings never wake the Pool to send it again, so such a ping, or any request or
+// message sent that late, opens a new socket instead, whose welcome carries the `released` before anything goes up.
+const LATE_PING_MS = LIVE_MS - Math.ceil(MAX_MESSAGE_BYTES / SLOWEST_UPLOAD_BYTES_PER_MS)
 // A download that moves no byte for this long goes on, in its next try, from the byte it reached.
 const IDLE_MS = 30_000
 // A redeploy reset a GET that started 10 seconds after it, and the same GET a minute later finished (R14): 6 tries
@@ -204,6 +212,9 @@ export function connectRelay(options: RelayOptions): Relay {
   let isClosed = false
   let reopen: ReturnType<typeof setTimeout> | undefined
   let pinger: ReturnType<typeof setInterval> | undefined
+  // when the socket open now last pinged, on the wall clock, which counts the time the machine slept, as Linux's
+  // monotonic clock does not
+  let pingedAt = 0
   let pongDue: ReturnType<typeof setTimeout> | undefined
   // the socket's one wait for an answer, while a request sent on it waits for its own
   let answerDue: ReturnType<typeof setTimeout> | undefined
@@ -220,14 +231,25 @@ export function connectRelay(options: RelayOptions): Relay {
     clearTimeout(answerDue)
     answerDue = setTimeout(() => drop({ is: 'offline', message: `The relay at ${login?.url} sent no answer for ${ANSWER_MS / 1000} seconds while a request waited.` }), ANSWER_MS)
   }
+  // Whether the socket open now last pinged more than LATE_PING_MS ago, as before this machine slept with it open: then
+  // it carries nothing more, and a new socket opens, whose welcome comes before anything this program sends. The timers
+  // of a machine that wakes fire in the order they came due, so a drain's can come before the pinger's.
+  const isLate = (): boolean => {
+    const since = Date.now() - pingedAt
+    if (socket === undefined || since <= LATE_PING_MS) return false
+    console.error(`${new Date().toISOString()} anyhost last pinged the relay at ${login?.url} ${Math.round(since / 1000)} seconds ago, as before this machine slept, so it connects again before it sends anything more.`)
+    drop({ is: 'connecting' })
+    return true
+  }
   // a request on the socket the relay welcomed
   const send = (on: WebSocket, request: Pending): void => {
+    if (isLate()) return
     on.send(request.message)
     request.wasSent = true
     if (answerDue === undefined) waitForAnswer()
   }
   const welcomedLogin = (): Promise<Login> => {
-    if (state.is === 'connected' && login !== undefined) return Promise.resolve(login)
+    if (state.is === 'connected' && login !== undefined && !isLate()) return Promise.resolve(login)
     if (!options.isPatient && 'message' in state) return Promise.reject(new Error(state.message))
     return new Promise((resolve, reject) => waiting.add({ resolve, reject }))
   }
@@ -351,8 +373,11 @@ export function connectRelay(options: RelayOptions): Relay {
     })
     ws.addEventListener('open', () => {
       if (socket !== ws) return
+      // the Pool counts the connect as it counts a ping
+      pingedAt = Date.now()
       pinger = setInterval(() => {
-        if (socket !== ws) return
+        if (socket !== ws || isLate()) return
+        pingedAt = Date.now()
         ws.send('ping')
         if (pongDue === undefined) awaitPong()
       }, PING_MS)
@@ -531,7 +556,7 @@ export function connectRelay(options: RelayOptions): Relay {
     },
     getObject,
     send(message) {
-      if (state.is !== 'connected' || socket === undefined) return false
+      if (state.is !== 'connected' || socket === undefined || isLate()) return false
       socket.send(message instanceof Uint8Array ? message : JSON.stringify(message))
       return true
     },

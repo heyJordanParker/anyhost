@@ -81,20 +81,18 @@ const noProgram = (): Error => new Error(`The anyhost program does not answer at
 // session's upload queue, and prints each step of the move until it ends, however long the move waits. Ctrl-C ends
 // only the command, as the move runs in the program.
 async function moveThroughProgram(session: string, machine: string): Promise<number> {
-  const unix = serveSocket()
-  const asked = await fetch('http://localhost/move', { unix, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session, machine }) }).catch(() => undefined)
-  if (asked === undefined) throw new Error(`The anyhost program does not answer at ${unix}. Start Claude Code on this machine, and the anyhost mod starts it.`)
-  const started = (await asked.json()) as { readonly session: string; readonly message?: string }
-  if (!asked.ok) throw new Error(started.message ?? `The anyhost program at ${unix} answered the move with ${asked.status}.`)
+  const started = await askProgram<{ readonly session: string }>('/move', { session, machine })
+  if (started === undefined) throw noProgram()
   process.once('SIGINT', () => {
     console.log(`The move of ${started.session.slice(0, 8)} to ${machine} goes on. Keep it here in the session takes the session back.`)
     process.exit(130)
   })
   let said = ''
   for (;;) {
-    // the program's /claims/<session> answer carries the move it runs, as serve.ts serves it
-    const { move } = (await (await fetch(`http://localhost/claims/${started.session}`, { unix })).json()) as { readonly move?: Pick<Moving, 'step' | 'line'> }
-    if (move === undefined) throw new Error(`The anyhost program at ${unix} restarted during the move, so it no longer knows where ${session} is.`)
+    // the program's /claims/<session> answer carries the move it runs, as serve.ts serves it, and a program that
+    // restarts answers nothing for a moment, then knows no move
+    const { move } = (await askProgram<{ readonly move?: Pick<Moving, 'step' | 'line'> }>(`/claims/${started.session}`)) ?? {}
+    if (move === undefined) throw new Error(`The anyhost program at ${serveSocket()} restarted during the move, so it no longer knows where ${session} is.`)
     if (move.line !== said) (move.step === 'failed' ? console.error : console.log)(move.line)
     said = move.line
     if (move.step === 'moved' || move.step === 'failed') return move.step === 'moved' ? 0 : 1

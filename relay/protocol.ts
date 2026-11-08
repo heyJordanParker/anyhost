@@ -13,13 +13,16 @@ export const MAX_MESSAGE_BYTES = 1024 * 1024
 export const INVITE_MS = 10 * 60_000
 // The program pings every PING_MS, and the Pool counts a socket alive while the last message it heard on it, its last
 // ping, or its connect is within LIVE_MS. A WebSocket carries its messages in order, so a ping waits behind the data
-// already on its way, 10.5 s behind 1 MiB at the 100 KB/s a write counts as the slowest link, and every message the
-// Pool hears proves the socket alive. Cloudflare closes a socket that carries nothing for a while: one quiet for 10
-// minutes was closed by then, and one pinged every 30 seconds had every pong back within 40 seconds over 50 minutes
-// (relay-spec R16). Cloudflare keeps listing the socket of a machine that went to sleep until a message sent on it
-// fails, which a silent socket met only at 10 minutes (R16), so the Pool delivers only to a live socket.
+// already on its way, 10.49 s behind 1 MiB at the 100 KB/s a write counts as the slowest link. Cloudflare takes the
+// whole Pool out of memory once no event ran in it for a short while, a message still on its way included, which
+// forgets the times of the messages it heard, so the pings alone may keep a socket alive: they arrive at most
+// 30 s + 10.49 s = 40.49 s apart, and LIVE_MS leaves 4.51 s more for the link's own delay. Cloudflare closes a socket
+// that carries nothing for a while: one quiet for 10 minutes was closed by then, and one pinged every 30 seconds had
+// every pong back within 40 seconds over 50 minutes (relay-spec R16). Cloudflare keeps listing the socket of a machine
+// that went to sleep until a message sent on it fails, which a silent socket met only at 10 minutes (R16), so the Pool
+// delivers only to a live socket.
 export const PING_MS = 30_000
-export const LIVE_MS = 40_000
+export const LIVE_MS = 45_000
 // What the R2 binding lists and deletes in one call.
 export const MAX_KEYS = 1000
 
@@ -78,13 +81,15 @@ export type Condition = { readonly none: '*' } | { readonly match: string }
 // A condition as the HTTP headers that carry it, which a PUT of an object sends and the R2 binding's `onlyIf` takes.
 export const conditionHeaders = (condition: Condition): Record<string, string> => ('none' in condition ? { 'if-none-match': '*' } : { 'if-match': `"${condition.match}"` })
 
-// `claims` with a `prefix` answers only the sessions whose id begins with it.
+// `claims` with a `prefix` answers only the sessions whose id begins with it. A `claim` with `take` and `if` takes the
+// session only while its claim's `at` is `if.at`, or the machine holds it already, so a take its holder gave up on by a
+// take of its own since takes nothing: the fence a `move` carries in `claimedAt`.
 export type Op =
   | { readonly op: 'get'; readonly key: string }
   | { readonly op: 'put'; readonly key: string; readonly size: number; readonly if?: Condition; readonly holder?: string }
   | { readonly op: 'list'; readonly prefix: string; readonly cursor?: string }
   | { readonly op: 'delete'; readonly keys: readonly string[] }
-  | { readonly op: 'claim'; readonly session: string; readonly take: boolean }
+  | { readonly op: 'claim'; readonly session: string; readonly take: boolean; readonly if?: { readonly at: string } }
   | { readonly op: 'claims'; readonly prefix?: string }
   | { readonly op: 'devices' }
   | { readonly op: 'invite' }
@@ -94,14 +99,18 @@ export type Listed = { readonly key: string; readonly size: number }
 
 // What each op answers, by the op. A `get` answered 200 carries `size` bytes in the answer's bytes, and one the answer
 // has no room for answers 413. A `claim` names the machine it took the session from until that machine says it heard
-// of it, and `claims` the machine that holds each session. Every op answers a request sent again after a lost answer as
-// it answered the first.
+// of it, and the `at` of the claim it holds now: the time the machine took the session, which every take and every
+// claim of a free session writes anew, later than the one before, and a claim of a session the machine holds keeps. `claims` names the machine that holds each session. Every op answers a request sent again after a lost
+// answer as it answered the first, but a take, whose repeat writes a later `at`.
 export type Results = {
   readonly get: { readonly status: 200; readonly etag: string; readonly size: number } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
   readonly put: { readonly status: 200; readonly etag: string } | { readonly status: 412; readonly etag?: string } | { readonly status: 409; readonly holder: DeviceRef }
   readonly list: { readonly status: 200; readonly objects: readonly Listed[]; readonly cursor?: string }
   readonly delete: { readonly status: 200 }
-  readonly claim: { readonly status: 200; readonly told: true } | { readonly status: 200; readonly previous: DeviceRef; readonly told: false } | { readonly status: 409; readonly holder: DeviceRef }
+  readonly claim:
+    | { readonly status: 200; readonly told: true; readonly at: string }
+    | { readonly status: 200; readonly previous: DeviceRef; readonly told: false; readonly at: string }
+    | { readonly status: 409; readonly holder: DeviceRef }
   readonly claims: { readonly status: 200; readonly claims: Readonly<Record<string, DeviceRef>> }
   readonly devices: { readonly status: 200; readonly devices: readonly Device[] }
   readonly invite: { readonly status: 200; readonly link: string; readonly expiresAt: string }
@@ -125,12 +134,13 @@ export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceR
 // base64 of the 32 random bytes that key the stream's direct connection, and `attached` is the host's answer, with the
 // port and the addresses that connection reaches it at, and `hostStream`, the random id the host drew for its own end of
 // the stream as it opened it, which a host that restarted or forgot the viewer draws anew. `move` asks `to` to take the
-// session and run it in Claude Code's background, and `moved`, with the same `id`, answers that it runs it, or why it does not. `start` asks `to` to
+// session and run it in Claude Code's background, taking it only from the claim whose `at` is `claimedAt`, the asking
+// machine's as the move went, and `moved`, with the same `id`, answers that it runs it, or why it does not. `start` asks `to` to
 // start a new session in its checkout of `repo` on `branch`, in `folder` inside it, or outside git in the folder at
 // `folder` on the asking machine, and `started` answers the session, or why it started none. `trusted` says the asking
 // machine's Claude Code trusts the session's folder, so `to` trusts the folder the session runs in there.
 export type Routed =
-  | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly trusted: boolean }
+  | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly trusted: boolean; readonly claimedAt: string }
   | { readonly t: 'moved'; readonly id: string; readonly to: string }
   | { readonly t: 'moved'; readonly id: string; readonly to: string; readonly error: string }
   | { readonly t: 'start'; readonly id: string; readonly to: string; readonly repo: string; readonly branch: string; readonly folder: string; readonly trusted: boolean }

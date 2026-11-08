@@ -11,7 +11,7 @@ import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
-import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type Listed, type Released } from '../../relay/protocol.ts'
+import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Listed, type Released } from '../../relay/protocol.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Relay } from './relay.ts'
@@ -28,6 +28,8 @@ export const CODE_PIECE_BYTES = 128 * 2 ** 10
 export const CODE_PIECES = 4
 // A session written within QUIET_MS is active: the backup checks its files every minute, and seals it once it is not.
 export const QUIET_MS = 10 * 60_000
+// The most backup passes, a minute apart, a session whose seals keep failing waits between two tries: an hour.
+const SEAL_WAIT_PASSES = 60
 // The full sweep yields to the program's other work every SWEEP_BATCH files: a stat of the Architect's Mac's 40,898
 // captured files took 0.21 s of CPU in the program's thread, so a batch holds a prompt's check for about 5 ms.
 const SWEEP_BATCH = 1000
@@ -58,9 +60,10 @@ export type Code = { readonly captureCode: typeof captureCode; readonly restoreC
 // failure, or undefined once it read, so whatever waits on it reads how it ended. A session in
 // `codeStale` changed while its code was read or went up, so its code is read again once that ends. A session in
 // `codeSkipped` had its last drain at `uploadEvery` 0 carry its files alone while its code waited, so its next drain
-// carries code too. `claimed` holds the sessions this program claimed, each once a run, as the Pool keeps a takeover's
-// `released` for this machine until a program here says it heard it. `lastIndex` is the index.json this program last
-// put, which `writeIndex` puts again only once it changed.
+// carries code too. `onReleased` hears that another machine holds a session, by the name of that machine, once this
+// machine stopped capturing it. `sealWaits` holds each session whose seal failed: how many seals of it failed in a row,
+// and how many backup passes it waits before the next. `lastIndex` is the index.json this program last put, which
+// `writeIndex` puts again only once it changed.
 export type Capture = Code & {
   readonly relay: Relay
   readonly db: Database
@@ -71,10 +74,11 @@ export type Capture = Code & {
   readonly codeWaiting: Map<string, { readonly folder: string; readonly code: CodeCapture }>
   readonly codeStale: Set<string>
   readonly codeSkipped: Set<string>
-  readonly claimed: Set<string>
+  readonly sealWaits: Map<string, { readonly failures: number; passes: number }>
   // the working folders found missing, each logged once
   readonly missingFolders: Set<string>
   readonly onCode: (session: string, tool: Tool, folder: string) => void
+  readonly onReleased: (session: string, holder: string) => void
   lastIndex: string
 }
 export type Problems = { set(key: string, error: unknown): void; clear(key: string): void }
@@ -166,9 +170,8 @@ function useRelay(db: Database, url: string, bucket: string): boolean {
 
 // What the relay tells this machine goes into its database at once: the relay that welcomes it and the bucket it names,
 // and each session another machine took, whether the welcome brings it from the time this machine was away or it comes
-// as it happens. Each `released` written answers `heard`, so the Pool keeps it no more, and every welcome carries it
-// until one does, as a socket that died took it into nowhere. `onOtherRelay` hears a welcome from another relay than
-// the database counted, once the database started over.
+// as it happens, which `releasedTo` takes as it takes a frame or a seal the relay refused. `onOtherRelay` hears a
+// welcome from another relay than the database counted, once the database started over.
 export function openCapture(
   relay: Relay,
   device: Device,
@@ -177,20 +180,32 @@ export function openCapture(
     db = openDatabase(),
     code = { captureCode, restoreCode },
     onCode = () => undefined,
+    onReleased = () => undefined,
     onOtherRelay = () => undefined,
-  }: { readonly db?: Database; readonly code?: Code; readonly onCode?: Capture['onCode']; readonly onOtherRelay?: (url: string, bucket: string) => void } = {},
+  }: { readonly db?: Database; readonly code?: Code; readonly onCode?: Capture['onCode']; readonly onReleased?: Capture['onReleased']; readonly onOtherRelay?: (url: string, bucket: string) => void } = {},
 ): Capture {
-  const released = ({ session, to, at }: Released): void => {
-    holdElsewhere(db, session, to.name, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
-    relay.send({ t: 'heard', session, to: to.id })
+  const capture: Capture = {
+    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased, lastIndex: '',
   }
+  const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
   relay.on('welcome', ({ bucket, waiting }) => {
     const isOther = useRelay(db, relay.url, bucket)
     for (const message of waiting) released(message)
     if (isOther) onOtherRelay(relay.url, bucket)
   })
   relay.on('released', released)
-  return { ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeSkipped: new Set(), claimed: new Set(), missingFolders: new Set(), onCode, lastIndex: '' }
+  return capture
+}
+
+// Another machine holds the session, as a `released` says, or a frame or a seal's claim the relay refused with 409:
+// this machine captures nothing more of it and refuses its prompts with that machine's name, says `heard`, as a
+// `released` of the take may wait in the Pool for this machine until a program here says it, and `onReleased` hears
+// it, which stops the session's background job in the service. A `heard` while no socket is welcomed goes nowhere,
+// and the next welcome carries the `released` again.
+function releasedTo(capture: Capture, session: string, holder: DeviceRef, reason: string, tool?: Tool): void {
+  holdElsewhere(capture.db, session, holder.name, reason, tool)
+  capture.relay.send({ t: 'heard', session, to: holder.id })
+  capture.onReleased(session, holder.name)
 }
 
 // A path that names a code part is no file on any machine: restore hands it to `restoreCode` instead of placing it.
@@ -199,7 +214,7 @@ export const isCodePart = (path: string): boolean => path.startsWith('anyhost:co
 const position = (at: number): string => String(at).padStart(16, '0')
 export const journalPrefix = (session: string): string => `journals/${session}/`
 export const hotKey = (session: string, start: number): string => `${journalPrefix(session)}hot/${position(start)}.zst`
-export const sealedKey = (session: string, start: number, end: number): string => `${journalPrefix(session)}sealed/${position(start)}-${position(end)}.zst`
+const sealedKey = (session: string, start: number, end: number): string => `${journalPrefix(session)}sealed/${position(start)}-${position(end)}.zst`
 
 const C = zlib.constants
 // Every frame carries zstd's content checksum, so a damaged frame fails to decode instead of placing wrong bytes.
@@ -453,7 +468,10 @@ async function sourceOf(capture: Capture, session: string, path: string): Promis
 
 const isLog = (path: string, roots: MachineRoots): boolean => path.endsWith('.jsonl') || path.endsWith('.output') || linesFiles(roots).has(path)
 const sameBytes = (a: Uint8Array, b: Uint8Array): boolean => Buffer.from(a).equals(Buffer.from(b))
-const tailOf = (bytes: Uint8Array): Uint8Array => bytes.slice(Math.max(0, bytes.length - TAIL_BYTES))
+// the last bytes of a file, whose change says a log changed before its uploaded end, as `FileState.tail` keeps them
+export const tailOf = (bytes: Uint8Array): Uint8Array => bytes.slice(Math.max(0, bytes.length - TAIL_BYTES))
+// the sha256 of bytes in hex, as a record's `after` names it
+export const sha256 = (bytes: Uint8Array): string => new Bun.CryptoHasher('sha256').update(bytes).digest('hex')
 
 async function hasherOf(source: Source, size: number): Promise<Bun.CryptoHasher> {
   const hasher = new Bun.CryptoHasher('sha256')
@@ -555,19 +573,16 @@ type Upload = {
 export type Changed = { readonly session: string; readonly tool: Tool; readonly paths: ReadonlySet<string> }
 // One frame of a drain: its position in the journal, its bytes, the records they hold, and the relay's answer to its put.
 type Put = { readonly start: number; readonly body: Uint8Array; readonly records: readonly Change[]; readonly put: Promise<RanOf<'put'>> }
-// The relay's answers to one session's ops in a drain: its claim, which only its first drain this run carries, and
-// its frames' puts.
-type Answered = { readonly claim: Promise<RanOf<'claim'>> | undefined; readonly puts: readonly Put[] }
 
 // A drain: every session's frames go up in one request, after each session read what its files gained, and a frame
-// over MAX_MESSAGE_BYTES goes by HTTP beside it, so it holds back no other frame. The first drain of a session this run
-// claims it in the same request, before its frames, so the Pool holds the session for this machine and tells it of a
+// over MAX_MESSAGE_BYTES goes by HTTP beside it, so it holds back no other frame. The Pool claims a session no machine
+// holds for the machine whose frame of it comes first, so it holds the session for this machine and tells it of a
 // takeover. Answers each session with its paths left for the next drain.
 export function uploadSessions(capture: Capture, sessions: readonly Changed[], problems: Problems, isEveryWrite = false): (readonly [Changed, Promise<Set<string>>])[] {
   const drains = sessions.map((changed) => ({
     changed,
     upload: readUpload(capture, changed.session, changed.tool, changed.paths, problems, isEveryWrite),
-    answered: Promise.withResolvers<Answered>(),
+    answered: Promise.withResolvers<readonly Put[]>(),
   }))
   void Promise.allSettled(drains.map(async ({ upload, answered }) => ({ upload: await upload, answered }))).then((all) => {
     // a session whose read failed rejects with it, and one with nothing to send answers its paths left
@@ -575,7 +590,6 @@ export function uploadSessions(capture: Capture, sessions: readonly Changed[], p
     try {
       const calls: Call[] = []
       const asked = sending.map(({ upload: { session, end, frames }, answered }) => {
-        const claim = capture.claimed.has(session) ? undefined : calls.push({ op: 'claim', session, take: false }) - 1
         let start = end
         const framed = frames.map((records) => {
           const body = Buffer.concat(records.flatMap((record) => encodeRecord(record.header, record.bytes)))
@@ -583,13 +597,11 @@ export function uploadSessions(capture: Capture, sessions: readonly Changed[], p
           start += body.length
           return frame
         })
-        return { answered, claim, frames: framed }
+        return { answered, frames: framed }
       })
       // the relay answers each call in its position, a put's with a put's result
       const answers = capture.relay.run(calls)
-      for (const { answered, claim, frames } of asked) {
-        answered.resolve({ claim: claim === undefined ? undefined : (answers[claim] as Promise<RanOf<'claim'>>), puts: frames.map(({ call, ...frame }): Put => ({ ...frame, put: answers[call] as Promise<RanOf<'put'>> })) })
-      }
+      for (const { answered, frames } of asked) answered.resolve(frames.map(({ call, ...frame }): Put => ({ ...frame, put: answers[call] as Promise<RanOf<'put'>> })))
     } catch (error) {
       for (const { answered } of sending) answered.reject(error)
     }
@@ -653,14 +665,12 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
 }
 
 // Counts what of a session's drain the relay took, and answers the paths left for the next drain.
-async function finishUpload(capture: Capture, upload: Upload, answers: Answered, problems: Problems): Promise<Set<string>> {
+async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put[], problems: Problems): Promise<Set<string>> {
   const { db, roots } = capture
   const { session, tool, changes, code, waiting, left } = upload
-  // a claim another machine holds refuses the frames after it too, which say who holds the session
-  if ((await answers.claim)?.status === 200) capture.claimed.add(session)
   type Outcome = { readonly frame: Put; readonly isHere: boolean } | { readonly frame: Put; readonly error: unknown }
   const outcomes = await Promise.all(
-    answers.puts.map((frame) =>
+    puts.map((frame) =>
       frame.put.then((put) => frameWritten(capture, session, tool, frame.start, frame.body, put)).then(
         (isHere): Outcome => ({ frame, isHere }),
         (error: unknown): Outcome => ({ frame, error }),
@@ -707,15 +717,13 @@ async function finishUpload(capture: Capture, upload: Upload, answers: Answered,
 // relay's answer counts a position that holds this frame's own bytes as written already (`written` in relay.ts), as
 // after an answer lost on the way back. This machine's own other bytes there, or its same lines compressed otherwise,
 // went up past a position that failed, or before a crash, and the journal never counted them, so this frame replaces
-// them. Another machine's bytes there make this machine's lines a fork, and a session another machine
-// holds refuses the frame: either way this machine stops capturing the session.
+// them, in one put on the condition that the object is still the one read and the session still this machine's, so a
+// takeover since keeps the frame its taker's journal goes on from. Another machine's bytes there make this machine's
+// lines a fork, and a session another machine holds refuses the frame: either way this machine stops capturing the
+// session.
 async function frameWritten(capture: Capture, session: string, tool: Tool, start: number, body: Uint8Array, put: RanOf<'put'>): Promise<boolean> {
   const { relay, db, device } = capture
   const key = hotKey(session, start)
-  const heldBy = (holder: string, reason: string): false => {
-    holdElsewhere(db, session, holder, reason, tool)
-    return false
-  }
   let answer = put
   if (answer.status === 412) {
     const there = await relay.runOne({ op: 'get', key })
@@ -723,18 +731,21 @@ async function frameWritten(capture: Capture, session: string, tool: Tool, start
     // the frame's first record names the machine that wrote it
     const writer = written === undefined ? undefined : (JSON.parse(new TextDecoder().decode(written.subarray(0, written.indexOf(10)))) as RecordHeader).device
     if (writer === device.id || writer === undefined) {
-      await relay.runOne({ op: 'delete', keys: [key] })
-      answer = await relay.runOne({ op: 'put', key, bytes: compressHot(body), if: { none: '*' }, holder: session })
+      answer = await relay.runOne({ op: 'put', key, bytes: compressHot(body), if: there.status === 200 ? { match: there.etag } : { none: '*' }, holder: session })
     }
     if (answer.status === 412) {
       const fork = `${new Date().toISOString()} Another machine wrote byte ${start} of the session ${session}'s journal first, so ${device.name} stops capturing it, and its lines from here are a fork of the session.`
       console.error(fork)
       const machine = writer === undefined || writer === device.id ? undefined : (await devicesOf(relay)).get(writer)?.name
       if (machine === undefined) stopJournal(db, session, tool, fork)
-      return machine === undefined ? false : heldBy(machine, fork)
+      else holdElsewhere(db, session, machine, fork, tool)
+      return false
     }
   }
-  if (answer.status === 409) return heldBy(answer.holder.name, `${new Date().toISOString()} ${answer.holder.name} took the session ${session} over, so ${device.name} stops capturing it.`)
+  if (answer.status === 409) {
+    releasedTo(capture, session, answer.holder, `${new Date().toISOString()} ${answer.holder.name} took the session ${session} over, so ${device.name} stops capturing it.`, tool)
+    return false
+  }
   return true
 }
 
@@ -946,22 +957,33 @@ export async function sealJournal(capture: Capture, session: string, tool: Tool,
 
 // Seals every session quiet for QUIET_MS that this machine holds. A journal whose chain in R2 ends elsewhere than this
 // machine counted goes on from where the chain ends, with every file whole, once, so it is not read again each minute.
-// Answers the files of those sessions, for the upload queue.
+// A session whose seal failed waits 1 backup pass, then 2, 4 and up to SEAL_WAIT_PASSES after each failure in a row,
+// until one succeeds: each try lists and reads every hot frame, thousands at `uploadEvery` 0. The backup passes run a
+// minute apart and seal seconds into each, so the wait counts passes, not time. Answers the files of the sessions that
+// go on, for the upload queue.
 export async function sealQuiet(capture: Capture, problems: Problems, now = Date.now()): Promise<Map<string, Set<string>>> {
-  const { db, relay, device } = capture
+  const { db, relay, device, sealWaits } = capture
   const quiet = db.query<{ session: string; tool: Tool }, [number]>("select session, tool from journals where stopped = '' and end > sealed and written_at < ?").all(now - QUIET_MS)
   const again = new Map<string, Set<string>>()
   for (const { session, tool } of quiet) {
+    const wait = sealWaits.get(session)
+    if (wait !== undefined && wait.passes > 1) {
+      wait.passes -= 1
+      continue
+    }
     try {
       // a session another machine holds is that machine's to seal
       const claim = await relay.runOne({ op: 'claim', session, take: false })
-      if (claim.status === 409) holdElsewhere(db, session, claim.holder.name, `${new Date().toISOString()} ${claim.holder.name} holds the session ${session}, so ${device.name} stops capturing it.`, tool)
+      if (claim.status === 409) releasedTo(capture, session, claim.holder, `${new Date().toISOString()} ${claim.holder.name} holds the session ${session}, so ${device.name} stops capturing it.`, tool)
       else {
         const files = await sealJournal(capture, session, tool, problems)
         if (files.size > 0) again.set(session, files)
       }
+      sealWaits.delete(session)
       problems.clear(`seal ${session}`)
     } catch (error) {
+      const failures = (wait?.failures ?? 0) + 1
+      sealWaits.set(session, { failures, passes: Math.min(2 ** (failures - 1), SEAL_WAIT_PASSES) })
       problems.set(`seal ${session}`, error)
     }
   }

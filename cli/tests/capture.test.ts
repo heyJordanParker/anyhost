@@ -151,9 +151,11 @@ test('replay of append, write-once and rewrite records', async () => {
   expect(replayed.end).toBe(first.length + second.length)
 })
 
-test('a drain of several sessions goes up in one request, each session claimed before its frames', async () => {
+// The suite missed it: every first drain carried a claim of its own, a round trip the frame's holder check makes
+// already, as the Pool claims a session no machine holds for the writer of its first frame.
+test('a drain of several sessions goes up in one request, and the first frame of each session no machine holds leaves its claim with this machine, with no claim sent', async () => {
   const relay = await memoryRelay()
-  const { roots, transcript, capture, upload } = machine(deviceA, relay)
+  const { roots, transcript, capture } = machine(deviceA, relay)
   const other = join(roots.home, '.claude', 'projects', '-work-trip', `${OTHER}.jsonl`)
   writeFileSync(transcript, lines[0] ?? '')
   writeFileSync(other, `{"type":"user","message":{"role":"user","content":"Pack"},"sessionId":"${OTHER}"}\n`)
@@ -163,34 +165,9 @@ test('a drain of several sessions goes up in one request, each session claimed b
   ]
   await Promise.all(uploadSessions(capture, sessions, failTest).map(([, left]) => left))
 
-  expect(relay.requests[0]?.map((op) => (op.op === 'claim' ? `claim ${op.session}` : op.op === 'put' ? `put ${op.key}` : op.op))).toEqual([
-    `claim ${SESSION}`,
-    `put ${hotKey(SESSION, 0)}`,
-    `claim ${OTHER}`,
-    `put ${hotKey(OTHER, 0)}`,
-  ])
+  expect(relay.requests[0]?.map((op) => (op.op === 'put' ? `put ${op.key}` : op.op))).toEqual([`put ${hotKey(SESSION, 0)}`, `put ${hotKey(OTHER, 0)}`])
   expect(await relay.claims()).toEqual(new Map([[SESSION, deviceA.id], [OTHER, deviceA.id]]))
-  // the next drain claims nothing again
-  appendFileSync(transcript, lines[1] ?? '')
-  await upload(transcript)
-  expect(relay.requests.flat().filter(({ op }) => op === 'claim')).toHaveLength(2)
-})
-
-// A takeover's `released` waits in the Pool until this machine says it heard it, and every welcome carries it again
-// until then, so a session this program claimed once needs no claim after a reconnect.
-test('a drain after the relay welcomes the machine again claims no session this program claimed already', async () => {
-  const relay = await memoryRelay()
-  const { transcript, capture, upload } = machine(deviceA, relay)
-  writeFileSync(transcript, lines[0] ?? '')
-  await upload(transcript)
-  capture.relay.reconnect()
-  await welcomed(capture.relay)
-
-  appendFileSync(transcript, lines[1] ?? '')
-  await upload(transcript)
-
-  const drains = relay.requests.filter((ops) => ops.some((op) => op.op === 'put' && op.key.startsWith(`journals/${SESSION}/`)))
-  expect(drains.map((ops) => ops.filter(({ op }) => op === 'claim').length)).toEqual([1, 0])
+  expect(relay.requests.flat().filter(({ op }) => op === 'claim')).toEqual([])
 })
 
 test('a frame over 1 MiB goes up by HTTP beside the request, and the journal reads it back byte for byte', async () => {
@@ -389,6 +366,47 @@ test("a frame this machine put up that its journal never counted is written over
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '', 'utf8')).toBe(lines[0] ?? '')
   expect(replayed.end).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
+})
+
+// The suite missed it: no take landed while a machine wrote over a frame of its own, where a delete with no holder
+// check took the frame out from under the taker's journal.
+test("a take that lands between a frame's 412 and the put over this machine's uncounted frame leaves the taker's journal whole", async () => {
+  const relay = await memoryRelay()
+  const a = machine(deviceA, relay)
+  const b = machine(deviceB, relay)
+  writeFileSync(a.transcript, lines[0] ?? '')
+  // anyhost-a holds the session, and put up a frame at byte 0 its journal never counted, as before a crash
+  expect(await a.capture.relay.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true, at: expect.any(String) })
+  const old = new TextEncoder().encode(lines[1])
+  const stray = Buffer.concat(encodeRecord({ device: deviceA.id, path: a.transcript, at: 0, size: old.length, after: { size: old.length, sha256: '' } }, old))
+  await relay.objects.put(hotKey(SESSION, 0), compressHot(stray))
+  // anyhost-a's write over byte 0 waits, once it read what is there, until anyhost-b took the session
+  const first = hotKey(SESSION, 0)
+  let isRead = false
+  const writing = Promise.withResolvers<void>()
+  const taken = Promise.withResolvers<void>()
+  relay.before = (op) => {
+    if (op.op === 'get' && op.key === first) isRead = true
+    const isWrite = (op.op === 'put' && op.key === first) || (op.op === 'delete' && op.keys.includes(first))
+    if (!isRead || !isWrite) return undefined
+    writing.resolve()
+    return taken.promise
+  }
+  const uploading = a.upload(a.transcript)
+  await writing.promise
+  // anyhost-b takes the session and goes on with the journal from the frame's end, as a restore of it does
+  expect(await b.capture.relay.runOne({ op: 'claim', session: SESSION, take: true })).toMatchObject({ status: 200 })
+  continueJournal(b.capture.db, { session: SESSION, tool: 'claude', end: stray.length, sealed: 0 }, [])
+  writeFileSync(b.transcript, lines[2] ?? '')
+  await b.upload(b.transcript)
+  taken.resolve()
+
+  expect(await uploading).toEqual([new Set()])
+  expect(Buffer.from(await frameOf(relay, first)).equals(stray)).toBe(true)
+  const replayed = await downloadJournal(b.capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
+  expect(readFileSync(replayed.files.get(b.transcript)?.staged ?? '', 'utf8')).toBe(lines[2] ?? '')
+  expect(replayed.end).toBe(journalOf(b.capture.db, SESSION)?.end ?? -1)
+  expect(journalOf(a.capture.db, SESSION)).toMatchObject({ holder: 'anyhost-b', stopped: expect.stringContaining('anyhost-b took the session') })
 })
 
 test('a code frame that fails leaves the journal at the frames before it, and the next drain writes the rest', async () => {
@@ -667,6 +685,43 @@ test('the repair of a journal R2 lost a frame of keeps the warning a takeover le
   expect((await sealQuiet(capture, failTest, quiet)).has(SESSION)).toBe(true)
   logged.mockRestore()
   expect(takeUntold(capture.db, SESSION)).toBe('anyhost-b')
+})
+
+// The suite missed it: every seal a test failed was tried once, while the backup tries each quiet session's seal every
+// minute, listing and reading every hot frame of it each time.
+test('a seal that keeps failing is tried again after 1, 2, 4 and 8 minutes, and a seal that succeeds ends the wait', async () => {
+  const relay = await memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
+  writeFileSync(transcript, lines[0] ?? '')
+  await upload(transcript)
+  const quiet = (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000
+  let isFailing = true
+  relay.refuse = (op) => (isFailing && op.op === 'list' ? 'R2 answered 500' : undefined)
+  const problems: string[] = []
+  const recording: Problems = { set: (key, error) => void problems.push(`${key}: ${String(error)}`), clear: () => undefined }
+  // the backup pass of each minute from `quiet` on, and whether its seal listed the journal's frames
+  const pass = async (minute: number): Promise<boolean> => {
+    const asked = relay.requests.length
+    await sealQuiet(capture, recording, quiet + minute * 60_000)
+    return relay.requests.slice(asked).some((ops) => ops.some(({ op }) => op === 'list'))
+  }
+
+  const tried: number[] = []
+  for (let minute = 0; minute <= 15; minute += 1) if (await pass(minute)) tried.push(minute)
+  expect(tried).toEqual([0, 1, 3, 7, 15])
+  expect(problems).toHaveLength(5)
+  isFailing = false
+  let sealedAt = 16
+  while (!(await pass(sealedAt))) sealedAt += 1
+  expect(sealedAt).toBe(31)
+  expect(journalOf(capture.db, SESSION)?.sealed).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
+  // a seal that fails after one that succeeded waits a minute again
+  appendFileSync(transcript, lines[1] ?? '')
+  await upload(transcript)
+  isFailing = true
+  const later = (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000 - quiet
+  const minute = Math.ceil(later / 60_000)
+  expect([await pass(minute), await pass(minute + 1)]).toEqual([true, true])
 })
 
 // A session of 17 hot frames of about 700 KB each, a line of random text a frame of its own, as no two fit one

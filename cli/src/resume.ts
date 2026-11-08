@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
-import { checkoutOf, continueJournal, isCodePart, linesOf, markUntold, recordSummary, stopJournal, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
+import { checkoutOf, continueJournal, isCodePart, linesOf, markUntold, recordSummary, sha256, stopJournal, tailOf, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { devicesOf, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
@@ -11,7 +11,6 @@ import { downloadJournal, indexesOf, listSessions, type ListedSession, type Repl
 import { codexState, linesFiles, ownerOf } from './transcript.ts'
 
 const NOTHING = new Uint8Array()
-const TAIL_BYTES = 32
 
 export const repoSlug = (remote: string): string =>
   remote
@@ -138,8 +137,6 @@ async function* viewOf(file: ReplayedFile, writers: Writers, to: Roots): AsyncGe
   }
 }
 
-const sha256 = (bytes: Uint8Array): string => new Bun.CryptoHasher('sha256').update(bytes).digest('hex')
-
 // Every file must be what its last writer had after its last record: its size and sha256.
 async function checkFile(file: ReplayedFile, writers: Writers): Promise<void> {
   const { device, path, after } = file.last
@@ -195,19 +192,20 @@ async function placeFile(session: string, file: ReplayedFile, writers: Writers, 
     if (lines === undefined) placeCodexRow(path, placed)
     else await mergeLines(path, placed)
     const local = lines === undefined ? placed : linesOf(await Bun.file(path).text(), lines.lines, session)
-    return { session, path, ...known, localSize: local.length, tail: local.slice(Math.max(0, local.length - TAIL_BYTES)), sha256: sha256(local) }
+    return { session, path, ...known, localSize: local.length, tail: tailOf(local), sha256: sha256(local) }
   }
   await mkdir(dirname(path), { recursive: true })
   // 'w' empties a copy this machine already has, such as its own longer transcript of a session it takes back
   const handle = await open(path, 'w')
   const hasher = new Bun.CryptoHasher('sha256')
-  let [size, tail] = [0, NOTHING]
+  let size = 0
+  let tail: Uint8Array = NOTHING
   try {
     for await (const part of viewOf(file, writers, here)) {
       for (let at = 0; at < part.length; ) at += (await handle.write(part, at)).bytesWritten
       hasher.update(part)
       size += part.length
-      tail = Buffer.concat([tail, part.subarray(Math.max(0, part.length - TAIL_BYTES))]).subarray(-TAIL_BYTES)
+      tail = tailOf(Buffer.concat([tail, tailOf(part)]))
     }
   } finally {
     await handle.close()
@@ -236,8 +234,9 @@ export async function openSession(session: ListedSession, cwd: string): Promise<
 // the working folder's code, and places every file with its paths rewritten to this machine's. The relay tells the
 // machine that held the session, which stops capturing it and refuses its prompts with this machine's name, at once
 // or as it next connects. Answers the session and the folder it continues in. `checkouts` is the person's option of
-// that name.
-export async function restore(capture: Capture, id: string, options: { take: boolean; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
+// that name. A take with `if` takes the session only from the claim of that `at`, as a move's does, and fails with
+// `HeldElsewhere` before it places anything once its holder took it again since.
+export async function restore(capture: Capture, id: string, options: { take: boolean; if?: { readonly at: string }; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
   const { relay, db, roots } = capture
   const devices = await devicesOf(relay)
   const [indexes, claims] = await Promise.all([indexesOf(relay, devices.keys()), claimsOf(relay, id)])
@@ -246,8 +245,9 @@ export async function restore(capture: Capture, id: string, options: { take: boo
   // A session only the machine it started on wrote is that machine's by capture alone, so a resume takes it. Once
   // another machine resumed it, which lists it then, taking it needs --take.
   const hasMoved = [...indexes.values()].filter((index) => index.some((entry) => entry.id === id)).length > 1
-  const claim = await takeClaim(relay, id, { take: options.take || !hasMoved }).catch((error: unknown) => {
-    if (!(error instanceof HeldElsewhere)) throw error
+  const claim = await takeClaim(relay, id, { take: options.take || !hasMoved, ...(options.take && options.if !== undefined ? { if: options.if } : {}) }).catch((error: unknown) => {
+    // only a fenced take is refused, and its caller names why
+    if (!(error instanceof HeldElsewhere) || options.take) throw error
     throw new Error(`This session continues on ${error.holder.name}. Run anyhost resume ${id} --take to continue it here.`)
   })
   const rootsOf = writersOf(devices, indexes, session)

@@ -37,7 +37,8 @@ export type Stream = {
   // the last peer's terminal, so it goes nowhere again.
   startOver(): void
   // The link carried no frame from `offset` on, as the relay refused it while its machine's socket was down: there is
-  // no link from now on, and those frames count as carried by none, so a new peer gets them after `startOver`.
+  // no link from now on, and those frames count as carried by none, so a new peer gets them after `startOver`. A frame
+  // an earlier link carried stays carried, whatever `offset` says, as it may have reached the last peer.
   refused(offset: number): void
   // a frame the link brought
   receive(frame: Uint8Array): void
@@ -70,6 +71,11 @@ export const offsetOf = (frame: Uint8Array): number => {
   const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
   return view.getUint32(1) * 2 ** 32 + view.getUint32(5)
 }
+// the offset after a frame's last byte
+export const endOf = (frame: Uint8Array): number => offsetOf(frame) + frame.length - HEADER
+// Whether a frame is an acknowledgement, whose offset counts the bytes of the other direction, where every other
+// frame's offset counts its sender's own.
+export const isAcknowledgement = (frame: Uint8Array): boolean => frame[0] === ACK
 
 const bytesOf = (value: Values[Kind]): Uint8Array => (value instanceof Uint8Array ? value : encoder.encode(JSON.stringify(value)))
 const valueOf = (kind: Kind, bytes: Uint8Array): Values[Kind] => (kind === 'input' || kind === 'output' ? bytes : (JSON.parse(decoder.decode(bytes)) as Values[Kind]))
@@ -101,6 +107,8 @@ export function openStream(): Stream {
   let isStarting = false
   // the offset before which every byte this side wrote went on a link, as of the last link that went
   let carriedTo = 0
+  // `carriedTo` as the link in use began, before which an earlier link carried every byte, whatever this one refused
+  let linkedAt = 0
   // armed by the first frame taken since the last acknowledgement, so a stream that takes nothing runs no timer
   let acking: ReturnType<typeof setTimeout> | undefined
 
@@ -138,6 +146,7 @@ export function openStream(): Stream {
     if (link !== undefined) carriedTo = sent
     link = isClosed ? undefined : next
     if (link === undefined) return
+    linkedAt = carriedTo
     isStarting = false
     link.send(frameOf(ACK, received))
     acknowledged = received
@@ -163,7 +172,7 @@ export function openStream(): Stream {
     startOver() {
       use(undefined)
       const uncarried = waiting.filter((kept) => kept.offset >= carriedTo)
-      sent = received = acknowledged = waitingBytes = carriedTo = 0
+      sent = received = acknowledged = waitingBytes = carriedTo = linkedAt = 0
       waiting = []
       for (const { code, frame } of uncarried) keep(code, frame.subarray(HEADER))
       isStarting = true
@@ -172,7 +181,7 @@ export function openStream(): Stream {
     },
     refused(offset) {
       use(undefined)
-      carriedTo = Math.min(carriedTo, offset)
+      carriedTo = Math.max(linkedAt, Math.min(carriedTo, offset))
     },
     receive(frame) {
       if (isClosed || frame.length < HEADER) return

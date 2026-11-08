@@ -84,8 +84,10 @@ type Envelope = { success: boolean; errors: { code: number; message: string }[];
 // the Worker waits for before Cloudflare answers it, `resets` the API calls the link resets, and `timeouts` the API calls
 // that get no answer until their time limit ends them. A new secret alone reaches the join at once, as the Worker checks
 // the setup code itself. `buckets` holds each bucket's jurisdiction, `objects` each bucket's keys with when each was
-// last written, and `relayBucket` the bucket the relay deployed before binds.
-function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; buckets?: Record<string, string>; objects?: Record<string, Record<string, string>>; keyring?: boolean; apiToken?: boolean; loggedIn?: boolean; expired?: 403 | 401; notFound?: number; unavailable?: number; resets?: number; timeouts?: number; others?: Account[]; relay?: number; protocol?: number; relayBucket?: string; health?: { status: number; body: string }; secretLag?: number; upload?: Promise<void>; loseBucketMake?: boolean } = { r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' } }) {
+// last written, and `relayBucket` the bucket the relay deployed before binds. The login's `others` accounts hold no
+// Worker, and under `othersRefuse` answer the read of a Worker's settings with that status and error instead, as an
+// account where the person has no Workers access does.
+function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; buckets?: Record<string, string>; objects?: Record<string, Record<string, string>>; keyring?: boolean; apiToken?: boolean; loggedIn?: boolean; expired?: 403 | 401; notFound?: number; unavailable?: number; resets?: number; timeouts?: number; others?: Account[]; othersRefuse?: { status: number; code: number; message: string }; relay?: number; protocol?: number; relayBucket?: string; health?: { status: number; body: string }; secretLag?: number; upload?: Promise<void>; loseBucketMake?: boolean } = { r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' } }) {
   const loginFile = join(temporaryFolder(), 'default.json')
   writeFileSync(loginFile, JSON.stringify({ oauth_token: account.expired === undefined ? 'fresh' : 'expired' }))
   let isLoggedIn = account.loggedIn ?? true
@@ -122,8 +124,11 @@ function standIn(account: { r2: boolean; subdomain?: string; taken?: string[]; b
     if (!valid.has(headers.get('authorization')?.replace('Bearer ', '') ?? '')) {
       return account.expired === 401 ? new Response('{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}', { status: 401 }) : envelope(403, null, [9109, 'Invalid access token'])
     }
-    // the login's other accounts hold no Worker
-    if (account.others?.some(({ id }) => new RegExp(`^/accounts/${id}/workers/scripts/[^/]+/settings$`).test(path)) === true) return envelope(404, null, [10007, 'This Worker does not exist on your account.'])
+    // the login's other accounts hold no Worker, or refuse the read
+    if (account.others?.some(({ id }) => new RegExp(`^/accounts/${id}/workers/scripts/[^/]+/settings$`).test(path)) === true) {
+      const refusal = account.othersRefuse
+      return refusal === undefined ? envelope(404, null, [10007, 'This Worker does not exist on your account.']) : envelope(refusal.status, null, [refusal.code, refusal.message])
+    }
     const prefix = `/accounts/${ACCOUNT.id}`
     // a list of the buckets of one jurisdiction, all on one page
     if (method === 'GET' && path.startsWith(`${prefix}/r2/buckets?`)) {
@@ -307,9 +312,10 @@ test('deploys the relay from nothing into the bucket it finds in the EU and join
   expect(cloudflare.calls).toEqual([
     `GET /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect/settings`,
     `GET /accounts/${ACCOUNT.id}/workers/subdomain`,
-    // no other bucket holds anyhost 0.2's records
+    // no bucket holds anyhost 0.2's records, the relay's own bucket included
     `GET /accounts/${ACCOUNT.id}/r2/buckets?per_page=1000 (default)`,
     `GET /accounts/${ACCOUNT.id}/r2/buckets?per_page=1000 (eu)`,
+    `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test/objects?prefix=devices%2F&per_page=1000 (eu)`,
     `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test (default)`,
     `GET /accounts/${ACCOUNT.id}/r2/buckets/anyhost-test (eu)`,
     `PUT /accounts/${ACCOUNT.id}/workers/scripts/anyhost-test-connect`,
@@ -402,6 +408,23 @@ test('a join after a setup that never gets an answer sends one request a second 
   expect(cloudflare.said.filter((line) => line.includes('/v1/join'))).toEqual([])
 })
 
+// The suite missed it: a sleep that overshot past the 10 minutes, as on a busy machine, left the next join a negative
+// time limit, and AbortSignal.timeout's RangeError failed the setup in place of the 10 minutes' message.
+test('a join after a setup whose last wait overshoots the 10 minutes fails naming the 10 minutes', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION })
+  const started = cloudflare.cloudflare.now()
+  const overshooting: Cloudflare = {
+    ...cloudflare.cloudflare,
+    fetch: async (url, init) => {
+      if (!url.endsWith('/v1/join')) return await cloudflare.cloudflare.fetch(url, init)
+      throw new Error('ECONNRESET: The socket connection was closed unexpectedly.')
+    },
+    // the wait that starts 590 s into the join ends 20 s late
+    sleep: async (ms) => await cloudflare.cloudflare.sleep(cloudflare.cloudflare.now() - started > 590_000 ? ms + 20_000 : ms),
+  }
+  await expect(connectCloudflare(cloudflare.progress, DEVICE, NAMES, overshooting)).rejects.toThrow('https://anyhost-test-connect.parker-labs.workers.dev did not join macbook within 10 minutes of the setup.')
+})
+
 // The suite missed it: a second machine's Connect Cloudflare set a newer setup code, and the first one's join blamed
 // Cloudflare's rollout after 10 minutes.
 test('a join whose setup code another Connect Cloudflare replaced fails after 10 minutes, naming that Connect and to press it again', async () => {
@@ -481,20 +504,20 @@ test("Connect Cloudflare on an account with no relay binds the one other bucket 
     { type: 'durable_object_namespace', name: 'POOL', class_name: 'Pool' },
     { type: 'plain_text', name: 'BUCKET_NAME', text: 'claude-sessions' },
   ])
-  expect(cloudflare.said).toContain('The bucket claude-sessions holds the machine records of anyhost 0.2, which kept every session in the bucket its option R2 bucket named, so your relay keeps every session in claude-sessions')
+  expect(cloudflare.said).toContain('anyhost 0.2 kept every session in the bucket its option R2 bucket named. The bucket claude-sessions holds this machine\'s record, so your relay keeps every session in claude-sessions')
   expect(cloudflare.said).toContain('Found the bucket claude-sessions in the eu jurisdiction')
   expect(cloudflare.calls.filter((call) => call.startsWith(`POST /accounts/${ACCOUNT.id}/r2/buckets`))).toEqual([])
   expect(storedToken()).toBe('token-of-macbook')
 })
 
 // The suite missed it: with several buckets holding 0.2's records, the relay bound an empty bucket of its own. Each 0.2
-// machine wrote its record again every 5 minutes, so the bucket 0.2 used last holds the newest record.
-test("with several other buckets holding anyhost 0.2's machine records, Connect Cloudflare binds the one written last and names the others", async () => {
+// machine wrote its record again every 5 minutes, so the bucket this machine used last holds its newest record.
+test("with several buckets holding this machine's anyhost 0.2 record, Connect Cloudflare binds the one whose record of it was written last and names the others", async () => {
   const cloudflare = standIn({
     r2: true,
     subdomain: 'parker-labs',
     buckets: { 'anyhost-test': 'eu', 'claude-sessions': 'eu', 'old-sessions': 'default' },
-    // old-sessions, listed first, holds more machines, but its newest record is older than claude-sessions' newest
+    // old-sessions, listed first, holds more machines, but its record of this machine is older than claude-sessions'
     objects: {
       'old-sessions': { 'devices/c0ffee.json': '2026-06-01T09:00:00.000Z', 'devices/f00d.json': '2026-06-01T09:05:00.000Z' },
       'claude-sessions': { 'devices/c0ffee.json': '2026-10-30T08:05:00.000Z' },
@@ -503,9 +526,119 @@ test("with several other buckets holding anyhost 0.2's machine records, Connect 
   await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
   expect((cloudflare.workers.get(NAMES.worker)?.metadata['bindings'] as unknown[])[0]).toEqual({ type: 'r2_bucket', name: 'BUCKET', bucket_name: 'claude-sessions', jurisdiction: 'eu' })
   expect(cloudflare.said).toContain(
-    'The buckets claude-sessions, old-sessions hold the machine records of anyhost 0.2, which kept every session in the bucket its option R2 bucket named. claude-sessions holds the most recently written, so your relay keeps every session in claude-sessions, and the sessions in old-sessions stay where they are',
+    "anyhost 0.2 kept every session in the bucket its option R2 bucket named. The bucket claude-sessions holds this machine's record written last, so your relay keeps every session in claude-sessions. The bucket old-sessions holds anyhost 0.2 machine records too, and the sessions there stay where they are",
   )
   expect(storedToken()).toBe('token-of-macbook')
+})
+
+// The bindings of the relay a first Connect Cloudflare put up, and its bucket's line.
+const boundBucket = (cloudflare: ReturnType<typeof standIn>): unknown => (cloudflare.workers.get(NAMES.worker)?.metadata['bindings'] as { name: string; bucket_name?: string }[]).find(({ name }) => name === 'BUCKET')?.bucket_name
+const bucketLine = (cloudflare: ReturnType<typeof standIn>): string | undefined => cloudflare.said.find((line) => line.startsWith('anyhost 0.2 kept') || line.startsWith('No bucket holds'))
+
+// The suite missed it: the 0.2 search skipped the relay's own bucket, so with anyhost holding a 0.2.2 user's history
+// and a test bucket holding older records, the relay bound the test bucket and left the history unlisted.
+test("Connect Cloudflare binds the bucket anyhost when it holds the newest anyhost 0.2 records, beside an older anyhost-test", async () => {
+  const cloudflare = standIn({
+    r2: true,
+    subdomain: 'parker-labs',
+    buckets: { anyhost: 'eu', 'anyhost-test': 'eu' },
+    objects: {
+      anyhost: { 'devices/f00d.json': '2026-11-05T08:00:00.000Z', 'devices/beef.json': '2026-11-04T08:00:00.000Z' },
+      'anyhost-test': { 'devices/d00d.json': '2026-10-01T08:00:00.000Z' },
+    },
+  })
+  await connectCloudflare(cloudflare.progress, DEVICE, { worker: NAMES.worker, bucket: 'anyhost' }, cloudflare.cloudflare)
+  expect(boundBucket(cloudflare)).toBe('anyhost')
+  expect(bucketLine(cloudflare)).toBe(
+    "anyhost 0.2 kept every session in the bucket its option R2 bucket named. No bucket holds this machine's record, and the bucket anyhost holds the one written last, so your relay keeps every session in anyhost. The bucket anyhost-test holds anyhost 0.2 machine records too, and the sessions there stay where they are",
+  )
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
+// The suite missed it: the bucket with the newest record of any machine won over the one this machine wrote its own to.
+test("Connect Cloudflare binds the bucket that holds this machine's own anyhost 0.2 record over one whose records are newer", async () => {
+  const cloudflare = standIn({
+    r2: true,
+    subdomain: 'parker-labs',
+    buckets: { 'anyhost-test': 'eu', 'claude-sessions': 'eu', 'team-sessions': 'default' },
+    objects: {
+      'claude-sessions': { [`devices/${DEVICE.id}.json`]: '2026-10-30T08:05:00.000Z' },
+      'team-sessions': { 'devices/f00d.json': '2026-11-06T21:06:00.000Z' },
+    },
+  })
+  await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
+  expect(boundBucket(cloudflare)).toBe('claude-sessions')
+  expect(bucketLine(cloudflare)).toBe(
+    "anyhost 0.2 kept every session in the bucket its option R2 bucket named. The bucket claude-sessions holds this machine's record, so your relay keeps every session in claude-sessions. The bucket team-sessions holds anyhost 0.2 machine records too, and the sessions there stay where they are",
+  )
+})
+
+// The Architect's account: anyhost holds his Mac's 0.2.2 record, and anyhost-test 4 other machines' records a test put
+// back on 2026-11-06, after the Mac's last 0.2.2 write.
+test("Connect Cloudflare binds anyhost, which holds this machine's record, over anyhost-test, whose other machines' records a test put back later", async () => {
+  const back = '2026-11-06T21:06:00.000Z'
+  const cloudflare = standIn({
+    r2: true,
+    subdomain: 'parker-labs',
+    buckets: { anyhost: 'eu', 'anyhost-test': 'eu' },
+    objects: {
+      anyhost: { [`devices/${DEVICE.id}.json`]: '2026-11-05T19:00:00.000Z' },
+      'anyhost-test': { 'devices/26214b1b.json': back, 'devices/3415e247.json': back, 'devices/ee5f5fec.json': back, 'devices/ff0db1db.json': back },
+    },
+  })
+  await connectCloudflare(cloudflare.progress, DEVICE, { worker: NAMES.worker, bucket: 'anyhost' }, cloudflare.cloudflare)
+  expect(boundBucket(cloudflare)).toBe('anyhost')
+})
+
+// The suite missed it: any key under devices/ counted as a 0.2 record, so a bucket of the person's own with such a key
+// took the relay.
+test('a bucket whose only devices/ keys are no devices/<id>.json record holds no anyhost 0.2 record, and the relay binds its own bucket', async () => {
+  const cloudflare = standIn({
+    r2: true,
+    subdomain: 'parker-labs',
+    buckets: { 'anyhost-test': 'eu', backups: 'default' },
+    objects: { backups: { 'devices/readme.txt': '2026-11-06T10:00:00.000Z', 'devices/2026/macbook.json': '2026-11-06T10:00:00.000Z' } },
+  })
+  await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
+  expect(boundBucket(cloudflare)).toBe('anyhost-test')
+  expect(bucketLine(cloudflare)).toBe('No bucket holds a machine record of anyhost 0.2, so your relay keeps every session in the bucket anyhost-test')
+})
+
+const NO_WORKERS_ACCESS = { status: 403, code: 10000, message: 'Authentication error' }
+
+// The suite missed it: a login that also reached an account where the person has no Workers access failed the whole
+// setup and every relay update.
+test('an account that refuses the Worker settings read with 403 is left out with a line, and the setup goes on in the account that holds the relay', async () => {
+  const client: Account = { id: 'c1a1e47', name: 'Client Co' }
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, others: [client], othersRefuse: NO_WORKERS_ACCESS, relay: RELAY_VERSION })
+  // the stand-in's pickAccount fails the setup when it is asked
+  await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
+  expect(cloudflare.said).toContain("Your Cloudflare login may not read the Workers of Client Co (403 10000 Authentication error), so anyhost leaves that account out")
+  expect(storedToken()).toBe('token-of-macbook')
+
+  const updating = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, others: [client], othersRefuse: NO_WORKERS_ACCESS, relay: RELAY_VERSION - 1 })
+  await updateRelay(NAMES, updating.cloudflare)
+  expect(updating.workers.get(NAMES.worker)?.relay).toBe(RELAY_VERSION)
+})
+
+test("an account that refuses the Worker settings read with 403 is left out, and with no relay the setup deploys in the login's other account, asking nothing", async () => {
+  const client: Account = { id: 'c1a1e47', name: 'Client Co' }
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, others: [client], othersRefuse: NO_WORKERS_ACCESS })
+  await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
+  expect(cloudflare.calls).toContain(`PUT /accounts/${ACCOUNT.id}/workers/scripts/${NAMES.worker}`)
+  expect(cloudflare.calls.filter((call) => call.includes(client.id))).toEqual([`GET /accounts/${client.id}/workers/scripts/${NAMES.worker}/settings`])
+  expect(storedToken()).toBe('token-of-macbook')
+})
+
+// A relay account that answered 5xx once would read as holding no relay, and a second relay would go up beside it.
+test('an account that answers the Worker settings read with a 5xx fails the setup and the relay update, naming the account', async () => {
+  const client: Account = { id: 'c1a1e47', name: 'Client Co' }
+  const failing = { status: 503, code: 10013, message: 'An unknown error has occurred' }
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, others: [client], othersRefuse: failing })
+  const failure = `Looking for the Worker ${NAMES.worker} in Client Co failed: 10013 An unknown error has occurred.`
+  await expect(connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)).rejects.toThrow(failure)
+  expect(cloudflare.calls.filter((call) => call.startsWith('PUT') || call.startsWith('POST'))).toEqual([])
+  await expect(updateRelay(NAMES, cloudflare.cloudflare)).rejects.toThrow(failure)
 })
 
 // The suite missed it: an upload bound the bucket the program names, so a relay bound to a 0.2 bucket moved to an

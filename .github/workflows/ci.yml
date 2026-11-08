@@ -55,10 +55,12 @@ jobs:
           bun run --cwd cli check
           bun run --cwd relay check
 
-      - name: Test the mod, the anyhost program and the relay
-        run: bun test
+      # cmod check runs tests/mod.test.ts and relay/relay.test.ts with bun test, and no file of cli/tests, so this step
+      # runs only the program's
+      - name: Test the anyhost program
+        run: bun test ./cli/tests
 
-      - name: Check and test the mod
+      - name: Check the mod, and test the mod and the relay
         run: cmod check .
 
   # A release goes out only once the Mac and Linux both passed.

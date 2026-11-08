@@ -1,9 +1,12 @@
 // A session moves to another machine, which runs it in Claude Code's background from then on, and a new session
 // starts on another machine. The program of the machine that runs a session holds the session's upload queue, so `move`
 // runs there: it waits for the session's turn to end, drains, seals and sends `move`, and the machine it goes to takes
-// the claim, restores the session and starts it in `receiveMove`. A move that fails leaves the session running where it
-// was, with its claim, its journal going on past whatever the other machine wrote, and no job of it on that machine,
-// unless another machine took the session meanwhile. `startNew` and `receiveStart` start a new session on another
+// the claim, restores the session and starts it in `receiveMove`. The move carries the `at` of this machine's claim as
+// it went, and the other machine's take takes the session only from that claim, so once a move that failed took the
+// claim back, which writes a new `at`, a take of that move that comes later is refused before it starts any job. A move
+// that fails leaves the session running where it was, with its claim and its journal going on past whatever the other
+// machine wrote, and a job that machine started already stops there at its `released` (`receiveReleased`), unless
+// another machine took the session meanwhile. `startNew` and `receiveStart` start a new session on another
 // machine in the same repository. Only the program sends `move` and `start` and waits for their answers.
 import { mkdir, readFile, readlink, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -37,20 +40,24 @@ type MoveStep = 'waiting' | 'uploading' | 'moving' | 'moved' | 'failed'
 // move and keeps the session here, taking it back from a machine that answers nothing while the move waits for it, and
 // answers whether it did, as it does only until the other machine answered.
 export type Moving = { readonly session: string; readonly to: string; step: MoveStep; line: string; readonly keep: () => boolean }
-// What a move needs of the program that runs it.
+// What a move, a move or start this machine receives, and a take of a session from this machine need of the program
+// that runs them.
 export type MoveHere = {
   readonly moves: Map<string, Moving>
+  // the answer this program gave each `move` and `start` it received, by the message's id (`answerOnce`)
+  readonly answers: Map<string, Reply | undefined>
   readonly problems: Problems
   readonly environment: Promise<Record<string, string>>
-  // a path of the session for its next drain, and the drain of what the session holds now, as the upload queue runs them
+  // the person's `checkouts` option, where a session moved or started here clones its repository
+  readonly checkouts: string
+  // A path of the session for its next drain, and the drain of what the session holds now, as the upload queue runs
+  // them. The drain waits out a relay that is not connected, saying so through `onRelay` as the wait starts and ends.
   readonly queue: (session: string, tool: Tool, path: string) => void
-  readonly flush: (session: string, signal: AbortSignal) => Promise<void>
+  readonly flush: (session: string, signal: AbortSignal, onRelay: (isConnected: boolean) => void) => Promise<void>
   // ends every viewer of a session this program shows, telling each the machine it runs on now
   readonly movedAway: (session: string, to: string) => void
   readonly onRecordsChange: OnRecordsChange
 }
-// What a machine that receives a session or starts one needs of its program.
-type ReceiveHere = { readonly environment: Promise<Record<string, string>>; readonly checkouts: string; readonly onRecordsChange: OnRecordsChange }
 
 // what a machine answers a `move` or a `start` it received with
 type Reply = Extract<Routed, { readonly t: 'moved' | 'started' }>
@@ -67,23 +74,24 @@ const stamp = (): string => new Date().toISOString()
 
 // Sends a `move` or `start` to the machine it names, and answers that machine's answer to it, or `offline`. The relay's
 // `devices`, read as the message goes and every CONNECTED_MS after, counts the machine gone once it lists it not
-// connected or removed: the Pool counts a machine connected only while a socket of it pinged within LIVE_MS, so one
-// asleep or dead reads as gone. The message goes again with its id at each check that finds the machine there,
+// connected or removed, or `countsGone` answers true of the machine as listed as the message went and now: the Pool
+// counts a machine connected only while it heard a socket of it within LIVE_MS, a message, a ping or its connect, so
+// one asleep or dead reads as gone. The message goes again with its id at each check that finds the machine there,
 // whatever happened to either socket meanwhile, as an answer dies with a socket the Pool still counted alive, and that
-// machine answers a repeated id without running it twice (`answerOnce`, `takeSession`). A start's ask also counts the
-// machine gone once its `seenAt` moved, which the Pool writes at each connect and close of its sockets, as a restart
-// between two reads ended the start's run there, and a repeat to the restarted program would start a second session,
-// so a `start` goes again only to the program it went to. A gone machine, or the Pool's `offline` for one with no
-// socket open, answers `offline` unless `keepsWaiting` answers true, as a move's does while that machine holds the
-// session. A signal that aborts first, as Keep it here, rejects with its reason, and so does a read of `devices` or a
-// `keepsWaiting` that fails.
-async function ask<A extends Asked>(relay: Relay, message: A, { signal, keepsWaiting = async () => false }: { readonly signal?: AbortSignal; readonly keepsWaiting?: () => Promise<boolean> } = {}): Promise<AnswerTo<A>> {
+// machine answers a repeated id without running it twice (`answerOnce`, `takeSession`). A gone machine, or the Pool's
+// `offline` for one with no socket alive, answers `offline` unless `keepsWaiting` answers true. A signal that aborts
+// first, as Keep it here, rejects with its reason, and so does a read of `devices` or a `keepsWaiting` that fails.
+async function ask<A extends Asked>(
+  relay: Relay,
+  message: A,
+  { signal, keepsWaiting, countsGone }: { readonly signal?: AbortSignal; readonly keepsWaiting: () => Promise<boolean>; readonly countsGone: (asked: Device, now: Device) => boolean },
+): Promise<AnswerTo<A>> {
   const offline: Offline = { t: 'offline', id: message.id, to: message.to }
   signal?.throwIfAborted()
   const listed = (await devicesOf(relay)).get(message.to)
-  // the machine as the relay lists it now: gone, or for a start no longer the program the start went to
-  const isGone = (now: Device | undefined): boolean => now === undefined || now.removedAt !== undefined || !now.connected || (message.t === 'start' && now.seenAt !== listed?.seenAt)
-  if (isGone(listed)) return offline
+  const isUp = (now: Device | undefined): now is Device => now !== undefined && now.removedAt === undefined && now.connected
+  if (!isUp(listed)) return offline
+  const isGone = (now: Device | undefined): boolean => !isUp(now) || countsGone(listed, now)
   signal?.throwIfAborted()
   const answered = new AbortController()
   const until = signal === undefined ? answered.signal : AbortSignal.any([signal, answered.signal])
@@ -251,15 +259,16 @@ async function trustHere(capture: Capture, cwd: string, from: string): Promise<v
 // end the seal covers. A journal whose chain in R2 ends short of the end this machine counted, as after R2 lost a
 // frame, goes on from there with every file whole, as `sealQuiet` does, and is sealed again. A journal still short
 // after that fails the move, as the other machine would restore the session without the lost span. A session whose
-// journal stopped meanwhile, as another machine took it, uploads nothing more, and fails the move. A signal that
+// journal stopped meanwhile, as another machine took it, uploads nothing more, and fails the move. Its drains wait out
+// a relay that is not connected, as the program's every request does, saying so through `onRelay`. A signal that
 // aborts, as Keep it here, ends the upload with its reason.
-async function upload(capture: Capture, session: string, tool: Tool, here: MoveHere, signal: AbortSignal): Promise<void> {
+async function upload(capture: Capture, session: string, tool: Tool, here: MoveHere, signal: AbortSignal, onRelay: (isConnected: boolean) => void): Promise<void> {
   const aborted = new Promise<never>((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
   aborted.catch(() => undefined)
   // the paths and what the session holds now up, which leaves a stopped journal's paths and code undone
   const drained = async (paths: Iterable<string> = []): Promise<void> => {
     for (const path of paths) here.queue(session, tool, path)
-    await here.flush(session, signal)
+    await here.flush(session, signal, onRelay)
     const stopped = journalOf(capture.db, session)?.stopped ?? ''
     if (stopped !== '') throw new Error(`${capture.device.name} uploads no more of ${session.slice(0, 8)}: ${stopped}`)
   }
@@ -355,7 +364,8 @@ export async function move(capture: Capture, asked: string, machine: string, her
   else say('uploading', `Uploading ${id}.`)
   // A move that fails keeps the session here. Once it asked the other machine, which may have taken the claim and run
   // the session, it takes the claim back and captures the session here again past whatever that machine wrote, so its
-  // prompts go through. A session another machine took meanwhile stays with that machine.
+  // prompts go through. That take writes the claim a new `at`, so a take of the move the other machine sends later is
+  // refused. A session another machine took meanwhile stays with that machine.
   let isAsked = false
   const fail = async (line: string): Promise<void> => {
     const holder = journalOf(db, session)?.holder ?? ''
@@ -400,15 +410,20 @@ export async function move(capture: Capture, asked: string, machine: string, her
       await whenSessions(capture.roots.claudeHome, (sessions) => (sessions.find((listed) => listed.sessionId === session)?.status ?? 'idle') === 'idle' || undefined, Infinity, here.onRecordsChange, signal)
       say('uploading', `Uploading ${id}.`)
     }
-    await upload(capture, session, tool, here, signal)
+    await upload(capture, session, tool, here, signal, (isConnected) => say('uploading', isConnected ? `Uploading ${id}.` : `Uploading ${id} once the relay at ${relay.url} connects.`))
     signal.throwIfAborted()
     say('moving', `Uploaded and sealed ${id}. ${machine} restores it.`)
     const cwd = workingFolderOf(db, session)
     const trusted = cwd !== '' && (await trusts(capture, cwd))
     signal.throwIfAborted()
+    // the fence of the other machine's take: this machine's claim as the move goes, whose `at` only a take changes
+    const { at: claimedAt } = await takeClaim(relay, session, { take: false })
+    signal.throwIfAborted()
     const started = Date.now()
     isAsked = true
-    const answer = await ask(relay, { t: 'move', id: crypto.randomUUID(), to: target.id, session, trusted }, { signal, keepsWaiting })
+    // A program there that restarted answers the move's repeat from the claim it holds and the job it runs
+    // (`takeSession`), so no restart counts it gone.
+    const answer = await ask(relay, { t: 'move', id: crypto.randomUUID(), to: target.id, session, trusted, claimedAt }, { signal, keepsWaiting, countsGone: () => false })
     keeping.abort()
     if (answer.t === 'offline') return await fail(`${machine} is offline, so the session keeps running here.`)
     if ('error' in answer) return await fail(`${machine} could not take the session: ${reasonOf(answer.error)}. It keeps running here.`)
@@ -421,21 +436,20 @@ export async function move(capture: Capture, asked: string, machine: string, her
     if (stopped !== undefined) return say('failed', `${machine} runs ${id} now, and anyhost could not stop its copy here: ${reasonOf(stopped)}.`)
     say('moved', `${machine} restored ${id} in ${took} s and runs it.`)
   })().catch((error: unknown) => {
+    // another machine took the session before the move asked, and the released of it is on its way here
+    if (error instanceof HeldElsewhere) return say('failed', `${error.holder.name} took ${id} over during the move, so it continues there.`)
     if (error !== kept) return fail(`anyhost could not move the session to ${machine}: ${reasonOf(error)}. It keeps running here.`)
     return isAsked ? fail(`${machine} did not answer, so the session keeps running here.`) : say('failed', kept.message)
   })
   return moving
 }
 
-// The answer this program gave each `move` and `start` it received, by the message's id, for as long as it runs, or
-// undefined while it works on one. An asker sends its message again at each check of its wait (`ask`), as it may have
-// missed the answer: a repeated id gets the same answer again, and one still in progress gets nothing more, as its
-// first run answers it once it ends. Each answer goes once, and one the relay did not carry, as while either machine's
-// socket was down, reaches the asker at its next repeat.
-const answers = new WeakMap<Relay, Map<string, Reply | undefined>>()
-async function answerOnce(relay: Relay, asked: { readonly id: string; readonly from: { readonly name: string } }, work: () => Promise<Reply>): Promise<void> {
-  const known = answers.get(relay) ?? new Map<string, Reply | undefined>()
-  answers.set(relay, known)
+// Runs `work` once for each id of a `move` or `start` this program received, keeping its answer in `known`, the
+// program's `answers`, for as long as it runs, and undefined while it works on one. An asker sends its message again at
+// each check of its wait (`ask`), as it may have missed the answer: a repeated id gets the same answer again, and one
+// still in progress gets nothing more, as its first run answers it once it ends. Each answer goes once, and one the
+// relay did not carry, as while either machine's socket was down, reaches the asker at its next repeat.
+async function answerOnce(relay: Relay, known: Map<string, Reply | undefined>, asked: { readonly id: string; readonly from: { readonly name: string } }, work: () => Promise<Reply>): Promise<void> {
   const answer = (reply: Reply): void => {
     if (!relay.send(reply)) console.error(`${stamp()} anyhost sent ${asked.from.name} no answer, as this machine is not connected to the relay.`)
   }
@@ -452,16 +466,19 @@ async function answerOnce(relay: Relay, asked: { readonly id: string; readonly f
 }
 
 // The machine side of `move`, once for each move's id (`answerOnce`).
-export const receiveMove = (capture: Capture, asked: Extract<Delivered, { readonly t: 'move' }>, here: ReceiveHere): Promise<void> =>
-  answerOnce(capture.relay, asked, () => takeSession(capture, asked, here))
+export const receiveMove = (capture: Capture, asked: Extract<Delivered, { readonly t: 'move' }>, here: MoveHere): Promise<void> =>
+  answerOnce(capture.relay, here.answers, asked, () => takeSession(capture, asked, here))
 
 // Takes the claim and restores the session as `anyhost resume --take` does, runs it in Claude Code's background, and
-// answers whether it runs here. A move this program has no answer for whose session this machine holds and Claude
-// Code runs in its background here moved already, as one this program's run before a restart took: it answers `moved`
-// with no stop and no restore, which would cut the job's turn off and lose what it had not uploaded. A move that fails
+// answers whether it runs here. The take takes the session only from the claim the asking machine held as the move went
+// (`claimedAt`), so one that machine gave up on, as it took the session back since, is refused before any job starts
+// here, while the take of a move asked again after this program restarted past its take passes, as this machine holds
+// the claim. A move this program has no answer for whose session this machine holds and Claude Code runs in its
+// background here moved already, as one this program's run before a restart took: it answers `moved` with no stop and
+// no restore, which would cut the job's turn off and lose what it had not uploaded. A move that fails
 // here once it started the session's job, as when the asking machine took the session back meanwhile, stops the job at
 // once. A take of the session after the answer stops it in `receiveReleased`.
-async function takeSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'move' }>, here: ReceiveHere): Promise<Reply> {
+async function takeSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'move' }>, here: MoveHere): Promise<Reply> {
   const { device, roots } = capture
   // the stop of the job this move started here
   let stopJob: (() => Promise<void>) | undefined
@@ -477,7 +494,7 @@ async function takeSession(capture: Capture, asked: Extract<Delivered, { readonl
     // keeps its job. Only the person ends one in a terminal of its own.
     if (copy?.kind === 'interactive') throw new Error(`${device.name} runs the session in a terminal of its own, so close that terminal or exit that Claude Code there, then move the session again`)
     if (copy?.id !== undefined) await stopInBackground(copy.id, env)
-    const { session, cwd } = await restore(capture, asked.session, { take: true, checkouts: here.checkouts })
+    const { session, cwd } = await restore(capture, asked.session, { take: true, if: { at: asked.claimedAt }, checkouts: here.checkouts })
     if (asked.trusted) await trustHere(capture, cwd, asked.from.name)
     // A job Claude Code kept, the copy's or one stopped before, starts again with `claude attach`, while a new job runs
     // from its start. The session runs once its record names its process.
@@ -509,7 +526,14 @@ export async function startNew(capture: Capture, machine: string, cwd: string): 
   const { repo, folder: inside } = await checkoutOf(cwd)
   const branch = repo === '' ? '' : (await run(['git', '-C', cwd, 'branch', '--show-current'])).trim()
   const trusted = await trusts(capture, cwd)
-  const answer = await ask(capture.relay, { t: 'start', id: crypto.randomUUID(), to: target.id, repo, branch, folder: repo === '' ? cwd : inside, trusted })
+  // The Pool writes `seenAt` at each connect and close of a machine's sockets, so a program there that restarted since
+  // the start went, whose run of the start ended with it, counts as gone: a repeat to the restarted program would start
+  // a second session. A start takes no session from this machine, so an `offline` ends its ask.
+  const answer = await ask(
+    capture.relay,
+    { t: 'start', id: crypto.randomUUID(), to: target.id, repo, branch, folder: repo === '' ? cwd : inside, trusted },
+    { keepsWaiting: async () => false, countsGone: (asked, now) => now.seenAt !== asked.seenAt },
+  )
   // it may have started the session before it went
   if (answer.t === 'offline') throw new Error(`${machine} is offline or its program restarted before it answered. anyhost list shows whether a session started there.`)
   if ('error' in answer) throw new Error(`${machine} could not start a session: ${reasonOf(answer.error)}.`)
@@ -517,12 +541,12 @@ export async function startNew(capture: Capture, machine: string, cwd: string): 
 }
 
 // The machine side of `start`, once for each start's id (`answerOnce`).
-export const receiveStart = (capture: Capture, asked: Extract<Delivered, { readonly t: 'start' }>, here: ReceiveHere): Promise<void> =>
-  answerOnce(capture.relay, asked, () => startSession(capture, asked, here))
+export const receiveStart = (capture: Capture, asked: Extract<Delivered, { readonly t: 'start' }>, here: MoveHere): Promise<void> =>
+  answerOnce(capture.relay, here.answers, asked, () => startSession(capture, asked, here))
 
 // Finds or clones the checkout as a restore does, starts a new session in Claude Code's background there, claims it,
 // and answers it once Claude Code lists it running. A start that fails once its job started stops the job at once.
-async function startSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'start' }>, here: ReceiveHere): Promise<Reply> {
+async function startSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'start' }>, here: MoveHere): Promise<Reply> {
   const { relay, roots, device } = capture
   // the stop of the job this start started here
   let stopJob: (() => Promise<void>) | undefined
@@ -553,9 +577,12 @@ async function startSession(capture: Capture, asked: Extract<Delivered, { readon
 // This machine's side of the machine named `holder` taking the session, as the relay's `released` or this machine's
 // record of the holder says it: Claude Code's background job of the session here stops, so no copy runs here that
 // refuses every prompt, as after a move that failed took the session back from this machine, by whichever program
-// started the job. A job in a turn stops once its record says `idle`, so no turn is cut off, as the relay refuses that
-// turn's frames anyway. Its viewers hear where the session went. A move of the session from here leaves its copy alone,
-// as the move stops it itself once the session runs there, and a session this machine holds again by then keeps its job.
+// started the job. A job whose record says `busy`, in a turn, stops once the record says otherwise, so no turn is cut
+// off, as the relay refuses that turn's frames anyway, and one `idle` or `waiting` at a permission prompt stops at once,
+// as a viewer's answer to the prompt would change files on a machine that no longer holds the session. The wait has no
+// limit, and ends with the job's record or with the program. Its viewers hear where the session went. A move of the
+// session from here leaves its copy alone, as the move stops it itself once the session runs there, and a session this
+// machine holds again by then keeps its job.
 export async function receiveReleased(capture: Capture, session: string, holder: string, here: MoveHere): Promise<void> {
   const moving = here.moves.get(session)
   if (moving !== undefined && moving.step !== 'moved' && moving.step !== 'failed') return
@@ -565,7 +592,7 @@ export async function receiveReleased(capture: Capture, session: string, holder:
     (sessions) => {
       const copy = sessions.find((entry) => entry.sessionId === session)
       if (copy?.kind !== 'background' || copy.id === undefined) return { id: undefined }
-      return (copy.status ?? 'idle') === 'idle' ? { id: copy.id } : undefined
+      return copy.status === 'busy' ? undefined : { id: copy.id }
     },
     Infinity,
     here.onRecordsChange,

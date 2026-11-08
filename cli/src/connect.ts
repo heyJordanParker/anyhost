@@ -182,8 +182,11 @@ async function loginOf(cloudflare: Cloudflare, progress?: Progress, apiToken = p
   return { env: ownEnv, accounts: own.accounts ?? [], token: ownToken, say }
 }
 
-// A list's answer names in `result_info.cursor` where its next page starts.
-type Envelope<T> = { readonly success: boolean; readonly errors: readonly { readonly code: number; readonly message: string }[]; readonly result: T; readonly result_info?: { readonly cursor?: string } }
+// A list's answer names in `result_info.cursor` where its next page starts, and a list of objects says in
+// `is_truncated` whether one does.
+type Envelope<T> = { readonly success: boolean; readonly errors: readonly { readonly code: number; readonly message: string }[]; readonly result: T; readonly result_info?: { readonly cursor?: string; readonly is_truncated?: boolean } }
+// A Cloudflare API answer with the HTTP status it came with.
+type Answer<T> = Envelope<T> & { readonly status: number }
 
 const hasError = (envelope: Envelope<unknown>, code: number): boolean => envelope.errors.some((error) => error.code === code)
 
@@ -213,8 +216,8 @@ async function answerTo(cloudflare: Cloudflare, url: string, init: RequestInit, 
 
 // One Cloudflare API call. Cloudflare refuses an expired access token with 403 and 9109 (a 401 for others), and then cf
 // refreshes it: `cf auth whoami` wrote a new token when the old one had expired. The call reads the token again and
-// tries once more.
-async function call<T>(cloudflare: Cloudflare, login: Login, method: string, path: string, body?: { readonly json: object } | { readonly form: FormData }, headers: Record<string, string> = {}): Promise<Envelope<T>> {
+// tries once more. Answers the envelope with its HTTP status.
+async function call<T>(cloudflare: Cloudflare, login: Login, method: string, path: string, body?: { readonly json: object } | { readonly form: FormData }, headers: Record<string, string> = {}): Promise<Answer<T>> {
   const send = async (): Promise<{ readonly status: number; readonly envelope: Envelope<T> | undefined }> => {
     const answer = await answerTo(
       cloudflare,
@@ -235,7 +238,7 @@ async function call<T>(cloudflare: Cloudflare, login: Login, method: string, pat
     answer = await send()
   }
   if (answer.envelope === undefined) throw new Error(`Cloudflare answered ${method} ${path} with ${answer.status} and no API answer.`)
-  return answer.envelope
+  return { ...answer.envelope, status: answer.status }
 }
 
 type Bucket = { readonly name: string; readonly jurisdiction: string }
@@ -273,39 +276,56 @@ async function bucketOf(cloudflare: Cloudflare, login: Login, account: Account, 
   }
 }
 
-// The bucket a first relay binds: `name`, unless another bucket holds anyhost 0.2's machine records, `devices/<id>.json`.
-// anyhost 0.2 kept every session in the bucket its option R2 bucket named, which cmod 5.13's `cmod options` no longer
-// prints once the mod declares no such option, so that bucket is known only by the records 0.2 wrote there. The relay's
-// first start imports them from its bucket, and the sessions stay where 0.2 put them. Each 0.2 machine wrote its record
-// again every 5 minutes, so of several such buckets the one whose newest record was written last is the one 0.2 used
-// last. An account with R2 off holds none.
-async function firstBucketOf(cloudflare: Cloudflare, login: Login, account: Account, name: string): Promise<string> {
-  const holding: { readonly name: string; readonly writtenAt: number }[] = []
+// A machine record anyhost 0.2's `register` wrote, `devices/<id>.json`, under the id `cmod device` gives the machine.
+const RECORD = /^devices\/[^/]+\.json$/
+
+// The anyhost 0.2 machine records of the bucket `bucket`, each key with when R2 last wrote it (`last_modified`, in
+// r2/api List Objects), through every page of the list.
+async function recordsIn(cloudflare: Cloudflare, login: Login, account: Account, bucket: string, header: Record<string, string>): Promise<ReadonlyMap<string, number>> {
+  const records = new Map<string, number>()
+  for (let cursor = ''; ; ) {
+    const listed = await call<readonly { readonly key: string; readonly last_modified?: string }[]>(cloudflare, login, 'GET', `/accounts/${account.id}/r2/buckets/${bucket}/objects?prefix=${encodeURIComponent('devices/')}&per_page=${LIST_SIZE}${cursor === '' ? '' : `&cursor=${encodeURIComponent(cursor)}`}`, undefined, header)
+    for (const { key, last_modified } of resultOf(listed, `Looking for anyhost 0.2's machine records in the bucket ${bucket}`)) if (RECORD.test(key)) records.set(key, Date.parse(last_modified ?? '') || 0)
+    cursor = listed.result_info?.is_truncated === true ? (listed.result_info.cursor ?? '') : ''
+    if (cursor === '') return records
+  }
+}
+
+// The bucket a first relay binds: the one that holds this machine's history. anyhost 0.2 kept every session in the
+// bucket its option R2 bucket named, `anyhost` unless the person named another, which cmod 5.13's `cmod options` no
+// longer prints once the mod declares no such option, so that bucket is known only by the machine records 0.2 wrote
+// there, each under the id `cmod device` gives, which `device` is. Each 0.2 machine wrote its record again every 5
+// minutes, so the relay binds, of every bucket, `name` too: the one whose record of this machine was written last, as
+// this machine used it last, else the one whose newest record was written last, as 0.2 used it last, else `name`. The
+// relay's first start imports the records from its bucket, and the sessions stay where 0.2 put them. An account with R2
+// off holds none.
+async function firstBucketOf(cloudflare: Cloudflare, login: Login, account: Account, name: string, device: string): Promise<string> {
+  const holding: { readonly name: string; readonly newestAt: number; readonly ownAt: number | undefined }[] = []
   for (const jurisdiction of JURISDICTIONS) {
     const header = { 'cf-r2-jurisdiction': jurisdiction }
     for (let cursor = ''; ; ) {
       const listed = await call<{ readonly buckets: readonly { readonly name: string }[] }>(cloudflare, login, 'GET', `/accounts/${account.id}/r2/buckets?per_page=${LIST_SIZE}${cursor === '' ? '' : `&cursor=${encodeURIComponent(cursor)}`}`, undefined, header)
       if (hasError(listed, R2_NOT_ENTITLED)) return name
       const { buckets } = resultOf(listed, `Listing the buckets of ${account.name}`)
-      for (const bucket of buckets.filter((each) => each.name !== name)) {
-        const listedRecords = await call<readonly { readonly last_modified?: string }[]>(cloudflare, login, 'GET', `/accounts/${account.id}/r2/buckets/${bucket.name}/objects?prefix=${encodeURIComponent('devices/')}&per_page=${LIST_SIZE}`, undefined, header)
-        const records = resultOf(listedRecords, `Looking for anyhost 0.2's records in the bucket ${bucket.name}`)
-        if (records.length > 0) holding.push({ name: bucket.name, writtenAt: Math.max(...records.map(({ last_modified }) => Date.parse(last_modified ?? '') || 0)) })
+      for (const bucket of buckets) {
+        const records = await recordsIn(cloudflare, login, account, bucket.name, header)
+        if (records.size > 0) holding.push({ name: bucket.name, newestAt: Math.max(...records.values()), ownAt: records.get(`devices/${device}.json`) })
       }
       cursor = listed.result_info?.cursor ?? ''
       if (cursor === '' || buckets.length < LIST_SIZE) break
     }
   }
-  const [newest, ...others] = [...holding].sort((one, other) => other.writtenAt - one.writtenAt)
-  if (newest === undefined) return name
-  const kept = 'which kept every session in the bucket its option R2 bucket named'
-  const othersNamed = others.map((other) => other.name).join(', ')
-  login.say(
-    others.length === 0
-      ? `The bucket ${newest.name} holds the machine records of anyhost 0.2, ${kept}, so your relay keeps every session in ${newest.name}`
-      : `The buckets ${newest.name}, ${othersNamed} hold the machine records of anyhost 0.2, ${kept}. ${newest.name} holds the most recently written, so your relay keeps every session in ${newest.name}, and the sessions in ${othersNamed} stay where they are`,
-  )
-  return newest.name
+  const own = holding.filter(({ ownAt }) => ownAt !== undefined).sort((one, other) => (other.ownAt ?? 0) - (one.ownAt ?? 0))
+  const [chosen] = own.length > 0 ? own : [...holding].sort((one, other) => other.newestAt - one.newestAt)
+  if (chosen === undefined) {
+    login.say(`No bucket holds a machine record of anyhost 0.2, so your relay keeps every session in the bucket ${name}`)
+    return name
+  }
+  const why = own.length === 0 ? `No bucket holds this machine's record, and the bucket ${chosen.name} holds the one written last` : `The bucket ${chosen.name} holds this machine's record${own.length === 1 ? '' : ' written last'}`
+  const others = holding.filter((bucket) => bucket !== chosen).map((bucket) => bucket.name)
+  const othersSaid = others.length === 0 ? '' : `. ${others.length === 1 ? `The bucket ${others[0]} holds` : `The buckets ${others.join(', ')} hold`} anyhost 0.2 machine records too, and the sessions there stay where they are`
+  login.say(`anyhost 0.2 kept every session in the bucket its option R2 bucket named. ${why}, so your relay keeps every session in ${chosen.name}${othersSaid}`)
+  return chosen.name
 }
 
 // The account's workers.dev subdomain, registered the way cf registers one when the account has none: its name in
@@ -322,15 +342,24 @@ async function subdomainOf(cloudflare: Cloudflare, login: Login, account: Accoun
   return resultOf(await call<{ subdomain: string }>(cloudflare, login, 'PUT', `/accounts/${account.id}/workers/subdomain`, { json: { subdomain } }), `Registering the workers.dev subdomain ${subdomain}`).subdomain
 }
 
-// The accounts of the login that hold the Worker `worker`, in the login's order.
-async function accountsHolding(cloudflare: Cloudflare, login: Login, worker: string): Promise<Account[]> {
+// The accounts of the login whose Workers it may read, and those of them that hold the Worker `worker`, in the login's
+// order. A login can reach an account where the person has no Workers access, as a client's, which refuses the read
+// with 403, so the setup leaves that account out and says so. Every other failure, a 5xx too, fails, so an account
+// that holds the relay is never read as holding none. `call` already refreshed an expired token's 403.
+async function accountsHolding(cloudflare: Cloudflare, login: Login, worker: string): Promise<{ readonly readable: readonly Account[]; readonly holding: readonly Account[] }> {
+  const readable: Account[] = []
   const holding: Account[] = []
   for (const account of login.accounts) {
     const settings = await call(cloudflare, login, 'GET', `/accounts/${account.id}/workers/scripts/${worker}/settings`)
+    if (!settings.success && settings.status === 403 && !hasError(settings, INVALID_TOKEN)) {
+      login.say(`Your Cloudflare login may not read the Workers of ${account.name} (403 ${settings.errors.map(({ code, message }) => `${code} ${message}`).join('; ')}), so anyhost leaves that account out`)
+      continue
+    }
     if (!settings.success && !hasError(settings, NO_WORKER)) refused(settings, `Looking for the Worker ${worker} in ${account.name}`)
+    readable.push(account)
     if (settings.success) holding.push(account)
   }
-  return holding
+  return { readable, holding }
 }
 
 // The address the Worker answers at, on the account's workers.dev subdomain.
@@ -402,8 +431,9 @@ async function turnOn(cloudflare: Cloudflare, login: Login, account: Account, na
 }
 
 // Sets the relay up in the person's Cloudflare account and joins `device`, this machine, to it, in the one account of
-// the login that holds the relay, else the login's one account, else the account the person picks. A missing relay gets
-// this program's upload, bound to the bucket firstBucketOf picks, then its route turned on. A Worker there has its route
+// the login that holds the relay, else the login's one account whose Workers it may read, else the account the person
+// picks. A missing relay gets this program's upload, bound to the bucket firstBucketOf picks for this machine's id, then
+// its route turned on. A Worker there has its route
 // turned on and its /v1/health read: a relay that needsUpload gets the upload with a new setup code, bound to the
 // bucket it names, any other only a new setup code secret, and an answer that names no version fails the setup. The Pool takes each setup code from one machine, so any machine with the
 // person's Cloudflare login joins without an invite. `apiToken` is the person's CLOUDFLARE_API_TOKEN, which loginOf
@@ -412,15 +442,16 @@ export async function connectCloudflare(progress: Progress, device: Device, name
   try {
     const login = await loginOf(cloudflare, progress, apiToken)
     if (login.accounts.length === 0) throw new Error('Your Cloudflare login reaches no account.')
-    const holding = await accountsHolding(cloudflare, login, names.worker)
-    const choices = holding.length === 0 ? login.accounts : holding
+    const { readable, holding } = await accountsHolding(cloudflare, login, names.worker)
+    if (readable.length === 0) throw new Error('Your Cloudflare login may read the Workers of none of its accounts. Log cf in to an account where you may deploy Workers, then connect again.')
+    const choices = holding.length === 0 ? readable : holding
     const [only, ...more] = choices
     const account = only !== undefined && more.length === 0 ? only : await progress.pickAccount(choices)
     const url = await relayUrlOf(cloudflare, login, account, names.worker)
     const setupCode = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url')
     // the account picked holds the Worker whenever one does, and a route goes on only for a Worker that is there
     const isFirst = holding.length === 0
-    if (isFirst) await deploy(cloudflare, login, account, { worker: names.worker, bucket: await firstBucketOf(cloudflare, login, account, names.bucket) }, true, setupCode, progress)
+    if (isFirst) await deploy(cloudflare, login, account, { worker: names.worker, bucket: await firstBucketOf(cloudflare, login, account, names.bucket, device.id) }, true, setupCode, progress)
     await turnOn(cloudflare, login, account, names, url)
     if (!isFirst) {
       const health = await healthAt(cloudflare, url, login.say, ROUTE_LIMIT_MS)
@@ -478,7 +509,7 @@ export function connectForStep(device: Device, names: RelayNames = RELAY, cloudf
   }
   const done = connectCloudflare(progress, device, names, cloudflare, apiToken).then(
     () => void (view = { ...view, is: 'joined' }),
-    (error: unknown) => void (view = { ...view, is: 'failed', error: error instanceof Error ? error.message : String(error) }),
+    (error: unknown) => void (view = { ...view, is: 'failed', error: messageOf(error) }),
   )
   return {
     get view() {
@@ -508,7 +539,7 @@ export function connectForStep(device: Device, names: RelayNames = RELAY, cloudf
 // Each call it runs goes to the program's log.
 export async function updateRelay(names: RelayNames = RELAY, cloudflare: Cloudflare = CLOUDFLARE): Promise<void> {
   const login = await loginOf(cloudflare)
-  const holding = await accountsHolding(cloudflare, login, names.worker)
+  const { holding } = await accountsHolding(cloudflare, login, names.worker)
   const [account, ...more] = holding
   if (account === undefined || more.length > 0) {
     throw new Error(`${holding.length} accounts of your Cloudflare login hold the Worker ${names.worker}${holding.length > 0 ? `: ${holding.map(({ name }) => name).join(', ')}` : ''}, so anyhost updates none. Connect Cloudflare deploys it.`)
@@ -550,7 +581,8 @@ async function exchangeCode(origin: string, code: string, device: Device, cloudf
   }
   const started = cloudflare.now()
   for (;;) {
-    const limitMs = Math.min(REQUEST_MS, patienceMs - (cloudflare.now() - started))
+    // a sleep that overshot can leave no time, and AbortSignal.timeout refuses a negative one
+    const limitMs = Math.max(1, Math.min(REQUEST_MS, patienceMs - (cloudflare.now() - started)))
     const joined = await cloudflare.fetch(url, { ...init, signal: AbortSignal.timeout(limitMs) }).then(
       (answer) => joinAnswerOf(origin, device, answer),
       (error: unknown): JoinAnswer => ({ wait: `no answer (${messageOf(error)}).`, isRefused: false }),

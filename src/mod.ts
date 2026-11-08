@@ -80,7 +80,7 @@ export const anyhost = defineMod({
       const session = sessions.current.id
       if ((await capture.ready().catch(() => undefined)) === undefined) return undefined
       const holder = await askProgram<Holder>(mod, `/claims/${session}`).catch((error: unknown) => {
-        showOnce('anyhost could not check which machine holds this session', error instanceof Error ? error.message : String(error))
+        showOnce('anyhost could not check which machine holds this session', messageOf(error))
         return undefined
       })
       if (holder === undefined) return undefined

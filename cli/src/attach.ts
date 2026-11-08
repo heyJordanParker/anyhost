@@ -141,11 +141,14 @@ export function attach(asked: string): Promise<number> {
       }
       check()
     }
+    // The same attach again after `waitAfter` the failed tries in a row, at once with none. A failed try is an attach
+    // this machine's program answered `offline` with no `at`, or a socket to the program that closed. A `detach` counts
+    // none and starts the count over, as one comes only after a frame on a linked leg, a socket's close or a welcome,
+    // when the path is back or the next attach's answer says it is not.
     const again = (): void => {
       leg = undefined
       if (direct === undefined) frames.use(undefined)
       clearTimeout(retry)
-      failures += 1
       retry = setTimeout(() => (socket?.readyState === WebSocket.OPEN ? socket.send(attachMessage()) : connect()), waitAfter(failures))
     }
     // The stream's host so far holds it no more, as after `moved` or an `attached` of another host stream: its direct
@@ -174,6 +177,7 @@ export function attach(asked: string): Promise<number> {
         if (message.t === 'attached') {
           wasAttached = true
           failures = 0
+          clearTimeout(retry)
           // A host stream this side never linked with, as a restarted host program or one that forgot the viewer opens,
           // takes the stream from its first byte, and the keys no link carried meanwhile reach it, even when this side
           // missed that host's earlier `attached`.
@@ -184,8 +188,14 @@ export function attach(asked: string): Promise<number> {
           if (direct === undefined) frames.use(leg)
           dial()
         } else if (message.t === 'invalid') finish(1, message.message)
-        // detach or offline: the link or the machine that holds the session is gone for now
+        // the link to the host is gone, as one of the two machines' relay sockets went
+        else if (message.t === 'detach') {
+          failures = 0
+          again()
+        }
+        // offline: the machine that holds the session, or this machine's relay, is gone for now
         else {
+          if (message.at === undefined) failures += 1
           again()
           // the frame at `at` and every one after it went nowhere, as this machine's relay was down, while a direct
           // connection sends every frame its host did not acknowledge anyway
@@ -195,6 +205,7 @@ export function attach(asked: string): Promise<number> {
       ws.addEventListener('close', () => {
         if (socket !== ws || isDone) return
         if (!isOpen && !wasAttached && failures === 0) return finish(1, `The anyhost program does not answer at ${serveSocket()}. Start Claude Code on this machine, and the anyhost mod starts it.`)
+        failures += 1
         again()
       })
     }

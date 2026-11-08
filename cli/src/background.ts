@@ -2,7 +2,7 @@
 // session outlives anyhost and every viewer, and `claude attach <id>` shows it in any terminal, `id` being the first 8
 // characters of the session's id.
 import type { Subprocess } from 'bun'
-import { readdir } from 'node:fs/promises'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // A service gets the person's Claude Code in CLAUDE_CODE_EXECPATH, which cmod sets, and a command finds it on PATH.
@@ -81,12 +81,15 @@ export const keptSessions = async (): Promise<RunningSession[]> => JSON.parse(aw
 // Claude Code is writing, is none. A background session runs only while Claude Code's daemon does: the daemon's end
 // ends its sessions, which take up to 2.1 s more to end and remove their records, and a `claude attach` that reached
 // one of them first would start a new daemon, which starts it again.
+// It reads in the program's thread, as the host reads the records of the sessions it shows every second: a read
+// through the thread pool wakes the program once a file, as the capture's stats of 40,898 files took 2.58 s of CPU
+// there and 0.21 s in the program's thread on the Architect's Mac.
 type SessionRecord = { readonly pid?: number; readonly sessionId?: string; readonly jobId?: string; readonly cwd?: string; readonly status?: string; readonly kind?: string }
 export async function recordedSessions(claudeHome: string): Promise<RunningSession[]> {
   const folder = join(claudeHome, 'sessions')
-  const names = await readdir(folder).catch(() => [])
-  const records = await Promise.all(names.filter((name) => /^\d+\.json$/.test(name)).map((name) => Bun.file(join(folder, name)).json().catch(() => undefined) as Promise<SessionRecord | undefined>))
-  const hasDaemon = await isDaemonRunning(claudeHome)
+  const names = namesIn(folder)
+  const records = names.filter((name) => /^\d+\.json$/.test(name)).map((name) => jsonOf(join(folder, name)) as SessionRecord | undefined)
+  const hasDaemon = isDaemonRunning(claudeHome)
   return records.flatMap((record) => {
     if (record?.pid === undefined || record.sessionId === undefined || !isAlive(record.pid)) return []
     if (record.kind === 'bg' && !hasDaemon) return []
@@ -107,12 +110,39 @@ export const isAlive = (pid: number): boolean => {
 // Whether Claude Code's daemon runs here, as Claude Code itself reads it: the lock `daemon.lock` in its folder names a
 // process that lives and, where /proc holds the process, started when the lock says, since a pid is used again. The
 // daemon removes its lock as it ends, and one killed leaves it.
-async function isDaemonRunning(claudeHome: string): Promise<boolean> {
-  const lock = (await Bun.file(join(claudeHome, 'daemon.lock')).json().catch(() => ({}))) as { readonly pid?: number; readonly procStart?: string }
+function isDaemonRunning(claudeHome: string): boolean {
+  const lock = (jsonOf(join(claudeHome, 'daemon.lock')) ?? {}) as { readonly pid?: number; readonly procStart?: string }
   if (lock.pid === undefined || !isAlive(lock.pid)) return false
   // its start in clock ticks, the 22nd field of its stat, which counts from the state after its name in parentheses
-  const stat = await Bun.file(`/proc/${lock.pid}/stat`).text().catch(() => undefined)
+  const stat = textOf(`/proc/${lock.pid}/stat`)
   return stat === undefined || stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] === lock.procStart
+}
+
+// the names in a folder, none while it is missing
+function namesIn(folder: string): string[] {
+  try {
+    return readdirSync(folder)
+  } catch {
+    return []
+  }
+}
+
+// a file's text, or none while it is missing
+function textOf(path: string): string | undefined {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+// a file's JSON, or none while it is missing or Claude Code is writing it
+function jsonOf(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as unknown
+  } catch {
+    return undefined
+  }
 }
 
 // Calls `heard` at each change of Claude Code's records under its folder that a watcher heard, and every second
