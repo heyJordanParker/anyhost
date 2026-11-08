@@ -2,7 +2,7 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
-## [Unreleased]
+## [0.3.0] - 2026-11-08
 
 ### Added
 - **Connect your machines**, one step on the mod's install page while the machine is not joined: **Connect Cloudflare** sets your relay up in your own Cloudflare account with your Cloudflare login and joins the machine, and on every other machine you paste the command or link **Add a machine** gives. An account your Cloudflare login reaches where you may not read Workers, such as a client's, is left out, and the step says so. `anyhost connect` and `anyhost join <link>` do the same from a terminal.
