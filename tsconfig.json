@@ -1,5 +1,10 @@
 {
   "extends": "./.claude-plugin/types/tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment"
+  },
   "include": [
     "hooks",
     "src"

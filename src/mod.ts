@@ -1,24 +1,35 @@
-import { defineMod, device, http, sessions } from '../node_modules/@cmodjs/core/mod.js'
+import { defineMod, device, messageOf, sessions } from '../node_modules/@cmodjs/core/mod.js'
 import { program } from '../node_modules/@cmodjs/core/jobs/program.js'
+import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
 import { option } from '../node_modules/@cmodjs/core/options.js'
+import { askProgram, connectStep, FOLLOW_MS, initialState, machinesPage, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
 
-// The program's /claims/<session> answer: the machine that took the session over, or why this machine captures nothing.
-// `untold`, answered once, is the machine this one took the session from without reaching it over ssh.
-type Holder = { readonly machine?: string; readonly problem?: string; readonly untold?: string }
+// A move of the session the program runs or ran: the machine it goes to, its step and the line that says it. It copies
+// `Moving` of `cli/src/move.ts`, as `cmod check`'s compile against Claude Code's API refuses `cli/src/`.
+type Move = { readonly to: string; readonly step: 'waiting' | 'uploading' | 'moving' | 'moved' | 'failed'; readonly line: string }
+// The program's /claims/<session> answer: the machine that took the session over, or why this machine captures nothing,
+// and the session's move. `untold`, answered once, is the machine this one took the session from while that machine was
+// not connected.
+type Holder = { readonly machine?: string; readonly problem?: string; readonly untold?: string; readonly move?: Move }
+
+// The machines list reads again while /machines is open, as a machine connects or leaves.
+const MACHINES_EVERY_MS = 10_000
+// The program answers /claims from its memory in milliseconds, so only a program that is busy or starting keeps a
+// prompt waiting past PROMPT_ASK_MS, and the prompt then goes on with the mod's last answer of it. PROMPT_MS bounds the
+// listener itself, so nothing holds a prompt longer.
+const PROMPT_ASK_MS = 1500
+const PROMPT_MS = 3000
+const MOVING = new Set<Move['step']>(['waiting', 'uploading', 'moving'])
 
 export const anyhost = defineMod({
   name: 'anyhost',
-  // The anyhost program reads them with cmod options: bucket at its start and uploadEvery within a minute of a change,
-  // since one program serves every session, and checkouts at each anyhost resume. A new bucket restarts the program.
+  state: initialState,
+  // The anyhost program reads them with cmod options: uploadEvery within a minute of a change, since one program
+  // serves every session, checkouts at each anyhost resume, and join at its start and within a minute of a change.
   options: {
-    bucket: option.text({
-      title: 'R2 bucket',
-      description: 'The bucket in your R2 account that keeps every session. Each machine names the same one.',
-      default: 'anyhost',
-    }),
     uploadEvery: option.number({
       title: 'Upload every',
-      description: 'Seconds between uploads of a session to R2. 0 uploads every write.',
+      description: 'Seconds between uploads of a session to your Cloudflare account. 0 uploads every write.',
       default: 5,
       min: 0,
     }),
@@ -27,7 +38,13 @@ export const anyhost = defineMod({
       description: 'Where anyhost resume clones a repository this machine lacks. Empty: the folder your checkouts share, else your home folder.',
       default: '',
     }),
+    join: option.text({
+      title: 'Join with',
+      description: 'An invite link from Add a machine in /machines on a joined machine. anyhost joins this machine with it within a minute, then empties it.',
+      default: '',
+    }),
   },
+  installer: [connectStep],
 
   async setup(mod) {
     const here = await device.read()
@@ -39,40 +56,129 @@ export const anyhost = defineMod({
         isService: true,
       }),
     )
+    reachProgram(mod, capture)
+    const page = mod.sidebar.add(machinesPage)
+    mod.use(
+      slashCommand({
+        name: 'machines',
+        description: 'Show every machine joined to your relay, add a machine, or remove one',
+        reply: () => toggleMachines(mod, page),
+      }),
+    )
+    mod.every(MACHINES_EVERY_MS, () => (page.isOpen ? showMachines(mod) : undefined))
     const shown = new Set<string>()
     const showOnce = (message: string, description: string): void => {
       if (shown.has(message)) return
       shown.add(message)
       mod.toast.error(message, { description, duration: Infinity })
     }
-    const holderOf = async (address: { url: string; socketPath?: string }): Promise<Holder> => {
-      const answer = await http.fetch(`${address.url}/claims/${sessions.current.id}`, address.socketPath === undefined ? {} : { socketPath: address.socketPath })
-      if (!answer.ok) throw new Error(`The anyhost program answered ${answer.status}: ${answer.text}`)
-      return JSON.parse(answer.text) as Holder
-    }
-    const check = async (): Promise<Holder> => {
-      const address = await capture.ready().catch(() => undefined)
-      if (address === undefined) return {}
-      const holder = await holderOf(address).catch((error: unknown): Holder => {
-        showOnce('anyhost could not check which machine holds this session', error instanceof Error ? error.message : String(error))
-        return {}
+    // The program's last answer of each session's holder and move, which a prompt goes on with while the program is slow.
+    const known = new Map<string, Holder>()
+    // the sessions whose move a toast follows now
+    const following = new Set<string>()
+    const check = async (): Promise<Holder | undefined> => {
+      const session = sessions.current.id
+      if ((await capture.ready().catch(() => undefined)) === undefined) return undefined
+      const holder = await askProgram<Holder>(mod, `/claims/${session}`).catch((error: unknown) => {
+        showOnce('anyhost could not check which machine holds this session', messageOf(error))
+        return undefined
       })
+      if (holder === undefined) return undefined
+      known.set(session, holder)
       if (holder.problem !== undefined) showOnce('anyhost captures nothing on this machine', holder.problem)
       if (holder.untold !== undefined) {
         mod.toast.warning(`${holder.untold} may take one more prompt of this session`, {
-          description: `anyhost could not reach ${holder.untold} over ssh to say this machine holds the session now. ${holder.untold} learns it when its anyhost program next starts or uploads the session.`,
+          description: `${holder.untold}'s anyhost was not connected when this machine took the session, so it learns that this machine holds the session when it next connects.`,
           duration: Infinity,
         })
       }
+      // a move another command asked for, as anyhost move, gets the toast and its Keep it here too
+      if (holder.move !== undefined && MOVING.has(holder.move.step)) follow()
       return holder
     }
     // a session anyhost resume opened after a takeover says at once when the machine it came from did not hear of it
     sessions.current.onSessionStart(async () => void (await check()))
-    // The program answers from its own record of the session's holder, in milliseconds and with no network, so the
-    // listener keeps cmod's default of 10 s, which only a program still starting comes near.
-    sessions.current.beforePrompt(async () => {
-      const { machine } = await check()
-      return machine === undefined ? undefined : { refuse: `This session continues on ${machine}.` }
-    })
+    const continuesOn = (machine: string): string => `This session continues on ${machine}. Run anyhost attach ${sessions.current.id.slice(0, 8)} here to keep working on it.`
+    // The prompt waits PROMPT_ASK_MS at most for the program's answer, else goes on with the last one, so a move this
+    // session asked for refuses the prompt even while the program is busy with it. The check it gave up on still
+    // records its answer once it comes. A session that moved and still shows here, as outside herdr nothing types the
+    // attach into its terminal, says how to go on with it.
+    sessions.current.beforePrompt(
+      async () => {
+        const session = sessions.current.id
+        const answered = await new Promise<Holder | undefined>((resolve) => {
+          const late = mod.after(PROMPT_ASK_MS, () => resolve(undefined))
+          void check().then((holder) => {
+            late.stop()
+            resolve(holder)
+          })
+        })
+        const { machine, move } = answered ?? known.get(session) ?? {}
+        if (move !== undefined && MOVING.has(move.step)) return { refuse: `This session is moving to ${move.to}.` }
+        if (machine === undefined) return undefined
+        return { refuse: move?.step === 'moved' ? continuesOn(machine) : `This session continues on ${machine}.` }
+      },
+      { timeoutMs: PROMPT_MS, onFailure: 'pass' },
+    )
+
+    // /move asks the program, which drains, seals and sends the session, and its toast follows each step: the
+    // session's own Claude Code ends once the session runs there, or refuses each prompt outside herdr. Until the machine
+    // answers, Keep it here ends the move and keeps the session here. One toast follows a session's move, whether this
+    // session's /move or a check that found it running asked for it.
+    const follow = (): void => {
+      const session = sessions.current.id
+      if (following.has(session)) return
+      following.add(session)
+      const toast = `move-${session}`
+      // the step and line the toast draws now
+      let drawn = ''
+      const end = (): void => {
+        timer.stop()
+        following.delete(session)
+      }
+      const timer = mod.every(FOLLOW_MS, async () => {
+        const holder = await askProgram<Holder>(mod, `/claims/${session}`).catch((error: unknown) => {
+          mod.log(`anyhost could not follow the move of ${session}: ${messageOf(error)}`, { level: 'warning' })
+          return undefined
+        })
+        // a failed ask is asked again at the next tick
+        if (holder === undefined) return
+        known.set(session, holder)
+        const { move } = holder
+        // the program keeps its moves in memory only, so one that restarted knows this move no more
+        if (move === undefined) {
+          end()
+          mod.toast.error('anyhost lost track of the move, as its program restarted', { id: toast, description: 'anyhost list shows which machine holds the session now.', duration: Infinity })
+          return
+        }
+        if (`${move.step} ${move.line}` === drawn) return
+        drawn = `${move.step} ${move.line}`
+        if (move.step === 'moved') mod.toast.info(continuesOn(move.to), { id: toast, description: move.line, duration: Infinity })
+        else if (move.step === 'failed') mod.toast.error(move.line, { id: toast, duration: Infinity })
+        else {
+          const keep = { label: 'Keep it here', onClick: () => askProgram(mod, '/move/keep', { session }) }
+          mod.toast.loading(`Moving to ${move.to}…`, { id: toast, description: move.line, action: keep })
+        }
+        if (!MOVING.has(move.step)) end()
+      })
+    }
+    mod.use(
+      slashCommand({
+        name: 'move',
+        description: 'Move this session to another of your machines, which runs it from then on',
+        argumentHint: '<machine>',
+        reply: async ({ positionals }) => {
+          const [machine, ...more] = positionals
+          if (machine === undefined || more.length > 0) return 'Name the one machine to move this session to, as in /move devbox. /machines lists your machines.'
+          const session = sessions.current.id
+          const { to, step, line } = await askProgram<Move>(mod, '/move', { session, machine })
+          // the next prompt is refused from here on, before the program answers again
+          known.set(session, { ...known.get(session), move: { to, step, line } })
+          mod.toast.loading(`Moving to ${machine}…`, { id: `move-${session}` })
+          follow()
+          return undefined
+        },
+      }),
+    )
   },
 })
