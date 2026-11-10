@@ -117,11 +117,18 @@ async function folderRepository(folder: string): Promise<Repository> {
   return repo
 }
 
+// The home folder holds the person's whole machine, and the shared temp folders every program's scratch files, so they
+// and every folder above them hold no session's code.
+const SHARED_FOLDERS = [homedir(), '/tmp', '/var/tmp', tmpdir()]
+
 async function repositoryOf(folder: string): Promise<Repository | undefined> {
   const found = await openRepository(folder, 'repo')
   if (found !== undefined) return found
-  // The home folder and every folder above it hold the person's whole machine, never a session's code.
-  if (!relative(await realpath(folder), await realpath(homedir())).startsWith('..')) return undefined
+  const real = await realpath(folder)
+  for (const shared of SHARED_FOLDERS) {
+    const sharedReal = await realpath(shared).catch(() => undefined)
+    if (sharedReal !== undefined && !relative(real, sharedReal).startsWith('..')) return undefined
+  }
   return await folderRepository(folder)
 }
 
@@ -506,6 +513,13 @@ async function rememberJournaled(repo: Repository, record: CodeRecord): Promise<
   await saveJournaled(repo, record.session, { parts, bundles, bundled: bundles.length === 0 ? null : record.keep })
 }
 
+// The https form of a GitHub ssh remote, which a machine with no GitHub key clones with: a public repository with
+// nothing, and a private one through that machine's git credentials, as `gh auth setup-git` gives.
+export function httpsRemoteOf(url: string): string | undefined {
+  const found = /^(?:ssh:\/\/)?git@github\.com[:/](.+?)(?:\.git)?\/?$/.exec(url)
+  return found?.[1] === undefined ? undefined : `https://github.com/${found[1]}.git`
+}
+
 // The checkout at root: the one there, or a clone of the session's remote (an empty repository without one).
 async function checkoutAt(root: string, record: CodeRecord): Promise<{ repo: Repository; fresh: boolean }> {
   const found = (await exists(root)) ? await openRepository(root, 'repo') : undefined
@@ -515,7 +529,13 @@ async function checkoutAt(root: string, record: CodeRecord): Promise<{ repo: Rep
   if (record.remote === null) await git({ cwd: dirname(root), env: {} }, ['init', '-q', root])
   else {
     console.log(`Cloning ${record.remote.url} into ${root}`)
-    await git({ cwd: dirname(root), env: {} }, ['clone', '-q', '--no-checkout', '--origin', record.remote.name, record.remote.url, root], { deadline: NETWORK_MS })
+    const { name, url } = record.remote
+    const clone = (from: string): Promise<Uint8Array> => git({ cwd: dirname(root), env: {} }, ['clone', '-q', '--no-checkout', '--origin', name, from, root], { deadline: NETWORK_MS })
+    await clone(url).catch((error: unknown) => {
+      const https = httpsRemoteOf(url)
+      if (https === undefined) throw error
+      return clone(https)
+    })
   }
   const repo = await openRepository(root, 'repo')
   if (repo === undefined) throw new Error(`git made ${root}, and it is not a checkout.`)

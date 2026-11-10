@@ -13,6 +13,7 @@ import { openSession, repoSlug, resumeHere } from './resume.ts'
 import { runSession } from './runner.ts'
 import { serve, serveSocket, type JoinedRelay, type Status } from './serve.ts'
 import { listSessions, type ListedSession } from './sessions.ts'
+import { isSettled, sharedOf } from './shared.ts'
 
 const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex session of every machine in your own Cloudflare account.
 
@@ -26,7 +27,12 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
                                      run Claude Code, ending its process while it rests and resuming it at the next key
   anyhost connect                    set your relay up in your Cloudflare account and join this machine to it
   anyhost join <link>                join this machine with an invite link from another machine
+  anyhost settle <session> [--undo]  move a session out of the active list on every machine, or bring it back
+  anyhost settle --after <days|never>
+                                     settle a session by itself once it sits idle that many days, or never
   anyhost machines [--json]          list every machine joined to your relay
+  anyhost machines --add <ssh target>
+                                     install anyhost on a machine ssh reaches and join it, so every machine shows it
   anyhost machines --invite          print the command that joins one more machine
   anyhost machines --remove <name>   remove a machine; its sessions stay listed and resumable
   anyhost doctor                     check this machine's relay, the machine and the program
@@ -185,14 +191,25 @@ const TERMINAL: Progress = {
 async function main(argv: string[]): Promise<number> {
   if (argv[0] === 'run') {
     const split = argv.indexOf('--')
-    const { values: run } = parseArgs({ args: argv.slice(1, split < 0 ? undefined : split), options: { session: { type: 'string' } } })
+    const { values: run } = parseArgs({ args: argv.slice(1, split < 0 ? undefined : split), options: { session: { type: 'string' }, rest: { type: 'boolean' } } })
     const command = split < 0 ? [] : argv.slice(split + 1)
-    process.exit(await runSession(command.length === 0 ? ['claude'] : command, run.session))
+    process.exit(await runSession(command.length === 0 ? ['claude'] : command, run.session, run.rest === true))
   }
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
-    options: { json: { type: 'boolean' }, take: { type: 'boolean' }, invite: { type: 'boolean' }, remove: { type: 'string' }, version: { type: 'boolean' }, help: { type: 'boolean', short: 'h' } },
+    options: {
+      json: { type: 'boolean' },
+      brief: { type: 'boolean' },
+      take: { type: 'boolean' },
+      invite: { type: 'boolean' },
+      add: { type: 'string' },
+      remove: { type: 'string' },
+      undo: { type: 'boolean' },
+      after: { type: 'string' },
+      version: { type: 'boolean' },
+      help: { type: 'boolean', short: 'h' },
+    },
   })
   const [command, ...rest] = positionals
   if (values.version === true) {
@@ -233,15 +250,47 @@ async function main(argv: string[]): Promise<number> {
     console.log(`Removed ${removed.name}. Its sessions stay listed and resumable.`)
     return 0
   }
+  if (command === 'machines' && rest.length === 0 && values.add !== undefined) {
+    const target = values.add
+    if ((await askProgram('/machines/add', { target })) === undefined) throw noProgram()
+    console.log(`Adding ${target}: herdr-core, cmod and anyhost install there, and it joins your relay.`)
+    for (;;) {
+      await Bun.sleep(FOLLOW_MS)
+      const { adding } = (await askProgram<{ readonly adding: readonly { readonly target: string; readonly error?: string }[] }>('/machines')) ?? { adding: [] }
+      const add = adding.find((each) => each.target === target)
+      if (add?.error !== undefined) throw new Error(add.error)
+      if (add === undefined) break
+    }
+    console.log(`Added ${target}. Its sessions show on every machine, and the Herdr app reaches it.`)
+    return 0
+  }
   // the program answers from the socket it keeps to the relay, so a command opens one only while no program runs
   if (command === 'machines' && rest.length === 0 && values.invite !== true && values.remove === undefined) {
-    const { here, machines } = (await askProgram<{ readonly here: string; readonly machines: Protocol.Device[] }>('/machines')) ?? (await connected(async ({ relay, device }) => ({ here: device.id, machines: await machinesOf(relay) })))
-    console.log(values.json === true ? JSON.stringify({ here, machines }) : machineTable(machines, here))
+    const listed = (await askProgram<{ readonly here: string; readonly machines: Protocol.Device[] }>('/machines')) ?? (await connected(async ({ relay, device }) => ({ here: device.id, machines: await machinesOf(relay) })))
+    console.log(values.json === true ? JSON.stringify(listed) : machineTable(listed.machines, listed.here))
     return 0
   }
   if (command === 'list') {
-    const sessions = (await askProgram<{ readonly agents: ListedSession[] }>('/agents'))?.agents ?? (await connected(async ({ relay }) => await listSessions(relay)))
-    console.log(values.json === true ? JSON.stringify(sessions, null, 2) : table(sessions))
+    type Listed = { readonly agents: readonly (ListedSession & { readonly status: string; readonly settled: boolean })[]; readonly settleAfterDays: number | null; readonly lastMachine: string }
+    const listed =
+      (await askProgram<Listed>('/agents')) ??
+      (await connected(async ({ relay }): Promise<Listed> => {
+        const [agents, shared] = await Promise.all([listSessions(relay), sharedOf(relay)])
+        return { agents: agents.map((agent) => ({ ...agent, status: '', settled: isSettled(shared, agent) })), settleAfterDays: shared.settleAfterDays, lastMachine: shared.lastMachine }
+      }))
+    // the Herdr app's sidebar reads every session of every machine in one go, so it gets what a card shows alone
+    const brief = values.brief === true ? { ...listed, agents: listed.agents.map(({ id, tool, title, firstPrompt, cwd, repo, machine, holder, lastActivity, status, settled }) => ({ id, tool, title: title || firstPrompt.slice(0, 120), cwd, repo, machine, holder, lastActivity, status, settled })) } : listed
+    console.log(values.json === true ? JSON.stringify(brief, null, values.brief === true ? undefined : 2) : table(listed.agents))
+    return 0
+  }
+  if (command === 'settle' && rest.length === 1 && rest[0] !== undefined && values.after === undefined) {
+    if ((await askProgram('/agents/settle', { session: rest[0], settled: values.undo !== true })) === undefined) throw noProgram()
+    return 0
+  }
+  if (command === 'settle' && rest.length === 0 && values.after !== undefined) {
+    const days = values.after === 'never' ? null : Number(values.after)
+    if (days !== null && !(days > 0)) throw new Error(`anyhost settle --after takes a number of days or never, not ${values.after}.`)
+    if ((await askProgram('/settings', { settleAfterDays: days })) === undefined) throw noProgram()
     return 0
   }
   if (command === 'resume' && rest.length === 1 && rest[0] !== undefined) {

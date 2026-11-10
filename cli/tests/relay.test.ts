@@ -303,6 +303,13 @@ case "$1" in
   keys) shift; echo "$*" >> "$F/keys.log"; exit 0 ;;
   kill) read -r owner pid < "$F/terminals/$2"; kill -9 "$pid"; exit 0 ;;
   read) read -r owner pid < "$F/terminals/$2"; printf 'screen of %s\\n\\n\\n%s\\n' "$owner" "$(tail -n 1 "$F/sent.log" 2>/dev/null | cut -d ' ' -f 2-)"; exit 0 ;;
+  get)
+    read -r owner pid < "$F/terminals/$2" || exit 3
+    state=finished
+    if kill -0 "$pid" 2>/dev/null; then state=live; fi
+    printf '{"state":"%s","cwd":"/","labels":{"anyhost.session":"%s"}}' "$state" "$owner"
+    exit 0 ;;
+  machine) printf '{"machines":[]}'; exit 0 ;;
   label) exit 0 ;;
   run) ;;
   *) exit 2 ;;
@@ -580,7 +587,7 @@ test('anyhost doctor beside a program whose option join failed prints why and th
     const at = lines.indexOf(`✘ The link of the option join joined no relay: ${refusal}`)
     expect(at).toBeGreaterThan(-1)
     expect(lines[at + 1]).toBe(
-      '  The program does not try that link again. Press Add a machine in /machines on a joined machine, then paste its command into the Connect your machines step of the anyhost mod, or run anyhost join with its link here.',
+      '  The program does not try that link again. Add this machine again from /machines on a joined machine, or run anyhost join here with the link anyhost machines --invite prints there.',
     )
     expect(lines[lines.indexOf(`✘ ${update}`) + 1]).toBe('  The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.')
     expect(out).not.toContain('tries this again')
@@ -665,7 +672,7 @@ test('a second serve on one state folder refuses to start, naming the one that r
   const unknown = await fetch('http://localhost/machines/rename', { unix: host.socket, method: 'POST', body: '{}' })
   expect(unknown.status).toBe(404)
   expect(await unknown.json()).toEqual({
-    message: 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell and /agents/take, not POST /machines/rename.',
+    message: 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/take, /agents/settle and /settings, not POST /machines/rename.',
   })
 })
 
@@ -2073,6 +2080,8 @@ test("anyhost new while its program's relay is not connected says what it waits 
 // What each machine's herdr-core typed into a terminal: its address and the text.
 const sentOn = (folder: string): string[] => logOf(folder, 'sent.log')
 
+// The folder is one Claude Code does not trust on the laptop, so the start answers once the terminal opened, where Claude
+// Code asks the person first, and the first message goes in once Claude Code runs the session.
 test('anyhost new on this machine starts a session in a terminal of herdr-core here and types its first message into it', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
@@ -2087,6 +2096,7 @@ test('anyhost new on this machine starts a session in a terminal of herdr-core h
   expect(code).toBe(0)
   expect(out).toBe(`${LAPTOP.name} started ${session.slice(0, 8)} in a terminal of herdr-core there.\n`)
   expect(runsOn(laptop.folder)).toMatchObject([{ session, command: `claude --session-id ${session}` }])
+  await until(() => sentOn(laptop.folder).length > 0, 'the first message going in')
   expect(sentOn(laptop.folder)).toEqual(['t0 You are the CTO. Watch every agent.'])
   expect((await relay.claims()).get(session)).toBe(LAPTOP.id)
 }, 60_000)

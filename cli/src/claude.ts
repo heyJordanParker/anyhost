@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'nod
 import { join } from 'node:path'
 import type { AgentStatus } from '../../relay/protocol.ts'
 import { stateFolder } from './device.ts'
+import { killTerminal } from './hc.ts'
 
 const EXIT_MS = 10_000
 
@@ -159,7 +160,17 @@ export const runSessions = (): string[] =>
     .map((name) => name.slice(0, -'.json'.length))
     .filter((session) => runOf(session) !== undefined)
 
-const STATUS: Record<string, AgentStatus> = { busy: 'working', shell: 'working', idle: 'idle', waiting: 'waiting' }
+// The runs whose runner ended without removing its file, as a restart of the machine ends every runner.
+export const stoppedRuns = (): { readonly session: string; readonly run: Run }[] =>
+  namesIn(runsFolder())
+    .filter((name) => name.endsWith('.json'))
+    .flatMap((name) => {
+      const session = name.slice(0, -'.json'.length)
+      const run = jsonOf(join(runsFolder(), name)) as Run | undefined
+      return run === undefined || isProcess(run.pid, run.procStart) ? [] : [{ session, run }]
+    })
+
+const STATUS: Record<string, AgentStatus> ={ busy: 'working', shell: 'working', idle: 'idle', waiting: 'waiting' }
 
 // What the session does here, or undefined when no process runs it here.
 export async function statusOf(claudeHome: string, session: string): Promise<AgentStatus | undefined> {
@@ -194,12 +205,17 @@ const signal = (pids: readonly number[], name: NodeJS.Signals): void => {
   }
 }
 
+// Ends the session's copy on this machine for good: its terminal closes, as herdr-core would give a kept terminal a
+// shell carrying the session's label, and its run goes, so a restart never opens the session here again.
 export async function stopCopy(claudeHome: string, session: string): Promise<void> {
   const record = (await recordedSessions(claudeHome)).find((entry) => entry.sessionId === session)
   const recorded = record !== undefined && isProcess(record.pid, recordAt(claudeHome, record.pid)?.procStart) ? record.pid : undefined
-  const pids = [runOf(session)?.pid, recorded].filter((pid): pid is number => pid !== undefined)
+  const ran = runOf(session)
+  if (ran?.terminal !== undefined) await killTerminal(ran.terminal).catch((error: unknown) => console.error(`anyhost could not close terminal ${ran.terminal} of ${session}: ${error instanceof Error ? error.message : String(error)}`))
+  const pids = [ran?.pid, recorded].filter((pid): pid is number => pid !== undefined)
   signal(pids, 'SIGTERM')
   const stuck = (await Promise.all(pids.map(async (pid) => ((await ends(pid)) ? [] : [pid])))).flat()
   signal(stuck, 'SIGKILL')
   for (const pid of stuck) if (!(await ends(pid))) throw new Error(`Claude Code, pid ${pid}, still runs ${EXIT_MS / 1000} s after its SIGKILL.`)
+  forgetRun(session)
 }

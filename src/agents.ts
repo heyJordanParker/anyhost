@@ -15,6 +15,7 @@ type Agent = {
   readonly lastActivity: string
   readonly repo: string
   readonly cwd: string
+  readonly settled: boolean
 }
 type Machines = { readonly here: string; readonly machines: readonly { readonly id: string; readonly name: string; readonly connected: boolean; readonly seenAt: string }[] }
 type Told = { readonly machine: string; readonly session: string; readonly status: string; readonly screen: string }
@@ -30,13 +31,19 @@ export function agentTools(mod: Mod<AnyhostState>) {
   return [
     tool({
       name: 'list_machines',
-      description: 'List every machine joined to your relay: its name, whether it is connected, and when it was last seen. `here` is the id of this machine.',
+      description:
+        'List every machine joined to your relay: its name, whether it is connected, and when it was last seen. `here` is the id of this machine. `candidates` are machines on your Tailscale network not joined yet, which add_machine adds, and `adding` the adds still running, with why one failed.',
       execute: () => askProgram<Machines>(mod, '/machines'),
     }),
     tool({
       name: 'add_machine',
-      description: 'Make a one-time invite that joins one more machine within 10 minutes. Give the person the command to paste on that machine.',
-      execute: () => askProgram<{ readonly command: string; readonly expiresAt: string }>(mod, '/machines/invite', {}),
+      description:
+        'Add a machine this one reaches over ssh: anyhost installs herdr-core, cmod and anyhost there and joins it to your relay, and every machine then shows its agents and terminals. It takes a few minutes and runs on after this call: list_machines shows it under adding until it joins, or why it failed.',
+      inputSchema: { type: 'object', properties: { target: { type: 'string', description: 'How ssh reaches the machine: a Host of the ssh config, a Tailscale name such as mac-studio, or user@host.' } }, required: ['target'] },
+      execute: async ({ target }) => {
+        await askProgram(mod, '/machines/add', { target })
+        return `Adding ${target}. list_machines shows it under adding until it joins.`
+      },
     }),
     tool({
       name: 'remove_machine',
@@ -52,11 +59,14 @@ export function agentTools(mod: Mod<AnyhostState>) {
     tool({
       name: 'list_agents',
       description:
-        'List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository and folder. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine.',
-      inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, description: 'How many to list, 30 by default.' } } },
-      execute: async ({ limit = 30 }) => {
+        'List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder and whether it is settled. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. Settled agents are left out unless settled is true.',
+      inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, description: 'How many to list, 30 by default.' }, settled: { type: 'boolean', description: 'List settled agents too.' } } },
+      execute: async ({ limit = 30, settled = false }) => {
         const { agents } = await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')
-        return agents.slice(0, limit).map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd }) => ({ id, tool: kind, title, firstPrompt: firstPrompt.slice(0, 200), machine, holder, status, lastActivity, repo, cwd }))
+        return agents
+          .filter((agent) => settled || !agent.settled)
+          .slice(0, limit)
+          .map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd, settled: isSettled }) => ({ id, tool: kind, title, firstPrompt: firstPrompt.slice(0, 200), machine, holder, status, lastActivity, repo, cwd, settled: isSettled }))
       },
     }),
     tool({
@@ -104,6 +114,18 @@ export function agentTools(mod: Mod<AnyhostState>) {
         // the machine that runs the agent holds its upload queue, so the move runs there, typed into the agent
         await tell(found.id, { text: `/move ${machine}` })
         return `${runsOn} moves ${found.id.slice(0, 8)} to ${machine} once its turn ends. read_agent shows how it goes.`
+      },
+    }),
+    tool({
+      name: 'settle_agent',
+      description: 'Settle an agent whose work is finished, which moves it out of the active list on every machine, or bring a settled one back with settled false. Working in a settled agent brings it back by itself.',
+      inputSchema: { type: 'object', properties: { agent: AGENT, settled: { type: 'boolean', description: 'true by default.' } }, required: ['agent'] },
+      execute: async ({ agent, settled = true }) => {
+        const { agents } = await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')
+        const found = agents.find(({ id }) => id.startsWith(agent))
+        if (found === undefined) throw new Error(`No agent's id begins with ${agent}. list_agents lists them.`)
+        await askProgram(mod, '/agents/settle', { session: found.id, settled })
+        return `${settled ? 'Settled' : 'Brought back'} ${found.id.slice(0, 8)}.`
       },
     }),
     tool({

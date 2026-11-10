@@ -3,7 +3,7 @@ import type { Subprocess } from 'bun'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { installHerdr } from '../src/herdr.ts'
-import { withoutSession } from '../src/runner.ts'
+import { resumeCommand } from '../src/runner.ts'
 import { temporaryFolder, until } from './memory.ts'
 
 const CLI = join(import.meta.dir, '..', 'src', 'main.ts')
@@ -17,8 +17,21 @@ afterEach(async () => {
 })
 
 test('a woken session runs the command it started with, with every session flag of it replaced by --resume of the session', () => {
-  expect(withoutSession(['claude', '--model', 'opus', '--resume', 'old', '-c', '--fork-session', '--session-id=x', '--dangerously-skip-permissions'])).toEqual(['claude', '--model', 'opus', '--dangerously-skip-permissions'])
-  expect(withoutSession(['claude', '-r', '--model', 'opus'])).toEqual(['claude', '--model', 'opus'])
+  expect(resumeCommand(['claude', '--model', 'opus', '--resume', 'old', '-c', '--fork-session', '--session-id=x', '--dangerously-skip-permissions'], 'new', {})).toEqual(['claude', '--model', 'opus', '--dangerously-skip-permissions', '--resume', 'new'])
+  expect(resumeCommand(['claude', '-r', '--model', 'opus'], 'new', {})).toEqual(['claude', '--model', 'opus', '--resume', 'new'])
+})
+
+// The suite missed it: the Herdr app gives a new tab's agent its first message as the last argument, which every wake
+// sent the resumed session again.
+test('a woken session drops the first message the Herdr app gave its command, which the conversation holds already', () => {
+  expect(resumeCommand(['claude', '--model', 'haiku', 'fix'], 'new', { firstMessage: 'fix' })).toEqual(['claude', '--model', 'haiku', '--resume', 'new'])
+  expect(resumeCommand(['claude', '--model', 'haiku'], 'new', { firstMessage: 'fix the login' })).toEqual(['claude', '--model', 'haiku', '--resume', 'new'])
+})
+
+// The suite missed it: --resume takes the default model and effort, so a session whose /model picked another came back
+// on the default, and missed the cache its model held.
+test('a woken session runs on the model and effort its last turn ran with', () => {
+  expect(resumeCommand(['claude', '--model', 'opus', '--effort=high', '--verbose'], 'new', { model: 'claude-haiku-5-5', effort: 'medium' })).toEqual(['claude', '--verbose', '--model', 'claude-haiku-5-5', '--effort', 'medium', '--resume', 'new'])
 })
 
 test("the Herdr app's Claude Code runs under the runner where cmod links anyhost, once, and as it was once anyhost is gone", async () => {
@@ -48,9 +61,9 @@ test("the Herdr app's Claude Code runs under the runner where cmod links anyhost
 })
 
 // A Claude Code that writes its record of SESSION, idle, as Claude Code writes one for each session it runs, prints how
-// it started and its status report, echoes each line typed, and removes its record as it ends at SIGTERM. It reads the
-// lines in a job of its own and waits for it, as a signal it traps ends a `wait` at once, and gives that job its own
-// input, as bash gives a job `/dev/null` else.
+// it started and its status report, echoes each line typed, prints its terminal's size at each SIGWINCH, and removes its
+// record as it ends at SIGTERM. It reads the lines in a job of its own and waits for it again after each signal it traps,
+// which ends a `wait` at once, and gives that job its own input, as bash gives a job `/dev/null` else.
 const fakeClaude = (folder: string): string => {
   const path = join(folder, 'claude')
   writeFileSync(
@@ -59,14 +72,38 @@ const fakeClaude = (folder: string): string => {
 record="$CLAUDE_CONFIG_DIR/sessions/$$.json"
 printf '{"pid":%s,"sessionId":"${SESSION}","kind":"interactive","status":"idle"}' $$ > "$record"
 trap 'rm -f "$record"; exit 0' TERM
+trap 'echo "size $(stty size)"' WINCH
 printf 'started %s\\033]7501;state=idle:app=claude-code\\033\\\\\\n' "$*"
 while IFS= read -r line; do echo "typed $line"; done <&0 &
-wait
+reader=$!
+while kill -0 $reader 2>/dev/null; do wait $reader; done
 `,
   )
   chmodSync(path, 0o755)
   return path
 }
+
+// The suite missed it: Bun 1.4.4 refreshes the terminal's size only after every SIGWINCH listener ran, so the runner gave
+// Claude Code the size before each resize, and Claude Code drew a garbled screen.
+test('anyhost run gives Claude Code the size its terminal resized to', async () => {
+  const folder = temporaryFolder()
+  const claudeHome = join(folder, '.claude')
+  mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
+  const claude = fakeClaude(folder)
+  let shown = ''
+  const terminal = new Bun.Terminal({ cols: 70, rows: 31, data: (_terminal, bytes) => void (shown += new TextDecoder().decode(bytes)) })
+  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state') }
+  // the runner owns its terminal, as in a terminal of herdr-core, so the kernel sends it SIGWINCH at a resize
+  const owned = `ioctl(STDIN, ${process.platform === 'darwin' ? '0x20007461' : '0x540E'}, 0) or die "$!"; exec { $ARGV[0] } @ARGV`
+  children.push(Bun.spawn(['perl', '-e', owned, '--', 'bun', CLI, 'run', '--', claude], { env, terminal, detached: true }))
+
+  await until(() => shown.includes('started'), 'Claude Code starting')
+  terminal.resize(200, 60)
+  await until(() => shown.includes('size 60 200'), 'Claude Code hearing the new size')
+  terminal.resize(120, 40)
+  await until(() => shown.includes('size 40 120'), 'Claude Code hearing the next size')
+  terminal.close()
+}, 30_000)
 
 // The suite missed it: every slept session had a transcript, while Claude Code refuses --resume of one that never got a
 // message, so such a session never woke.
@@ -161,6 +198,7 @@ test('anyhost run ends an idle Claude Code after the sleep time, keeps its scree
   expect(written).toEqual({ pid: runner.pid, procStart: expect.any(String), command: [claude, '--model', 'opus'] })
   // the check after the sleep time ends Claude Code, whose record goes with it
   await until(() => readdirSync(join(claudeHome, 'sessions')).length === 0, 'Claude Code ending', 10_000)
+  await until(() => shown.endsWith('\x1b[?1004h'), 'the runner asking for focus reports, the last thing it does going to sleep')
   const asleep = shown
   await Bun.sleep(1000)
   expect(shown).toBe(asleep)

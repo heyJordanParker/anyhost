@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from 'bun:test'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
-import { captureCode, restoreCode } from '../src/code.ts'
+import { captureCode, httpsRemoteOf, restoreCode } from '../src/code.ts'
 import { temporaryFolder } from './memory.ts'
 
 const SESSION = '0a1b2c3d-1111-2222-3333-444455556666'
@@ -97,6 +97,14 @@ function journalOf() {
       restoreCode(header, async (path) => records.get(path) ?? Promise.reject(new Error(`The journal holds no ${path}.`)), folder),
   }
 }
+
+// The suite missed it: a machine with no GitHub key, as devbox, cloned a session's repository only from its ssh remote.
+test("a GitHub ssh remote has an https form a machine without a GitHub key clones, and another host's has none", () => {
+  expect(httpsRemoteOf('git@github.com:heyJordanParker/anyhost.git')).toBe('https://github.com/heyJordanParker/anyhost.git')
+  expect(httpsRemoteOf('ssh://git@github.com/heyJordanParker/anyhost')).toBe('https://github.com/heyJordanParker/anyhost.git')
+  expect(httpsRemoteOf('git@gitlab.com:a/b.git')).toBeUndefined()
+  expect(httpsRemoteOf('https://github.com/a/b.git')).toBeUndefined()
+})
 
 test('the diff record round trip restores staged, partly staged and unstaged edits, new, deleted, binary, executable and linked files, branches and the stash', async () => {
   const { base, work } = repository()
@@ -371,6 +379,12 @@ test('bundles are incremental: each holds only the commits since the last one', 
 
 test('the folder holding the home folder gives no record, since it holds the whole machine', async () => {
   expect(await captureCode(dirname(homedir()), SESSION)).toBeUndefined()
+})
+
+// The suite missed it: a session working in /tmp read all of /tmp as its code, which failed at other programs' folders.
+test('the shared temp folder gives no record, since it holds every program’s scratch files', async () => {
+  expect(await captureCode('/tmp', SESSION)).toBeUndefined()
+  expect(await captureCode(tmpdir(), SESSION)).toBeUndefined()
 })
 
 test('a checkout with work of its own keeps it, and the session continues in a worktree beside it', async () => {

@@ -884,6 +884,13 @@ test("the working folder is the session's own, never a folder a tool call names"
   expect([claude.cwd, codex.cwd, codex.entrypoint]).toEqual(['/work/app', '/Users/ada', 'cli'])
 })
 
+// The suite missed it: a session that began with a slash command had no first prompt, so its card showed its id.
+test('a session that begins with a slash command names it as its first prompt', () => {
+  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
+  const loop = JSON.stringify({ type: 'user', message: { role: 'user', content: '<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>2m Reply with tick.</command-args>' } })
+  expect(summarize(empty, `${loop}\n`, 'claude').firstPrompt).toBe('/loop 2m Reply with tick.')
+})
+
 test("the index entry holds the session's title, first prompt, working folder and entrypoint", async () => {
   const relay = await memoryRelay()
   const { transcript, upload, capture } = machine(deviceA, relay)
