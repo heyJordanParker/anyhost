@@ -2,6 +2,17 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.5.1] - 2026-11-10
+
+### Fixed
+- A session that comes back to a machine continues in the folder it ran in there, instead of a new worktree beside another checkout of its repository.
+- A new session's first message waits for Claude Code's screen to settle, instead of failing the start when Claude Code was still drawing.
+- A session moved to a Mac never waits on macOS's privacy prompt for Desktop, Documents or Downloads, which held the move for good on a Mac with nobody at its screen.
+- A session that ran on one machine in two folders, as a checkout and later a worktree beside it, moves and resumes everywhere, instead of failing its restore with `past its 0 bytes`, and the machine keeps no old copy that could go up over its history.
+- A machine reaches your other machines in the Herdr app even when their names have capitals, which herdr-core refused.
+- A move that fails after the other machine took the session comes back to the machine it left, even when that machine's anyhost restarted during the move, instead of staying held where nothing runs it.
+- A public GitHub repository clones and fetches over https with none of your git config, so a machine whose config sends GitHub to ssh through an agent that asks at its screen, such as 1Password, never waits on it.
+
 ## [0.5.0] - 2026-11-10
 
 ### Added
