@@ -295,6 +295,12 @@ case "$1" in
     printf '{"terminals":[%s]}' "$found"
     exit 0 ;;
   send)
+    left="$(cat "$F/unsettled" 2>/dev/null || echo 0)"
+    if [ "$left" -gt 0 ]; then
+      echo $((left - 1)) > "$F/unsettled"
+      echo "{\\"error\\":{\\"kind\\":\\"unavailable\\",\\"message\\":\\"$2 is still starting: its output has not settled\\"}}" >&2
+      exit 5
+    fi
     echo "$2 $3" >> "$F/sent.log"
     read -r owner pid < "$F/terminals/$2"
     record="$CLAUDE_CONFIG_DIR/sessions/$pid.json"
@@ -1181,6 +1187,31 @@ test('a move the worker cannot take takes the claim back, and the laptop capture
   writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"And the hotel"}}\n`, { flag: 'a' })
   await until(() => relay.puts.filter(({ key }) => key.startsWith(`journals/${SESSION}/hot/`)).length > frames, 'the next line uploading', 15_000)
 }, 60_000)
+
+// The suite missed it: a move to mac-studio stranded its session there, held and running nowhere, as cmod set the
+// laptop's program up again during the move, and the program that started after it knew of no move to take back.
+test('a move the worker cannot take after the laptop program restarted takes the session back, and the laptop runs it', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  // the worker takes the claim, then its herdr-core waits 8 s and fails
+  const worker = await workerOn(relay, (folder) => {
+    writeFileSync(join(folder, 'hang'), '8')
+    writeFileSync(join(folder, 'fail'), 'Claude Code is not logged in.')
+  })
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  await until(async () => (await relay.claims()).get(SESSION) === WORKER.id, 'the worker taking the claim', 30_000)
+  laptop.child.kill('SIGKILL')
+  const restarted = await serveOn(laptop.env)
+  await until(() => worker.logged().includes(`could not take ${SESSION} from ${LAPTOP.name}`), 'the worker failing the move', 30_000)
+  await until(async () => (await relay.claims()).get(SESSION) === LAPTOP.id, 'the laptop taking the session back', 30_000)
+  const tookBack = `${WORKER.name} could not take ${SESSION} in a move this program forgot, so ${LAPTOP.name} took it back and runs it`
+  // the program says so once Claude Code runs the session there
+  await until(() => restarted.logged().includes(tookBack), 'the laptop running the session', 30_000)
+
+  expect(runsOn(laptop.folder).some((run) => run.session === SESSION)).toBe(true)
+  expect((await claimOn(laptop.socket)).machine).toBeUndefined()
+}, 90_000)
 
 test('a move to a worker that took the claim and answers nothing waits for it, and Keep it here takes the session back', async () => {
   const relay = await memoryRelay()
@@ -2081,7 +2112,8 @@ test("anyhost new while its program's relay is not connected says what it waits 
 const sentOn = (folder: string): string[] => logOf(folder, 'sent.log')
 
 // The folder is one Claude Code does not trust on the laptop, so the start answers once the terminal opened, where Claude
-// Code asks the person first, and the first message goes in once Claude Code runs the session.
+// Code asks the person first, and the first message goes in once Claude Code runs the session. herdr-core refuses the
+// first 3 sends while the new terminal's output still moves, which the suite missed: devbox's start failed at the first.
 test('anyhost new on this machine starts a session in a terminal of herdr-core here and types its first message into it', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
@@ -2089,6 +2121,7 @@ test('anyhost new on this machine starts a session in a terminal of herdr-core h
   await until(() => relay.isConnected(LAPTOP.id), 'the laptop connecting')
   const folder = join(laptop.env['HOME'] ?? '', 'trip')
   mkdirSync(folder, { recursive: true })
+  writeFileSync(join(laptop.folder, 'unsettled'), '3')
 
   const { code, out } = await anyhostOn(laptop.env, ['new', LAPTOP.name, folder, 'You are the CTO. Watch every agent.'])
 

@@ -513,11 +513,29 @@ async function rememberJournaled(repo: Repository, record: CodeRecord): Promise<
   await saveJournaled(repo, record.session, { parts, bundles, bundled: bundles.length === 0 ? null : record.keep })
 }
 
-// The https form of a GitHub ssh remote, which a machine with no GitHub key clones with: a public repository with
-// nothing, and a private one through that machine's git credentials, as `gh auth setup-git` gives.
+// The https form of a GitHub remote, ssh or https.
 export function httpsRemoteOf(url: string): string | undefined {
-  const found = /^(?:ssh:\/\/)?git@github\.com[:/](.+?)(?:\.git)?\/?$/.exec(url)
+  const found = /^(?:(?:ssh:\/\/)?git@github\.com[:/]|https:\/\/github\.com\/)(.+?)(?:\.git)?\/?$/.exec(url)
   return found?.[1] === undefined ? undefined : `https://github.com/${found[1]}.git`
+}
+
+// Reads `url` over the network. A GitHub repository reads first over https with none of the person's own git config,
+// so a public one needs no key and never waits on a person: that config can send GitHub to ssh through an agent that
+// asks at the machine's own screen, as mac-studio's 1Password does, and devbox has no GitHub key at all. A private one
+// fails that read at once, as git asks for no password (`GIT_TERMINAL_PROMPT`), and reads `url` with the person's config.
+async function readRemote<T>(url: string, read: (from: string, env: Readonly<Record<string, string>>) => Promise<T>): Promise<T> {
+  const https = httpsRemoteOf(url)
+  if (https === undefined) return await read(url, {})
+  return await read(https, { GIT_CONFIG_GLOBAL: '/dev/null' }).catch(() => read(url, {}))
+}
+
+// Clones `url` into `root`, with `url` as its remote `origin` however it read it.
+export async function cloneRemote(url: string, root: string, options: { readonly origin?: string; readonly branch?: string; readonly noCheckout?: boolean } = {}): Promise<void> {
+  const { origin = 'origin', branch = '', noCheckout = false } = options
+  await mkdir(dirname(root), { recursive: true })
+  const flags = ['--origin', origin, ...(branch === '' ? [] : ['--branch', branch]), ...(noCheckout ? ['--no-checkout'] : [])]
+  await readRemote(url, (from, env) => git({ cwd: dirname(root), env }, ['clone', '-q', ...flags, from, root], { deadline: NETWORK_MS }))
+  await git({ cwd: root, env: {} }, ['remote', 'set-url', origin, url])
 }
 
 // The checkout at root: the one there, or a clone of the session's remote (an empty repository without one).
@@ -529,13 +547,7 @@ async function checkoutAt(root: string, record: CodeRecord): Promise<{ repo: Rep
   if (record.remote === null) await git({ cwd: dirname(root), env: {} }, ['init', '-q', root])
   else {
     console.log(`Cloning ${record.remote.url} into ${root}`)
-    const { name, url } = record.remote
-    const clone = (from: string): Promise<Uint8Array> => git({ cwd: dirname(root), env: {} }, ['clone', '-q', '--no-checkout', '--origin', name, from, root], { deadline: NETWORK_MS })
-    await clone(url).catch((error: unknown) => {
-      const https = httpsRemoteOf(url)
-      if (https === undefined) throw error
-      return clone(https)
-    })
+    await cloneRemote(record.remote.url, root, { origin: record.remote.name, noCheckout: true })
   }
   const repo = await openRepository(root, 'repo')
   if (repo === undefined) throw new Error(`git made ${root}, and it is not a checkout.`)
@@ -546,12 +558,11 @@ async function checkoutAt(root: string, record: CodeRecord): Promise<{ repo: Rep
 // that was here fetches the remote first, since the session's HEAD can be a commit pushed after this checkout's last fetch.
 async function fetchCommits(repo: Repository, record: CodeRecord, parts: ReadonlyMap<string, Uint8Array>, fresh: boolean): Promise<void> {
   const ref = `refs/anyhost/${record.session}`
-  let source = record.remote?.name
-  if (record.remote !== null && !fresh) {
-    const url = record.remote.url
-    source = (await remotesOf(repo)).find((remote) => remote.url === url)?.name
-    await git(repo, ['fetch', '-q', ...(source === undefined ? [url, 'refs/heads/*'] : [source])], { deadline: NETWORK_MS })
-    source ??= url
+  const url = record.remote?.url
+  if (url !== undefined && !fresh) {
+    const name = (await remotesOf(repo)).find((remote) => remote.url === url)?.name
+    const into = name === undefined ? 'refs/heads/*' : `+refs/heads/*:refs/remotes/${name}/*`
+    await readRemote(url, (from, env) => git(repo, ['fetch', '-q', from, into], { env, deadline: NETWORK_MS }))
   }
   if (record.bundles.length > 0) {
     const temp = await mkdtemp(join(tmpdir(), 'anyhost-bundle-'))
@@ -563,7 +574,7 @@ async function fetchCommits(repo: Repository, record: CodeRecord, parts: Readonl
     } finally {
       await rm(temp, { recursive: true, force: true })
     }
-  } else if (record.keep !== null && source !== undefined) await git(repo, ['fetch', '-q', source, `${ref}:${ref}`], { deadline: NETWORK_MS })
+  } else if (record.keep !== null && url !== undefined) await readRemote(url, (from, env) => git(repo, ['fetch', '-q', from, `${ref}:${ref}`], { env, deadline: NETWORK_MS }))
 }
 
 // Whose uncommitted work a checkout holds: the session's state already, none, or work of its own.

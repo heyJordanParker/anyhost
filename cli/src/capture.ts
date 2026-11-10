@@ -82,8 +82,17 @@ export type Capture = Code & {
   lastIndex: string
 }
 export type Problems = { set(key: string, error: unknown): void; clear(key: string): void }
-// `after` is null on a deletion record: the file is gone from its writer's machine.
-export type RecordHeader = { readonly device: string; readonly path: string; readonly at: number; readonly size: number; readonly after: { readonly size: number; readonly sha256: string } | null }
+// `after` is null on a deletion record: the file is gone from its writer's machine. `checkout` is the folder the session
+// worked in on its writer's machine as it wrote the record, absent before the writer first read the session's working
+// folder and in records of anyhost 0.5.0 and earlier, where a restore takes the writer's index entry's instead.
+export type RecordHeader = {
+  readonly device: string
+  readonly checkout?: string
+  readonly path: string
+  readonly at: number
+  readonly size: number
+  readonly after: { readonly size: number; readonly sha256: string } | null
+}
 export type Frame = { readonly key: string; readonly start: number; readonly end?: number; readonly size: number }
 // A file of a session as this machine last uploaded it: `journalSize` bytes of the journal's file stand for the first
 // `localSize` bytes of the local file, which differ when a restore rewrote the writer's paths into this machine's.
@@ -479,13 +488,26 @@ async function hasherOf(source: Source, size: number): Promise<Bun.CryptoHasher>
   return hasher
 }
 
+// The checkout a session works in: its repository's root, or its working folder outside git, else `home`.
+export const checkoutOfEntry = (entry: Pick<IndexedSession, 'cwd' | 'repo' | 'repoFolder'>, home: string): string =>
+  (entry.repo !== '' && entry.repoFolder !== '' ? entry.cwd.slice(0, -entry.repoFolder.length - 1) : entry.cwd) || home
+
+// Who writes a record: this machine, and the checkout its session works in here, as the session's row names it, so a
+// restore rewrites each record's paths from the folder it was written in. One machine can hold records of two: a
+// session that came back to devbox continued in a worktree beside the checkout it ran in there before.
+function writerOf(capture: Capture, session: string): Pick<RecordHeader, 'device' | 'checkout'> {
+  const row = capture.db.query<Pick<SessionRow, 'cwd' | 'repo' | 'repo_folder'>, [string]>('select cwd, repo, repo_folder from sessions where id = ?').get(session)
+  const checkout = row === null ? '' : checkoutOfEntry({ cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder }, '')
+  return { device: capture.device.id, ...(checkout === '' ? {} : { checkout }) }
+}
+
 // The deletion record of a file the journal holds and this machine no longer has, as a plan `/rewind` took back or a
 // task Claude Code deleted. A lines file's view and Codex's row are never deleted: other sessions share their files.
 async function deletionOf(capture: Capture, session: string, path: string, row: FileRow | null): Promise<Change | undefined> {
   if (row === null || row.sha256 === '' || linesFiles(capture.roots).has(path) || path === codexState(capture.roots)) return undefined
   if ((await stat(path).catch(() => undefined)) !== undefined) return undefined
   return {
-    header: { device: capture.device.id, path, at: 0, size: 0, after: null },
+    header: { ...writerOf(capture, session), path, at: 0, size: 0, after: null },
     bytes: new Uint8Array(),
     // the session worked when it deleted the file
     state: { session, path, journalSize: 0, localSize: 0, tail: new Uint8Array(), sha256: '', mtime: Date.now() },
@@ -505,7 +527,7 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
   const record = (at: number, bytes: Uint8Array, localSize: number, journalSize: number, hasher: Bun.CryptoHasher, tail: Uint8Array, isPartial: boolean): Change => {
     const sha256 = hasher.copy().digest('hex')
     return {
-      header: { device: capture.device.id, path, at, size: bytes.length, after: { size: localSize, sha256 } },
+      header: { ...writerOf(capture, session), path, at, size: bytes.length, after: { size: localSize, sha256 } },
       bytes,
       state: { session, path, journalSize, localSize, tail, sha256, mtime: source.mtime },
       hasher,
@@ -792,7 +814,7 @@ function codeRecord(capture: Capture, session: string, path: string, bytes: Uint
   const hasher = before.update(bytes.subarray(from, to))
   const sha256 = hasher.copy().digest('hex')
   return {
-    header: { device: capture.device.id, path, at: from, size: to - from, after: { size: to, sha256 } },
+    header: { ...writerOf(capture, session), path, at: from, size: to - from, after: { size: to, sha256 } },
     bytes: bytes.subarray(from, to),
     state: { session, path, journalSize: to, localSize: to, tail: tailOf(bytes.subarray(0, to)), sha256, mtime: 0 },
     hasher,

@@ -9,7 +9,7 @@ import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relay
 import { hcPath, machinesReached } from './hc.ts'
 import { installHerdr } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { move, receiveList, receiveMove, receiveReleased, receiveStart, receiveTell, startNew, statusesOf, takeHere, tell, type MoveHere, type Moving } from './move.ts'
+import { move, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, startNew, statusesOf, takeHere, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, waitAfter, type RelayState } from './relay.ts'
 import { reopenStopped } from './runner.ts'
 import { listSessions } from './sessions.ts'
@@ -849,6 +849,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   relay.on('start', (message) => void receiveStart(capture, message, mover))
   relay.on('tell', (message) => void receiveTell(capture, message, mover))
   relay.on('list', (message) => void receiveList(capture, message, mover))
+  relay.on('moved', (message) => void receiveMoved(capture, message, mover))
   // Another machine holds a session, and its copy here stops: at each `released` this socket takes and each 409 a frame
   // or a seal of this program meets (`onReleased`), now for every copy a release before missed, and at each welcome for
   // every copy of a session the database names another holder of. Each copy stops once, whichever comes.

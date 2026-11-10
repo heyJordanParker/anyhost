@@ -3,10 +3,10 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
-import { checkoutOf, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
+import { checkoutOf, checkoutOfEntry, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession, type RecordHeader } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { statusOf } from './claude.ts'
-import { httpsRemoteOf } from './code.ts'
+import { cloneRemote } from './code.ts'
 import { devicesOf, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
 import { runSession } from './runner.ts'
@@ -25,13 +25,6 @@ export const repoSlug = (remote: string): string =>
 const sameRepo = (a: string, b: string): boolean => repoSlug(a).toLowerCase() === repoSlug(b).toLowerCase()
 
 const isFolder = (path: string): Promise<boolean> => stat(path).then((found) => found.isDirectory(), () => false)
-
-async function run(argv: string[]): Promise<string> {
-  const child = Bun.spawn(argv, { stdout: 'pipe', stderr: 'pipe' })
-  const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-  if (code !== 0) throw new Error(`${argv.join(' ')} exited with ${code}: ${error.trim() || output.trim()}`)
-  return output
-}
 
 // The checkout roots of the sessions this machine wrote or restored in a repository.
 const knownCheckouts = (capture: Capture): string[] =>
@@ -55,37 +48,41 @@ function checkoutsOf(capture: Capture, chosen: string): string {
   return shared === undefined || shared === '/' ? capture.roots.home : shared
 }
 
+// The folders macOS holds a program's first read of behind a privacy prompt on that machine's own screen, which nobody
+// may be at to answer, so a git that reads one waits for good: a move to mac-studio waited in `git -C ~/Desktop`, then
+// in `git -C ~/Documents`.
+const PROMPTED = new Set(['.Trash', 'Desktop', 'Documents', 'Downloads', 'Library', 'Movies', 'Music', 'Pictures'])
+
 async function findCheckout(capture: Capture, remote: string, checkouts: string): Promise<string | undefined> {
-  const children = (await isFolder(checkouts)) ? (await readdir(checkouts)).map((name) => join(checkouts, name)) : []
+  const names = (await isFolder(checkouts)) ? await readdir(checkouts) : []
+  const children = names.filter((name) => process.platform !== 'darwin' || !PROMPTED.has(name)).map((name) => join(checkouts, name))
   for (const root of [...knownCheckouts(capture), ...children]) {
     if (sameRepo((await checkoutOf(root)).repo, remote)) return root
   }
   return undefined
 }
 
-// The checkout a session works in: its repository's root, or its working folder outside git. A session with no working
-// folder has the home folder, since relocate takes only absolute roots.
-const checkoutOfEntry = (entry: Pick<IndexedSession, 'cwd' | 'repo' | 'repoFolder'>, home: string): string =>
-  (entry.repo !== '' && entry.repoFolder !== '' ? entry.cwd.slice(0, -entry.repoFolder.length - 1) : entry.cwd) || home
-
 // How restore rewrites each record: its writer's roots, and the file each `/rewind` backup of the session holds by
 // backup name, for the backups whose file lies under Claude Code's or Codex's own folders.
-type Writers = { readonly rootsOf: (device: string) => Roots; readonly tracked: ReadonlyMap<string, string> }
+type Writers = { readonly rootsOf: (writer: Writer) => Roots; readonly tracked: ReadonlyMap<string, string> }
+type Writer = Pick<RecordHeader, 'device' | 'checkout'>
 
-// Each machine's roots for the session: its home folders as it joined the relay with them, its checkout from its index.
-function writersOf(devices: ReadonlyMap<string, Protocol.Device>, indexes: ReadonlyMap<string, readonly IndexedSession[]>, session: ListedSession): (device: string) => Roots {
-  return (device) => {
+// Each record's roots: its writer's home folders as it joined the relay with them, and the checkout the record names,
+// else the one the writer's index names for the session.
+function writersOf(devices: ReadonlyMap<string, Protocol.Device>, indexes: ReadonlyMap<string, readonly IndexedSession[]>, session: ListedSession): (writer: Writer) => Roots {
+  return ({ device, checkout }) => {
     const roots = devices.get(device)?.roots
     if (roots === undefined) throw new Error(`The session ${session.id} holds records of the device ${device}, and the relay knows no machine of that id, so anyhost cannot rewrite its paths.`)
-    return { ...roots, checkout: checkoutOfEntry(indexes.get(device)?.find((entry) => entry.id === session.id) ?? session, roots.home) }
+    return { ...roots, checkout: checkout ?? checkoutOfEntry(indexes.get(device)?.find((entry) => entry.id === session.id) ?? session, roots.home) }
   }
 }
 
-// Where the session's working folder goes on this machine: in the checkout of its repository found by remote, or
-// in the folder this machine keeps checkouts in; outside git, where relocate moves its path from the writer's home,
-// temp root and other roots to this machine's.
-export async function localFolder(capture: Capture, session: Pick<IndexedSession, 'repo' | 'repoFolder' | 'cwd'>, writer: MachineRoots, chosen: string): Promise<string> {
+// Where the session's working folder goes on this machine: the folder it ran in here before, while that still holds
+// its repository, else the checkout of its repository found by remote, or in the folder this machine keeps checkouts
+// in; outside git, where relocate moves its path from the writer's home, temp root and other roots to this machine's.
+export async function localFolder(capture: Capture, session: Pick<IndexedSession, 'repo' | 'repoFolder' | 'cwd'>, writer: MachineRoots, chosen: string, ranHere = ''): Promise<string> {
   const { home } = capture.roots
+  if (session.repo !== '' && ranHere !== '' && sameRepo((await checkoutOf(ranHere)).repo, session.repo)) return ranHere
   if (session.repo !== '') {
     const checkouts = checkoutsOf(capture, chosen)
     return join((await findCheckout(capture, session.repo, checkouts)) ?? join(checkouts, basename(repoSlug(session.repo))), session.repoFolder)
@@ -101,12 +98,7 @@ export async function cloneMissing(session: Pick<IndexedSession, 'repo' | 'repoF
   const checkout = checkoutOfEntry({ ...session, cwd }, home)
   if (session.repo === '' || (await isFolder(checkout))) return
   console.log(`Cloning ${session.repo} into ${checkout}`)
-  const clone = (from: string): Promise<string> => run(['git', 'clone', ...(branch === '' ? [] : ['--branch', branch]), from, checkout])
-  await clone(session.repo).catch((error: unknown) => {
-    const https = httpsRemoteOf(session.repo)
-    if (https === undefined) throw error
-    return clone(https)
-  })
+  await cloneRemote(session.repo, checkout, { branch })
 }
 
 async function readStaged(file: ReplayedFile, offset: number, size: number): Promise<Uint8Array> {
@@ -139,7 +131,7 @@ function rulesPathOf(path: string, from: Roots, writers: Writers): string | unde
 async function* viewOf(file: ReplayedFile, writers: Writers, to: Roots): AsyncGenerator<Uint8Array> {
   for (const segment of file.segments) {
     const bytes = await readStaged(file, segment.offset, segment.size)
-    const from = writers.rootsOf(segment.device)
+    const from = writers.rootsOf(segment)
     const rules = rulesPathOf(segment.path, from, writers)
     yield rules === undefined ? bytes : relocate(bytes, rules, from, to).bytes
   }
@@ -147,10 +139,10 @@ async function* viewOf(file: ReplayedFile, writers: Writers, to: Roots): AsyncGe
 
 // Every file must be what its last writer had after its last record: its size and sha256.
 async function checkFile(file: ReplayedFile, writers: Writers): Promise<void> {
-  const { device, path, after } = file.last
+  const { path, after } = file.last
   const hasher = new Bun.CryptoHasher('sha256')
   let size = 0
-  for await (const part of viewOf(file, writers, writers.rootsOf(device))) {
+  for await (const part of viewOf(file, writers, writers.rootsOf(file.last))) {
     hasher.update(part)
     size += part.length
   }
@@ -190,7 +182,7 @@ function placeCodexRow(path: string, placed: Uint8Array): void {
 
 // Places a replayed file at its path on this machine and answers what this machine uploaded of it.
 async function placeFile(session: string, file: ReplayedFile, writers: Writers, here: Roots): Promise<FileState> {
-  const path = relocate(NOTHING, file.last.path, writers.rootsOf(file.last.device), here).path
+  const path = relocate(NOTHING, file.last.path, writers.rootsOf(file.last), here).path
   const lines = linesFiles(here).get(path)
   const known = { journalSize: file.size, mtime: 0 }
   if (lines !== undefined || path === codexState(here)) {
@@ -262,15 +254,15 @@ export async function restore(capture: Capture, id: string, options: { take: boo
     throw new Error(`This session continues on ${error.holder.name}. Run anyhost resume ${id} --take to continue it here.`)
   })
   const rootsOf = writersOf(devices, indexes, session)
-  const folder = await localFolder(capture, session, rootsOf(session.device), options.checkouts ?? '')
+  const folder = await localFolder(capture, session, rootsOf({ device: session.device }), options.checkouts ?? '', workingFolderOf(db, id))
   const provisional: Roots = { ...roots, checkout: checkoutOfEntry({ ...session, cwd: folder }, roots.home) }
   const staging = join(dirname(db.filename), 'restore', id)
   await rm(staging, { recursive: true, force: true })
   const named = new Map<string, string>()
-  const replayed = await downloadJournal(relay, id, staging, ({ device: writer, path }) => {
-    const key = `${writer}\0${path}`
-    if (!named.has(key)) named.set(key, relocate(NOTHING, path, rootsOf(writer), provisional).path)
-    return named.get(key) ?? path
+  const replayed = await downloadJournal(relay, id, staging, (writer) => {
+    const key = `${writer.device}\0${writer.checkout ?? ''}\0${writer.path}`
+    if (!named.has(key)) named.set(key, relocate(NOTHING, writer.path, rootsOf(writer), provisional).path)
+    return named.get(key) ?? writer.path
   })
   const writers: Writers = { rootsOf, tracked: await trackedFilesOf(replayed, id) }
   // Journals earlier versions uploaded hold Claude Code's job record `jobs/<8 hex>/state.json`, which names a job only
@@ -306,7 +298,16 @@ export async function restore(capture: Capture, id: string, options: { take: boo
     await rm(path, { force: true })
     placed.push({ session: id, path, journalSize: 0, localSize: 0, tail: NOTHING, sha256: '', mtime: 0 })
   }
+  // This machine's copies of the session's own files at paths it left, as the transcript of the checkout it ran in here
+  // before it came back to a worktree beside it, go once the journal goes on without them: a listing would take them for
+  // the session's files and upload them over its history, as devbox's hourly listing did.
+  const kept = new Set(placed.map(({ path }) => path))
+  const left = db.query<{ path: string }, [string]>('select path from files where session = ?').all(id).map(({ path }) => path).filter((path) => {
+    const owner = ownerOf(path, roots)
+    return !kept.has(path) && owner !== undefined && 'session' in owner && owner.session === id
+  })
   continueJournal(db, { session: id, tool: session.tool, end: replayed.end, sealed: replayed.sealedEnd }, placed)
+  for (const path of left) await rm(path, { force: true })
   const transcript = placed.find(({ path }) => {
     const owner = ownerOf(path, roots)
     return owner !== undefined && 'isTranscript' in owner && owner.isTranscript

@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
-import { captureCode, httpsRemoteOf, restoreCode } from '../src/code.ts'
+import { captureCode, cloneRemote, httpsRemoteOf, restoreCode } from '../src/code.ts'
 import { temporaryFolder } from './memory.ts'
 
 const SESSION = '0a1b2c3d-1111-2222-3333-444455556666'
@@ -99,12 +99,32 @@ function journalOf() {
 }
 
 // The suite missed it: a machine with no GitHub key, as devbox, cloned a session's repository only from its ssh remote.
-test("a GitHub ssh remote has an https form a machine without a GitHub key clones, and another host's has none", () => {
+test("a GitHub remote has an https form a machine without a GitHub key clones, and another host's has none", () => {
   expect(httpsRemoteOf('git@github.com:heyJordanParker/anyhost.git')).toBe('https://github.com/heyJordanParker/anyhost.git')
   expect(httpsRemoteOf('ssh://git@github.com/heyJordanParker/anyhost')).toBe('https://github.com/heyJordanParker/anyhost.git')
+  expect(httpsRemoteOf('https://github.com/a/b')).toBe('https://github.com/a/b.git')
   expect(httpsRemoteOf('git@gitlab.com:a/b.git')).toBeUndefined()
-  expect(httpsRemoteOf('https://github.com/a/b.git')).toBeUndefined()
 })
+
+// The suite missed it: mac-studio's git config sends GitHub to ssh through 1Password, which waits for a person at
+// that Mac's screen, so a clone there waited for good. A public repository clones with none of that config, and keeps
+// the session's own remote.
+test('a public GitHub repository clones with none of the person’s git config, and keeps the session’s remote', async () => {
+  const folder = temporaryFolder()
+  const config = join(folder, 'gitconfig')
+  // every GitHub address goes to an ssh no machine answers, as an agent that waits on a person reads to anyhost
+  writeFileSync(config, '[url "ssh://git@127.0.0.1:1/"]\n\tinsteadOf = https://github.com/\n\tinsteadOf = git@github.com:\n')
+  const root = join(folder, 'tiny')
+  const before = process.env['GIT_CONFIG_GLOBAL']
+  process.env['GIT_CONFIG_GLOBAL'] = config
+  try {
+    await cloneRemote('git@github.com:octocat/Hello-World.git', root, { noCheckout: true })
+  } finally {
+    if (before === undefined) delete process.env['GIT_CONFIG_GLOBAL']
+    else process.env['GIT_CONFIG_GLOBAL'] = before
+  }
+  expect(Bun.spawnSync(['git', '-C', root, 'remote', 'get-url', 'origin']).stdout.toString().trim()).toBe('git@github.com:octocat/Hello-World.git')
+}, 60_000)
 
 test('the diff record round trip restores staged, partly staged and unstaged edits, new, deleted, binary, executable and linked files, branches and the stash', async () => {
   const { base, work } = repository()
