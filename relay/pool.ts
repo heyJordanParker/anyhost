@@ -1,7 +1,7 @@
 // The Durable Object every machine of one person connects to: SQLite holds the machines, invites, claims and each
 // `released` its old holder has not said it heard, and each machine's hibernating WebSocket carries its requests, whose
 // ops the Pool runs on R2, and its messages to the other machines. Hibernation resets memory, so nothing the Pool needs
-// later lives only there: each socket's machine, connect time and open attach streams are in its attachment. Cloudflare
+// later lives only there: each socket's machine and connect time are in its attachment. Cloudflare
 // takes the whole Pool out of memory once no event ran in it for a short while, whatever its sockets still carry, so the
 // time the Pool last heard each socket lives in memory only as a socket's proof between two pings, and LIVE_MS holds
 // for the pings alone.
@@ -21,12 +21,10 @@ import {
   REMOVED_MESSAGE,
   REMOVED_REASON,
   REQUEST,
-  STREAM,
   cloneFixFor,
   conditionHeaders,
   decodeMessage,
   encodeMessage,
-  streamOf,
   tokenOf,
   type Answer,
   type DeviceRef,
@@ -54,9 +52,8 @@ export type Env = {
 // An answer to an HTTP route the Worker serves: its status and its JSON body.
 export type Reply = { readonly status: number; readonly body: object }
 
-// Who sent a socket's messages, when it connected, and the attach streams it views, each stream id naming the machine
-// that hosts it. A host's sockets keep no stream: the Pool finds a host's viewer by the stream id and the host's device id.
-type Attachment = { readonly device: string; readonly name: string; readonly origin: string; readonly connectedAt: number; readonly streams: Record<string, string> }
+// Who sent a socket's messages, and when it connected.
+type Attachment = { readonly device: string; readonly name: string; readonly origin: string; readonly connectedAt: number }
 
 type DeviceRow = {
   id: string
@@ -396,7 +393,7 @@ export class Pool extends DurableObject<Env> {
     // a machine connected under a new name was renamed, as no machine with its id holds a socket under the old one
     this.#sql.exec('update devices set name = ?, roots = ?, seen_at = ? where id = ?', name, JSON.stringify(roots), now, row.id)
     this.ctx.acceptWebSocket(server, [row.id])
-    server.serializeAttachment({ device: row.id, name, origin: new URL(request.url).origin, connectedAt: now, streams: {} } satisfies Attachment)
+    server.serializeAttachment({ device: row.id, name, origin: new URL(request.url).origin, connectedAt: now } satisfies Attachment)
     const waiting = this.#sql.exec<{ message: string }>('select message from waiting where device = ? order by id', row.id).toArray()
     const welcome: Welcome = { t: 'welcome', ...healthOf(this.env), device: { id: row.id, name }, waiting: waiting.map(({ message }) => JSON.parse(message) as Released) }
     server.send(JSON.stringify(welcome))
@@ -408,52 +405,18 @@ export class Pool extends DurableObject<Env> {
     if (typeof message === 'string') return this.#control(ws, message)
     const bytes = new Uint8Array(message)
     if (bytes[0] === REQUEST) return await this.#request(ws, bytes)
-    if (bytes[0] === STREAM && bytes.length >= 5) return this.#stream(ws, bytes)
     ws.send(JSON.stringify({ t: 'invalid', message: `The relay reads no binary message of kind ${bytes[0]}.` }))
   }
 
-  // A machine's socket closed: the streams it viewed end at their hosts, and a machine with no socket left ends the
-  // streams others viewed on it.
   override async webSocketClose(ws: WebSocket): Promise<void> {
-    const own = ws.deserializeAttachment() as Attachment
-    this.#sql.exec('update devices set seen_at = ? where id = ?', Date.now(), own.device)
-    for (const [stream, host] of Object.entries(own.streams)) this.#deliver(host, JSON.stringify({ t: 'detach', stream: Number(stream), from: { id: own.device, name: own.name } }))
-    if (this.ctx.getWebSockets(own.device).some((socket) => socket !== ws)) return
-    for (const socket of this.ctx.getWebSockets()) {
-      const viewer = socket.deserializeAttachment() as Attachment
-      const ended = Object.keys(viewer.streams).filter((stream) => viewer.streams[stream] === own.device)
-      if (ended.length === 0) continue
-      socket.serializeAttachment({ ...viewer, streams: Object.fromEntries(Object.entries(viewer.streams).filter(([, host]) => host !== own.device)) } satisfies Attachment)
-      for (const stream of ended) this.#deliver(viewer.device, JSON.stringify({ t: 'detach', stream: Number(stream), from: { id: own.device, name: own.name } }), [socket])
-    }
+    this.#sql.exec('update devices set seen_at = ? where id = ?', Date.now(), (ws.deserializeAttachment() as Attachment).device)
   }
 
   override async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
     console.error(`The socket of ${(ws.deserializeAttachment() as Attachment | null)?.name} failed: ${String(error)}`)
   }
 
-  #forget(socket: WebSocket, attachment: Attachment, stream: number): void {
-    const { [String(stream)]: _, ...streams } = attachment.streams
-    socket.serializeAttachment({ ...attachment, streams } satisfies Attachment)
-  }
-
-  // The sockets at the other end of a stream: the host's, from its viewer, else the one viewer socket that opened it
-  // on this socket's machine.
-  #peersOf(ws: WebSocket, own: Attachment, stream: number): WebSocket[] {
-    const host = own.streams[String(stream)]
-    if (host !== undefined) return this.ctx.getWebSockets(host)
-    return this.ctx.getWebSockets().filter((socket) => socket !== ws && (socket.deserializeAttachment() as Attachment).streams[String(stream)] === own.device)
-  }
-
-  #stream(ws: WebSocket, bytes: Uint8Array): void {
-    const own = ws.deserializeAttachment() as Attachment
-    const stream = streamOf(bytes)
-    const peers = this.#peersOf(ws, own, stream)
-    // a stream no live socket views any more ends here, so its host stops sending
-    if (!this.#deliver(own.device, bytes, peers)) ws.send(JSON.stringify({ t: 'detach', stream }))
-  }
-
-  // A control message: routed to its `to` machine, or by its stream for `attached` and `detach`.
+  // A control message, routed to its `to` machine.
   #control(ws: WebSocket, text: string): void {
     const invalid = (message: string): void => ws.send(JSON.stringify({ t: 'invalid', message }))
     let message: unknown
@@ -465,20 +428,7 @@ export class Pool extends DurableObject<Env> {
     if (!isRecord(message) || !isText(message['t'])) return invalid('A message is a JSON object that names its type in t.')
     const own = ws.deserializeAttachment() as Attachment
     const from = { id: own.device, name: own.name }
-    const { t, to, stream } = message
-    if (t === 'attached' || t === 'detach') {
-      if (typeof stream !== 'number') return invalid(`A ${t} message names its stream.`)
-      const peers = this.#peersOf(ws, own, stream)
-      if (t === 'detach') {
-        if (own.streams[String(stream)] !== undefined) this.#forget(ws, own, stream)
-        for (const peer of peers) {
-          const viewer = peer.deserializeAttachment() as Attachment
-          if (viewer.streams[String(stream)] === own.device) this.#forget(peer, viewer, stream)
-        }
-      }
-      this.#deliver(own.device, JSON.stringify({ ...message, from }), peers)
-      return
-    }
+    const { t, to } = message
     if (t === 'welcome' || t === 'released' || t === 'offline' || t === 'invalid') return invalid(`Only the relay sends ${t}.`)
     if (t === 'heard') {
       const { session } = message
@@ -486,12 +436,7 @@ export class Pool extends DurableObject<Env> {
       return this.#heard(own.device, session, to)
     }
     if (!isText(to)) return invalid(`A ${t} message names the machine it goes to in to.`)
-    if (t === 'attach' && !(Number.isInteger(stream) && (stream as number) >= 0 && (stream as number) < 2 ** 32)) return invalid('An attach names its stream, a 32-bit unsigned integer.')
-    if (!this.#deliver(to, JSON.stringify({ ...message, from }))) {
-      ws.send(JSON.stringify({ t: 'offline', ...('id' in message ? { id: message['id'] } : {}), ...(stream === undefined ? {} : { stream }), to }))
-      return
-    }
-    if (t === 'attach') ws.serializeAttachment({ ...own, streams: { ...own.streams, [String(stream)]: to } } satisfies Attachment)
+    if (!this.#deliver(to, JSON.stringify({ ...message, from }))) ws.send(JSON.stringify({ t: 'offline', ...('id' in message ? { id: message['id'] } : {}), to }))
   }
 
   // A request: every op runs, each starting in the order of the ops, and one answer carries every result and the

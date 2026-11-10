@@ -3,12 +3,14 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
-import { checkoutOf, continueJournal, isCodePart, linesOf, markUntold, recordSummary, sha256, stopJournal, tailOf, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
+import { checkoutOf, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
+import { statusOf } from './claude.ts'
 import { devicesOf, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
+import { runSession } from './runner.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
-import { codexState, linesFiles, ownerOf } from './transcript.ts'
+import { codexState, linesFiles, ownerOf, type Tool } from './transcript.ts'
 
 const NOTHING = new Uint8Array()
 
@@ -213,21 +215,24 @@ async function placeFile(session: string, file: ReplayedFile, writers: Writers, 
   return { session, path, ...known, localSize: size, tail: Uint8Array.from(tail), sha256: hasher.digest('hex'), mtime: (await stat(path)).mtimeMs }
 }
 
-async function herdrRuns(): Promise<boolean> {
-  if (Bun.which('herdr') === null) return false
-  return (await run(['herdr', 'status', 'server']).catch(() => '')).includes('status: running')
+// Opens the session in this terminal, in the folder it continues in: Claude Code under the runner, which ends its
+// process while it rests and resumes it at the next key, and Codex as it is.
+export async function openSession(tool: Tool, id: string, cwd: string): Promise<number> {
+  process.chdir(cwd)
+  if (tool === 'claude') return await runSession(['claude'], id)
+  return await Bun.spawn(['codex', 'resume', id], { stdio: ['inherit', 'inherit', 'inherit'] }).exited
 }
 
-// Opens the session in the folder it continues in: in a herdr workspace when a herdr server runs, else here.
-export async function openSession(session: ListedSession, cwd: string): Promise<number> {
-  const command = session.tool === 'claude' ? ['claude', '--resume', session.id] : ['codex', 'resume', session.id]
-  if (await herdrRuns()) {
-    const created = JSON.parse(await run(['herdr', 'workspace', 'create', '--cwd', cwd, '--label', session.title || session.id])) as { result: { root_pane: { pane_id: string } } }
-    await run(['herdr', 'pane', 'run', created.result.root_pane.pane_id, command.join(' ')])
-    console.log(`Resumed ${session.id} in a herdr pane in ${cwd}.`)
-    return 0
-  }
-  return await Bun.spawn(command, { cwd, stdio: ['inherit', 'inherit', 'inherit'] }).exited
+// The session to open here and its folder. One this machine holds opens from its own files, which are as new as R2's
+// or newer, and every other restores. One that runs here already opens nowhere else, as two Claude Codes would write
+// one transcript.
+export async function resumeHere(capture: Capture, id: string, options: { take: boolean; checkouts: string }): Promise<{ tool: Tool; cwd: string }> {
+  if ((await statusOf(capture.roots.claudeHome, id)) !== undefined) throw new Error(`${id.slice(0, 8)} runs on ${capture.device.name} already. The Herdr app shows its terminal.`)
+  const journal = journalOf(capture.db, id)
+  const cwd = workingFolderOf(capture.db, id)
+  if (journal !== undefined && journal.holder === '' && cwd !== '' && (await claimsOf(capture.relay, id)).get(id)?.id === capture.device.id) return { tool: journal.tool, cwd }
+  const { session, cwd: restored } = await restore(capture, id, options)
+  return { tool: session.tool, cwd: restored }
 }
 
 // Takes the claim, downloads and replays the session's journal, checks every file against its last writer, restores

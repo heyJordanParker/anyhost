@@ -17,7 +17,6 @@ import {
   PROTOCOL_VERSION,
   REMOVED_MESSAGE,
   REQUEST,
-  STREAM,
   cloneFixFor,
   conditionHeaders,
   decodeMessage,
@@ -55,7 +54,7 @@ const ANSWER_MS = 40_000
 const CONNECT_MS = 10_000
 const RETRY_MS = [1000, 2000, 4000, 8000, 16_000, 32_000, 60_000]
 // The wait before the next try after `failures` tries in a row failed: 1, 2, 4 and up to 60 seconds, none before a
-// failure. `anyhost attach` waits as long between its tries to attach again and to dial the host directly.
+// failure.
 export const waitAfter = (failures: number): number => RETRY_MS[Math.min(failures, RETRY_MS.length) - 1] ?? 0
 // A write gets REQUEST_MS and as long again as its bytes take at 100 KB/s. A Mac whose uploads moved at 0.4 to 0.9 MB/s
 // failed a frame holding a 67 MB tool result, 50 MB compressed, at 120 s on every try. Bun never ends an upload that
@@ -90,9 +89,8 @@ export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
   | { readonly is: 'unjoined' | 'offline' | 'refused' | 'outdated'; readonly message: string }
-// What the Pool sends: its own messages, each message another machine routed here by its `t`, and each attach stream
-// message whole, its stream id in its first bytes.
-type Events = { readonly welcome: Welcome; readonly released: Released; readonly offline: Offline; readonly stream: Uint8Array } & {
+// What the Pool sends: its own messages, and each message another machine routed here, by its `t`.
+type Events = { readonly welcome: Welcome; readonly released: Released; readonly offline: Offline } & {
   readonly [T in Delivered['t']]: Extract<Delivered, { readonly t: T }>
 }
 
@@ -109,9 +107,9 @@ export type Relay = {
   list(prefix: string): Promise<Listed[]>
   // one object by HTTP, which a broken download's next try goes on with from the byte it reached
   getObject(key: string): Promise<Got | undefined>
-  // A message for another machine, a `heard` for the Pool, or an attach stream's bytes, on the socket the relay
-  // welcomed. Answers false while no socket is, and the message goes nowhere.
-  send(message: Routed | Heard | Uint8Array): boolean
+  // A message for another machine, or a `heard` for the Pool, on the socket the relay welcomed. Answers false while no
+  // socket is, and the message goes nowhere.
+  send(message: Routed | Heard): boolean
   // calls `listener` with each message of the kind, until the function it answers is called
   on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): () => void
   // connects at once on the login read now, closing the socket open on the last one, as after this machine joined
@@ -366,7 +364,6 @@ export function connectRelay(options: RelayOptions): Relay {
         if (typeof event.data === 'string') return control(ws, used, event.data)
         const bytes = new Uint8Array(event.data as ArrayBuffer)
         if (bytes[0] === ANSWER) answered(bytes)
-        else if (bytes[0] === STREAM) emit('stream', bytes)
       } catch (error) {
         console.error(`${new Date().toISOString()} anyhost read no message of the relay: ${messageOf(error)}`)
       }
@@ -557,7 +554,7 @@ export function connectRelay(options: RelayOptions): Relay {
     getObject,
     send(message) {
       if (state.is !== 'connected' || socket === undefined || isLate()) return false
-      socket.send(message instanceof Uint8Array ? message : JSON.stringify(message))
+      socket.send(JSON.stringify(message))
       return true
     },
     // a new list at each change, so an emit that runs calls the listeners it began with

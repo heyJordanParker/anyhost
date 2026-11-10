@@ -2,6 +2,7 @@ import plugin from '../../.claude-plugin/plugin.json'
 import { PROTOCOL_VERSION, type Health } from '../../relay/protocol.ts'
 import { jsonOf } from './connect.ts'
 import { cmodDevice, relayLogin } from './device.ts'
+import { hcPath } from './hc.ts'
 import { DAILY_LIMIT, isDailyLimit } from './relay.ts'
 import { serveSocket, type Status } from './serve.ts'
 
@@ -13,13 +14,6 @@ const UPDATE = 'The program tries the update once a run. Connect Cloudflare in t
 // The mod's Step shows Connect Cloudflare only while the relay is `unjoined` or `outdated`, so the failed update of a
 // relay the program still captures through, an older relay version at this protocol, is fixed from the terminal.
 const UPDATE_FROM_TERMINAL = 'The program tries the update once a run. Run anyhost connect, which updates the relay with your Cloudflare login.'
-// cmod runs the program as the service com.claudemodmanager.anyhost.anyhost: a launchd agent on macOS and a systemd user
-// service on Linux, which a logout leaves running for a user systemd lingers for. A Linux machine with no systemd user
-// session runs the program from Claude Code instead.
-const RESTART =
-  process.platform === 'darwin'
-    ? 'Restart the program with launchctl kickstart -k gui/$(id -u)/com.claudemodmanager.anyhost.anyhost.'
-    : 'Restart the program with systemctl --user restart com.claudemodmanager.anyhost.anyhost, or, where no systemd user session runs it, close every Claude Code session and start one.'
 // A relay that answers an older protocol with no failed update: Cloudflare runs a busy Pool's older code for up to 300 s
 // after an upload, as the Step says, while an update no machine ran needs Connect Cloudflare. The program's /status
 // says nothing of when this machine last uploaded the relay, so the fix says to wait first.
@@ -82,13 +76,6 @@ function programChecks(address: string, status: Status | undefined): Check[] {
               : state === 'unjoined'
                 ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
                 : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
-  // the program reads the shell's environment once at its start, so a fix takes a restart
-  const shell: Check = status.shellProblem === undefined ? { ok: 'The sessions the program starts get the environment your login shell sets up.' } : { problem: status.shellProblem, fix: `Make your login shell start with no terminal and no input. ${RESTART}` }
-  // a stream macOS keeps off the local network still runs, through the relay
-  const localNetwork: Check[] =
-    status.localNetworkProblem === undefined
-      ? []
-      : [{ problem: `${status.localNetworkProblem} Its stream goes through the relay, a few times slower.`, fix: 'Turn your terminal app on in System Settings > Privacy & Security > Local Network, then quit it and open it again. A tmux or herdr server keeps the access of the terminal app that started it, so start it again from there.' }]
   // a program older than journalGaps answers none
   const gaps = (status.journalGaps ?? []).map((problem): Check => ({
     problem,
@@ -110,11 +97,15 @@ function programChecks(address: string, status: Status | undefined): Check[] {
           ]
   // the mod shows its Connect your machines step only for an unjoined or outdated relay, so a connected one has no button
   const update: Check[] = updateProblem === undefined || isOutdatedUpdate ? [] : [{ problem: updateProblem, fix: state === 'unjoined' ? UPDATE : UPDATE_FROM_TERMINAL }]
-  // the listener starts once a run, and viewers on other machines go through the relay without it
-  const direct: Check[] =
-    status.directProblem === undefined ? [] : [{ problem: `${status.directProblem} Viewers on other machines reach this machine through the relay meanwhile.`, fix: RESTART }]
   const retried = status.problems.map((problem): Check => ({ problem, fix: 'The program tries this again by itself, and this line goes once it works.' }))
-  return [connection, ...join, shell, ...localNetwork, ...update, ...direct, ...retried, ...gaps]
+  return [connection, ...join, ...update, ...retried, ...gaps]
+}
+
+// Sessions moved or started here run in a terminal of herdr-core, which the Herdr app and Herdr mobile show.
+function terminalCheck(): Check {
+  const hc = hcPath()
+  if (hc === undefined) return { problem: 'herdr-core is not installed here, so no session can move to this machine or start on it.', fix: 'Install the Herdr app, or herdr-core alone with curl -fsSL https://releases.herdr.dev/core/install.sh | sh.' }
+  return { ok: `Sessions moved or started here run in terminals of herdr-core, ${hc}.` }
 }
 
 export async function doctor(): Promise<number> {
@@ -122,7 +113,7 @@ export async function doctor(): Promise<number> {
   const status = await fetch('http://localhost/status', { unix: address, signal: AbortSignal.timeout(3000) })
     .then(async (response) => jsonOf<Status>(await response.text()))
     .catch(() => undefined)
-  const checks = [...(status === undefined ? await relayChecks() : []), await deviceCheck(), ...programChecks(address, status)]
+  const checks = [...(status === undefined ? await relayChecks() : []), await deviceCheck(), ...programChecks(address, status), terminalCheck()]
   for (const check of checks) console.log('ok' in check ? `✔ ${check.ok}` : 'wait' in check ? `… ${check.wait}` : `✘ ${check.problem}\n  ${check.fix}`)
   return checks.some((check) => 'problem' in check) ? 1 : 0
 }

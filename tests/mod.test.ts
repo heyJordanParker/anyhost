@@ -345,7 +345,7 @@ test('/move asks the program to move the session, refuses prompts while it moves
 
   // the session runs there, and outside herdr this Claude Code stays open and says how to go on with it
   await follow()
-  const continues = 'This session continues on anyhost-a. Run anyhost attach test-ses here to keep working on it.'
+  const continues = 'This session continues on anyhost-a, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.'
   expect(moveToasts(tested)).toEqual([{ type: 'info', message: continues, description: 'anyhost-a restored test-ses in 2.4 s and runs it.' }])
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: continues })
 })
@@ -421,6 +421,69 @@ test('/move names the machine to move to, and shows why the program refused the 
   expect(await tested.type('/move')).toEqual({ text: 'Name the one machine to move this session to, as in /move devbox. /machines lists your machines.' })
   expect(await tested.type('/move devbx')).toEqual({ text: '/move failed: No machine joined to your relay is named devbx. anyhost machines lists them.' })
   expect(moveToasts(tested)).toEqual([])
+})
+
+const AGENT = { id: '3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4', tool: 'claude', title: 'Checkout retry', firstPrompt: 'Make the checkout retry a declined card once', machine: 'devbox', holder: 'devbox', status: 'asleep', lastActivity: '2026-11-10T14:02:00.000Z', repo: 'git@github.com:acme/shop.git', cwd: '/home/jordan/shop', entrypoint: 'cli', device: 'd1' }
+const MACHINES = { here: 'd0', machines: [{ id: 'd0', name: 'test-computer', connected: true, seenAt: '' }, { id: 'd1', name: 'devbox', connected: true, seenAt: '' }] }
+
+test('Claude lists every agent of every machine with what it does, starts one on a machine with its first message, and tells, reads or answers one wherever it runs', async () => {
+  const told = { machine: 'devbox', session: AGENT.id, status: 'working', screen: '❯ Book the train' }
+  const { tested, asked } = withProgram({
+    'GET /agents': [{ body: { agents: [AGENT, { ...AGENT, id: 'b2' }] } }],
+    'POST /new': [{ body: { session: 'c3', machine: 'devbox' } }],
+    'POST /agents/tell': [{ body: told }],
+  })
+
+  // Claude reads each answer as JSON
+  expect(await tested.callTool('list_agents', { limit: 1 })).toEqual({
+    result: JSON.stringify([{ id: AGENT.id, tool: 'claude', title: 'Checkout retry', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'asleep', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd }]),
+  })
+  expect(await tested.callTool('start_agent', { folder: '/Users/jordan/shop', machine: 'devbox', prompt: 'You are the CTO. Watch every agent.' })).toEqual({ result: JSON.stringify({ session: 'c3', machine: 'devbox' }) })
+  expect(await tested.callTool('tell_agent', { agent: '3f9c2b1e', text: 'Book the train' })).toEqual({ result: JSON.stringify(told) })
+  expect(await tested.callTool('read_agent', { agent: '3f9c2b1e', lines: 40 })).toEqual({ result: JSON.stringify(told) })
+  expect(await tested.callTool('press_keys', { agent: '3f9c2b1e', keys: ['down', 'enter'] })).toEqual({ result: JSON.stringify(told) })
+  // the message names this session as its sender, so the agent answers it
+  expect(asked.filter(({ method }) => method === 'POST')).toEqual([
+    { method: 'POST', path: '/new', body: { folder: '/Users/jordan/shop', machine: 'devbox', prompt: 'You are the CTO. Watch every agent.' } },
+    { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', text: 'Book the train', sender: 'test-session' } },
+    { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', lines: 40 } },
+    { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', keys: ['down', 'enter'] } },
+  ])
+})
+
+test('Claude moves an agent this machine runs through its program, and one another machine runs by typing /move into it there', async () => {
+  const { tested, asked } = withProgram({
+    'GET /agents': [{ body: { agents: [AGENT, { ...AGENT, id: '7c1d0e9a-0000-4000-8000-000000000000', holder: 'test-computer' }] } }],
+    'GET /machines': [{ body: MACHINES }],
+    'POST /move': [{ body: { session: '7c1d0e9a-0000-4000-8000-000000000000', line: 'Uploading 7c1d0e9a.' } }],
+    'POST /agents/tell': [{ body: { machine: 'devbox', session: AGENT.id, status: 'working', screen: '❯ /move mac-studio' } }],
+  })
+
+  expect(await tested.callTool('move_agent', { agent: '7c1d0e9a', machine: 'devbox' })).toEqual({ result: JSON.stringify({ session: '7c1d0e9a-0000-4000-8000-000000000000', line: 'Uploading 7c1d0e9a.' }) })
+  expect(await tested.callTool('move_agent', { agent: '3f9c2b1e', machine: 'mac-studio' })).toEqual({ result: 'devbox moves 3f9c2b1e to mac-studio once its turn ends. read_agent shows how it goes.' })
+  expect(asked.filter(({ method }) => method === 'POST').map(({ path, body }) => ({ path, body }))).toEqual([
+    { path: '/move', body: { session: '7c1d0e9a-0000-4000-8000-000000000000', machine: 'devbox' } },
+    { path: '/agents/tell', body: { session: AGENT.id, text: '/move mac-studio' } },
+  ])
+})
+
+test('Claude takes an agent onto this machine, as when the machine that ran it is offline', async () => {
+  const { tested, asked } = withProgram({ 'POST /agents/take': [{ body: { session: AGENT.id, machine: 'test-computer' } }] })
+
+  expect(await tested.callTool('take_agent', { agent: '3f9c2b1e' })).toEqual({ result: JSON.stringify({ session: AGENT.id, machine: 'test-computer' }) })
+  expect(asked.at(-1)).toEqual({ method: 'POST', path: '/agents/take', body: { session: '3f9c2b1e' } })
+})
+
+test('Claude adds a machine with a one-time invite, and removes one by its name', async () => {
+  const { tested, asked } = withProgram({
+    'POST /machines/invite': [{ body: { command: "cmod install heyJordanParker/anyhost --option 'join=https://r/v1/join#c'", expiresAt: '2026-11-10T15:10:00.000Z' } }],
+    'GET /machines': [{ body: { here: 'd0', machines: [{ id: 'd2', name: 'mac-studio', connected: true, seenAt: '' }] } }],
+    'POST /machines/remove': [{ body: {} }],
+  })
+
+  expect(await tested.callTool('add_machine', {})).toEqual({ result: JSON.stringify({ command: "cmod install heyJordanParker/anyhost --option 'join=https://r/v1/join#c'", expiresAt: '2026-11-10T15:10:00.000Z' }) })
+  expect(await tested.callTool('remove_machine', { machine: 'mac-studio' })).toEqual({ result: 'Removed mac-studio.' })
+  expect(asked.at(-1)).toEqual({ method: 'POST', path: '/machines/remove', body: { id: 'd2' } })
 })
 
 test('/machines says why it lists nothing while this machine is not joined', async () => {

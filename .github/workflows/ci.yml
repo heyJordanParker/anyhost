@@ -37,7 +37,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install -g @cmodjs/cli
 
-      - name: Start the user's systemd, which runs each claude --bg and claude attach in a scope on Linux
+      - name: Start the user's systemd, which runs each hc run in a scope on Linux
         if: runner.os == 'Linux'
         run: |
           sudo loginctl enable-linger "$USER"
