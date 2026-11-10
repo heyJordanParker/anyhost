@@ -277,7 +277,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
     signal.throwIfAborted()
     const started = Date.now()
     isAsked = true
-    const answer = await ask(relay, { t: 'move', id: crypto.randomUUID(), to: target.id, session, trusted, claimedAt, command: [...commandOf(session)] }, { signal, keepsWaiting, countsGone: () => false })
+    const answer = await ask(relay, { t: 'move', id: moveId(session), to: target.id, session, trusted, claimedAt, command: [...commandOf(session)] }, { signal, keepsWaiting, countsGone: () => false })
     keeping.abort()
     if (answer.t === 'offline') return await fail(`${machine} is offline, so the session keeps running here.`)
     if ('error' in answer) return await fail(`${machine} could not take the session: ${reasonOf(answer.error)}. It keeps running here.`)
@@ -295,6 +295,31 @@ export async function move(capture: Capture, asked: string, machine: string, her
     return isAsked ? fail(`${machine} did not answer, so the session keeps running here.`) : say('failed', kept.message)
   })
   return moving
+}
+
+// A move's id starts with its session, so the answer names it to a program that forgot the move.
+const moveId = (session: string): string => `${session}/${crypto.randomUUID()}`
+
+// A failed move's answer that no move of this program waits for: this program restarted during the move, as when cmod
+// set the program up again, and the other machine took the session and then could not run it, so it holds the session
+// and runs it nowhere. This machine takes it back and opens it, as the move's own failure does: a move to mac-studio
+// stranded a session this way.
+export async function receiveMoved(capture: Capture, answer: Extract<Delivered, { readonly t: 'moved' }>, here: MoveHere): Promise<void> {
+  const session = answer.id.split('/')[0] ?? ''
+  const journal = journalOf(capture.db, session)
+  if (!('error' in answer) || here.moves.has(session) || journal === undefined) return
+  if ((await claimsOf(capture.relay, session)).get(session)?.id !== answer.from.id) return
+  here.moves.set(session, { session, to: capture.device.name, step: 'moving', line: '', keep: () => false })
+  try {
+    await takeClaim(capture.relay, session, { take: true })
+    await continueHere(capture, session, journal.tool, here)
+    await takeHere(capture, session, here)
+    console.error(`${stamp()} ${answer.from.name} could not take ${session} in a move this program forgot, so ${capture.device.name} took it back and runs it: ${reasonOf(answer.error)}.`)
+  } catch (error) {
+    console.error(`${stamp()} ${answer.from.name} could not take ${session} in a move this program forgot, and ${capture.device.name} could not take it back: ${messageOf(error)}`)
+  } finally {
+    here.moves.delete(session)
+  }
 }
 
 async function answerOnce(relay: Relay, known: Map<string, Reply | undefined>, asked: { readonly id: string; readonly from: { readonly name: string } }, work: () => Promise<Reply>, forgetMs = Infinity): Promise<void> {

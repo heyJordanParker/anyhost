@@ -33,6 +33,11 @@ async function spaceOf(cwd: string): Promise<string> {
   return `anyhost-${new Bun.CryptoHasher('sha256').update(cwd).digest('hex').slice(0, 12)}`
 }
 
+// oh-my-zsh asks `Would you like to update? [Y/n]` as an interactive shell starts once its update is due, and nobody
+// answers in a terminal anyhost opens, so a session moved to mac-studio never started. oh-my-zsh skips the check for this
+// variable when the person's config sets no update mode of its own (`check_for_upgrade.sh`).
+const UNATTENDED = ['env', 'DISABLE_AUTO_UPDATE=true']
+
 // Opens the session's runner in a terminal of herdr-core, which the Herdr app shows in the space and tab its labels name:
 // the space of its folder and a tab of the session, unless `place` names the labels of the terminal it replaces. A
 // resting runner starts Claude Code only once the terminal is opened or typed into.
@@ -41,7 +46,7 @@ export async function openTerminal(cwd: string, session: string, command: readon
   const placed = { [SPACE_LABEL]: options.place?.[SPACE_LABEL] ?? (await spaceOf(cwd)), 'herdr.tab': session.slice(0, 8), ...options.place, [SESSION_LABEL]: session }
   const labels = Object.entries(placed).flatMap(([key, value]) => ['--label', `${key}=${value}`])
   // kept, so a restart of the machine leaves a shell in its place that reopenStopped gives the session back
-  await run(inScope([hcHere(), 'run', '--bg', '--keep', '--no-parent', '--cwd', cwd, ...labels, '--', await loginShell(), '-i', '-l', '-c', 'exec "$0" "$@"', ...runner]), { cwd })
+  await run(inScope([hcHere(), 'run', '--bg', '--keep', '--no-parent', '--cwd', cwd, ...labels, '--', ...UNATTENDED, await loginShell(), '-i', '-l', '-c', 'exec "$0" "$@"', ...runner]), { cwd })
 }
 
 // A terminal of herdr-core here: whether it still runs a program and the labels that place it.
@@ -61,9 +66,23 @@ export async function labelledTerminals(session: string): Promise<string[]> {
 
 export const killTerminal = async (address: string): Promise<void> => void (await run([hcHere(), 'kill', address]))
 
+// herdr-core types nothing into a program in its first seconds until its screen was still a moment, and refuses the
+// send with this, which its own first message sends again every 100 ms for up to 60 s (`first_message` in
+// `templates.rs`), as only that refusal is sure nothing was typed.
+const STILL_STARTING = 'is still starting: its output has not settled'
+const SETTLE_MS = 60_000
+
 // Pastes `text` and presses Enter, as herdr-core does once a person's unfinished draft is sent, and refuses while the
-// program is blocked on a dialog.
-export const sendTo = async (address: string, text: string): Promise<void> => void (await run([hcHere(), 'send', address, text]))
+// program is blocked on a dialog. A program that just started gets the text once its screen settles.
+export async function sendTo(address: string, text: string): Promise<void> {
+  for (const started = Date.now(); ; await Bun.sleep(100)) {
+    try {
+      return void (await run([hcHere(), 'send', address, text]))
+    } catch (error) {
+      if (!String(error).includes(STILL_STARTING) || Date.now() - started > SETTLE_MS) throw error
+    }
+  }
+}
 
 // Presses named keys, as `down enter` answers a permission prompt and `esc` stops a turn.
 export const pressKeys = async (address: string, keys: readonly string[]): Promise<void> => void (await run([hcHere(), 'keys', address, ...keys]))
@@ -82,11 +101,12 @@ export async function machinesReached(): Promise<Reached[]> {
 
 // Dials the machine at `target`, as ssh reaches it, and keeps it, installing herdr-core there when it lacks it, as the
 // Herdr app's Add a machine does, unless herdr-core reaches it at that target already, which it refuses to add twice.
-// Answers the name herdr-core gave it.
-export async function reachMachine(target: string, name?: string): Promise<string> {
+// Answers the name herdr-core gave it, after the target, as herdr-core refuses anyhost's machine names with capitals:
+// `bad name "Jordans-Mac-Studio": use 1-32 of a-z 0-9 - _ .`.
+export async function reachMachine(target: string): Promise<string> {
   const known = (await machinesReached()).find((machine) => machine.target === target)
   if (known !== undefined) return known.name
-  const added = JSON.parse(await run([hcHere(), 'machine', 'add', target, '--install', '--json', ...(name === undefined ? [] : ['--name', name])])) as { readonly name: string }
+  const added = JSON.parse(await run([hcHere(), 'machine', 'add', target, '--install', '--json'])) as { readonly name: string }
   return added.name
 }
 

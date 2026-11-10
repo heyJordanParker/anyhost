@@ -7,8 +7,9 @@ import { devicesOf } from './device.ts'
 import type { Relay } from './relay.ts'
 
 export type ListedSession = IndexedSession & { readonly machine: string; readonly device: string; readonly holder: string }
-// A run of one record's bytes in a replayed file: `size` bytes from `offset`, as `device` wrote them at `path`.
-export type Segment = { readonly device: string; readonly path: string; readonly offset: number; readonly size: number }
+// A run of one record's bytes in a replayed file: `size` bytes from `offset`, as `device` wrote them at `path` while the
+// session worked in `checkout` there.
+export type Segment = Pick<RecordHeader, 'device' | 'checkout' | 'path'> & { readonly offset: number; readonly size: number }
 // A file of the journal, replayed into `staged`: its bytes as each writer wrote them, and its last record, which is
 // never a deletion.
 type Written = RecordHeader & { readonly after: NonNullable<RecordHeader['after']> }
@@ -121,7 +122,7 @@ class Replay {
     ftruncateSync(fd, header.at)
     closeSync(fd)
     const segments = known.segments.flatMap((segment) => (segment.offset >= header.at ? [] : [{ ...segment, size: Math.min(segment.size, header.at - segment.offset) }]))
-    this.files.set(file, { staged: known.staged, size: header.at + header.size, segments: [...segments, { device: header.device, path: header.path, offset: header.at, size: header.size }], last })
+    this.files.set(file, { staged: known.staged, size: header.at + header.size, segments: [...segments, { device: header.device, ...(header.checkout === undefined ? {} : { checkout: header.checkout }), path: header.path, offset: header.at, size: header.size }], last })
     if (header.size === 0) this.finish()
   }
 

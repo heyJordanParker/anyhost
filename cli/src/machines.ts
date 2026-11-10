@@ -85,7 +85,7 @@ export async function keepHerdrReaching(relay: Relay, here: Device): Promise<voi
       continue
     }
     if (known !== undefined || Date.now() - (failedAt.get(target) ?? 0) < RETRY_MS) continue
-    await reachMachine(target, device.name).catch((error: unknown) => {
+    await reachMachine(target).catch((error: unknown) => {
       failedAt.set(target, Date.now())
       console.error(`${new Date().toISOString()} herdr-core here could not reach ${device.name} at ${target}, and tries again in an hour: ${error instanceof Error ? error.message : String(error)}`)
     })

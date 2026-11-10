@@ -396,9 +396,84 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
       await recordSummary(capture, crypto.randomUUID(), 'claude', `{"type":"user","cwd":${JSON.stringify(repo)}}\n`, 1, new Date().toISOString())
     }
   }
+  // The suite missed it: a session that came back to a machine went to the first checkout of its repository there,
+  // a worktree beside the person's own checkout, instead of the folder it ran in on that machine.
+  const ranInElsewhere = async (folder: string, capture: Capture): Promise<void> => {
+    for (const [name, id] of [['code/shop', crypto.randomUUID()], ['elsewhere/shop', session]] as const) {
+      const repo = join(folder, name)
+      mkdirSync(repo, { recursive: true })
+      Bun.spawnSync(['git', 'init', '-q', repo])
+      Bun.spawnSync(['git', '-C', repo, 'remote', 'add', 'origin', 'git@github.com:alice/shop.git'])
+      await recordSummary(capture, id, 'claude', `{"type":"user","cwd":${JSON.stringify(repo)}}\n`, 1, new Date().toISOString())
+    }
+  }
   expect(await restoredInto(withCheckouts)).toBe('<home>/code/shop')
   expect(await restoredInto(async () => undefined)).toBe('<home>/shop')
   expect(await restoredInto(withCheckouts, '<home>/src')).toBe('<home>/src/shop')
+  expect(await restoredInto(ranInElsewhere)).toBe('<home>/elsewhere/shop')
+  // The suite missed it: on a Mac, the search read ~/Desktop, where macOS held git on a privacy prompt nobody answered.
+  const onDesktop = async (folder: string): Promise<void> => {
+    const desktop = join(folder, 'Desktop')
+    mkdirSync(desktop, { recursive: true })
+    Bun.spawnSync(['git', 'init', '-q', desktop])
+    Bun.spawnSync(['git', '-C', desktop, 'remote', 'add', 'origin', 'git@github.com:alice/shop.git'])
+  }
+  expect(await restoredInto(onDesktop)).toBe(process.platform === 'darwin' ? '<home>/shop' : '<home>/Desktop')
+})
+
+// The suite missed it: a session that came back to devbox continued in a worktree beside the checkout it ran in there
+// before, so devbox's records named two folders, restore read both from its index's one, and the mac's take failed with
+// `The journal writes … at byte 1388993, past its 0 bytes.`
+test('a session that ran on one machine in a checkout and then a worktree beside it restores whole on the other, and the old copy there goes', async () => {
+  const relay = await memoryRelay()
+  const session = '99999999-0000-4000-8000-000000000009'
+  const remote = 'git@github.com:alice/shop.git'
+  const encoded = (path: string): string => path.replace(/[^a-zA-Z0-9]/g, '-')
+  const checkout = (folder: string): string => {
+    mkdirSync(folder, { recursive: true })
+    Bun.spawnSync(['git', 'init', '-q', folder])
+    Bun.spawnSync(['git', '-C', folder, 'remote', 'add', 'origin', remote])
+    return folder
+  }
+  // each machine's code: a header to carry, and a restore that gives the folder asked, or `diverted` once
+  let diverted = ''
+  const code = {
+    captureCode: async () => ({ header: new TextEncoder().encode('header'), parts: [] }),
+    restoreCode: async (_header: Uint8Array, _readPart: unknown, at: string): Promise<string> => {
+      const target = diverted === '' ? at : diverted
+      diverted = ''
+      return checkout(target)
+    },
+  }
+  const a = machine(mac, relay, join(temporaryFolder(), 'alice'), undefined, code)
+  const b = machine(server, relay, join(temporaryFolder(), 'bob'), undefined, code)
+  const transcriptIn = (roots: MachineRoots, cwd: string): string => join(roots.claudeHome, 'projects', encoded(cwd), `${session}.jsonl`)
+  const say = async (on: ReturnType<typeof machine>, cwd: string, text: string): Promise<void> => {
+    const transcript = transcriptIn(on.roots, cwd)
+    mkdirSync(dirname(transcript), { recursive: true })
+    appendFileSync(transcript, `{"type":"user","message":{"role":"user","content":"${text}"},"cwd":${JSON.stringify(cwd)},"sessionId":"${session}"}\n`)
+    await upload(on.capture, session, transcript)
+    await on.capture.codeRuns.get(session)
+    await upload(on.capture, session, `${cwd}/`)
+    await writeIndex(on.capture)
+  }
+  const onA = checkout(join(a.roots.home, 'work', 'shop'))
+  await say(a, onA, 'Plan the shop')
+
+  const { cwd: first } = await restore(b.capture, session, { take: true, checkouts: join(b.roots.home, 'src') })
+  await say(b, first, 'Book the train')
+  await restore(a.capture, session, { take: true })
+  await say(a, onA, 'Book the hotel')
+  diverted = `${first}-0a1b2c3d`
+  const { cwd: second } = await restore(b.capture, session, { take: true })
+  await say(b, second, 'Pack the bags')
+  await restore(a.capture, session, { take: true })
+
+  expect(second).toBe(`${first}-0a1b2c3d`)
+  expect(existsSync(transcriptIn(b.roots, first))).toBe(false)
+  const lines = readFileSync(transcriptIn(a.roots, onA), 'utf8').split('\n').filter((line) => line !== '')
+  expect(lines.map((line) => (JSON.parse(line) as { message: { content: string } }).message.content)).toEqual(['Plan the shop', 'Book the train', 'Book the hotel', 'Pack the bags'])
+  expect(lines.every((line) => line.includes(`"cwd":${JSON.stringify(onA)}`))).toBe(true)
 })
 
 // The session mac captures, which server then takes over. `isOffline` closes mac's connection first.
