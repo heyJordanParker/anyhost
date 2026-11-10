@@ -6,10 +6,14 @@ import { changedFiles, countedRelay, journalOf, openCapture, openDatabase, QUIET
 import { recordedSessions, runSessions, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
+import { hcPath, machinesReached } from './hc.ts'
 import { installHerdr } from './herdr.ts'
+import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
 import { move, receiveList, receiveMove, receiveReleased, receiveStart, receiveTell, startNew, statusesOf, takeHere, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, waitAfter, type RelayState } from './relay.ts'
+import { reopenStopped } from './runner.ts'
 import { listSessions } from './sessions.ts'
+import { isSettled, settle as settleSession, sharedOf, updateShared } from './shared.ts'
 import { codexState, filesUnder, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
@@ -85,7 +89,7 @@ const WATCHER_MS = 10_000
 // A running program answers /status in milliseconds over its socket.
 const RUNNING_MS = 2000
 // What the program's 404 names, every route it serves.
-const ROUTES = 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell and /agents/take'
+const ROUTES = 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/take, /agents/settle and /settings'
 
 // The address the mod and every command of this machine reach the service at.
 export const serveSocket = (): string => join(stateFolder(), 'serve.sock')
@@ -657,6 +661,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (isAll) unheardFrom(sweptAllAt > 0 ? sweptAllAt : lastRanAt)
     await listWritten()
     await readOptions()
+    // the Herdr app makes its home at its first start, which can come while the program runs
+    await settle('herdr', () => installHerdr())
     // the queue keeps what the sweep finds until the relay welcomes this machine
     await settle('backup', async () => {
       queueFiles(await changedFiles(capture, isAll ? 0 : started - QUIET_MS))
@@ -667,6 +673,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (queue.uploadEvery === 0) queue.drain()
     await settle('index', () => writeIndex(capture))
     queueFiles(await sealQuiet(capture, problems))
+    await settle('herdr machines', () => keepHerdrReaching(relay, device))
   }
   // Each move this program ran since it started, by its whole session id, which its session and `anyhost move` follow.
   const moves = new Map<string, Moving>()
@@ -702,6 +709,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       ...(joining === undefined ? {} : { joining }),
     }
   }
+  // Each machine an add runs for, by its ssh target, with why it failed once it did.
+  const adding = new Map<string, { readonly error?: string }>()
   const failed = (status: number, error: unknown): Response => Response.json({ message: error instanceof Error ? error.message : String(error) }, { status })
   // The relay's answer to the mod's /machines, or at once why the relay gives none.
   const throughRelay = async (work: () => Promise<unknown>): Promise<Response> => {
@@ -729,8 +738,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     readonly lines?: number
     readonly sender?: string
     readonly apiToken?: string
+    readonly target?: string
+    readonly settled?: boolean
+    readonly settleAfterDays?: number | null
   }
-  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', text = '', keys = [], lines = 0, sender = '', apiToken }: Asked): Promise<Response> => {
+  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', text = '', keys = [], lines = 0, sender = '', apiToken, target = '', settled = true, settleAfterDays }: Asked): Promise<Response> => {
     switch (pathname) {
       case '/connect': {
         if (connecting?.view.is === 'running') return Response.json(connecting.view)
@@ -757,6 +769,21 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       case '/machines/remove':
         if (id === device.id) return failed(400, `${device.name} is this machine. Remove it from another machine's /machines.`)
         return await throughRelay(() => removeMachine(relay, id))
+      // An add takes minutes, as it installs herdr-core, cmod and anyhost there, so it runs on in the program and /machines
+      // says how it goes, as the Step does with Connect Cloudflare.
+      case '/machines/add':
+        if (target === '') return failed(400, 'Name the machine to add as ssh reaches it, such as devbox or me@10.0.0.7.')
+        if (adding.get(target)?.error === undefined && adding.has(target)) return Response.json({ target })
+        adding.set(target, {})
+        void addMachine(relay, target).then(
+          () => adding.delete(target),
+          (error: unknown) => adding.set(target, { error: error instanceof Error ? error.message : String(error) }),
+        )
+        return Response.json({ target })
+      case '/agents/settle':
+        return await throughRelay(async () => void (await settleSession(relay, session, settled)))
+      case '/settings':
+        return await throughRelay(async () => void (await updateShared(relay, (shared) => ({ ...shared, settleAfterDays: settleAfterDays ?? null }))))
       case '/move':
         return await move(capture, session, machine, mover).then(
           (moving) => Response.json({ session: moving.session, ...shownMove(moving) }),
@@ -770,7 +797,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       // program does.
       case '/new':
         return await startNew(capture, machine, folder, prompt, mover).then(
-          (started) => Response.json({ session: started, machine: machine || device.name }),
+          async (started) => {
+            await updateShared(relay, (shared) => ({ ...shared, lastMachine: machine || device.name }))
+            return Response.json({ session: started, machine: machine || device.name })
+          },
           (error: unknown) => failed(400, error),
         )
       case '/agents/tell':
@@ -837,10 +867,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   relay.on('welcome', releaseHeld)
   void releaseHeld()
-  void installHerdr().then(
-    () => problems.clear('herdr'),
-    (error: unknown) => problems.set('herdr', error),
-  )
+  void settle('herdr', () => installHerdr())
+  if (hcPath() !== undefined) void reopenStopped().catch((error: unknown) => problems.set('reopen', error))
 
   await startLineOffsets(capture)
   // a socket file a stopped program left refuses the listen
@@ -851,11 +879,23 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     async fetch(request) {
       const { pathname } = new URL(request.url)
       if (request.method === 'GET' && pathname === '/status') return Response.json(statusOf())
-      if (request.method === 'GET' && pathname === '/machines') return await throughRelay(async () => ({ here: device.id, machines: await machinesOf(relay) }))
+      if (request.method === 'GET' && pathname === '/machines')
+        return await throughRelay(async () => {
+          const [machines, shared, reached, candidates] = await Promise.all([machinesOf(relay), sharedOf(relay), hcPath() === undefined ? [] : machinesReached(), candidatesOf()])
+          const joined = new Set([...machines.map(({ name }) => name), ...Object.values(shared.reach)])
+          // a failed add of a machine that joined since, as one that took longer than the add waited, is over
+          for (const machine of machines) if (machine.connected && shared.reach[machine.id] !== undefined) adding.delete(shared.reach[machine.id] ?? '')
+          return {
+            here: device.id,
+            machines: machines.map((machine) => ({ ...machine, herdr: reachedAt(reached, shared.reach[machine.id])?.name ?? null })),
+            candidates: candidates.filter(({ target }) => !joined.has(target) && !machines.some(({ name }) => name.toLowerCase() === target.toLowerCase())),
+            adding: [...adding].map(([target, { error }]) => ({ target, ...(error === undefined ? {} : { error }) })),
+          }
+        })
       if (request.method === 'GET' && pathname === '/agents')
         return await throughRelay(async () => {
-          const [agents, statuses] = await Promise.all([listSessions(relay), statusesOf(capture)])
-          return { agents: agents.map((agent) => ({ ...agent, status: statuses[agent.id] ?? '' })) }
+          const [agents, statuses, shared] = await Promise.all([listSessions(relay), statusesOf(capture), sharedOf(relay)])
+          return { agents: agents.map((agent) => ({ ...agent, status: statuses[agent.id] ?? '', settled: isSettled(shared, agent) })), settleAfterDays: shared.settleAfterDays, lastMachine: shared.lastMachine }
         })
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]
       if (request.method === 'GET' && claim !== undefined) return Response.json(holderOf(claim))

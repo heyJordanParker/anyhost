@@ -41,7 +41,7 @@ export const anyhost = defineMod({
     }),
     join: option.text({
       title: 'Join with',
-      description: 'An invite link from Add a machine in /machines on a joined machine. anyhost joins this machine with it within a minute, then empties it.',
+      description: 'An invite link, which Add a machine sets as it installs anyhost here, or anyhost machines --invite prints on a joined machine. anyhost joins this machine with it within a minute, then empties it.',
       default: '',
     }),
   },

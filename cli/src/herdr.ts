@@ -15,12 +15,43 @@ const writeChanged = async (path: string, text: string): Promise<void> => {
   await rename(`${path}.anyhost`, path)
 }
 
+type Node = { id?: string; content?: unknown; children?: Node[] } & Record<string, unknown>
+const LAYOUT = 'anyhost'
+
+// The Herdr app's main layout with anyhost's session list in the place of its Agents list, as a layout of its own,
+// since the app replaces its shipped layouts at each start: Herdr's guide adds a layout by writing its file and
+// switching to it, and the person's own layout stays one ctrl-shift-l away.
+const withSessions = (node: Node): Node => ({
+  ...node,
+  ...(node.id === 'agents' ? { content: { mod: 'anyhost' } } : {}),
+  ...(node.children === undefined ? {} : { children: node.children.map(withSessions) }),
+})
+
+const herdrApp = (): string | undefined => Bun.which('herdr-app', { PATH: `${process.env['PATH'] ?? ''}:${join(homedir(), '.local', 'bin')}` }) ?? undefined
+
 export async function installHerdr(home = herdrHome()): Promise<void> {
   if (!existsSync(home)) return
   const mod = join(home, 'mods', 'anyhost')
   await mkdir(mod, { recursive: true })
   await writeChanged(join(mod, 'main.js'), pane)
   await writeChanged(join(mod, 'mod.json'), `${JSON.stringify(placement)}\n`)
+  const main = await readFile(join(home, 'layouts', 'main.json'), 'utf8').catch(() => undefined)
+  if (main !== undefined) await writeChanged(join(home, 'layouts', `${LAYOUT}.json`), `${JSON.stringify(withSessions(JSON.parse(main) as Node), null, 2)}\n`)
+  await switchOnce(home)
+  await runUnderRunner(home)
+}
+
+// The app shows the layout once, at the first start of anyhost that finds the app running, and the person's choice
+// from then on.
+async function switchOnce(home: string): Promise<void> {
+  const switched = join(home, 'mods', 'anyhost', '.switched')
+  const app = herdrApp()
+  if (existsSync(switched) || app === undefined || !existsSync(join(home, 'layouts', `${LAYOUT}.json`))) return
+  const child = Bun.spawn([app, 'do', 'layout.switch', '--name', LAYOUT], { env: { ...process.env, HERDR_APP_HOME: home }, stdout: 'ignore', stderr: 'ignore' })
+  if ((await child.exited) === 0) await writeFile(switched, '')
+}
+
+async function runUnderRunner(home: string): Promise<void> {
   const file = join(home, 'programs.json')
   const read = await readFile(file, 'utf8').catch(() => '{}')
   const programs = JSON.parse(read) as Programs

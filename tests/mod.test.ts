@@ -183,7 +183,7 @@ test('the Step on a program whose install command\'s link joined no relay shows 
   await tested.type('/step')
   const drawn = (await tested.shown.page.lines({ columns: 400 })).join('\n')
   expect(drawn).toContain(`The invite link of the install command joined no relay: ${error}`)
-  expect(drawn).toContain('anyhost tries a link once. Press Add a machine in /machines on a joined machine for a new invite, and paste its command here.')
+  expect(drawn).toContain('anyhost tries a link once. Add this machine again from /machines on a joined machine.')
 })
 
 test('a machine removed after a link pasted on the Step joined it gets the Step afresh', async () => {
@@ -286,13 +286,15 @@ const machines = {
     { id: 'b-id', name: 'anyhost-b', os: 'linux', arch: 'arm64', connected: false, seenAt: '2026-11-05T08:00:00.000Z' },
     { id: 'mac-id', name: 'macbook', os: 'darwin', arch: 'arm64', connected: true, seenAt: '2026-11-06T09:00:00.000Z' },
   ],
+  candidates: [{ target: 'mac-studio', os: 'macOS', online: true }],
+  adding: [],
 }
 
-test('/machines lists every machine, gives the install command with a fresh invite to copy, and removes another machine', async () => {
-  const invite = { command: "cmod install heyJordanParker/anyhost --option 'join=https://anyhost.parker-labs.workers.dev/v1/join#K7QX2M4W9TPR6ZC3HN8JD5VB'", expiresAt: '2026-11-06T09:10:00.000Z' }
-  const { tested, asked, copied } = withProgram({
-    'GET /machines': [{ body: machines }, { body: { ...machines, machines: machines.machines.slice(1) } }],
-    'POST /machines/invite': [{ body: invite }],
+test('/machines lists every machine, adds one over ssh from your Tailscale network, and removes another machine', async () => {
+  const adding = { ...machines, candidates: [], adding: [{ target: 'mac-studio' }] }
+  const { tested, asked } = withProgram({
+    'GET /machines': [{ body: machines }, { body: adding }, { body: { ...adding, machines: machines.machines.slice(1) } }],
+    'POST /machines/add': [{ body: { target: 'mac-studio' } }],
     'POST /machines/remove': [{ body: {} }],
   })
   await tested.type('/machines')
@@ -302,11 +304,10 @@ test('/machines lists every machine, gives the install command with a fresh invi
   expect(listed.find((line) => line.startsWith('macbook'))).toBe('macbook    darwin-arm64  connected  this machine')
 
   await tested.shown.page.press('add')
-  const offered = (await tested.shown.page.lines({ columns: 160 })).join('\n')
-  expect(offered).toContain('It joins one machine, until')
-  expect(offered).toContain(invite.command)
-  await tested.shown.page.press('copy')
-  expect(copied).toEqual([invite.command])
+  expect((await tested.shown.page.lines({ columns: 160 })).join('\n')).toContain('On your Tailscale network:  [mac-studio]')
+  await tested.shown.page.press('candidate-mac-studio')
+  expect(asked.filter(({ method }) => method === 'POST').at(-1)).toEqual({ method: 'POST', path: '/machines/add', body: { target: 'mac-studio' } })
+  expect((await tested.shown.page.lines({ columns: 160 })).join('\n')).toContain('Adding mac-studio: anyhost installs there and joins it')
 
   await tested.shown.page.press('remove-b-id')
   expect((await tested.shown.page.lines()).join('\n')).toContain('Remove anyhost-b? It stops uploading at once')
@@ -477,14 +478,15 @@ test('Claude takes an agent onto this machine, as when the machine that ran it i
   expect(asked.at(-1)).toEqual({ method: 'POST', path: '/agents/take', body: { session: '3f9c2b1e' } })
 })
 
-test('Claude adds a machine with a one-time invite, and removes one by its name', async () => {
+test('Claude adds a machine it reaches over ssh, and removes one by its name', async () => {
   const { tested, asked } = withProgram({
-    'POST /machines/invite': [{ body: { command: "cmod install heyJordanParker/anyhost --option 'join=https://r/v1/join#c'", expiresAt: '2026-11-10T15:10:00.000Z' } }],
-    'GET /machines': [{ body: { here: 'd0', machines: [{ id: 'd2', name: 'mac-studio', connected: true, seenAt: '' }] } }],
+    'POST /machines/add': [{ body: { target: 'mac-studio' } }],
+    'GET /machines': [{ body: { here: 'd0', machines: [{ id: 'd2', name: 'mac-studio', connected: true, seenAt: '' }], candidates: [], adding: [] } }],
     'POST /machines/remove': [{ body: {} }],
   })
 
-  expect(await tested.callTool('add_machine', {})).toEqual({ result: JSON.stringify({ command: "cmod install heyJordanParker/anyhost --option 'join=https://r/v1/join#c'", expiresAt: '2026-11-10T15:10:00.000Z' }) })
+  expect(await tested.callTool('add_machine', { target: 'mac-studio' })).toEqual({ result: 'Adding mac-studio. list_machines shows it under adding until it joins.' })
+  expect(asked.at(-1)).toEqual({ method: 'POST', path: '/machines/add', body: { target: 'mac-studio' } })
   expect(await tested.callTool('remove_machine', { machine: 'mac-studio' })).toEqual({ result: 'Removed mac-studio.' })
   expect(asked.at(-1)).toEqual({ method: 'POST', path: '/machines/remove', body: { id: 'd2' } })
 })

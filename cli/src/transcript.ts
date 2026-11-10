@@ -163,6 +163,9 @@ function promptOf(line: string, tool: Tool): string | undefined {
     if (value.type !== 'user' || value.isMeta === true || value.message?.role !== 'user') return undefined
     const content = value.message.content
     const text = typeof content === 'string' ? content : Array.isArray(content) ? (content as { type?: string; text?: string }[]).find((block) => block.type === 'text')?.text : undefined
+    // a slash command, as Claude Code writes it: `<command-name>/loop</command-name>` and `<command-args>2m …</command-args>`
+    const command = text === undefined ? undefined : /<command-name>([^<]*)<\/command-name>/.exec(text)?.[1]
+    if (command !== undefined) return `${command} ${/<command-args>([^<]*)<\/command-args>/.exec(text ?? '')?.[1] ?? ''}`.trim()
     return text === undefined || text.trimStart().startsWith('<') ? undefined : text
   }
   if (!line.includes('"user_message"') && !line.includes('"UserMessage"')) return undefined

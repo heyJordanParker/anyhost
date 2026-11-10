@@ -126,12 +126,15 @@ export async function otherMachine(relay: Relay, here: Device, name: string, ins
   return machine
 }
 
+// anyhost as cmod installs it: the GitHub repository that publishes it.
+const MOD = new URL(plugin.repository).pathname.slice(1)
+
 // The command that joins one more machine: cmod installs anyhost with the option `join`, which the program exchanges
 // at its next read of the options, as it starts and within a minute of the option changing while it runs. Its invite
 // joins one machine before `expiresAt`. The link is quoted, because zsh's extendedglob reads its `#` as a pattern.
-export async function inviteMachine(relay: Relay): Promise<{ readonly command: string; readonly expiresAt: string }> {
+export async function inviteMachine(relay: Relay): Promise<{ readonly command: string; readonly link: string; readonly expiresAt: string }> {
   const { link, expiresAt } = await relay.runOne({ op: 'invite' })
-  return { command: `cmod install ${new URL(plugin.repository).pathname.slice(1)} --option 'join=${link}'`, expiresAt }
+  return { command: `cmod install ${MOD} --option 'join=${link}'`, link, expiresAt }
 }
 
 // Takes the machine's token back and closes its connections. Its sessions stay listed and resumable.

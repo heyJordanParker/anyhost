@@ -6,6 +6,7 @@ import type * as Protocol from '../../relay/protocol.ts'
 import { checkoutOf, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { statusOf } from './claude.ts'
+import { httpsRemoteOf } from './code.ts'
 import { devicesOf, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
 import { runSession } from './runner.ts'
@@ -100,7 +101,12 @@ export async function cloneMissing(session: Pick<IndexedSession, 'repo' | 'repoF
   const checkout = checkoutOfEntry({ ...session, cwd }, home)
   if (session.repo === '' || (await isFolder(checkout))) return
   console.log(`Cloning ${session.repo} into ${checkout}`)
-  await run(['git', 'clone', ...(branch === '' ? [] : ['--branch', branch]), session.repo, checkout])
+  const clone = (from: string): Promise<string> => run(['git', 'clone', ...(branch === '' ? [] : ['--branch', branch]), from, checkout])
+  await clone(session.repo).catch((error: unknown) => {
+    const https = httpsRemoteOf(session.repo)
+    if (https === undefined) throw error
+    return clone(https)
+  })
 }
 
 async function readStaged(file: ReplayedFile, offset: number, size: number): Promise<Uint8Array> {

@@ -12,6 +12,8 @@ import { cloneMissing, localFolder, restore } from './resume.ts'
 import type { Tool } from './transcript.ts'
 
 const RUNNING_MS = 60_000
+// how long a new session in a folder Claude Code asks the person to trust waits for their answer before its first message
+const TRUST_ANSWER_MS = 86_400_000
 const CONNECTED_MS = 10_000
 // a tell answers within a tool call of Claude Code's, and a woken session starts its turn within 3 s
 const TELL_MS = 25_000
@@ -328,7 +330,7 @@ async function takeSession(capture: Capture, asked: Extract<Delivered, { readonl
     const { session, cwd } = await restore(capture, asked.session, { take: true, if: { at: asked.claimedAt }, checkouts: here.checkouts })
     if (asked.trusted) await trustHere(capture, cwd, asked.from.name)
     // the asking machine's flags, with this machine's own Claude Code
-    await openTerminal(cwd, session.id, ['claude', ...asked.command.slice(1)], true)
+    await openTerminal(cwd, session.id, ['claude', ...asked.command.slice(1)], { isResumed: true })
     isOpened = true
     const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session.id), RUNNING_MS, here.onRecordsChange)
     if (running === undefined) throw new Error(`Claude Code listed the session ${session.id.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start`)
@@ -384,18 +386,29 @@ async function startSession(capture: Capture, asked: Extract<Delivered, { readon
 }
 
 // A new session in a terminal of herdr-core here, which this machine holds once Claude Code runs it, with `prompt` typed
-// into it. A start that fails once the terminal opened stops its copy.
+// into it. A start that fails once the terminal opened stops its copy. In a folder Claude Code does not trust here, Claude
+// Code first asks the person in that terminal, as it does when they run it there themselves, so the start answers once
+// the terminal opened, and the session takes its first message whenever they answer.
 async function startIn(capture: Capture, cwd: string, prompt: string, here: MoveHere): Promise<string> {
   const { relay, roots, device } = capture
   const session = crypto.randomUUID()
-  let isOpened = false
-  try {
-    await openTerminal(cwd, session, ['claude', '--session-id', session], false)
-    isOpened = true
-    const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session), RUNNING_MS, here.onRecordsChange)
-    if (running === undefined) throw new Error(`Claude Code listed the new session ${session.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start. A folder Claude Code does not trust there waits on its trust dialog.`)
+  const begin = async (running: RunningSession | undefined): Promise<void> => {
+    if (running === undefined) throw new Error(`Claude Code listed the new session ${session.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start, or no day after it in a folder it asked the person to trust.`)
     await takeClaim(relay, session, { take: false })
     if (prompt !== '') await tellHere(capture, session, { text: prompt, keys: [], lines: 0, sender: '' }, here)
+  }
+  let isOpened = false
+  try {
+    const isTrusted = await trusts(capture, cwd)
+    await openTerminal(cwd, session, ['claude', '--session-id', session], { isResumed: false })
+    isOpened = true
+    // the runner writes its run, which names the terminal a message goes to, within a second of Claude Code's record
+    const running = whenSessions(roots.claudeHome, (sessions) => (runOf(session)?.terminal === undefined ? undefined : sessions.find((entry) => entry.sessionId === session)), isTrusted ? RUNNING_MS : TRUST_ANSWER_MS, here.onRecordsChange)
+    if (!isTrusted) {
+      void running.then(begin).catch((error: unknown) => console.error(`${stamp()} ${device.name} could not give ${session} its first message: ${messageOf(error)}`))
+      return session
+    }
+    await begin(await running)
     return session
   } catch (error) {
     if (isOpened) await stopCopy(roots.claudeHome, session).catch((failure: unknown) => console.error(`${stamp()} ${device.name} could not stop the session ${session} it started: ${messageOf(failure)}`))
@@ -449,7 +462,7 @@ async function tellHere(capture: Capture, session: string, told: Tell, here: Mov
     const cwd = workingFolderOf(db, session)
     if (cwd === '') throw new Error(`${device.name} knows no working folder of ${id}.`)
     for (const stale of await labelledTerminals(session)) await killTerminal(stale)
-    await openTerminal(cwd, session, commandOf(session), true)
+    await openTerminal(cwd, session, commandOf(session), { isResumed: true })
     for (const started = Date.now(); (address = runOf(session)?.terminal) === undefined; await sleep(100)) {
       if (Date.now() - started > RUNNING_MS) throw new Error(`The runner of ${id} named no terminal of herdr-core on ${device.name} ${RUNNING_MS / 1000} s after it opened one.`)
     }
@@ -530,7 +543,7 @@ export async function takeHere(capture: Capture, asked: string, here: MoveHere):
   const held = (await claimsOf(relay, session)).get(session)?.id === device.id
   const cwd = held ? workingFolderOf(capture.db, session) : (await restore(capture, session, { take: true, checkouts: here.checkouts })).cwd
   if (cwd === '') throw new Error(`${device.name} knows no working folder of ${id}.`)
-  await openTerminal(cwd, session, ['claude'], true)
+  await openTerminal(cwd, session, ['claude'], { isResumed: true })
   const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session), RUNNING_MS, here.onRecordsChange)
   if (running === undefined) throw new Error(`Claude Code listed ${id} running on ${device.name} no ${RUNNING_MS / 1000} s after its start.`)
   return session

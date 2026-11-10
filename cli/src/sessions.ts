@@ -35,8 +35,10 @@ export async function indexesOf(relay: Relay, devices: Iterable<string>): Promis
   }))
 }
 
-// Every session the machines' indexes name, each from the index of the machine that holds it, else the latest. `read`
-// is the machines, their indexes and the claims a caller read already, as a restore reads only its own session's claim.
+// Every session with a conversation the machines' indexes name, each from the index of the machine that holds it, else
+// the latest. A session that never got a message has no transcript, whose first line names its working folder, and
+// nothing to resume, as Claude Code's own /resume lists it nowhere. `read` is the machines, their indexes and the
+// claims a caller read already, as a restore reads only its own session's claim.
 export async function listSessions(
   relay: Relay,
   read?: {
@@ -50,6 +52,7 @@ export async function listSessions(
   const latest = new Map<string, ListedSession>()
   for (const [device, index] of indexes) {
     for (const session of index) {
+      if (session.cwd === '') continue
       const earlier = latest.get(session.id)
       const holder = claims.get(session.id)
       if (earlier !== undefined && (earlier.device === holder?.id || (device !== holder?.id && earlier.lastActivity >= session.lastActivity))) continue

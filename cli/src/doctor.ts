@@ -9,7 +9,7 @@ import { serveSocket, type Status } from './serve.ts'
 type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
 
 const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod makes the anyhost program a service of the machine, which records its sessions from each login on.'
-const JOIN = 'Connect your machines in the anyhost mod: Connect Cloudflare on your first machine, and on every other machine paste the command Add a machine gives in /machines on a joined one.'
+const JOIN = 'Connect your machines in the anyhost mod: Connect Cloudflare on your first machine, and add every other machine from /machines on a joined one, or join it with the command anyhost machines --invite prints there.'
 const UPDATE = 'The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.'
 // The mod's Step shows Connect Cloudflare only while the relay is `unjoined` or `outdated`, so the failed update of a
 // relay the program still captures through, an older relay version at this protocol, is fixed from the terminal.
@@ -92,7 +92,7 @@ function programChecks(address: string, status: Status | undefined): Check[] {
         : [
             {
               problem: `The link of the option join joined no relay: ${joining.error}`,
-              fix: 'The program does not try that link again. Press Add a machine in /machines on a joined machine, then paste its command into the Connect your machines step of the anyhost mod, or run anyhost join with its link here.',
+              fix: 'The program does not try that link again. Add this machine again from /machines on a joined machine, or run anyhost join here with the link anyhost machines --invite prints there.',
             },
           ]
   // the mod shows its Connect your machines step only for an unjoined or outdated relay, so a connected one has no button
