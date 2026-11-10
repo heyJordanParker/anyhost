@@ -2,6 +2,24 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.4.0] - 2026-11-10
+
+### Added
+- Every session anyhost moves or starts runs in a terminal of herdr-core, so the Herdr app on any of your machines and Herdr mobile show it and type into it.
+- **The anyhost pane of the Herdr app** is an inbox of every agent on every machine: the ones that came back to you on top, each with its project, title, machine and what it does now (Working, Needs you, Done), then shelves for the working and older agents and your machines. Clicking an agent shows its terminal, or resumes it here or on the machine that holds it, **Move** sends it to another machine, **+** copies the command that joins a new machine, and the pen starts a new agent here. anyhost installs the pane into the Herdr app at each start.
+- Claude manages your agents from any session: it lists every machine and agent with what each does now, starts an agent on any machine with its first message, messages an agent or reads its screen wherever it runs, answers its permission prompt, moves it, takes it onto this machine when its own machine is offline, and adds or removes a machine. A session you make your CTO or project manager starts and steers the others, and a worker's message back names it, so the CTO hears when it is done or stuck. `anyhost tell <session> [text]` types into a session from a terminal, and `anyhost new` takes a first message and starts on this machine too.
+- A Claude Code session idle for 15 minutes ends its process and keeps its screen, and opening it in the Herdr app or Herdr mobile, your next key, or a message resumes the same conversation, so it is ready before you type, does the work, and rests again. Nothing shows the rest: a resting session reads as idle everywhere. A session running a background command stays up until the command ends, and a `/loop` that runs at least every 15 minutes keeps its session awake. Sessions anyhost opens, and every Claude Code the Herdr app starts, sleep this way, so many open sessions no longer keep a laptop busy.
+
+### Changed
+- A moved session keeps the Claude Code command and flags it ran with, instead of starting as a plain background job.
+- A session's copy that ignores its stop ends 10 seconds later, so a move reaches the other machine instead of waiting a minute and failing.
+- `anyhost doctor` checks that herdr-core is installed, as no session moves to or starts on a machine without it.
+- `anyhost resume` of a session this machine holds opens it from its own files, which are as new as your history or newer, instead of restoring over them, and refuses a session that already runs here.
+- `anyhost list` and `anyhost machines` answer through the running anyhost, so the Herdr pane's refresh no longer opens a connection to your relay each minute.
+
+### Removed
+- `anyhost attach`, its streams through the relay and its direct connections over Tailscale and the local network. The Herdr app shows every session instead, so `anyhost doctor` no longer checks your terminal app's Local Network access.
+
 ## [0.3.0] - 2026-11-08
 
 ### Added
