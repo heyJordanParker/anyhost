@@ -2,6 +2,25 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.5.0] - 2026-11-10
+
+### Added
+- **Add a machine** installs anyhost on another machine over ssh and joins it, with no command to paste: pick one of your Tailscale network in `/machines` or the Herdr pane, type how ssh reaches it, or ask Claude. It installs herdr-core and cmod there too, and every machine's herdr-core reaches the others, so the Herdr app on any machine shows them all.
+- **The Herdr pane takes the place of the Agents list**, after t3code's sidebar: search, the sessions that need you first, a Working shelf, and a Settled shelf. **Settle** puts a session away on every machine, and one idle for 7 days settles by itself, which you change or turn off from the shelf's clock. The pen starts a session in a project you pick, on this machine or the machine you picked last.
+- A restart of your machine keeps your sessions where they were: each comes back resting in its own space and tab, and wakes as you open it.
+
+### Changed
+- A session opens in the space of its project in the Herdr app, beside its project's other tabs, instead of a tab of whatever space you were in.
+- A session that wakes keeps its model and effort and its whole cached conversation, and never sends its first message again.
+- A session with no message yet stays off every list, so opening one never starts an empty session.
+- A session that began with a slash command is named after the command instead of its id.
+- A new session in a folder Claude Code doesn't trust yet waits in its terminal for your answer, and takes its first message once you trust the folder, instead of failing after a minute.
+- A machine with no GitHub key clones a session's GitHub repository over https, so a public repository needs nothing and a private one the machine's git login.
+
+### Fixed
+- Claude Code draws at the size of its window after a resize, instead of the size before it.
+- A session working in `/tmp` moves and backs up without reading all of `/tmp` as its code.
+
 ## [0.4.0] - 2026-11-10
 
 ### Added

@@ -1,5 +1,5 @@
 import type { RenderElement } from 'claude-code'
-import { clipboard, http, messageOf, type Mod, type Page, type PageInit, type Step } from '../../node_modules/@cmodjs/core/mod.js'
+import { http, messageOf, type Mod, type Page, type PageInit, type Step } from '../../node_modules/@cmodjs/core/mod.js'
 import type { Program } from '../../node_modules/@cmodjs/core/jobs/program.js'
 import { Box, Button, Input, Link, Text } from '../../node_modules/@cmodjs/core/ui/elements.js'
 import type { Device as Machine } from '../../relay/protocol.ts'
@@ -12,8 +12,8 @@ type Connecting = { readonly is: 'running' | 'joined' | 'failed'; readonly lines
 type Joining = { readonly is: 'running' } | { readonly is: 'failed'; readonly error: string }
 type Status = { readonly relay: { readonly state: string; readonly message: string }; readonly connecting?: Connecting; readonly joining?: Joining }
 type JoinedRelay = { readonly url: string }
-type Machines = { readonly here: string; readonly machines: readonly Machine[] }
-type Invite = { readonly command: string; readonly expiresAt: string }
+type Candidate = { readonly target: string; readonly os: string; readonly online: boolean }
+type Machines = { readonly here: string; readonly machines: readonly Machine[]; readonly candidates: readonly Candidate[]; readonly adding: readonly { readonly target: string; readonly error?: string }[] }
 
 export type AnyhostState = {
   memory: {
@@ -26,14 +26,15 @@ export type AnyhostState = {
     // the program's relay state at the Step's last check
     relayState: string | null
     machines: Machines | null
-    invite: Invite | null
+    // whether /machines shows the machines it can add
+    isAdding: boolean
     removing: string | null
     problem: string | null
   }
 }
 
 export const initialState: AnyhostState = {
-  memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, invite: null, removing: null, problem: null },
+  memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null },
 }
 
 // The relay states in which this machine needs the Step: not joined, as before a join or once the program forgot a
@@ -154,13 +155,13 @@ function ConnectView({ mod }: { readonly mod: Mod<AnyhostState> }): RenderElemen
       </Box>
       <Box flexDirection="column">
         <Text bold>On every other machine</Text>
-        <Text wrap="wrap">Paste the command or the invite link that Add a machine gives in /machines on a joined machine.</Text>
+        <Text wrap="wrap">Add it from /machines on a joined machine, which installs anyhost here over ssh, or ask Claude there to add it. A machine it can't reach over ssh joins here with the command anyhost machines --invite prints there.</Text>
         {joining === null ? null : joining.is === 'running' ? (
           <Text dimColor wrap="wrap">Joining with the invite link of the install command</Text>
         ) : (
           <Box flexDirection="column">
             <Text color="error" wrap="wrap">{`The invite link of the install command joined no relay: ${joining.error}`}</Text>
-            <Text wrap="wrap">anyhost tries a link once. Press Add a machine in /machines on a joined machine for a new invite, and paste its command here.</Text>
+            <Text wrap="wrap">anyhost tries a link once. Add this machine again from /machines on a joined machine.</Text>
           </Box>
         )}
         <Input key="invite" label="› " placeholder="cmod install … --option 'join=https://…/v1/join#…'" submitLabel="join" onSubmit={(link) => void joinWith(mod, link)} />
@@ -219,14 +220,19 @@ export async function showMachines(mod: Mod<AnyhostState>): Promise<void> {
 // Opens or closes /machines, reading the machines as it opens.
 export async function toggleMachines(mod: Mod<AnyhostState>, page: Page): Promise<void> {
   if (!page.isOpen) {
-    mod.state.memory.invite = null
+    mod.state.memory.isAdding = false
     mod.state.memory.removing = null
     void showMachines(mod)
   }
   await page.toggle({ focus: true })
 }
 
-const addMachine = (mod: Mod<AnyhostState>): Promise<void> => act(mod, async () => void (mod.state.memory.invite = await askProgram<Invite>(mod, '/machines/invite', {})))
+// The program installs anyhost on the machine over ssh and joins it, which takes minutes, and /machines shows how it goes.
+const addMachine = (mod: Mod<AnyhostState>, target: string): Promise<void> =>
+  act(mod, async () => {
+    await askProgram(mod, '/machines/add', { target: target.trim() })
+    await showMachines(mod)
+  })
 
 const remove = (mod: Mod<AnyhostState>, id: string): Promise<void> =>
   act(mod, async () => {
@@ -235,31 +241,32 @@ const remove = (mod: Mod<AnyhostState>, id: string): Promise<void> =>
     await showMachines(mod)
   })
 
-async function copy(mod: Mod<AnyhostState>, command: string): Promise<void> {
-  await clipboard.write(command)
-  mod.toast.success('Copied the install command')
-}
-
 export const machinesPage: PageInit<AnyhostState> = {
   id: 'machines',
   title: 'Machines',
   render: (mod) => {
-    const { machines, invite, removing, problem } = mod.state.memory
+    const { machines, isAdding, removing, problem } = mod.state.memory
     return (
       <Box flexDirection="column" gap={1} paddingX={1}>
         {machines === null ? <Text dimColor>{problem === null ? 'Reading your machines' : ''}</Text> : <MachineList mod={mod} machines={machines} removing={removing} />}
-        {invite === null ? (
+        {machines?.adding.map(({ target, error }) => (error === undefined ? <Text key={`adding-${target}`} dimColor>{`Adding ${target}: anyhost installs there and joins it`}</Text> : <Text key={`adding-${target}`} color="error" wrap="wrap">{`${target} was not added: ${error}`}</Text>))}
+        {!isAdding ? (
           <Box>
-            <Button key="add" plain onPress={() => addMachine(mod)}><Text color="claude">[Add a machine]</Text></Button>
+            <Button key="add" plain onPress={() => void (mod.state.memory.isAdding = true)}><Text color="claude">[Add a machine]</Text></Button>
           </Box>
         ) : (
           <Box flexDirection="column">
-            <Text wrap="wrap">{`Paste this on the machine to join. It joins one machine, until ${momentOf(invite.expiresAt)}.`}</Text>
-            <Text>{invite.command}</Text>
-            <Box gap={2}>
-              <Button key="copy" plain onPress={() => copy(mod, invite.command)}><Text color="claude">[Copy]</Text></Button>
-              <Button key="add-another" plain dimColor onPress={() => addMachine(mod)}>[New invite]</Button>
-            </Box>
+            {machines === null || machines.candidates.length === 0 ? null : (
+              <Box gap={2}>
+                <Text dimColor>On your Tailscale network:</Text>
+                {machines.candidates.map(({ target, online }) => (
+                  <Button key={`candidate-${target}`} plain onPress={() => addMachine(mod, target)}>
+                    <Text color={online ? 'claude' : undefined} dimColor={!online}>{`[${target}]`}</Text>
+                  </Button>
+                ))}
+              </Box>
+            )}
+            <Input key="target" label="› " placeholder="how ssh reaches it: devbox, me@10.0.0.7" submitLabel="add" onSubmit={(target) => void addMachine(mod, target)} />
           </Box>
         )}
         {problem === null ? null : <Text color="error" wrap="wrap">{problem}</Text>}
@@ -284,7 +291,7 @@ function MachineList({ mod, machines, removing }: { readonly mod: Mod<AnyhostSta
           </Box>
           {removing !== machine.id ? null : (
             <Box flexDirection="column" paddingLeft={2}>
-              <Text wrap="wrap">{`Remove ${machine.name}? It stops uploading at once, and its sessions stay listed and resumable here. It joins again with a new invite.`}</Text>
+              <Text wrap="wrap">{`Remove ${machine.name}? It stops uploading at once, and its sessions stay listed and resumable here. Add a machine joins it again.`}</Text>
               <Box gap={2}>
                 <Button key={`remove-yes-${machine.id}`} plain onPress={() => remove(mod, machine.id)}><Text color="error">[Remove]</Text></Button>
                 <Button key={`remove-no-${machine.id}`} plain dimColor onPress={() => void (mod.state.memory.removing = null)}>[Cancel]</Button>
