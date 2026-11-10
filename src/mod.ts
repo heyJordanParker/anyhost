@@ -2,6 +2,7 @@ import { defineMod, device, messageOf, sessions } from '../node_modules/@cmodjs/
 import { program } from '../node_modules/@cmodjs/core/jobs/program.js'
 import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
 import { option } from '../node_modules/@cmodjs/core/options.js'
+import { agentTools } from './agents.js'
 import { askProgram, connectStep, FOLLOW_MS, initialState, machinesPage, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
 
 // A move of the session the program runs or ran: the machine it goes to, its step and the line that says it. It copies
@@ -57,6 +58,7 @@ export const anyhost = defineMod({
       }),
     )
     reachProgram(mod, capture)
+    for (const job of agentTools(mod)) mod.use(job)
     const page = mod.sidebar.add(machinesPage)
     mod.use(
       slashCommand({
@@ -98,11 +100,10 @@ export const anyhost = defineMod({
     }
     // a session anyhost resume opened after a takeover says at once when the machine it came from did not hear of it
     sessions.current.onSessionStart(async () => void (await check()))
-    const continuesOn = (machine: string): string => `This session continues on ${machine}. Run anyhost attach ${sessions.current.id.slice(0, 8)} here to keep working on it.`
+    const continuesOn = (machine: string): string => `This session continues on ${machine}, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.`
     // The prompt waits PROMPT_ASK_MS at most for the program's answer, else goes on with the last one, so a move this
     // session asked for refuses the prompt even while the program is busy with it. The check it gave up on still
-    // records its answer once it comes. A session that moved and still shows here, as outside herdr nothing types the
-    // attach into its terminal, says how to go on with it.
+    // records its answer once it comes. A session that moved and still shows here says where to go on with it.
     sessions.current.beforePrompt(
       async () => {
         const session = sessions.current.id
@@ -122,7 +123,7 @@ export const anyhost = defineMod({
     )
 
     // /move asks the program, which drains, seals and sends the session, and its toast follows each step: the
-    // session's own Claude Code ends once the session runs there, or refuses each prompt outside herdr. Until the machine
+    // session's own Claude Code ends once the session runs there, and each prompt it still takes is refused. Until the machine
     // answers, Keep it here ends the move and keeps the session here. One toast follows a session's move, whether this
     // session's /move or a check that found it running asked for it.
     const follow = (): void => {

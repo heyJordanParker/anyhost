@@ -3,27 +3,30 @@ import { resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import plugin from '../../.claude-plugin/plugin.json'
 import type * as Protocol from '../../relay/protocol.ts'
-import { attach } from './attach.ts'
 import { openCapture, type Capture } from './capture.ts'
 import { connectCloudflare, join, type Connecting, type Progress } from './connect.ts'
 import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, otherMachine, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
 import type { Moving } from './move.ts'
 import { connectRelay } from './relay.ts'
-import { openSession, repoSlug, restore } from './resume.ts'
+import { openSession, repoSlug, resumeHere } from './resume.ts'
+import { runSession } from './runner.ts'
 import { serve, serveSocket, type JoinedRelay, type Status } from './serve.ts'
 import { listSessions, type ListedSession } from './sessions.ts'
 
 const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex session of every machine in your own Cloudflare account.
 
   anyhost list [--json]              list every session of every machine
-  anyhost resume <session> [--take]  continue a Claude Code or Codex session on this machine
-  anyhost attach <session>           show a session the machine that holds it runs, and type into it
+  anyhost resume <session> [--take]  continue a Claude Code or Codex session on this machine, in this terminal
   anyhost move <session> <machine>   move a session this machine runs to another machine, which runs it from then on
-  anyhost new <machine> <folder>     start a session on another machine in the same repository, and show it here
+  anyhost new <machine> <folder> [prompt]
+                                     start a session on a machine, this one too, in the same repository, and type prompt into it
+  anyhost tell <session> [text]      type text into a session wherever it runs, waking it, and print its screen; no text only prints it
+  anyhost run [--session <id>] [-- <claude command>]
+                                     run Claude Code, ending its process while it rests and resuming it at the next key
   anyhost connect                    set your relay up in your Cloudflare account and join this machine to it
   anyhost join <link>                join this machine with an invite link from another machine
-  anyhost machines                   list every machine joined to your relay
+  anyhost machines [--json]          list every machine joined to your relay
   anyhost machines --invite          print the command that joins one more machine
   anyhost machines --remove <name>   remove a machine; its sessions stay listed and resumable
   anyhost doctor                     check this machine's relay, the machine and the program
@@ -104,13 +107,13 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
 // that machine's answer to the sockets this machine has open as it comes, and only the program's own socket stays open
 // while the session starts. The program waits for its relay, and so does the command, saying so first when the relay
 // is not connected, until Ctrl-C ends it. Answers the session.
-async function startThroughProgram(machine: string, folder: string): Promise<string> {
+async function startThroughProgram(machine: string, folder: string, prompt: string): Promise<string> {
   const status = await askProgram<Status>('/status')
   if (status === undefined) throw noProgram()
   const { relay } = status
   if (relay.state !== 'connected') console.log(`Waiting for the relay at ${relay.url} to connect.${relay.message === '' ? '' : ` ${relay.message}`} Ctrl-C stops waiting.`)
   // the program works in a folder of its own
-  const started = await askProgram<{ readonly session: string }>('/new', { machine, folder: resolve(folder) })
+  const started = await askProgram<{ readonly session: string }>('/new', { machine, folder: resolve(folder), prompt })
   if (started === undefined) throw new Error(`The anyhost program at ${serveSocket()} stopped answering before ${machine} started a session. anyhost list shows whether it did.`)
   return started.session
 }
@@ -180,6 +183,12 @@ const TERMINAL: Progress = {
 }
 
 async function main(argv: string[]): Promise<number> {
+  if (argv[0] === 'run') {
+    const split = argv.indexOf('--')
+    const { values: run } = parseArgs({ args: argv.slice(1, split < 0 ? undefined : split), options: { session: { type: 'string' } } })
+    const command = split < 0 ? [] : argv.slice(split + 1)
+    process.exit(await runSession(command.length === 0 ? ['claude'] : command, run.session))
+  }
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -224,12 +233,14 @@ async function main(argv: string[]): Promise<number> {
     console.log(`Removed ${removed.name}. Its sessions stay listed and resumable.`)
     return 0
   }
+  // the program answers from the socket it keeps to the relay, so a command opens one only while no program runs
   if (command === 'machines' && rest.length === 0 && values.invite !== true && values.remove === undefined) {
-    console.log(await connected(async ({ relay, device }) => machineTable(await machinesOf(relay), device.id)))
+    const { here, machines } = (await askProgram<{ readonly here: string; readonly machines: Protocol.Device[] }>('/machines')) ?? (await connected(async ({ relay, device }) => ({ here: device.id, machines: await machinesOf(relay) })))
+    console.log(values.json === true ? JSON.stringify({ here, machines }) : machineTable(machines, here))
     return 0
   }
   if (command === 'list') {
-    const sessions = await connected(async ({ relay }) => await listSessions(relay))
+    const sessions = (await askProgram<{ readonly agents: ListedSession[] }>('/agents'))?.agents ?? (await connected(async ({ relay }) => await listSessions(relay)))
     console.log(values.json === true ? JSON.stringify(sessions, null, 2) : table(sessions))
     return 0
   }
@@ -237,16 +248,21 @@ async function main(argv: string[]): Promise<number> {
     const id = rest[0]
     const { checkouts } = await personOptions()
     // the session opens once the connection is closed, as it runs for as long as the person works in it
-    const { session, cwd } = await connected(async (capture) => await restore(capture, id, { take: values.take === true, checkouts: checkouts ?? '' }))
-    return await openSession(session, cwd)
+    const { tool, cwd } = await connected(async (capture) => await resumeHere(capture, id, { take: values.take === true, checkouts: checkouts ?? '' }))
+    return await openSession(tool, id, cwd)
   }
-  if (command === 'attach' && rest.length === 1 && rest[0] !== undefined) return await attach(rest[0])
   if (command === 'move' && rest.length === 2 && rest[0] !== undefined && rest[1] !== undefined) return await moveThroughProgram(rest[0], rest[1])
-  if (command === 'new' && rest.length === 2 && rest[0] !== undefined && rest[1] !== undefined) {
-    const [machine, folder] = rest
-    const session = await startThroughProgram(machine, folder)
-    console.log(`${machine} started ${session.slice(0, 8)}.`)
-    return await attach(session)
+  if (command === 'new' && (rest.length === 2 || rest.length === 3) && rest[0] !== undefined && rest[1] !== undefined) {
+    const [machine, folder, prompt = ''] = rest
+    const session = await startThroughProgram(machine, folder, prompt)
+    console.log(`${machine} started ${session.slice(0, 8)} in a terminal of herdr-core there.`)
+    return 0
+  }
+  if (command === 'tell' && (rest.length === 1 || rest.length === 2) && rest[0] !== undefined) {
+    const told = await askProgram<{ readonly machine: string; readonly screen: string }>('/agents/tell', { session: rest[0], text: rest[1] ?? '' })
+    if (told === undefined) throw noProgram()
+    console.log(told.screen)
+    return 0
   }
   if (command === 'doctor') return await doctor()
   if (command === 'serve') {

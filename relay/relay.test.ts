@@ -21,12 +21,9 @@ import {
   PROTOCOL_VERSION,
   RELAY_VERSION,
   REQUEST,
-  STREAM,
   cloneFixFor,
   decodeMessage,
   encodeMessage,
-  encodeStream,
-  streamOf,
   type Condition,
   type JoiningDevice,
   type Op,
@@ -942,8 +939,8 @@ describe('messages between machines', () => {
   test('move and moved reach the other machine with from, and a message to a machine with no socket answers offline', async () => {
     const target = await joinNew(mac, 'target')
     const session = crypto.randomUUID()
-    mac.socket.send({ t: 'move', id: 'm1', to: target.device.id, session, trusted: true })
-    expect(await target.socket.message('move')).toEqual({ t: 'move', id: 'm1', to: target.device.id, session, trusted: true, from: { id: mac.device.id, name: mac.device.name } })
+    mac.socket.send({ t: 'move', id: 'm1', to: target.device.id, session, trusted: true, command: ['claude'] })
+    expect(await target.socket.message('move')).toEqual({ t: 'move', id: 'm1', to: target.device.id, session, trusted: true, command: ['claude'], from: { id: mac.device.id, name: mac.device.name } })
     target.socket.send({ t: 'moved', id: 'm1', to: mac.device.id })
     expect(await mac.socket.message('moved')).toEqual({ t: 'moved', id: 'm1', to: mac.device.id, from: { id: target.device.id, name: target.device.name } })
     mac.socket.send({ t: 'move', id: 'm2', to: imported.old.id, session, trusted: true })
@@ -951,53 +948,5 @@ describe('messages between machines', () => {
     mac.socket.send({ t: 'released', session, to: target.device.id })
     expect(await mac.socket.message('invalid')).toMatchObject({ message: 'Only the relay sends released.' })
     await target.socket.none('released')
-  })
-
-  test('an attach stream carries attached back, bytes both ways and detach, and ends when a side leaves', async () => {
-    const host = await joinNew(mac, 'host')
-    const viewer = await connect(mac.token, mac.device.name, mac.device.roots)
-    await viewer.message('welcome')
-    const stream = 0xfeed1234
-    const session = crypto.randomUUID()
-    const key = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')
-    viewer.send({ t: 'attach', stream, to: host.device.id, session, cols: 80, rows: 24, key })
-    expect(await host.socket.message('attach')).toMatchObject({ stream, session, cols: 80, rows: 24, key, from: { id: mac.device.id } })
-    // the host's answer goes back by its stream, to the socket that attached
-    host.socket.send({ t: 'attached', stream, port: 0, addresses: [] })
-    expect(await viewer.message('attached')).toEqual({ t: 'attached', stream, port: 0, addresses: [], from: { id: host.device.id, name: host.device.name } })
-    const isStream = (m: Message): boolean => m instanceof Uint8Array && m[0] === STREAM && streamOf(m) === stream
-    viewer.send(encodeStream(stream, new TextEncoder().encode('ls\r')))
-    expect(new TextDecoder().decode(((await host.socket.next(isStream, 'keys')) as Uint8Array).subarray(5))).toBe('ls\r')
-    host.socket.send(encodeStream(stream, new TextEncoder().encode('README.md\r\n')))
-    expect(new TextDecoder().decode(((await viewer.next(isStream, 'output')) as Uint8Array).subarray(5))).toBe('README.md\r\n')
-    // the stream goes to the socket that attached, not to the viewer machine's other sockets
-    await mac.socket.none('attach', 300)
-    await mac.socket.none('attached', 300)
-    expect(await mac.socket.next(isStream, 'a stranger\'s copy', 500).catch(() => undefined)).toBeUndefined()
-    // a size travels as a frame of the stream, so a resize is no message the Pool routes
-    viewer.send({ t: 'resize', stream, cols: 120, rows: 40 })
-    expect(await viewer.message('invalid')).toEqual({ t: 'invalid', message: 'A resize message names the machine it goes to in to.' })
-    await host.socket.none('resize', 300)
-    host.socket.send({ t: 'detach', stream })
-    expect(await viewer.message('detach')).toMatchObject({ stream, from: { id: host.device.id } })
-    // a stream that ended answers its next bytes with detach
-    viewer.send(encodeStream(stream, new TextEncoder().encode('x')))
-    expect(await viewer.message('detach')).toMatchObject({ stream })
-    viewer.send({ t: 'attach', stream: 7, to: host.device.id, session, cols: 80, rows: 24, key })
-    await host.socket.message('attach')
-    viewer.close()
-    expect(await host.socket.message('detach')).toMatchObject({ stream: 7, from: { id: mac.device.id } })
-    // a host whose last socket closes ends every stream viewed on it
-    const second = await connect(mac.token, mac.device.name, mac.device.roots)
-    await second.message('welcome')
-    second.send({ t: 'attach', stream: 8, to: host.device.id, session, cols: 80, rows: 24, key })
-    second.send({ t: 'attach', stream: 9, to: host.device.id, session, cols: 80, rows: 24, key })
-    await host.socket.message('attach')
-    await host.socket.message('attach')
-    host.socket.close()
-    const ended = [await second.message('detach'), await second.message('detach')].map((message) => message['stream'])
-    expect(ended.sort()).toEqual([8, 9])
-    second.send(encodeStream(8, new TextEncoder().encode('x')))
-    expect(await second.message('detach')).toEqual({ t: 'detach', stream: 8 })
   })
 })

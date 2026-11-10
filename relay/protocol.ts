@@ -2,7 +2,7 @@
 // `cli/src/relay.ts` both compile against this file, so it uses nothing but the language: no Worker or Bun API.
 
 // A new relay keeps answering every protocol before its own, so machines on two versions work side by side.
-export const RELAY_VERSION = 1
+export const RELAY_VERSION = 2
 export const PROTOCOL_VERSION = 1
 // The Workers runtime the relay is deployed and tested at.
 export const COMPATIBILITY_DATE = '2026-11-01'
@@ -29,7 +29,6 @@ export const MAX_KEYS = 1000
 // The first byte of a binary WebSocket message.
 export const REQUEST = 0x01
 export const ANSWER = 0x02
-export const STREAM = 0x03
 
 // The codes the Pool closes a socket with: its token is unknown, its machine was removed, or a machine with its id
 // and another name is connected, as a cloned machine is.
@@ -129,29 +128,36 @@ export type Released = { readonly t: 'released'; readonly session: string; reado
 export type Heard = { readonly t: 'heard'; readonly session: string; readonly to: string }
 export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceRef; readonly waiting: readonly Released[] }
 
-// What a machine sends another: the Pool routes it to every live socket of `to`, a device id, adding `from`. `attached` and
-// `detach` name only their stream, whose two machines the Pool knows from the `attach` that opened it. `key` is the
-// base64 of the 32 random bytes that key the stream's direct connection, and `attached` is the host's answer, with the
-// port and the addresses that connection reaches it at, and `hostStream`, the random id the host drew for its own end of
-// the stream as it opened it, which a host that restarted or forgot the viewer draws anew. `move` asks `to` to take the
-// session and run it in Claude Code's background, taking it only from the claim whose `at` is `claimedAt`, the asking
-// machine's as the move went, and `moved`, with the same `id`, answers that it runs it, or why it does not. `start` asks `to` to
-// start a new session in its checkout of `repo` on `branch`, in `folder` inside it, or outside git in the folder at
-// `folder` on the asking machine, and `started` answers the session, or why it started none. `trusted` says the asking
-// machine's Claude Code trusts the session's folder, so `to` trusts the folder the session runs in there.
+// What a machine sends another: the Pool routes it to every live socket of `to`, a device id, adding `from`. `move` asks
+// `to` to take the session and run `command`, the Claude Code command line the session ran with, in a terminal of
+// herdr-core there, taking it only from the claim whose `at` is `claimedAt`, the asking machine's as the move went, and
+// `moved`, with the same `id`, answers that it runs it, or why it does not. `start` asks `to` to start a new session in
+// its checkout of `repo` on `branch`, in `folder` inside it, or outside git in the folder at `folder` on the asking
+// machine, and types `prompt` into it once it runs, and `started` answers the session, or why it started none. `trusted`
+// says the asking machine's Claude Code trusts the session's folder, so `to` trusts the folder the session runs in there.
+// `tell` types `text` into the terminal the session runs in on `to`, which wakes a sleeping session, or presses `keys`,
+// or only reads it when both are empty, with `sender` naming the agent that sends it, and `told` answers what the session
+// does now and the terminal's screen with `lines` lines of history, or why it has none. `list` asks `to` what each
+// session it runs does now, which `listed` answers.
 export type Routed =
-  | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly trusted: boolean; readonly claimedAt: string }
+  | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly trusted: boolean; readonly claimedAt: string; readonly command: readonly string[] }
   | { readonly t: 'moved'; readonly id: string; readonly to: string }
   | { readonly t: 'moved'; readonly id: string; readonly to: string; readonly error: string }
-  | { readonly t: 'start'; readonly id: string; readonly to: string; readonly repo: string; readonly branch: string; readonly folder: string; readonly trusted: boolean }
+  | { readonly t: 'start'; readonly id: string; readonly to: string; readonly repo: string; readonly branch: string; readonly folder: string; readonly trusted: boolean; readonly prompt: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly session: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly error: string }
-  | { readonly t: 'attach'; readonly stream: number; readonly to: string; readonly session: string; readonly cols: number; readonly rows: number; readonly key: string }
-  | { readonly t: 'attached'; readonly stream: number; readonly hostStream: number; readonly port: number; readonly addresses: readonly string[] }
-  | { readonly t: 'detach'; readonly stream: number }
+  | { readonly t: 'tell'; readonly id: string; readonly to: string; readonly session: string; readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string }
+  | { readonly t: 'told'; readonly id: string; readonly to: string; readonly status: AgentStatus; readonly screen: string }
+  | { readonly t: 'told'; readonly id: string; readonly to: string; readonly error: string }
+  | { readonly t: 'list'; readonly id: string; readonly to: string }
+  | { readonly t: 'listed'; readonly id: string; readonly to: string; readonly statuses: Readonly<Record<string, AgentStatus>> }
+// What a session does on the machine that runs it: Claude Code's record says `busy`, or `shell` while a background
+// command runs, `idle`, or `waiting` at a permission prompt, and a runner whose Claude Code ended while it rests is
+// `asleep`.
+export type AgentStatus = 'working' | 'idle' | 'waiting' | 'asleep'
 export type Delivered = Routed & { readonly from: DeviceRef }
 // The Pool's answer to a message for a machine with no socket alive within LIVE_MS, or to one it cannot read.
-export type Offline = { readonly t: 'offline'; readonly id?: string; readonly stream?: number; readonly to: string }
+export type Offline = { readonly t: 'offline'; readonly id?: string; readonly to: string }
 export type Invalid = { readonly t: 'invalid'; readonly message: string }
 export type FromPool = Welcome | Released | Delivered | Offline | Invalid
 
@@ -184,15 +190,3 @@ export function decodeMessage(message: Uint8Array): { readonly header: unknown; 
   if (end < 0) throw new Error('The message has no header line.')
   return { header: JSON.parse(decoder.decode(message.subarray(1, end))), bytes: message.subarray(end + 1) }
 }
-
-// An attach stream's bytes: the kind byte, the stream id as 4 bytes big-endian, then one frame of the stream, which
-// `cli/src/stream.ts` numbers: its kind, the offset of its first byte, and its bytes.
-export function encodeStream(stream: number, bytes: Uint8Array): Uint8Array {
-  const message = new Uint8Array(5 + bytes.length)
-  message[0] = STREAM
-  new DataView(message.buffer).setUint32(1, stream)
-  message.set(bytes, 5)
-  return message
-}
-
-export const streamOf = (message: Uint8Array): number => new DataView(message.buffer, message.byteOffset, message.byteLength).getUint32(1)
