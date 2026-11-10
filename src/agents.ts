@@ -20,7 +20,7 @@ type Machines = { readonly here: string; readonly machines: readonly { readonly 
 type Told = { readonly machine: string; readonly session: string; readonly status: string; readonly screen: string }
 
 const AGENT = { type: 'string', description: 'The agent id, or its first 8 characters.' } as const
-const WAKES = 'An agent that sleeps, as each does 15 minutes after its last turn, wakes at the message, works, and sleeps again on its own.'
+const WAKES = 'An idle agent takes the message at once, works, and rests again on its own.'
 
 // The tools that let Claude manage every agent of every machine through this machine's anyhost program, so a session
 // that manages others, such as a CTO or a project manager, does what a person does in the Herdr app.
@@ -52,7 +52,7 @@ export function agentTools(mod: Mod<AnyhostState>) {
     tool({
       name: 'list_agents',
       description:
-        'List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository and folder. The status is working, idle, waiting (at a permission prompt, which press_keys answers), asleep (its Claude Code process ended while it rests, and a message wakes it), or empty when it runs on no connected machine.',
+        'List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository and folder. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine.',
       inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, description: 'How many to list, 30 by default.' } } },
       execute: async ({ limit = 30 }) => {
         const { agents } = await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')
@@ -108,7 +108,7 @@ export function agentTools(mod: Mod<AnyhostState>) {
     }),
     tool({
       name: 'take_agent',
-      description: 'Continue an agent on this machine from its history in R2, as when the machine that runs it sleeps, is offline or died. That machine stops its copy as it next connects. move_agent moves an agent whose machine is connected without that.',
+      description: 'Continue an agent on this machine from its history in R2, as when the machine that runs it is closed, offline or died. That machine stops its copy as it next connects. move_agent moves an agent whose machine is connected without that.',
       inputSchema: { type: 'object', properties: { agent: AGENT }, required: ['agent'] },
       execute: ({ agent }) => askProgram<{ readonly session: string; readonly machine: string }>(mod, '/agents/take', { session: agent }),
     }),

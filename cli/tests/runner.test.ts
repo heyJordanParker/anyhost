@@ -89,6 +89,32 @@ test('anyhost run wakes a session that never got a message with the command it s
   terminal.close()
 }, 30_000)
 
+test('anyhost run asks for focus reports while Claude Code rests, and a focus wakes it before any key, with no focus report reaching it', async () => {
+  const folder = temporaryFolder()
+  const claudeHome = join(folder, '.claude')
+  mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
+  mkdirSync(join(claudeHome, 'projects', '-work'), { recursive: true })
+  writeFileSync(join(claudeHome, 'projects', '-work', `${SESSION}.jsonl`), '{"type":"user"}\n')
+  const claude = fakeClaude(folder)
+  let shown = ''
+  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: (_terminal, bytes) => void (shown += new TextDecoder().decode(bytes)) })
+  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state'), ANYHOST_SLEEP_MS: '500' }
+  children.push(Bun.spawn(['bun', CLI, 'run', '--', claude], { env, terminal }))
+
+  await until(() => shown.includes('started'), 'Claude Code starting')
+  await until(() => readdirSync(join(claudeHome, 'sessions')).length === 0, 'Claude Code ending', 10_000)
+  await until(() => shown.endsWith('\x1b[?1004h'), 'the runner asking for focus reports')
+  const asleep = shown.length
+  // a viewer focusing the terminal, as the Herdr app does when the session opens
+  terminal.write('\x1b[I')
+  await until(() => shown.slice(asleep).includes(`started --resume ${SESSION}`), 'Claude Code starting at the focus')
+  expect(shown.slice(asleep)).toStartWith('\x1b[?1004l')
+  terminal.write('book the train\r')
+  await until(() => shown.includes('typed '), 'the key reaching Claude Code')
+  expect(shown).toContain('typed book the train')
+  terminal.close()
+}, 30_000)
+
 // The suite missed it: a /loop's next run is a turn no key starts, and Claude Code's record says idle between runs, so
 // the runner ended the loop at the sleep time after the last key.
 test('anyhost run counts a turn Claude Code starts on its own as a key, and sleeps only the sleep time after it ends', async () => {

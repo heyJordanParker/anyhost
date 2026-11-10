@@ -459,7 +459,7 @@ async function tellHere(capture: Capture, session: string, told: Tell, here: Mov
     await sendTo(address, tagged(told, sender))
     await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session)?.status === 'busy' || undefined, TURN_STARTS_MS, here.onRecordsChange)
   }
-  return { status: (await statusOf(roots.claudeHome, session)) ?? 'asleep', screen: await readTerminal(address, told.lines) }
+  return { status: (await statusOf(roots.claudeHome, session)) ?? 'idle', screen: await readTerminal(address, told.lines) }
 }
 
 // Tells the session wherever it runs: here, or through the relay on the machine that holds it.

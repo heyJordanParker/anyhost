@@ -171,7 +171,6 @@ export default class Anyhost extends View {
     if (status === "working") return h_flex().gap(4).items_center().text_size(12).text_color(t.working).child(svg(`${ICON}/spinner.svg`).size(12).spin(900)).child("Working");
     if (status === "blocked") return div().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(11).font_semibold().text_color(t.blocked).child("Needs you");
     if (status === "done") return h_flex().gap(4).items_center().text_size(12).font_medium().text_color(t.done).child(svg(`${ICON}/circle-check.svg`).size(12)).child("Done");
-    if (status === "asleep") return div().text_size(12).text_color(t.dim).child(`Asleep · ${ago(s.lastActivity)}`);
     return div().text_size(12).text_color(t.dim).child(ago(s.lastActivity));
   }
 
@@ -334,14 +333,14 @@ export default class Anyhost extends View {
     // what the Herdr app sees an agent do, else what the machine that runs it says, where waiting at a prompt is the
     // Herdr app's blocked; a labelled terminal that is no agent is a shell herdr-core kept where the runner was lost
     const statusOf = new Map(agents().map((a) => [a.address, a.status]));
-    const SAID = { working: "working", waiting: "blocked", idle: "idle", asleep: "asleep" };
+    const SAID = { working: "working", waiting: "blocked", idle: "idle" };
     this.liveOf = new Map();
     this.statusOf = new Map(this.sessions.filter((s) => s.status).map((s) => [s.id, SAID[s.status]]));
     for (const terminal of terminals()) {
       const session = terminal.labels?.["anyhost.session"];
       if (!session || terminal.state !== "live" || !statusOf.has(terminal.address)) continue;
       this.liveOf.set(session, terminal.address);
-      if (this.statusOf.get(session) !== "asleep") this.statusOf.set(session, statusOf.get(terminal.address));
+      this.statusOf.set(session, statusOf.get(terminal.address));
     }
     const focusedOn = focused()?.terminal ?? null;
     const working = this.sessions.filter((s) => this.statusOf.get(s.id) === "working");

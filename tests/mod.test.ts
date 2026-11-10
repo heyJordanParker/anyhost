@@ -96,6 +96,9 @@ test('a session this device holds, or no device claims, takes prompts', async ()
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
 })
 
+// A request body as Claude Code gives it: text, or in the types CI installs, bytes as base64 too.
+const textOf = (body: string | { readonly base64: string }): string => (typeof body === 'string' ? body : atob(body.base64))
+
 // `delayMs` is how long the program takes to answer, as one busy with other work does
 type Answer = { readonly status?: number; readonly body: unknown; readonly delayMs?: number }
 type Asked = { readonly method: string; readonly path: string; readonly body?: unknown }
@@ -133,7 +136,7 @@ function withProgram(answers: Record<string, Answer[]>) {
     if (init?.socketPath !== SOCKET) throw new Error(`The mod asked ${url} at ${init?.socketPath}, not at the service's socket.`)
     const path = url.replace('http://localhost', '')
     const method = init?.method ?? 'GET'
-    asked.push({ method, path, ...(init?.body === undefined ? {} : { body: JSON.parse(init.body) }) })
+    asked.push({ method, path, ...(init?.body === undefined ? {} : { body: JSON.parse(textOf(init.body)) }) })
     const queue = answers[`${method} ${path}`] ?? []
     const answer = (queue.length > 1 ? queue.shift() : queue[0]) ?? { status: 404, body: { message: `No answer for ${method} ${path}.` } }
     const status = answer.status ?? 200
@@ -423,7 +426,7 @@ test('/move names the machine to move to, and shows why the program refused the 
   expect(moveToasts(tested)).toEqual([])
 })
 
-const AGENT = { id: '3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4', tool: 'claude', title: 'Checkout retry', firstPrompt: 'Make the checkout retry a declined card once', machine: 'devbox', holder: 'devbox', status: 'asleep', lastActivity: '2026-11-10T14:02:00.000Z', repo: 'git@github.com:acme/shop.git', cwd: '/home/jordan/shop', entrypoint: 'cli', device: 'd1' }
+const AGENT = { id: '3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4', tool: 'claude', title: 'Checkout retry', firstPrompt: 'Make the checkout retry a declined card once', machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: '2026-11-10T14:02:00.000Z', repo: 'git@github.com:acme/shop.git', cwd: '/home/jordan/shop', entrypoint: 'cli', device: 'd1' }
 const MACHINES = { here: 'd0', machines: [{ id: 'd0', name: 'test-computer', connected: true, seenAt: '' }, { id: 'd1', name: 'devbox', connected: true, seenAt: '' }] }
 
 test('Claude lists every agent of every machine with what it does, starts one on a machine with its first message, and tells, reads or answers one wherever it runs', async () => {
@@ -436,7 +439,7 @@ test('Claude lists every agent of every machine with what it does, starts one on
 
   // Claude reads each answer as JSON
   expect(await tested.callTool('list_agents', { limit: 1 })).toEqual({
-    result: JSON.stringify([{ id: AGENT.id, tool: 'claude', title: 'Checkout retry', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'asleep', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd }]),
+    result: JSON.stringify([{ id: AGENT.id, tool: 'claude', title: 'Checkout retry', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd }]),
   })
   expect(await tested.callTool('start_agent', { folder: '/Users/jordan/shop', machine: 'devbox', prompt: 'You are the CTO. Watch every agent.' })).toEqual({ result: JSON.stringify({ session: 'c3', machine: 'devbox' }) })
   expect(await tested.callTool('tell_agent', { agent: '3f9c2b1e', text: 'Book the train' })).toEqual({ result: JSON.stringify(told) })

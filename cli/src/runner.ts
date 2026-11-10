@@ -13,6 +13,12 @@ const SESSION_FLAGS = new Set(['--continue', '-c', '--fork-session'])
 const SESSION_VALUES = new Set(['--resume', '-r', '--session-id'])
 const LEFT_BEHIND = ['CLAUDECODE', 'CLAUDE_PID', 'AI_AGENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN']
 const STATUS_REPORT = '\x1b]7501;'
+// While Claude Code rests, the runner asks for focus reports, which herdr-core sends a program each time a viewer, the
+// Herdr app, Herdr mobile or `hc attach`, focuses its terminal, so opening a session wakes it before its first key.
+const FOCUS_REPORTS_ON = '\x1b[?1004h'
+const FOCUS_REPORTS_OFF = '\x1b[?1004l'
+const FOCUSED = '\x1b[I'
+const BLURRED = '\x1b[O'
 
 type Awake = { readonly child: Bun.Subprocess; readonly terminal: Bun.Terminal; isReady: boolean; held: Uint8Array[]; readyAt?: ReturnType<typeof setTimeout> }
 
@@ -57,7 +63,8 @@ export async function runSession(command: readonly string[], resumed?: string): 
   }
 
   const wake = (): Awake => {
-    const argv = session !== undefined && hasTranscript(claudeHome, session) ?[...withoutSession(command), '--resume', session] : [...command]
+    process.stdout.write(FOCUS_REPORTS_OFF)
+    const argv =session !== undefined && hasTranscript(claudeHome, session) ?[...withoutSession(command), '--resume', session] : [...command]
     const terminal = new Bun.Terminal({
       ...size(),
       name: process.env['TERM'] || 'xterm-256color',
@@ -85,14 +92,21 @@ export async function runSession(command: readonly string[], resumed?: string): 
     const timer = setTimeout(() => going.child.kill('SIGKILL'), EXIT_MS)
     await going.child.exited
     clearTimeout(timer)
+    process.stdout.write(FOCUS_REPORTS_ON)
   }
 
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
   process.stdin.on('data', (keys: Buffer) => {
     usedAt = Date.now()
-    const typed = Uint8Array.from(keys)
-    if (awake !== undefined) return type(awake, typed)
-    void (sleeping ?? Promise.resolve()).then(() => type((awake ??= wake()), typed))
+    if (awake !== undefined) return type(awake, Uint8Array.from(keys))
+    // a focus report only wakes Claude Code, which asks for its own once it runs
+    const text = keys.toString('latin1')
+    const typed = Buffer.from(text.replaceAll(FOCUSED, '').replaceAll(BLURRED, ''), 'latin1')
+    if (typed.length === 0 && !text.includes(FOCUSED)) return
+    void (sleeping ?? Promise.resolve()).then(() => {
+      awake ??= wake()
+      if (typed.length > 0) type(awake, Uint8Array.from(typed))
+    })
   })
   process.on('SIGWINCH', () => {
     if (awake === undefined) return

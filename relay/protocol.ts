@@ -152,9 +152,9 @@ export type Routed =
   | { readonly t: 'list'; readonly id: string; readonly to: string }
   | { readonly t: 'listed'; readonly id: string; readonly to: string; readonly statuses: Readonly<Record<string, AgentStatus>> }
 // What a session does on the machine that runs it: Claude Code's record says `busy`, or `shell` while a background
-// command runs, `idle`, or `waiting` at a permission prompt, and a runner whose Claude Code ended while it rests is
-// `asleep`.
-export type AgentStatus = 'working' | 'idle' | 'waiting' | 'asleep'
+// command runs, `idle`, or `waiting` at a permission prompt. A runner whose Claude Code ended while it rests is `idle`
+// too, as a message or a focus wakes it before anyone sees the difference.
+export type AgentStatus = 'working' | 'idle' | 'waiting'
 export type Delivered = Routed & { readonly from: DeviceRef }
 // The Pool's answer to a message for a machine with no socket alive within LIVE_MS, or to one it cannot read.
 export type Offline = { readonly t: 'offline'; readonly id?: string; readonly to: string }

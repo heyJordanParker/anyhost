@@ -165,7 +165,7 @@ const STATUS: Record<string, AgentStatus> = { busy: 'working', shell: 'working',
 export async function statusOf(claudeHome: string, session: string): Promise<AgentStatus | undefined> {
   const record = (await recordedSessions(claudeHome)).find((entry) => entry.sessionId === session)
   if (record !== undefined) return STATUS[record.status ?? 'idle'] ?? 'working'
-  return runOf(session) === undefined ? undefined : 'asleep'
+  return runOf(session) === undefined ? undefined : 'idle'
 }
 
 export function writeRun(session: string, run: Run): void {
