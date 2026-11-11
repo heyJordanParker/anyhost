@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import * as fs from 'node:fs'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -12,13 +12,10 @@ import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
 import { downloadJournal } from '../src/sessions.ts'
 import { codexState, summarize } from '../src/transcript.ts'
-import { MEMORY, failTest, memoryRelay, noCode, stopRelays, temporaryFolder, welcomed, type MemoryRelay } from './memory.ts'
-
-afterEach(stopRelays)
+import { MEMORY, failTest, memoryRelay, noCode, temporaryFolder, welcomed, type MemoryRelay } from './memory.ts'
 
 const SESSION = '11111111-2222-3333-4444-555555555555'
 const OTHER = '99999999-2222-3333-4444-555555555555'
-// the session's working folder, which captureCode reads only when it exists
 const TRIP = join(temporaryFolder(), 'trip')
 mkdirSync(TRIP)
 const deviceA: Device = { id: 'device-a', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
@@ -135,7 +132,6 @@ test('replay of append, write-once and rewrite records', async () => {
     encodeRecord({ device, path, at, size: Buffer.byteLength(text), after: { size: at + Buffer.byteLength(text), sha256: '' } }, new TextEncoder().encode(text))
   const first = Buffer.concat([...record('a', '/h/log.jsonl', 0, 'one\n'), ...record('a', '/h/once.txt', 0, 'written once'), ...record('a', '/h/state.json', 0, '{"step":"first, and longer"}')])
   const second = Buffer.concat([...record('b', '/h/log.jsonl', 4, 'two\n'), ...record('b', '/h/state.json', 0, '{"step":2}')])
-  // a record may span two frames
   await relay.objects.put(hotKey(SESSION, 0), compressHot(first))
   await relay.objects.put(hotKey(SESSION, first.length), compressHot(second.subarray(0, 30)))
   await relay.objects.put(hotKey(SESSION, first.length + 30), compressHot(second.subarray(30)))
@@ -151,8 +147,6 @@ test('replay of append, write-once and rewrite records', async () => {
   expect(replayed.end).toBe(first.length + second.length)
 })
 
-// The suite missed it: every first drain carried a claim of its own, a round trip the frame's holder check makes
-// already, as the Pool claims a session no machine holds for the writer of its first frame.
 test('a drain of several sessions goes up in one request, and the first frame of each session no machine holds leaves its claim with this machine, with no claim sent', async () => {
   const relay = await memoryRelay()
   const { roots, transcript, capture } = machine(deviceA, relay)
@@ -175,9 +169,8 @@ test('a frame over 1 MiB goes up by HTTP beside the request, and the journal rea
   const { transcript, upload, capture } = machine(deviceA, relay)
   const toolResult = join(dirname(transcript), SESSION, 'tool-results', 'big.txt')
   mkdirSync(dirname(toolResult), { recursive: true })
-  // random bytes compress to about their own size
-  const big = Buffer.from(crypto.getRandomValues(new Uint8Array(3 * MAX_MESSAGE_BYTES / 2))).toString('base64')
-  writeFileSync(toolResult, big)
+  const incompressible = Buffer.from(crypto.getRandomValues(new Uint8Array(3 * MAX_MESSAGE_BYTES / 2))).toString('base64')
+  writeFileSync(toolResult, incompressible)
   writeFileSync(transcript, lines[0] ?? '')
   await upload(transcript, toolResult)
 
@@ -185,7 +178,7 @@ test('a frame over 1 MiB goes up by HTTP beside the request, and the journal rea
   expect((await relay.read(frame))?.length).toBeGreaterThan(MAX_MESSAGE_BYTES)
   expect(relay.requests.flat().some((op) => op.op === 'put' && op.key === frame)).toBe(false)
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
-  expect(readFileSync(replayed.files.get(toolResult)?.staged ?? '', 'utf8')).toBe(big)
+  expect(readFileSync(replayed.files.get(toolResult)?.staged ?? '', 'utf8')).toBe(incompressible)
 })
 
 test("a drain never waits on git: the files go up at once, the code follows in its own frame, and a part goes up once", async () => {
@@ -205,7 +198,6 @@ test("a drain never waits on git: the files go up at once, the code follows in i
   )
   writeFileSync(transcript, lines[1] ?? '')
 
-  // git answers only when the test says, and the upload has returned before it
   const gitAsked = async (count: number): Promise<void> => {
     while (releases.length < count) await Bun.sleep(1)
   }
@@ -274,7 +266,6 @@ test('at uploadEvery 0 a line goes up alone, and a long code part in pieces, sev
   appendFileSync(transcript, lines[2] ?? '')
   expect(await upload(transcript, `${TRIP}/`)).toEqual([new Set([`${TRIP}/`])])
   await upload(`${TRIP}/`)
-  // the line changed the session while its code went up, so the code is read again once it is up
   await upload(`${TRIP}/`)
   await capture.codeRuns.get(SESSION)
   await upload(`${TRIP}/`)
@@ -290,7 +281,6 @@ test('at uploadEvery 0 a line goes up alone, and a long code part in pieces, sev
     [`${bundle.path} ${(CODE_PIECES + 1) * CODE_PIECE_BYTES} 5`, `${TRIP}/ 0 8`],
     [`${TRIP}/ 0 8`],
   ])
-  // the pieces of one drain go in one request
   expect(relay.requests.filter((ops) => ops.filter(({ op }) => op === 'put').length === CODE_PIECES)).toHaveLength(1)
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(Buffer.from(readFileSync(replayed.files.get(bundle.path)?.staged ?? '')).equals(Buffer.from(bundle.bytes))).toBe(true)
@@ -302,7 +292,6 @@ test('a refused position stops the machine that lost it, and its lines from ther
   const relay = await memoryRelay()
   const a = machine(deviceA, relay)
   const b = machine(deviceB, relay)
-  // anyhost-a wrote byte 0 before any machine claimed the session, as anyhost before the relay did
   const bytes = new TextEncoder().encode(lines[0])
   await relay.objects.put(hotKey(SESSION, 0), compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: a.transcript, at: 0, size: bytes.length, after: { size: bytes.length, sha256: '' } }, bytes))))
   writeFileSync(b.transcript, lines[1] ?? '')
@@ -346,7 +335,6 @@ test('a refused position that holds the same bytes counts as uploaded, as a retr
 
   await upload(transcript)
   expect(journalOf(capture.db, SESSION)).toMatchObject({ end: (await frameOf(relay, hotKey(SESSION, 0))).length, stopped: '' })
-  // the frame stays the one there, and no get was needed to know it
   expect(relay.puts.map(({ key }) => key)).toEqual([`sessions/${deviceA.id}/index.json`])
   expect(relay.requests.flat().some(({ op }) => op === 'get')).toBe(false)
 })
@@ -357,7 +345,6 @@ test("a frame this machine put up that its journal never counted is written over
   writeFileSync(transcript, lines[0] ?? '')
   const old = new TextEncoder().encode('old')
   const stray = compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at: 0, size: old.length, after: { size: old.length, sha256: '' } }, old)))
-  // one where the next upload goes, as before a crash, and one past a position that failed
   await relay.objects.put(hotKey(SESSION, 0), stray)
   await relay.objects.put(hotKey(SESSION, 100_000), stray)
 
@@ -368,19 +355,15 @@ test("a frame this machine put up that its journal never counted is written over
   expect(replayed.end).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
 })
 
-// The suite missed it: no take landed while a machine wrote over a frame of its own, where a delete with no holder
-// check took the frame out from under the taker's journal.
 test("a take that lands between a frame's 412 and the put over this machine's uncounted frame leaves the taker's journal whole", async () => {
   const relay = await memoryRelay()
   const a = machine(deviceA, relay)
   const b = machine(deviceB, relay)
   writeFileSync(a.transcript, lines[0] ?? '')
-  // anyhost-a holds the session, and put up a frame at byte 0 its journal never counted, as before a crash
   expect(await a.capture.relay.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true, at: expect.any(String) })
   const old = new TextEncoder().encode(lines[1])
   const stray = Buffer.concat(encodeRecord({ device: deviceA.id, path: a.transcript, at: 0, size: old.length, after: { size: old.length, sha256: '' } }, old))
   await relay.objects.put(hotKey(SESSION, 0), compressHot(stray))
-  // anyhost-a's write over byte 0 waits, once it read what is there, until anyhost-b took the session
   const first = hotKey(SESSION, 0)
   let isRead = false
   const writing = Promise.withResolvers<void>()
@@ -394,7 +377,6 @@ test("a take that lands between a frame's 412 and the put over this machine's un
   }
   const uploading = a.upload(a.transcript)
   await writing.promise
-  // anyhost-b takes the session and goes on with the journal from the frame's end, as a restore of it does
   expect(await b.capture.relay.runOne({ op: 'claim', session: SESSION, take: true })).toMatchObject({ status: 200 })
   continueJournal(b.capture.db, { session: SESSION, tool: 'claude', end: stray.length, sealed: 0 }, [])
   writeFileSync(b.transcript, lines[2] ?? '')
@@ -424,13 +406,11 @@ test('a code frame that fails leaves the journal at the frames before it, and th
   await upload(transcript)
   await capture.codeRuns.get(SESSION)
   const lineEnd = journalOf(capture.db, SESSION)?.end ?? 0
-  // the second of the drain's three code frames fails
   failing = puts + 2
   await expect(upload(`${TRIP}/`)).rejects.toThrow('ECONNREFUSED')
 
   const counted = journalOf(capture.db, SESSION)?.end ?? 0
   expect(counted).toBe(lineEnd + (await frameOf(relay, hotKey(SESSION, lineEnd))).length)
-  // the frame after the one that failed stays off the chain, where a restore ends, until the next drain writes over it
   expect((await hotFrames(relay)).at(-1)).not.toBe(hotKey(SESSION, lineEnd))
   expect((await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)).end).toBe(counted)
   await upload(`${TRIP}/`)
@@ -513,7 +493,6 @@ test('a quiet session seals its hot frames into one sealed frame, and the journa
 test('a seal reads small frames many to a request, and at most 16 requests at once', async () => {
   const relay = await memoryRelay()
   const { transcript, capture } = machine(deviceA, relay)
-  // 40 frames of 600 KiB of random bytes, which compress to about their own size, so each takes a request of its own
   const bodies: Uint8Array[] = []
   let at = 0
   for (let index = 0; index < 40; index += 1) {
@@ -523,7 +502,6 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
     bodies.push(body)
     at += bytes.length
   }
-  // and 40 lines after them, which fit one request
   for (let index = 0; index < 40; index += 1) {
     const bytes = new TextEncoder().encode(`{"line":${index}}\n`)
     const body = Buffer.concat(encodeRecord({ device: deviceA.id, path: `${transcript}.small`, at: index * bytes.length, size: bytes.length, after: { size: (index + 1) * bytes.length, sha256: '' } }, bytes))
@@ -531,7 +509,6 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
     bodies.push(body)
   }
   const before = Buffer.concat(bodies)
-  // this machine counted every frame
   continueJournal(capture.db, { session: SESSION, tool: 'claude', end: before.length, sealed: 0 }, [])
   await welcomed(capture.relay)
   relay.delayMs = 20
@@ -539,12 +516,10 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
 
   expect(await seal(capture, SESSION)).toBe(before.length)
   expect(relay.mostAtOnce).toBe(16)
-  // the last large frame leaves room for the 40 lines
   expect(relay.requests.slice(asked).filter((ops) => ops[0]?.op === 'get').map((ops) => ops.length)).toEqual([...Array.from({ length: 39 }, () => 1), 41])
   const sealed = await relay.keys(`journals/${SESSION}/`)
   expect(sealed).toEqual([`journals/${SESSION}/sealed/${'0'.padStart(16, '0')}-${String(before.length).padStart(16, '0')}.zst`])
   expect(Buffer.from(await frameOf(relay, sealed[0] ?? '')).equals(before)).toBe(true)
-  // its 24 MiB go through the relay four times: 17.6 s alone at a Mac load average of 133
 }, 60_000)
 
 test("a Codex thread on a machine with no Codex database gets its name into the row Codex makes, as Codex writes it", async () => {
@@ -560,7 +535,6 @@ test("a Codex thread on a machine with no Codex database gets its name into the 
   const wal = `${codexState(roots)}-wal`
   expect(await sessionsOf(capture, wal)).toEqual([{ session: SESSION, tool: 'codex' }])
 
-  // Codex's first start here makes the database and the thread's row, with no name
   const codex = new Database(codexState(roots))
   codex.run('create table threads (id text primary key, title text not null, name text)')
   codex.query('insert into threads values (?, ?, null)').run(SESSION, 'What bird is named in notes.md?')
@@ -573,24 +547,14 @@ test("a Codex thread on a machine with no Codex database gets its name into the 
   expect(await sessionsOf(capture, wal)).toEqual([])
 })
 
-test('the backup finds a file that grew without an event', async () => {
+test('the minute sweep stats no file of a session quiet for QUIET_MS, and the full sweep finds the write no event named and uploads it', async () => {
   const relay = await memoryRelay()
   const { transcript, upload, capture } = machine(deviceA, relay)
   writeFileSync(transcript, lines[0] ?? '')
   await upload(transcript)
   expect(await changedFiles(capture)).toEqual(new Map())
   appendFileSync(transcript, lines[1] ?? '')
-  expect(await changedFiles(capture)).toEqual(new Map([[SESSION, new Set([transcript])]]))
-})
-
-test('the minute sweep stats no file of a session quiet for QUIET_MS, and the full sweep finds the write no event named and uploads it', async () => {
-  const relay = await memoryRelay()
-  const { transcript, upload, capture } = machine(deviceA, relay)
-  writeFileSync(transcript, lines[0] ?? '')
-  await upload(transcript)
-  appendFileSync(transcript, lines[1] ?? '')
   const writtenAt = journalOf(capture.db, SESSION)?.writtenAt ?? 0
-  // the minute sweep at `now`, as the service runs it
   const minuteSweep = (now: number): Promise<Map<string, Set<string>>> => changedFiles(capture, now - QUIET_MS)
   const statted = spyOn(fs, 'statSync')
 
@@ -601,7 +565,6 @@ test('the minute sweep stats no file of a session quiet for QUIET_MS, and the fu
   expect(statted).not.toHaveBeenCalled()
   statted.mockRestore()
 
-  // the sweep of every session, at the program's start and once an hour
   const missed = await changedFiles(capture)
   expect(missed).toEqual(new Map([[SESSION, new Set([transcript])]]))
   await upload(...(missed.get(SESSION) ?? []))
@@ -609,8 +572,6 @@ test('the minute sweep stats no file of a session quiet for QUIET_MS, and the fu
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '', 'utf8')).toBe(`${lines[0]}${lines[1]}`)
 })
 
-// A session of three uploads, the transcript and a tool result each time, whose second frame R2 lost, and the time
-// QUIET_MS and a minute after its last upload.
 async function lostFrame(relay: MemoryRelay) {
   const { roots, transcript, upload, capture } = machine(deviceA, relay)
   const toolResult = join(dirname(transcript), SESSION, 'tool-results', 'b1.txt')
@@ -644,13 +605,11 @@ test("a seal of a journal R2 lost a frame of seals up to the lost frame, and the
   expect(journalOf(capture.db, SESSION)).toMatchObject({ end: lostAt, sealed: lostAt })
   expect(await relay.keys(`journals/${SESSION}/`)).toEqual([`journals/${SESSION}/sealed/${'0'.padStart(16, '0')}-${String(lostAt).padStart(16, '0')}.zst`])
 
-  // the queue uploads the files the seal answered, and a restore reads every byte of them
   await upload(...(again.get(SESSION) ?? []))
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   for (const path of [transcript, toolResult]) expect(readFileSync(replayed.files.get(path)?.staged ?? '', 'utf8')).toBe(readFileSync(path, 'utf8'))
   expect(replayed.end).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
 
-  // once quiet again, it seals to its end, and a minute later reads nothing
   const later = Date.now() + QUIET_MS + 60_000
   expect(await sealQuiet(capture, recording, later)).toEqual(new Map())
   expect(journalOf(capture.db, SESSION)?.sealed).toBe(replayed.end)
@@ -678,7 +637,6 @@ test('a journal R2 lost a frame of, whose transcript is gone here, names the los
 test('the repair of a journal R2 lost a frame of keeps the warning a takeover left for the next prompt', async () => {
   const relay = await memoryRelay()
   const { capture, quiet } = await lostFrame(relay)
-  // this machine took the session from anyhost-b while anyhost-b had no connection to the relay
   markUntold(capture.db, SESSION, 'anyhost-b')
   const logged = spyOn(console, 'error').mockImplementation(() => undefined)
 
@@ -687,8 +645,6 @@ test('the repair of a journal R2 lost a frame of keeps the warning a takeover le
   expect(takeUntold(capture.db, SESSION)).toBe('anyhost-b')
 })
 
-// The suite missed it: every seal a test failed was tried once, while the backup tries each quiet session's seal every
-// minute, listing and reading every hot frame of it each time.
 test('a seal that keeps failing is tried again after 1, 2, 4 and 8 minutes, and a seal that succeeds ends the wait', async () => {
   const relay = await memoryRelay()
   const { transcript, upload, capture } = machine(deviceA, relay)
@@ -699,7 +655,6 @@ test('a seal that keeps failing is tried again after 1, 2, 4 and 8 minutes, and 
   relay.refuse = (op) => (isFailing && op.op === 'list' ? 'R2 answered 500' : undefined)
   const problems: string[] = []
   const recording: Problems = { set: (key, error) => void problems.push(`${key}: ${String(error)}`), clear: () => undefined }
-  // the backup pass of each minute from `quiet` on, and whether its seal listed the journal's frames
   const pass = async (minute: number): Promise<boolean> => {
     const asked = relay.requests.length
     await sealQuiet(capture, recording, quiet + minute * 60_000)
@@ -715,7 +670,6 @@ test('a seal that keeps failing is tried again after 1, 2, 4 and 8 minutes, and 
   while (!(await pass(sealedAt))) sealedAt += 1
   expect(sealedAt).toBe(31)
   expect(journalOf(capture.db, SESSION)?.sealed).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
-  // a seal that fails after one that succeeded waits a minute again
   appendFileSync(transcript, lines[1] ?? '')
   await upload(transcript)
   isFailing = true
@@ -724,9 +678,6 @@ test('a seal that keeps failing is tried again after 1, 2, 4 and 8 minutes, and 
   expect([await pass(minute), await pass(minute + 1)]).toEqual([true, true])
 })
 
-// A session of 17 hot frames of about 700 KB each, a line of random text a frame of its own, as no two fit one
-// request's 1 MiB, so a seal asks for 16 of them at once, each in a request of its own. Answers the frames' sizes,
-// largest first.
 async function bigFrames(relay: MemoryRelay) {
   const { transcript, capture, upload } = machine(deviceA, relay)
   const frames = 17
@@ -742,13 +693,10 @@ async function bigFrames(relay: MemoryRelay) {
   return { capture, frames, sizes, quiet: (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000 }
 }
 
-// The suite missed it because its relay answered every request at once, where a link at 240 KB/s carries the 16 gets
-// a seal asks at once, about 700 KB each, one after another, and the last arrives past 40 s.
 test('a seal over a link whose answers take past 40 seconds in all finishes on its one socket, asking for each frame once', async () => {
   const relay = await memoryRelay()
   const { capture, frames, sizes, quiet } = await bigFrames(relay)
   relay.downloadBytesPerMs = 240
-  // the first 16 answers alone take past 40 s at that pace
   expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(40_000)
   const asked = relay.requests.length
 
@@ -758,15 +706,11 @@ test('a seal over a link whose answers take past 40 seconds in all finishes on i
   expect(relay.requests.slice(asked).filter((ops) => ops.some(({ op }) => op === 'get'))).toHaveLength(frames)
 }, 180_000)
 
-// The suite missed it because its link carried each pong at once, past the answers ahead of it, where a WebSocket
-// delivers in order: a pong waits behind every answer the link still carries, and a ping behind every request.
 test('a seal over a link paced both ways, whose 16 answers queued ahead of any pong take past 70 seconds, keeps its one socket', async () => {
   const relay = await memoryRelay()
   const { capture, frames, sizes, quiet } = await bigFrames(relay)
   relay.downloadBytesPerMs = 150
   relay.uploadBytesPerMs = 150
-  // A ping goes every 30 s, so one goes within the seal's first 30 s, and its pong waits behind the answers left,
-  // past the 40 s a pong may take.
   expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(70_000)
   let welcomes = 0
   capture.relay.on('welcome', () => (welcomes += 1))
@@ -884,11 +828,16 @@ test("the working folder is the session's own, never a folder a tool call names"
   expect([claude.cwd, codex.cwd, codex.entrypoint]).toEqual(['/work/app', '/Users/ada', 'cli'])
 })
 
-// The suite missed it: a session that began with a slash command had no first prompt, so its card showed its id.
 test('a session that begins with a slash command names it as its first prompt', () => {
   const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
   const loop = JSON.stringify({ type: 'user', message: { role: 'user', content: '<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>2m Reply with tick.</command-args>' } })
   expect(summarize(empty, `${loop}\n`, 'claude').firstPrompt).toBe('/loop 2m Reply with tick.')
+})
+
+test("a session whose first message another agent sent with tell_agent names that message as its first prompt, without the agent's tag", () => {
+  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
+  const told = JSON.stringify({ type: 'user', message: { role: 'user', content: '<anyhost from="2f115ce2 on mac" reach="tell_agent 2f115ce2 when done or stuck">Fix the login</anyhost>' } })
+  expect(summarize(empty, `${told}\n`, 'claude').firstPrompt).toBe('Fix the login')
 })
 
 test("the index entry holds the session's title, first prompt, working folder and entrypoint", async () => {
@@ -900,13 +849,10 @@ test("the index entry holds the session's title, first prompt, working folder an
   expect(row).toEqual({ title: 'Plan the trip', first_prompt: 'Book a train to Sofia 🚆, ще пътувам утре', cwd: TRIP, entrypoint: 'cli' })
 })
 
-// The suite missed it: each relay of the test before had an address of its own, so a bucket of another name alone told
-// two relays apart.
 test('the database keeps what one relay holds, and a welcome from another relay starts it over with the code parts it named, though its bucket has the same name', async () => {
   const folder = temporaryFolder()
   const parts = join(folder, 'state', 'code', SESSION, 'repo.json')
   const journals = (db: Database): number => db.query<{ count: number }, []>('select count(*) as count from journals').get()?.count ?? -1
-  // a session uploaded through the machine, with a code part recorded
   const uploaded = async ({ transcript, upload }: ReturnType<typeof machine>): Promise<void> => {
     writeFileSync(transcript, lines.join(''))
     await upload(transcript)
@@ -917,8 +863,6 @@ test('the database keeps what one relay holds, and a welcome from another relay 
   const first = machine(deviceA, relay, folder)
   await uploaded(first)
 
-  // the same relay welcomes the machine again, as after a restart, and so it does a database from before the relay's
-  // address was kept, which takes the address of its first welcome
   await welcomed(machine(deviceA, relay, folder).capture.relay)
   expect([journals(first.capture.db), existsSync(parts)]).toEqual([1, true])
   first.capture.db.run("update bucket set url = ''")
@@ -926,7 +870,6 @@ test('the database keeps what one relay holds, and a welcome from another relay 
   expect([journals(first.capture.db), existsSync(parts)]).toEqual([1, true])
   expect(first.capture.db.query<{ url: string; name: string }, []>('select url, name from bucket').get()).toEqual({ url: relay.url, name: MEMORY })
 
-  // every relay Connect Cloudflare deploys names the bucket anyhost, so another person's relay differs by its address
   const another = machine(deviceA, await memoryRelay(), folder)
   await welcomed(another.capture.relay)
   expect([journals(another.capture.db), existsSync(parts)]).toEqual([0, false])

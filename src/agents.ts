@@ -2,8 +2,6 @@ import { tool } from '../node_modules/@cmodjs/core/jobs/tool.js'
 import { sessions, type Mod } from '../node_modules/@cmodjs/core/mod.js'
 import { askProgram, type AnyhostState } from './pages/machines.js'
 
-// An agent as the program's /agents lists it, cut to what Claude reads to pick one. `status` is what it does on the
-// machine that runs it now, and empty when it runs nowhere.
 type Agent = {
   readonly id: string
   readonly tool: string
@@ -23,8 +21,6 @@ type Told = { readonly machine: string; readonly session: string; readonly statu
 const AGENT = { type: 'string', description: 'The agent id, or its first 8 characters.' } as const
 const WAKES = 'An idle agent takes the message at once, works, and rests again on its own.'
 
-// The tools that let Claude manage every agent of every machine through this machine's anyhost program, so a session
-// that manages others, such as a CTO or a project manager, does what a person does in the Herdr app.
 export function agentTools(mod: Mod<AnyhostState>) {
   const tell = (agent: string, told: { readonly text?: string; readonly keys?: readonly string[]; readonly lines?: number; readonly sender?: string }): Promise<Told> =>
     askProgram<Told>(mod, '/agents/tell', { session: agent, ...told })
@@ -81,7 +77,7 @@ export function agentTools(mod: Mod<AnyhostState>) {
         },
         required: ['folder'],
       },
-      execute: ({ folder, machine = '', prompt = '' }) => askProgram<{ readonly session: string; readonly machine: string }>(mod, '/new', { folder, machine, prompt }),
+      execute: ({ folder, machine = '', prompt = '' }) => askProgram<{ readonly session: string; readonly machine: string }>(mod, '/new', { folder, machine, prompt, parent: sessions.current.id }),
     }),
     tool({
       name: 'tell_agent',
@@ -111,7 +107,6 @@ export function agentTools(mod: Mod<AnyhostState>) {
         if (found === undefined) throw new Error(`No agent's id begins with ${agent}. list_agents lists them.`)
         const runsOn = found.holder || found.machine
         if (runsOn === machines.find(({ id }) => id === here)?.name) return await askProgram<{ readonly session: string; readonly line: string }>(mod, '/move', { session: found.id, machine })
-        // the machine that runs the agent holds its upload queue, so the move runs there, typed into the agent
         await tell(found.id, { text: `/move ${machine}` })
         return `${runsOn} moves ${found.id.slice(0, 8)} to ${machine} once its turn ends. read_agent shows how it goes.`
       },
@@ -129,10 +124,10 @@ export function agentTools(mod: Mod<AnyhostState>) {
       },
     }),
     tool({
-      name: 'take_agent',
-      description: 'Continue an agent on this machine from its history in R2, as when the machine that runs it is closed, offline or died. That machine stops its copy as it next connects. move_agent moves an agent whose machine is connected without that.',
+      name: 'open_agent',
+      description: 'Run an agent on this machine in a terminal of herdr-core and answer that terminal: the one it runs in when it runs here, else one that resumes it, from its history in R2 when another machine holds it, as when that machine is closed, offline or died, which then stops its copy as it next connects. move_agent moves an agent whose machine is connected without that.',
       inputSchema: { type: 'object', properties: { agent: AGENT }, required: ['agent'] },
-      execute: ({ agent }) => askProgram<{ readonly session: string; readonly machine: string }>(mod, '/agents/take', { session: agent }),
+      execute: ({ agent }) => askProgram<{ readonly session: string; readonly terminal: string; readonly machine: string }>(mod, '/agents/open', { session: agent }),
     }),
   ]
 }

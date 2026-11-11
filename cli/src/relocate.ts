@@ -1,36 +1,13 @@
 import { basename } from 'node:path'
 
-// A captured file holds the absolute paths of the machine that wrote it. `relocate`
-// rewrites every one of them into this machine's, so a session restored under another
-// home, user id, temp root or checkout reads as if it ran here: it opens its saved
-// output, plan and background output, and keeps `/rewind`, up-arrow history and Codex
-// resume.
-//
-// Every occurrence of a root is rewritten, wherever it sits: Claude Code's and Codex's own
-// fields, tool results, the person's prompts, the model's text, thinking and tool calls.
-// A root matches only at a path boundary, and so does an encoded folder name
-// (`-Users-alice-app`, Claude Code's name for a folder) that starts with one.
-//
-// Nothing another party verifies breaks: the Messages API answers a conversation whose
-// signed thinking or earlier turns changed by dropping that thinking
-// (`input_transformations` `thinking_dropped`, `prefix_binding_mismatch`), as it does in
-// any long session, and Claude Code never re-hashes a stored `api-request-blob` (its own
-// secret scrubber edits them in place). Two kinds of file keep their bytes: the backups
-// `/rewind` writes back into the person's files, and binary files.
-
 export type Roots = {
   readonly home: string
-  // Claude Code's own folder: `CLAUDE_CONFIG_DIR`, else `<home>/.claude`
   readonly claudeHome: string
-  // Claude Code's per-user temp root: `/private/tmp/claude-501` on macOS, `/tmp/claude-1000` on Linux
   readonly claudeTmp: string
   readonly codexHome: string
-  // the session's checkout, or the home when the session runs outside one
   readonly checkout: string
 }
 
-// The file this machine keeps for a file the writer kept at `path` on the machine with
-// roots `from`, and where it keeps it.
 export function relocate(bytes: Uint8Array, path: string, from: Roots, to: Roots): { path: string; bytes: Uint8Array } {
   check(from, 'from')
   check(to, 'to')
@@ -53,16 +30,10 @@ function check(roots: Roots, name: string) {
 
 const encoder = new TextEncoder()
 
-// git's test for a binary file: a NUL byte in its first 8000 bytes. It holds for a record
-// that starts or ends inside a character, as an appended `.output` record can.
 const isText = (bytes: Uint8Array): boolean => !bytes.subarray(0, 8000).includes(0)
 
-// a path as it sits between the quotes of a JSON string
 const jsonText = (text: string): string => JSON.stringify(text).slice(1, -1)
-// Claude Code names a folder after a path with every character but letters and digits as `-`
 const encode = (path: string): string => path.replace(/[^a-zA-Z0-9]/g, '-')
-// macOS keeps /etc, /tmp and /var under /private, so a path names one folder in two forms: Claude Code writes the
-// resolved one, such as a working folder of /private/tmp/trwork, and prompts and tool calls hold the other too
 function forms(path: string): string[] {
   if (/^\/private\/(?:etc|tmp|var)(?:\/|$)/.test(path)) return [path, path.slice('/private'.length)]
   if (/^\/(?:etc|tmp|var)(?:\/|$)/.test(path)) return [path, `/private${path}`]
@@ -71,7 +42,6 @@ function forms(path: string): string[] {
 
 const SLASH = 0x2f
 const BACKSLASH = 0x5c
-// A path continues through letters, digits, `.`, `_` and `-`, so `/Users/al` is no root of `/Users/alice`.
 const isPathByte = (byte: number): boolean => (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a) || byte === 0x2e || byte === 0x5f || byte === 0x2d
 const isNameByte = (byte: number): boolean => (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5a) || (byte >= 0x61 && byte <= 0x7a) || byte === 0x2d
 
@@ -79,16 +49,12 @@ type Root = { readonly from: Buffer; readonly to: Buffer }
 type Match = { readonly end: number; readonly with: Buffer }
 
 class Relocation {
-  // longest first, so Claude Code's folder and the checkout win over the home they sit in
   readonly roots: Root[]
   readonly encoded: { readonly from: string; readonly to: string }[]
-  // the bytes a match starts with: each root and encoded root that has no other as its prefix
   readonly needles: Buffer[]
 
   constructor(from: Roots, to: Roots, form: (text: string) => string) {
-    // a session in the home folder has no checkout of its own: the home maps it
     const checkout: [string, string][] = from.checkout === from.home ? [] : [[from.checkout, to.checkout]]
-    // the roots Claude Code names folders after
     const namedAfter: [string, string][] = [...checkout, [from.claudeTmp, to.claudeTmp], [from.home, to.home]]
     const pairs: [string, string][] = [[from.claudeHome, to.claudeHome], [from.codexHome, to.codexHome], ...namedAfter]
     this.roots = pairs
@@ -99,7 +65,6 @@ class Relocation {
     this.needles = starts.filter((start) => !starts.some((other) => other !== start && start.startsWith(other))).map((start) => Buffer.from(start))
   }
 
-  // The bytes with every root and encoded root rewritten, or the same bytes when none is in them.
   rewrite(bytes: Uint8Array): Uint8Array {
     const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     const next = this.needles.map((needle) => buffer.indexOf(needle))
@@ -135,10 +100,6 @@ class Relocation {
     return renamed === name ? undefined : { end, with: Buffer.from(renamed) }
   }
 
-  // An encoded folder name that starts with an encoded root: each part that encodes the
-  // checkout, the temp root or the home, starting and ending at a `-`, becomes the same
-  // part of this machine. The encoding is lossy, so the checkout wins over the home it
-  // sits in, and `-Users-alice-app-web` is the checkout's `web` folder.
   encodedName(name: string): string {
     if (!this.encoded.some(({ from }) => partAt(name, 0, from))) return name
     let out = ''
@@ -159,8 +120,6 @@ class Relocation {
 
 const partAt = (name: string, at: number, part: string): boolean => name.startsWith(part, at) && (at + part.length === name.length || name[at + part.length] === '-')
 
-// Boundaries read through JSON escapes: in "\n/Users/al" the path follows a line break,
-// not the letter n, and a `\u` escape counts as the character it names.
 function startsPath(buffer: Buffer, at: number): boolean {
   if (at === 0) return true
   let backslashes = 0

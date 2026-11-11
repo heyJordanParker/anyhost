@@ -6,8 +6,6 @@ import { testMod } from '../node_modules/@cmodjs/core/testing.js'
 import { anyhost } from '../src/mod.js'
 import { connectStep, type AnyhostState } from '../src/pages/machines.js'
 
-// `cmod program --service` loads the service, says `held` and ends, and the session reads the address the service
-// wrote to its instance file.
 function held(): HookStream<ProcessSpawnChunk, ProcessSpawnResult> {
   async function* read(): AsyncGenerator<ProcessSpawnChunk, ProcessSpawnResult> {
     yield { stream: 'stdout', text: 'held\n' }
@@ -16,7 +14,6 @@ function held(): HookStream<ProcessSpawnChunk, ProcessSpawnResult> {
   return Object.assign(read(), { result: Promise.resolve<ProcessSpawnResult>({ code: 0, signal: null }) }) as HookStream<ProcessSpawnChunk, ProcessSpawnResult>
 }
 
-// The service listens on a unix socket in its state folder, and writes that address to its instance file.
 const SOCKET = '/test/home/.local/state/anyhost/serve.sock'
 const instance = { '/test/home/.local/share/cmod/instances/anyhost/anyhost.json': JSON.stringify({ address: `unix:${SOCKET}` }) }
 
@@ -96,15 +93,11 @@ test('a session this device holds, or no device claims, takes prompts', async ()
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
 })
 
-// A request body as Claude Code gives it: text, or in the types CI installs, bytes as base64 too.
 const textOf = (body: string | { readonly base64: string }): string => (typeof body === 'string' ? body : atob(body.base64))
 
-// `delayMs` is how long the program takes to answer, as one busy with other work does
 type Answer = { readonly status?: number; readonly body: unknown; readonly delayMs?: number }
 type Asked = { readonly method: string; readonly path: string; readonly body?: unknown }
 
-// The anyhost program as the Step and /machines ask it: each answer is the next one `answers` has for its method and
-// path, and the last one repeats. The Step draws in a page of the test's own, as the install page draws it.
 function withProgram(answers: Record<string, Answer[]>) {
   let started: Mod<AnyhostState> | undefined
   const definition = {
@@ -119,7 +112,6 @@ function withProgram(answers: Record<string, Answer[]>) {
   const tested = testMod(definition, { files: instance })
   const asked: Asked[] = []
   const ticks: (() => unknown)[] = []
-  // the tick of the newest timer of each period
   const every = new Map<number, () => unknown>()
   const copied: string[] = []
   tested.fakes.process.spawn = () => held()
@@ -162,13 +154,11 @@ test('the Step is left to do on a machine not joined or on a relay too old, and 
     const { mod } = withProgram({ 'GET /status': [relayIs(state)] })
     expect(await connectStep.isDone(await mod())).toBe(true)
   }
-  // a program that just started is still connecting, so the Step waits for its answer
   const { mod, asked } = withProgram({ 'GET /status': [relayIs('connecting'), relayIs('connecting'), relayIs('connected')] })
   expect(await connectStep.isDone(await mod())).toBe(true)
   expect(asked.filter(({ path }) => path === '/status')).toHaveLength(3)
 })
 
-// The suite missed it: no /status the Step read carried the join with the link of the install command.
 test('the Step waits while the program joins with the link of the install command, and is done once the join lands', async () => {
   const joining: Answer = { body: { relay: { state: 'unjoined', message: '' }, joining: { is: 'running' } } }
   const { mod, asked } = withProgram({ 'GET /status': [joining, joining, joining, relayIs('connecting'), relayIs('connected')] })
@@ -219,7 +209,6 @@ test('Connect Cloudflare on the Step shows each line, asks for the account, and 
   await tested.shown.page.press('account-a1')
   expect(asked.at(-1)).toEqual({ method: 'POST', path: '/connect/account', body: { id: 'a1' } })
   expect((await tested.shown.page.lines()).join('\n')).toContain('Found the bucket anyhost in the eu jurisdiction')
-  // the Step follows the run once a second until it ends
   for (const tick of ticks) await tick()
   await tested.settle()
   const done = (await tested.shown.page.lines()).join('\n')
@@ -239,8 +228,6 @@ test('a machine removed after Connect Cloudflare joined it gets the Step afresh,
   expect(drawn).not.toContain('Joined this machine')
 })
 
-// The suite missed it: a run that uploaded a new protocol joined through the Worker while the busy Pool's older code
-// welcomed the machine as outdated, and the Step threw the joined run away, showing a bare Connect Cloudflare.
 test('a Step whose Connect Cloudflare joined keeps the run while the relay still reads outdated, and says what Finish waits for', async () => {
   const joined = { is: 'joined', lines: ['Uploading the relay as the Worker anyhost', 'Joined this machine to https://anyhost.parker-labs.workers.dev'] }
   const outdated = 'The relay at https://anyhost.parker-labs.workers.dev answers protocol 1, and anyhost 0.3.0 needs 2. Connect Cloudflare again to update the relay.'
@@ -317,7 +304,6 @@ test('/machines lists every machine, adds one over ssh from your Tailscale netwo
 })
 
 const moveIs = (step: string, line: string, machine?: string): Answer => ({ body: { ...(machine === undefined ? {} : { machine }), move: { to: 'anyhost-a', step, line } } })
-// the toasts of the move, without the one of the mod's first start
 const moveToasts = (tested: ReturnType<typeof withProgram>['tested']) => tested.shown.toasts.filter(({ message }) => message !== 'Installed')
 
 test('/move asks the program to move the session, refuses prompts while it moves, and follows each step in its toast', async () => {
@@ -335,7 +321,6 @@ test('/move asks the program to move the session, refuses prompts while it moves
   expect(asked.filter(({ method }) => method === 'POST')).toEqual([{ method: 'POST', path: '/move', body: { session: 'test-session', machine: 'anyhost-a' } }])
   expect(moveToasts(tested)).toEqual([{ type: 'loading', message: 'Moving to anyhost-a…' }])
 
-  // the toast follows the move once a second, and the timer runs its tick without waiting for it
   const follow = async (): Promise<void> => {
     await every.get(1000)?.()
     await tested.settle()
@@ -343,18 +328,15 @@ test('/move asks the program to move the session, refuses prompts while it moves
   await follow()
   expect(moveToasts(tested)).toEqual([{ type: 'loading', message: 'Moving to anyhost-a…', description: 'Uploading test-ses.' }])
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
-  // the machine took the claim, and the move still runs
   await follow()
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
 
-  // the session runs there, and outside herdr this Claude Code stays open and says how to go on with it
   await follow()
   const continues = 'This session continues on anyhost-a, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.'
   expect(moveToasts(tested)).toEqual([{ type: 'info', message: continues, description: 'anyhost-a restored test-ses in 2.4 s and runs it.' }])
   expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: continues })
 })
 
-// The program answers a prompt's ask 3 s late, past the 1.5 s a prompt waits for it.
 const SLOW_MS = 3000
 
 test('a program slow to answer holds no prompt: it goes through within the 1.5 s bound, with no toast', async () => {
@@ -404,8 +386,6 @@ test('a move the program forgot, as it restarted, says so and stops following it
   expect(moveToasts(tested)).toEqual([{ type: 'error', message: 'anyhost lost track of the move, as its program restarted', description: 'anyhost list shows which machine holds the session now.' }])
 })
 
-// The suite missed it: every move a test followed was one the session's own /move asked for, while anyhost move asks the
-// program from a terminal, and only the toast /move started offered Keep it here.
 test('a move anyhost move asked for, which a prompt finds running, gets the toast that follows it and offers Keep it here', async () => {
   const waiting = 'anyhost-a took test-ses and does not answer. Keep it here takes the session back.'
   const { tested, every } = withProgram({ 'GET /claims/test-session': [moveIs('moving', waiting, 'anyhost-a')] })
@@ -415,7 +395,6 @@ test('a move anyhost move asked for, which a prompt finds running, gets the toas
   await every.get(1000)?.()
   await tested.settle()
 
-  // the loading toast of a move carries its Keep it here
   expect(moveToasts(tested)).toEqual([{ type: 'loading', message: 'Moving to anyhost-a…', description: waiting }])
 })
 
@@ -438,7 +417,6 @@ test('Claude lists every agent of every machine with what it does, starts one on
     'POST /agents/tell': [{ body: told }],
   })
 
-  // Claude reads each answer as JSON
   expect(await tested.callTool('list_agents', { limit: 1 })).toEqual({
     result: JSON.stringify([{ id: AGENT.id, tool: 'claude', title: 'Checkout retry', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd }]),
   })
@@ -446,9 +424,8 @@ test('Claude lists every agent of every machine with what it does, starts one on
   expect(await tested.callTool('tell_agent', { agent: '3f9c2b1e', text: 'Book the train' })).toEqual({ result: JSON.stringify(told) })
   expect(await tested.callTool('read_agent', { agent: '3f9c2b1e', lines: 40 })).toEqual({ result: JSON.stringify(told) })
   expect(await tested.callTool('press_keys', { agent: '3f9c2b1e', keys: ['down', 'enter'] })).toEqual({ result: JSON.stringify(told) })
-  // the message names this session as its sender, so the agent answers it
   expect(asked.filter(({ method }) => method === 'POST')).toEqual([
-    { method: 'POST', path: '/new', body: { folder: '/Users/jordan/shop', machine: 'devbox', prompt: 'You are the CTO. Watch every agent.' } },
+    { method: 'POST', path: '/new', body: { folder: '/Users/jordan/shop', machine: 'devbox', prompt: 'You are the CTO. Watch every agent.', parent: 'test-session' } },
     { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', text: 'Book the train', sender: 'test-session' } },
     { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', lines: 40 } },
     { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', keys: ['down', 'enter'] } },
@@ -471,11 +448,11 @@ test('Claude moves an agent this machine runs through its program, and one anoth
   ])
 })
 
-test('Claude takes an agent onto this machine, as when the machine that ran it is offline', async () => {
-  const { tested, asked } = withProgram({ 'POST /agents/take': [{ body: { session: AGENT.id, machine: 'test-computer' } }] })
+test('Claude opens an agent on this machine, as when the machine that ran it is offline, and gets its terminal', async () => {
+  const { tested, asked } = withProgram({ 'POST /agents/open': [{ body: { session: AGENT.id, terminal: 't3', machine: 'test-computer' } }] })
 
-  expect(await tested.callTool('take_agent', { agent: '3f9c2b1e' })).toEqual({ result: JSON.stringify({ session: AGENT.id, machine: 'test-computer' }) })
-  expect(asked.at(-1)).toEqual({ method: 'POST', path: '/agents/take', body: { session: '3f9c2b1e' } })
+  expect(await tested.callTool('open_agent', { agent: '3f9c2b1e' })).toEqual({ result: JSON.stringify({ session: AGENT.id, terminal: 't3', machine: 'test-computer' }) })
+  expect(asked.at(-1)).toEqual({ method: 'POST', path: '/agents/open', body: { session: '3f9c2b1e' } })
 })
 
 test('Claude adds a machine it reaches over ssh, and removes one by its name', async () => {

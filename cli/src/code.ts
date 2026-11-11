@@ -4,19 +4,14 @@ import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { stateFolder } from './device.ts'
 
-// GitHub recommends at most 6 pushes a minute per repository.
 const PUSH_GAP_MS = 10_000
-// GitHub refuses a file over 100 MiB, so commits that carry one reach the journal as a bundle.
 const LARGEST_PUSHED_FILE = 100 * 1024 * 1024
-// A push, fetch or clone ends after 10 minutes: 750 MB at the 1.26 MB/s uplink measured on anyhost's first upload.
 const NETWORK_MS = 10 * 60_000
-// A part over 64 KiB is its own journal record, written once, so a change elsewhere never uploads it again.
 const PART_LIMIT = 64 * 1024
 const EMPTY_TREE: Readonly<Record<string, string>> = {
   sha1: '4b825dc642cb6eb9a060e54bf8d69288fbee4904',
   sha256: '6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321',
 }
-// What git keeps in a worktree's git folder while a merge, rebase, cherry-pick or revert waits on the person.
 const OPERATION_FILES = ['MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE', 'SQUASH_MSG', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'REBASE_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer']
 const ANYHOST = { GIT_AUTHOR_NAME: 'anyhost', GIT_AUTHOR_EMAIL: 'anyhost@anyhost.invalid', GIT_COMMITTER_NAME: 'anyhost', GIT_COMMITTER_EMAIL: 'anyhost@anyhost.invalid' }
 const GIT_ENV = { GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' }
@@ -39,19 +34,16 @@ type CodeRecord = {
   readonly keep: string | null
   readonly branches: Readonly<Record<string, string>>
   readonly stash: readonly Stashed[]
-  // Parts by sha256: the staged and unstaged diffs as file patches, conflict blobs by git id, operation files, bundles.
   readonly staged: readonly string[]
   readonly unstaged: readonly string[]
   readonly blobs: Readonly<Record<string, string>>
   readonly operation: readonly (readonly [string, string])[]
   readonly bundles: readonly string[]
-  // Every part the header names: inline ones follow the header line in this order, records are journal records.
   readonly parts: readonly (readonly [string, number, 'inline' | 'record'])[]
 }
 
 type Part = { readonly hash: string; readonly size: number; readonly bytes?: Uint8Array }
 
-/** A code record: the header, and the parts over 64 KiB the session's journal does not hold yet, each its own record. */
 export type CodeCapture = { readonly header: Uint8Array; readonly parts: readonly { readonly path: string; readonly bytes: Uint8Array }[] }
 
 type Repository = {
@@ -108,7 +100,6 @@ async function openRepository(cwd: string, kind: Repository['kind'], env: Readon
   return { kind, cwd: top, env, subfolder: prefix.replace(/\/$/, ''), gitDir, commonDir, index, emptyTree: EMPTY_TREE[format] ?? EMPTY_TREE['sha1'] ?? '' }
 }
 
-// A folder outside git gets its own git folder in anyhost's state, so git walks, hashes and diffs it as it does a checkout.
 async function folderRepository(folder: string): Promise<Repository> {
   const gitDir = join(stateFolder(), 'folders', `${sha256(await realpath(folder)).slice(0, 16)}.git`)
   if (!(await exists(gitDir))) await git({ cwd: folder, env: {} }, ['init', '-q', '--bare', gitDir])
@@ -117,8 +108,6 @@ async function folderRepository(folder: string): Promise<Repository> {
   return repo
 }
 
-// The home folder holds the person's whole machine, and the shared temp folders every program's scratch files, so they
-// and every folder above them hold no session's code.
 const SHARED_FOLDERS = [homedir(), '/tmp', '/var/tmp', tmpdir()]
 
 async function repositoryOf(folder: string): Promise<Repository | undefined> {
@@ -132,16 +121,12 @@ async function repositoryOf(folder: string): Promise<Repository | undefined> {
   return await folderRepository(folder)
 }
 
-// A copy of an index keeps the index's modified time. git trusts an entry's stat data only when the file was modified
-// before the index was written, so a newer time would hide an edit of the same size made in that second.
 async function copyIndex(from: string, to: string): Promise<void> {
   const { atime, mtime } = await stat(from)
   await copyFile(from, to)
   await utimes(to, atime, mtime)
 }
 
-// The index tree with every conflicted path at its HEAD version, the worktree tree of every file .gitignore allows,
-// and the conflict stages, all read from a copy of the index, so capture never takes the session's index.lock.
 async function treesOf(repo: Repository, head: string | null): Promise<Trees> {
   const temp = await mkdtemp(join(tmpdir(), 'anyhost-code-'))
   try {
@@ -170,7 +155,6 @@ async function treesOf(repo: Repository, head: string | null): Promise<Trees> {
     const staged = repo.kind === 'folder' ? repo.emptyTree : await valueOf(repo, ['write-tree'], { env })
     await git(repo, ['add', '-A', '--', ':/'], { env })
     const worktree = await valueOf(repo, ['write-tree'], { env })
-    // A folder outside git keeps its index, so the next capture rehashes only the files that changed.
     if (repo.kind === 'folder') await copyIndex(index, repo.index)
     return { index: staged, worktree, conflicts }
   } finally {
@@ -184,7 +168,6 @@ async function operationFilesOf(repo: Repository): Promise<[string, Uint8Array][
     const path = join(repo.gitDir, name)
     const found = await stat(path).catch(() => undefined)
     if (found === undefined) continue
-    // gpg_sign_opt copies this machine's commit.gpgSign, so the machine that continues the rebase signs by its own config.
     const paths = found.isDirectory()
       ? (await readdir(path, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile() && entry.name !== 'gpg_sign_opt').map((entry) => join(entry.parentPath, entry.name))
       : [path]
@@ -193,7 +176,6 @@ async function operationFilesOf(repo: Repository): Promise<[string, Uint8Array][
   return files
 }
 
-// Every remote with its configured URL, before insteadOf, and without the password an https URL can carry.
 async function remotesOf(repo: Repository): Promise<Remote[]> {
   const urls = await run(repo, ['config', '-z', '--get-regexp', '^remote\\..+\\.url$'])
   if (urls.code !== 0 && urls.code !== 1) throw new Error(`git config --get-regexp remote urls in ${repo.cwd} exited ${urls.code}: ${urls.err}`)
@@ -230,7 +212,6 @@ async function refsOf(repo: Repository) {
   }
 }
 
-// The commits a merge, rebase, cherry-pick or revert in progress names, so the keep ref holds them too.
 async function operationCommitsOf(repo: Repository, files: readonly [string, Uint8Array][]): Promise<string[]> {
   const ids = files.flatMap(([, bytes]) => {
     const lines = textOf(bytes).trim().split('\n')
@@ -241,8 +222,6 @@ async function operationCommitsOf(repo: Repository, files: readonly [string, Uin
   return types.filter((line) => line.endsWith(' commit')).map((line) => line.split(' ')[0] ?? '')
 }
 
-// The keep ref, refs/anyhost/<session>: an empty-tree commit whose parents are the previous keep commit and every tip
-// no remote branch holds, so the ref only moves forward and git gc never prunes a captured commit.
 async function keepCommits(repo: Repository, session: string, tips: readonly string[]): Promise<string | null> {
   const ref = `refs/anyhost/${session}`
   const kept = await commitOf(repo, ref)
@@ -261,9 +240,6 @@ type PushQueue = { startedAt: number; previous: Promise<unknown>; waiting: Push 
 const pushQueues = new Map<string, PushQueue>()
 const pushedKeeps = new Map<string, string>()
 
-// Every ref of one repository's sessions waiting at once goes in one push, at most one push every 10 s.
-// --no-verify: the person's pre-push hook guards what they publish on their branches; it would run their tests or
-// linters on every capture and refuse work in progress, while the hidden ref publishes no branch.
 async function pushRefs(repo: Repository, remote: string, refs: readonly string[]): Promise<Map<string, string>> {
   const done = await run(repo, ['push', '--porcelain', '--no-verify', '--no-follow-tags', '--no-signed', '--recurse-submodules=no', remote, ...refs.map((ref) => `${ref}:${ref}`)], { deadline: NETWORK_MS })
   const answers = new Map(
@@ -301,7 +277,6 @@ function pushRef(repo: Repository, remote: string, ref: string): Promise<string 
   return queue.waiting.refused.then((answers) => answers.get(ref))
 }
 
-// Why the remote does not hold the keep commit, or undefined once it does.
 async function pushKeep(repo: Repository, remote: Remote, session: string, keep: string): Promise<string | undefined> {
   const key = `${repo.commonDir}\0${remote.name}\0${session}`
   if (pushedKeeps.get(key) === keep) return undefined
@@ -315,8 +290,6 @@ async function pushKeep(repo: Repository, remote: Remote, session: string, keep:
 const partOf = (bytes: Uint8Array): Part => ({ hash: sha256(bytes), size: bytes.length, bytes })
 const partPath = (session: string, hash: string): string => `anyhost:code/${session}/parts/${hash}`
 
-// What the session's journal holds for this repository: the part records captureCode returned or restoreCode read, and
-// the chain of bundles since the remote last held the session's commits.
 type Journaled = { readonly parts: readonly string[]; readonly bundles: readonly Part[]; readonly bundled: string | null }
 const journaledPath = (repo: Repository, session: string): string => join(stateFolder(), 'code', session, `${sha256(repo.commonDir).slice(0, 16)}.json`)
 
@@ -330,8 +303,6 @@ async function saveJournaled(repo: Repository, session: string, journaled: Journ
   await writeFile(journaledPath(repo, session), JSON.stringify(journaled))
 }
 
-// Each changed file over 64 KiB gets its own patch, so an unchanged big file keeps its part's hash and is never
-// diffed again once the journal holds it. The other files share one patch.
 const bigPatches = new Map<string, Part>()
 
 async function patchesOf(repo: Repository, from: string, to: string, journaled: ReadonlySet<string>): Promise<Part[]> {
@@ -387,16 +358,6 @@ async function decode(header: Uint8Array, readPart: (path: string) => Promise<Ui
 
 const recorded = new Map<string, string>()
 
-/**
- * The working folder's state as one code record. The header holds `{head, branch, upstream, trees}` and the rest, and
- * names every part by sha256: the staged diff against HEAD and the unstaged diff against the index (untracked files as
- * .gitignore allows) as file patches, conflict stages, the files of an operation in progress, and incremental git
- * bundles while the remote does not hold the session's commits. Parts up to 64 KiB follow the header line; larger ones
- * and every bundle are returned as records at anyhost:code/<session>/parts/<sha256>, each only the first time.
- * The journal must hold every returned part before the header that names it.
- * Unpushed commits go to the hidden ref refs/anyhost/<session> on the repository's remote first.
- * Returns undefined when nothing changed since the session's last record, or for the home folder and the folders above it.
- */
 export async function captureCode(folder: string, session: string): Promise<CodeCapture | undefined> {
   if (!(await exists(folder))) throw new Error(`Session ${session} works in ${folder}, which no longer exists, so anyhost keeps its last code record.`)
   const repo = await repositoryOf(resolve(folder))
@@ -408,8 +369,6 @@ export async function captureCode(folder: string, session: string): Promise<Code
   const keep = repo.kind === 'repo' ? await keepCommits(repo, session, tips) : null
   const record = { session, kind: repo.kind, subfolder: repo.subfolder, ...refs, trees: { index: trees.index, worktree: trees.worktree }, conflicts: trees.conflicts, keep }
   const fingerprint = sha256(JSON.stringify([record, operation.map(([name, bytes]) => [name, sha256(bytes)])]))
-  // the journal holds this state already, unless anyhost forgot what the journal holds, as a repair of a journal R2 lost
-  // part of does, which needs every part and the header again
   if (recorded.get(session) === fingerprint && (await exists(journaledPath(repo, session)))) return undefined
 
   const journaled = await journaledOf(repo, session)
@@ -422,7 +381,6 @@ export async function captureCode(folder: string, session: string): Promise<Code
   const files = operation.map(([name, bytes]) => [name, partOf(bytes)] as const)
   const { bundles, bundled } = await bundlesOf(repo, session, keep, refs.remote, journaled)
   const parts = new Map([...staged, ...unstaged, ...blobs.values(), ...files.map(([, part]) => part), ...bundles].map((part) => [part.hash, part]))
-  // Bundles are records at any size: the chain grows, and an inline bundle would ride along in every later header.
   const records = new Set([...[...parts.values()].filter((part) => part.size > PART_LIMIT), ...bundles].map((part) => part.hash))
   const header = encode(
     {
@@ -442,8 +400,6 @@ export async function captureCode(folder: string, session: string): Promise<Code
   return { header, parts: fresh.map((part) => ({ path: partPath(session, part.hash), bytes: part.bytes ?? new Uint8Array() })) }
 }
 
-// The bundles that carry the session's commits while the remote does not hold them: the chain so far, and a new bundle
-// of the commits since the last one whenever the keep commit moved. A push the remote takes ends the chain.
 async function bundlesOf(repo: Repository, session: string, keep: string | null, remote: Remote | null, journaled: Journaled): Promise<{ bundles: Part[]; bundled: string | null }> {
   const chain = journaled.bundles.map(({ hash, size }) => ({ hash, size }))
   if (keep === null) return { bundles: [], bundled: null }
@@ -465,7 +421,6 @@ async function check(repo: Repository, record: CodeRecord): Promise<void> {
   }
 }
 
-// Applies the file patches as one patch: to the index and the worktree for the staged diff, to the worktree alone after it.
 async function apply(repo: Repository, patches: readonly string[], parts: ReadonlyMap<string, Uint8Array>, index: boolean): Promise<void> {
   if (patches.length === 0) return
   await git(repo, ['apply', ...(index ? ['--index'] : []), '--whitespace=nowarn', '-'], { input: Buffer.concat(patches.map((hash) => parts.get(hash) ?? new Uint8Array())) })
@@ -484,7 +439,6 @@ async function holdsFolder(folder: string, record: CodeRecord): Promise<boolean>
   return true
 }
 
-// A folder outside git restores into the folder when it is empty, and beside it when it holds other files.
 async function restoreFolder(record: CodeRecord, parts: ReadonlyMap<string, Uint8Array>, folder: string): Promise<string> {
   let target = folder
   if (!(await isEmptyFolder(folder))) {
@@ -504,8 +458,6 @@ async function restoreFolder(record: CodeRecord, parts: ReadonlyMap<string, Uint
   return target
 }
 
-// The parts and bundles a restore read are in the session's journal, so this machine's next capture names them and
-// continues the bundle chain instead of writing them again.
 async function rememberJournaled(repo: Repository, record: CodeRecord): Promise<void> {
   const sizes = new Map(record.parts.map(([hash, size]) => [hash, size]))
   const bundles = record.bundles.map((hash) => ({ hash, size: sizes.get(hash) ?? 0 }))
@@ -513,23 +465,17 @@ async function rememberJournaled(repo: Repository, record: CodeRecord): Promise<
   await saveJournaled(repo, record.session, { parts, bundles, bundled: bundles.length === 0 ? null : record.keep })
 }
 
-// The https form of a GitHub remote, ssh or https.
 export function httpsRemoteOf(url: string): string | undefined {
   const found = /^(?:(?:ssh:\/\/)?git@github\.com[:/]|https:\/\/github\.com\/)(.+?)(?:\.git)?\/?$/.exec(url)
   return found?.[1] === undefined ? undefined : `https://github.com/${found[1]}.git`
 }
 
-// Reads `url` over the network. A GitHub repository reads first over https with none of the person's own git config,
-// so a public one needs no key and never waits on a person: that config can send GitHub to ssh through an agent that
-// asks at the machine's own screen, as mac-studio's 1Password does, and devbox has no GitHub key at all. A private one
-// fails that read at once, as git asks for no password (`GIT_TERMINAL_PROMPT`), and reads `url` with the person's config.
 async function readRemote<T>(url: string, read: (from: string, env: Readonly<Record<string, string>>) => Promise<T>): Promise<T> {
   const https = httpsRemoteOf(url)
   if (https === undefined) return await read(url, {})
   return await read(https, { GIT_CONFIG_GLOBAL: '/dev/null' }).catch(() => read(url, {}))
 }
 
-// Clones `url` into `root`, with `url` as its remote `origin` however it read it.
 export async function cloneRemote(url: string, root: string, options: { readonly origin?: string; readonly branch?: string; readonly noCheckout?: boolean } = {}): Promise<void> {
   const { origin = 'origin', branch = '', noCheckout = false } = options
   await mkdir(dirname(root), { recursive: true })
@@ -538,7 +484,6 @@ export async function cloneRemote(url: string, root: string, options: { readonly
   await git({ cwd: root, env: {} }, ['remote', 'set-url', origin, url])
 }
 
-// The checkout at root: the one there, or a clone of the session's remote (an empty repository without one).
 async function checkoutAt(root: string, record: CodeRecord): Promise<{ repo: Repository; fresh: boolean }> {
   const found = (await exists(root)) ? await openRepository(root, 'repo') : undefined
   if (found !== undefined && (await realpath(found.cwd)) === (await realpath(root))) return { repo: found, fresh: false }
@@ -554,8 +499,6 @@ async function checkoutAt(root: string, record: CodeRecord): Promise<{ repo: Rep
   return { repo, fresh: true }
 }
 
-// The session's commits: from the record's bundles, oldest first, or from refs/anyhost/<session> on the remote. A checkout
-// that was here fetches the remote first, since the session's HEAD can be a commit pushed after this checkout's last fetch.
 async function fetchCommits(repo: Repository, record: CodeRecord, parts: ReadonlyMap<string, Uint8Array>, fresh: boolean): Promise<void> {
   const ref = `refs/anyhost/${record.session}`
   const url = record.remote?.url
@@ -577,7 +520,6 @@ async function fetchCommits(repo: Repository, record: CodeRecord, parts: Readonl
   } else if (record.keep !== null && url !== undefined) await readRemote(url, (from, env) => git(repo, ['fetch', '-q', from, `${ref}:${ref}`], { env, deadline: NETWORK_MS }))
 }
 
-// Whose uncommitted work a checkout holds: the session's state already, none, or work of its own.
 async function workIn(place: Repository, record: CodeRecord): Promise<'session' | 'none' | 'own'> {
   const head = await commitOf(place, 'HEAD')
   const trees = await treesOf(place, head)
@@ -587,8 +529,6 @@ async function workIn(place: Repository, record: CodeRecord): Promise<'session' 
   return isClean ? 'none' : 'own'
 }
 
-// Where the session continues: the checkout itself when it holds no work of its own, else a git worktree beside it,
-// so the person's own work stays as it was.
 async function placeOf(repo: Repository, record: CodeRecord): Promise<{ readonly work: Repository; readonly isSame: boolean }> {
   const here = await workIn(repo, record)
   if (here !== 'own') return { work: repo, isSame: here === 'session' }
@@ -622,8 +562,6 @@ async function checkedOutElsewhere(repo: Repository): Promise<Set<string>> {
   return elsewhere
 }
 
-// A fresh clone takes every branch as recorded. A checkout that was here moves a branch only forward, and never one
-// another worktree has checked out.
 async function moveBranches(repo: Repository, record: CodeRecord, fresh: boolean): Promise<void> {
   const elsewhere = await checkedOutElsewhere(repo)
   for (const [name, id] of Object.entries(record.branches)) {
@@ -642,7 +580,6 @@ async function moveBranches(repo: Repository, record: CodeRecord, fresh: boolean
     if (branch !== null) console.log(`HEAD is detached at ${record.head.slice(0, 8)}, because ${record.branch} could not move here.`)
   }
   if (!fresh) return
-  // A clone made its default branch; the session's checkout has exactly the branches it recorded.
   for (const name of linesOf(await git(repo, ['for-each-ref', '--format=%(refname:lstrip=2)', 'refs/heads']))) {
     if (!(name in record.branches) && name !== record.branch) await git(repo, ['branch', '-q', '-D', name])
   }
@@ -672,12 +609,6 @@ async function restoreOperation(repo: Repository, record: CodeRecord, parts: Rea
   }
 }
 
-/**
- * Restores a code record captureCode made into the session's working folder on this machine, reading each part the
- * header names as a journal record through readPart, and returns the folder the session continues in: the same folder,
- * or the same place in a new worktree or folder beside the checkout when the checkout there holds work of its own.
- * Throws when a part does not hash to its name, or the result does not hash to the trees the capture recorded.
- */
 export async function restoreCode(header: Uint8Array, readPart: (path: string) => Promise<Uint8Array>, folder: string): Promise<string> {
   const { record, parts } = await decode(header, readPart)
   const target = resolve(folder)

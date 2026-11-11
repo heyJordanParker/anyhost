@@ -7,6 +7,7 @@
   },
   "scripts": {
     "check": "bun run --cwd ../relay build && tsc",
+    "test": "bun run --cwd ../relay build && bun test --parallel ./tests",
     "build": "trap 'rm -f .*.bun-build' EXIT; bun install --frozen-lockfile || exit 1; bun run --cwd ../relay build || exit 1; for machine in ${CMOD_MACHINES:-darwin-arm64 darwin-x64 linux-arm64 linux-x64}; do bun build --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --target=bun-$machine src/main.ts --outfile dist/anyhost-$machine || exit 1; done"
   },
   "cmod": {

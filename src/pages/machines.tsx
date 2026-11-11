@@ -4,9 +4,6 @@ import type { Program } from '../../node_modules/@cmodjs/core/jobs/program.js'
 import { Box, Button, Input, Link, Text } from '../../node_modules/@cmodjs/core/ui/elements.js'
 import type { Device as Machine } from '../../relay/protocol.ts'
 
-// What the anyhost program answers, as `cli/src/serve.ts` serves it. `cmod check`'s compile against Claude Code's API
-// type-checks every file a type comes from, and refuses `cli/src/`, whose files import with `.ts` paths and use Bun, so
-// these copy the program's `Connecting`, `Status` and `JoinedRelay`. `relay/protocol.ts` uses nothing but the language.
 type Account = { readonly id: string; readonly name: string }
 type Connecting = { readonly is: 'running' | 'joined' | 'failed'; readonly lines: readonly string[]; readonly accounts?: readonly Account[]; readonly r2Page?: string; readonly error?: string }
 type Joining = { readonly is: 'running' } | { readonly is: 'failed'; readonly error: string }
@@ -19,14 +16,10 @@ export type AnyhostState = {
   memory: {
     connecting: Connecting | null
     isFollowing: boolean
-    // the program's answer to the invite link pasted on the Step: the relay joined, or why not
     joined: JoinedRelay | { readonly problem: string } | null
-    // the program's join with the link of the option join, as the install command Add a machine gives sets it
     joining: Joining | null
-    // the program's relay state at the Step's last check
     relayState: string | null
     machines: Machines | null
-    // whether /machines shows the machines it can add
     isAdding: boolean
     removing: string | null
     problem: string | null
@@ -37,21 +30,13 @@ export const initialState: AnyhostState = {
   memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null },
 }
 
-// The relay states in which this machine needs the Step: not joined, as before a join or once the program forgot a
-// removed machine's login, or `outdated`, joined to a relay that answers an older protocol than the program needs. A
-// relay whose relay version alone is older welcomes the machine, which captures through it while the program updates it
-// with a cf login, so no Step shows for it, and only anyhost doctor shows an update that failed.
 const NEEDS_STEP = new Set(['unjoined', 'outdated'])
-// The relay welcomes a joined machine within CONNECT_MS, 10 seconds, of the program asking (cli/src/relay.ts).
 const CONNECT_WAIT_MS = 15_000
-// how often the Step follows Connect Cloudflare and /move follows its move
 export const FOLLOW_MS = 1000
 
-// The anyhost program of each started mod, which its setup hands over.
 const programs = new WeakMap<object, Program>()
 export const reachProgram = (mod: Mod<AnyhostState>, program: Program): void => void programs.set(mod, program)
 
-// One answer of the program, at the unix socket it listens on: a GET, or a POST of `body` as JSON.
 export async function askProgram<T>(mod: Mod<AnyhostState>, path: string, body?: object): Promise<T> {
   const program = programs.get(mod)
   if (program === undefined) throw new Error('The anyhost mod has not started its program yet.')
@@ -73,12 +58,10 @@ export async function askProgram<T>(mod: Mod<AnyhostState>, path: string, body?:
 
 const pause = (mod: Mod<AnyhostState>, ms: number): Promise<void> => new Promise((resolve) => void mod.after(ms, resolve))
 
-// Follows a Connect Cloudflare the program runs, once a second until it joined or failed.
 function follow(mod: Mod<AnyhostState>): void {
   if (mod.state.memory.isFollowing) return
   mod.state.memory.isFollowing = true
   const timer = mod.every(FOLLOW_MS, async () => {
-    // a program that restarts answers at a later tick
     const status = await askProgram<Status>(mod, '/status').catch((error: unknown) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`, { level: 'warning' }))
     if (status === undefined) return
     const { connecting, joining } = status
@@ -90,22 +73,17 @@ function follow(mod: Mod<AnyhostState>): void {
   })
 }
 
-// Asks the program what a press on the Step asks, and shows the Connect Cloudflare it answers, or why it failed.
 async function connectAsk(mod: Mod<AnyhostState>, path: string, body: object): Promise<void> {
   const answered = await askProgram<Connecting>(mod, path, body).catch((error: unknown): Connecting => ({ is: 'failed', lines: mod.state.memory.connecting?.lines ?? [], error: messageOf(error) }))
   mod.state.memory.connecting = answered
   if (answered.is === 'running') follow(mod)
 }
 
-// A link that joins this machine ends the failure of the option's join, which the program forgets too.
 async function joinWith(mod: Mod<AnyhostState>, link: string): Promise<void> {
   mod.state.memory.joined = await askProgram<JoinedRelay>(mod, '/join', { link }).catch((error: unknown) => ({ problem: messageOf(error) }))
   if ('url' in mod.state.memory.joined) mod.state.memory.joining = null
 }
 
-// Done once this machine is joined to a relay that answers the program's protocol. A program that just started
-// connects first, and one installed with the command Add a machine gives joins with the option's link first, so the
-// Step never opens on a machine that is joining for that moment.
 async function needsStep(mod: Mod<AnyhostState>): Promise<boolean> {
   const started = Date.now()
   for (;;) {
@@ -117,9 +95,6 @@ async function needsStep(mod: Mod<AnyhostState>): Promise<boolean> {
       continue
     }
     mod.state.memory.relayState = relay.state
-    // A run or a pasted link that joined this machine before it was removed is over, and the Step starts afresh. An
-    // outdated relay keeps them: a run that uploaded a new protocol joins through the Worker, while Cloudflare runs the
-    // busy Pool's older code, which welcomes this machine as outdated, for up to 5 minutes.
     const isRemoved = relay.state === 'unjoined'
     mod.state.memory.connecting = isRemoved && connecting?.is === 'joined' ? null : (connecting ?? null)
     if (isRemoved && mod.state.memory.joined !== null && 'url' in mod.state.memory.joined) mod.state.memory.joined = null
@@ -171,7 +146,6 @@ function ConnectView({ mod }: { readonly mod: Mod<AnyhostState> }): RenderElemen
   )
 }
 
-// Every line Connect Cloudflare said, then what it waits for: an account to pick, or R2 turned on at its page.
 function ConnectingView({ mod, connecting }: { readonly mod: Mod<AnyhostState>; readonly connecting: Connecting }): RenderElement {
   return (
     <Box flexDirection="column">
@@ -200,14 +174,12 @@ function ConnectingView({ mod, connecting }: { readonly mod: Mod<AnyhostState>; 
   )
 }
 
-// The clock time of a moment today, else its date and time, in the person's own zone.
 function momentOf(iso: string): string {
   const at = new Date(iso)
   const time = at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
   return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${time}`
 }
 
-// Runs what a press on /machines asks of the program, and shows why it failed.
 async function act(mod: Mod<AnyhostState>, work: () => Promise<void>): Promise<void> {
   mod.state.memory.problem = null
   await work().catch((error: unknown) => void (mod.state.memory.problem = messageOf(error)))
@@ -217,7 +189,6 @@ export async function showMachines(mod: Mod<AnyhostState>): Promise<void> {
   await act(mod, async () => void (mod.state.memory.machines = await askProgram<Machines>(mod, '/machines')))
 }
 
-// Opens or closes /machines, reading the machines as it opens.
 export async function toggleMachines(mod: Mod<AnyhostState>, page: Page): Promise<void> {
   if (!page.isOpen) {
     mod.state.memory.isAdding = false
@@ -227,7 +198,6 @@ export async function toggleMachines(mod: Mod<AnyhostState>, page: Page): Promis
   await page.toggle({ focus: true })
 }
 
-// The program installs anyhost on the machine over ssh and joins it, which takes minutes, and /machines shows how it goes.
 const addMachine = (mod: Mod<AnyhostState>, target: string): Promise<void> =>
   act(mod, async () => {
     await askProgram(mod, '/machines/add', { target: target.trim() })

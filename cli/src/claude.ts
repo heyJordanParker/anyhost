@@ -16,7 +16,6 @@ export type RunningSession = {
 export type OnRecordsChange = (heard: () => void) => () => void
 
 type SessionRecord = { readonly pid?: number; readonly sessionId?: string; readonly cwd?: string; readonly status?: string; readonly procStart?: string }
-// `terminal` is the terminal of herdr-core the runner runs in, which none names when it runs in another terminal
 export type Run = { readonly pid: number; readonly procStart: string; readonly terminal?: string; readonly command: readonly string[] }
 
 export async function run(argv: readonly string[], options: { readonly cwd?: string; readonly env?: Record<string, string> } = {}): Promise<string> {
@@ -44,8 +43,6 @@ export const isAlive = (pid: number): boolean => {
   }
 }
 
-// A process's start as Claude Code writes it into its record's `procStart`: field 22 of `/proc/<pid>/stat` on Linux,
-// and `ps`'s `lstart` in UTC on macOS, so a pid the system gave to another process since counts as gone.
 export function startOf(pid: number): string {
   if (process.platform === 'linux') {
     const stat = (() => {
@@ -90,7 +87,6 @@ export async function recordedSessions(claudeHome: string): Promise<RunningSessi
     })
 }
 
-// Claude Code's record of the process `pid`, which the runner reads for its own Claude Code.
 export const recordAt = (claudeHome: string, pid: number): SessionRecord | undefined => jsonOf(join(claudeHome, 'sessions', `${pid}.json`)) as SessionRecord | undefined
 
 export function whenSessions<T>(claudeHome: string, found: (sessions: readonly RunningSession[]) => T | undefined, limitMs: number, onRecordsChange: OnRecordsChange, signal?: AbortSignal): Promise<T | undefined> {
@@ -147,20 +143,17 @@ export function whenSessions<T>(claudeHome: string, found: (sessions: readonly R
 
 const runsFolder = (): string => join(stateFolder(), 'runs')
 
-// The runner of the session here, awake or asleep, which only the runner that writes it removes.
 export const runOf = (session: string): Run | undefined => {
   const run = jsonOf(join(runsFolder(), `${session}.json`)) as Run | undefined
   return run !== undefined && isProcess(run.pid, run.procStart) ? run : undefined
 }
 
-// The sessions whose runner runs here.
 export const runSessions = (): string[] =>
   namesIn(runsFolder())
     .filter((name) => name.endsWith('.json'))
     .map((name) => name.slice(0, -'.json'.length))
     .filter((session) => runOf(session) !== undefined)
 
-// The runs whose runner ended without removing its file, as a restart of the machine ends every runner.
 export const stoppedRuns = (): { readonly session: string; readonly run: Run }[] =>
   namesIn(runsFolder())
     .filter((name) => name.endsWith('.json'))
@@ -172,7 +165,6 @@ export const stoppedRuns = (): { readonly session: string; readonly run: Run }[]
 
 const STATUS: Record<string, AgentStatus> ={ busy: 'working', shell: 'working', idle: 'idle', waiting: 'waiting' }
 
-// What the session does here, or undefined when no process runs it here.
 export async function statusOf(claudeHome: string, session: string): Promise<AgentStatus | undefined> {
   const record = (await recordedSessions(claudeHome)).find((entry) => entry.sessionId === session)
   if (record !== undefined) return STATUS[record.status ?? 'idle'] ?? 'working'
@@ -205,8 +197,6 @@ const signal = (pids: readonly number[], name: NodeJS.Signals): void => {
   }
 }
 
-// Ends the session's copy on this machine for good: its terminal closes, as herdr-core would give a kept terminal a
-// shell carrying the session's label, and its run goes, so a restart never opens the session here again.
 export async function stopCopy(claudeHome: string, session: string): Promise<void> {
   const record = (await recordedSessions(claudeHome)).find((entry) => entry.sessionId === session)
   const recorded = record !== undefined && isProcess(record.pid, recordAt(claudeHome, record.pid)?.procStart) ? record.pid : undefined

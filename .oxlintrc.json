@@ -3,5 +3,9 @@
     ".claude-plugin/types/**",
     "cli/dist/**",
     "relay/dist/**"
-  ]
+  ],
+  "jsPlugins": ["./lint/comments.js"],
+  "rules": {
+    "anyhost/no-comments": "error"
+  }
 }

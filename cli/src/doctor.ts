@@ -11,20 +11,12 @@ type Check = { readonly ok: string } | { readonly wait: string } | { readonly pr
 const START_CLAUDE = 'Start Claude Code on this machine. The anyhost mod makes the anyhost program a service of the machine, which records its sessions from each login on.'
 const JOIN = 'Connect your machines in the anyhost mod: Connect Cloudflare on your first machine, and add every other machine from /machines on a joined one, or join it with the command anyhost machines --invite prints there.'
 const UPDATE = 'The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.'
-// The mod's Step shows Connect Cloudflare only while the relay is `unjoined` or `outdated`, so the failed update of a
-// relay the program still captures through, an older relay version at this protocol, is fixed from the terminal.
 const UPDATE_FROM_TERMINAL = 'The program tries the update once a run. Run anyhost connect, which updates the relay with your Cloudflare login.'
-// A relay that answers an older protocol with no failed update: Cloudflare runs a busy Pool's older code for up to 300 s
-// after an upload, as the Step says, while an update no machine ran needs Connect Cloudflare. The program's /status
-// says nothing of when this machine last uploaded the relay, so the fix says to wait first.
 const OUTDATED = 'Wait 5 minutes first: after an upload of the relay, from this machine or another, Cloudflare runs its older version for up to 5 minutes, and the program connects again within a minute. If this line is still here then, Connect Cloudflare again in the anyhost mod, or run anyhost connect, which updates the relay.'
-// The relay answered /v1/health in under a second from the test machines (relay-spec R11).
 const HEALTH_MS = 10_000
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
-// This machine joined a relay, and that relay answers the protocol this program speaks, read here only while no
-// program answers, as a running program's relay state says it already.
 async function relayChecks(): Promise<Check[]> {
   const login = await relayLogin().catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
   if (login instanceof Error) return [{ problem: `anyhost cannot read which relay this machine joined: ${login.message}`, fix: JOIN }]
@@ -53,11 +45,9 @@ async function deviceCheck(): Promise<Check> {
   return { ok: `This machine is ${device.name}, ${device.id}.` }
 }
 
-// The program's own checks, and its relay's from its /status, one line per cause.
 function programChecks(address: string, status: Status | undefined): Check[] {
   if (status === undefined) return [{ problem: `The anyhost program does not answer at ${address}.`, fix: START_CLAUDE }]
   const { url, state, message, bucket } = status.relay
-  // an outdated relay and the failed update of it are one cause, so they make one line with the update's fix
   const { updateProblem } = status
   const isOutdatedUpdate = state === 'outdated' && updateProblem !== undefined
   const connection: Check =
@@ -76,13 +66,10 @@ function programChecks(address: string, status: Status | undefined): Check[] {
               : state === 'unjoined'
                 ? { problem: `The anyhost program at ${address} uploads nothing: ${message}`, fix: JOIN }
                 : { problem: `The anyhost program at ${address} reaches no relay, and ${status.pending} files wait for it: ${message}`, fix: 'It connects again within a minute, and uploads every change it kept meanwhile.' }
-  // a program older than journalGaps answers none
   const gaps = (status.journalGaps ?? []).map((problem): Check => ({
     problem,
     fix: "Put the session's transcript back at its path, as from a backup, and the program uploads it whole within an hour. Else a restore of the session goes on without that span. This line goes when the program restarts.",
   }))
-  // The join with the link of the option join, which `cmod install … --option 'join=<link>'` set. The program tries a
-  // link once, and an invite joins one machine within 10 minutes, so only a new invite joins after a failure.
   const { joining } = status
   const join: Check[] =
     joining === undefined
@@ -95,13 +82,11 @@ function programChecks(address: string, status: Status | undefined): Check[] {
               fix: 'The program does not try that link again. Add this machine again from /machines on a joined machine, or run anyhost join here with the link anyhost machines --invite prints there.',
             },
           ]
-  // the mod shows its Connect your machines step only for an unjoined or outdated relay, so a connected one has no button
   const update: Check[] = updateProblem === undefined || isOutdatedUpdate ? [] : [{ problem: updateProblem, fix: state === 'unjoined' ? UPDATE : UPDATE_FROM_TERMINAL }]
   const retried = status.problems.map((problem): Check => ({ problem, fix: 'The program tries this again by itself, and this line goes once it works.' }))
   return [connection, ...join, ...update, ...retried, ...gaps]
 }
 
-// Sessions moved or started here run in a terminal of herdr-core, which the Herdr app and Herdr mobile show.
 function terminalCheck(): Check {
   const hc = hcPath()
   if (hc === undefined) return { problem: 'herdr-core is not installed here, so no session can move to this machine or start on it.', fix: 'Install the Herdr app, or herdr-core alone with curl -fsSL https://releases.herdr.dev/core/install.sh | sh.' }

@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { forgetRun, recordAt, startOf, stoppedRuns, writeRun } from './claude.ts'
 import { rootsHere } from './device.ts'
-import { killTerminal, labelOwnTerminal, openTerminal, SESSION_LABEL, terminalAt } from './hc.ts'
+import { followLabels, isShown, killTerminal, labelOwnTerminal, openTerminal, SESSION_LABEL, terminalAt } from './hc.ts'
 
 const SLEEP_MS = Number(process.env['ANYHOST_SLEEP_MS'] ?? 15 * 60_000)
 const CHECK_MS = 30_000
@@ -13,25 +14,19 @@ const SESSION_FLAGS = new Set(['--continue', '-c', '--fork-session'])
 const SESSION_VALUES = new Set(['--resume', '-r', '--session-id'])
 const LEFT_BEHIND = ['CLAUDECODE', 'CLAUDE_PID', 'AI_AGENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN']
 const STATUS_REPORT = '\x1b]7501;'
-// While Claude Code rests, the runner asks for focus reports, which herdr-core sends a program each time a viewer, the
-// Herdr app, Herdr mobile or `hc attach`, focuses its terminal, so opening a session wakes it before its first key.
 const FOCUS_REPORTS_ON = '\x1b[?1004h'
-const FOCUS_REPORTS_OFF = '\x1b[?1004l'
 const FOCUSED = '\x1b[I'
 const BLURRED = '\x1b[O'
+const RESET = '\x1bc'
 
 type Awake = { readonly child: Bun.Subprocess; readonly terminal: Bun.Terminal; isReady: boolean; held: Uint8Array[]; readyAt?: ReturnType<typeof setTimeout> }
 
-// Claude Code resumes only a session that wrote its transcript, which it does at the first message.
 const transcriptOf = (claudeHome: string, session: string): string | undefined => {
   if (!existsSync(join(claudeHome, 'projects'))) return undefined
   const found = new Bun.Glob(`*/${session}.jsonl`).scanSync({ cwd: join(claudeHome, 'projects'), onlyFiles: true }).next()
   return found.done === true ? undefined : join(claudeHome, 'projects', found.value)
 }
 
-// What a resume of the session needs from its transcript: its first message as Claude Code wrote it, which the Herdr
-// app gives a new tab's agent as its last argument, and the model and effort its last turn ran with, which `--resume`
-// takes from the defaults else, as a `/model` lives in the process alone.
 export type Resumed = { readonly firstMessage?: string; readonly model?: string; readonly effort?: string }
 const EDGE_BYTES = 1 << 20
 async function resumedOf(transcript: string): Promise<Resumed> {
@@ -45,13 +40,10 @@ async function resumedOf(transcript: string): Promise<Resumed> {
   }
   const last = (await file.slice(Math.max(0, file.size - EDGE_BYTES)).text()).split('\n').findLast((line) => line.startsWith('{') && line.includes('"type":"assistant"'))
   const turn = last === undefined ? undefined : (JSON.parse(last) as { message?: { model?: string }; effort?: string })
-  // Claude Code writes an error it shows as a turn of the model `<synthetic>`
   const model = turn?.message?.model?.startsWith('<') === false ? turn.message.model : undefined
   return { ...(firstMessage === undefined ? {} : { firstMessage }), ...(model === undefined ? {} : { model }), ...(turn?.effort === undefined ? {} : { effort: turn.effort }) }
 }
 
-// The command that resumes the session: its own without its session flags, its first message, which the conversation
-// holds already, and the model and effort it started with, replaced by those its last turn ran with.
 export function resumeCommand(command: readonly string[], session: string, resumed: Resumed): string[] {
   if (command.length > 1 && resumed.firstMessage !== undefined && command.at(-1) === resumed.firstMessage) command = command.slice(0, -1)
   const replaced = new Set([...(resumed.model === undefined ? [] : ['--model']), ...(resumed.effort === undefined ? [] : ['--effort'])])
@@ -72,9 +64,6 @@ export function resumeCommand(command: readonly string[], session: string, resum
   return [...kept, ...(resumed.model === undefined ? [] : ['--model', resumed.model]), ...(resumed.effort === undefined ? [] : ['--effort', resumed.effort]), '--resume', session]
 }
 
-// A restart of the machine ends every runner, and herdr-core keeps each one's terminal with a shell in it, where the
-// Herdr app shows it as before. Each such terminal gets the session's runner back in its place, resting, so the session
-// shows again as it is opened and costs nothing until then. A run whose terminal is gone ended with that terminal.
 export async function reopenStopped(): Promise<void> {
   for (const { session, run } of stoppedRuns()) {
     forgetRun(session)
@@ -108,7 +97,6 @@ export async function runSession(command: readonly string[], resumed?: string, i
     else woken.held.push(keys)
   }
 
-  // read before each wake: as the runner starts with a session, and once Claude Code ended
   let resumable: Resumed | undefined
   const readResumable = async (): Promise<void> => {
     const transcript = session === undefined ? undefined : transcriptOf(claudeHome, session)
@@ -116,7 +104,7 @@ export async function runSession(command: readonly string[], resumed?: string, i
   }
 
   const wake = (): Awake => {
-    process.stdout.write(FOCUS_REPORTS_OFF)
+    process.stdout.write(RESET)
     const argv = session !== undefined && resumable !== undefined ? resumeCommand(command, session, resumable) : [...command]
     const terminal = new Bun.Terminal({
       ...size(),
@@ -153,7 +141,6 @@ export async function runSession(command: readonly string[], resumed?: string, i
   process.stdin.on('data', (keys: Buffer) => {
     usedAt = Date.now()
     if (awake !== undefined) return type(awake, Uint8Array.from(keys))
-    // a focus report only wakes Claude Code, which asks for its own once it runs
     const text = keys.toString('latin1')
     const typed = Buffer.from(text.replaceAll(FOCUSED, '').replaceAll(BLURRED, ''), 'latin1')
     if (typed.length === 0 && !text.includes(FOCUSED)) return
@@ -162,15 +149,11 @@ export async function runSession(command: readonly string[], resumed?: string, i
       if (typed.length > 0) type(awake, Uint8Array.from(typed))
     })
   })
-  // `resize`, as Bun 1.4.4 refreshes `columns` and `rows` only after every SIGWINCH listener ran, and Claude Code, which
-  // owns its terminal, hears the resize as SIGWINCH from the kernel
   process.stdout.on('resize', () => {
     if (awake === undefined) return
     const { cols, rows } = size()
     awake.terminal.resize(cols, rows)
   })
-  // A signal ends the runner as its terminal closes or the machine shuts down, and the run stays for reopenStopped, which
-  // tells the two apart by whether herdr-core kept the terminal.
   let isSignalled = false
   for (const signal of ['SIGTERM', 'SIGHUP', 'SIGINT'] as const) {
     process.on(signal, () => {
@@ -185,8 +168,6 @@ export async function runSession(command: readonly string[], resumed?: string, i
     writeRun(id, { pid: process.pid, procStart, ...(terminal ? { terminal } : {}), command })
     void labelOwnTerminal(id).catch((error: unknown) => console.error(`anyhost could not label this terminal with ${id}: ${error instanceof Error ? error.message : String(error)}`))
   }
-  // Claude Code writes its record as it starts, and the runner owns the session it names within a second, as a move, a
-  // tell and a restart find the session's terminal by its run.
   const learn = (record: ReturnType<typeof recordAt>): void => {
     if (record?.sessionId === undefined || record.sessionId === session) return
     if (session !== undefined) forgetRun(session)
@@ -197,12 +178,21 @@ export async function runSession(command: readonly string[], resumed?: string, i
     if (awake !== undefined) learn(recordAt(claudeHome, awake.child.pid))
     if (session !== undefined) clearInterval(learning)
   }, 1000)
+  let isOnScreen = false
+  const readShown = async (): Promise<void> => {
+    isOnScreen = terminal !== undefined && terminal !== '' && isShown((await terminalAt(terminal))?.labels ?? {})
+    if (!isOnScreen) return
+    usedAt = Date.now()
+    if (awake === undefined) void (sleeping ?? Promise.resolve()).then(() => (awake ??= wake()))
+  }
+  const stopFollowing = terminal === undefined || terminal === '' ? () => undefined : followLabels(terminal, () => void readShown())
   const check = setInterval(() => {
+    void readShown()
     if (awake === undefined || sleeping !== undefined) return
+    if (isOnScreen) usedAt = Date.now()
     const record = recordAt(claudeHome, awake.child.pid)
     learn(record)
-    // a turn Claude Code starts on its own, as a /loop's next run, counts as a key does
-    if (record !== undefined && record.status !== 'idle') usedAt = Date.now()
+    if (record !== undefined && (record.status !== 'idle' || record.cwd === homedir())) usedAt = Date.now()
     if (record?.status !== 'idle' || session === undefined || Date.now() - usedAt < SLEEP_MS) return
     sleeping = sleep(awake).finally(() => (sleeping = undefined))
   }, Math.min(CHECK_MS, SLEEP_MS / 4))
@@ -211,6 +201,7 @@ export async function runSession(command: readonly string[], resumed?: string, i
   if (isResting) process.stdout.write(FOCUS_REPORTS_ON)
   else awake = wake()
   const code = await exited.promise
+  stopFollowing()
   clearInterval(check)
   clearInterval(learning)
   if (session !== undefined && !isSignalled) forgetRun(session)

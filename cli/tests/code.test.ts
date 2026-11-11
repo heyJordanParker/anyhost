@@ -9,7 +9,6 @@ import { temporaryFolder } from './memory.ts'
 const SESSION = '0a1b2c3d-1111-2222-3333-444455556666'
 const kept: Record<string, string | undefined> = {}
 
-// Each test runs 20 to 60 git commands, and the 10 s push gap adds its own wait.
 setDefaultTimeout(60_000)
 
 beforeAll(() => {
@@ -40,7 +39,6 @@ function write(path: string, content: string | Uint8Array): void {
   writeFileSync(path, content)
 }
 
-// Every file under the folder but .git, with its type, executable bit, and content or link target.
 function filesOf(folder: string): string[] {
   return readdirSync(folder, { recursive: true, withFileTypes: true })
     .map((entry) => join(entry.parentPath, entry.name))
@@ -61,7 +59,6 @@ function gitStateOf(folder: string): string[] {
   ]
 }
 
-// A bare remote with one pushed commit on main, and a clone of it.
 function repository(): { base: string; remote: string; work: string } {
   const base = temporaryFolder()
   const remote = join(base, 'remote.git')
@@ -82,7 +79,6 @@ function repository(): { base: string; remote: string; work: string } {
   return { base, remote, work }
 }
 
-// The session's journal as restoreCode reads it: every part record captureCode returned, by its path.
 function journalOf() {
   const records = new Map<string, Uint8Array>()
   return {
@@ -98,7 +94,6 @@ function journalOf() {
   }
 }
 
-// The suite missed it: a machine with no GitHub key, as devbox, cloned a session's repository only from its ssh remote.
 test("a GitHub remote has an https form a machine without a GitHub key clones, and another host's has none", () => {
   expect(httpsRemoteOf('git@github.com:heyJordanParker/anyhost.git')).toBe('https://github.com/heyJordanParker/anyhost.git')
   expect(httpsRemoteOf('ssh://git@github.com/heyJordanParker/anyhost')).toBe('https://github.com/heyJordanParker/anyhost.git')
@@ -106,13 +101,9 @@ test("a GitHub remote has an https form a machine without a GitHub key clones, a
   expect(httpsRemoteOf('git@gitlab.com:a/b.git')).toBeUndefined()
 })
 
-// The suite missed it: mac-studio's git config sends GitHub to ssh through 1Password, which waits for a person at
-// that Mac's screen, so a clone there waited for good. A public repository clones with none of that config, and keeps
-// the session's own remote.
 test('a public GitHub repository clones with none of the person’s git config, and keeps the session’s remote', async () => {
   const folder = temporaryFolder()
   const config = join(folder, 'gitconfig')
-  // every GitHub address goes to an ssh no machine answers, as an agent that waits on a person reads to anyhost
   writeFileSync(config, '[url "ssh://git@127.0.0.1:1/"]\n\tinsteadOf = https://github.com/\n\tinsteadOf = git@github.com:\n')
   const root = join(folder, 'tiny')
   const before = process.env['GIT_CONFIG_GLOBAL']
@@ -164,8 +155,6 @@ test('the diff record round trip restores staged, partly staged and unstaged edi
 })
 
 test('a file rewritten with the same size in the second its index was written is captured with its new bytes', async () => {
-  // The file, its index entry and the index all carry one past timestamp, as a checkout and an edit in one second leave
-  // them, while the capture runs in a later second. touch -r copies a timestamp whole, to the nanosecond.
   const { base, work } = repository()
   const file = join(work, 'bin.dat')
   const tick = join(base, 'tick')
@@ -401,7 +390,6 @@ test('the folder holding the home folder gives no record, since it holds the who
   expect(await captureCode(dirname(homedir()), SESSION)).toBeUndefined()
 })
 
-// The suite missed it: a session working in /tmp read all of /tmp as its code, which failed at other programs' folders.
 test('the shared temp folder gives no record, since it holds every program’s scratch files', async () => {
   expect(await captureCode('/tmp', SESSION)).toBeUndefined()
   expect(await captureCode(tmpdir(), SESSION)).toBeUndefined()

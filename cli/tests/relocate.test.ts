@@ -36,7 +36,6 @@ test('a root matches only at a path boundary', () => {
 })
 
 test('every macOS root changes in both forms, with /private and without it', () => {
-  // macOS's root user lives in /var/root, and a session in /tmp/trwork records its folder as /private/tmp/trwork
   const root: Roots = { home: '/var/root', claudeHome: '/var/root/.claude', claudeTmp: '/tmp/claude-0', codexHome: '/var/root/.codex', checkout: '/private/tmp/trwork' }
   const content = '{"a":"/private/var/root/notes","b":"/private/var/root/.claude/plans/p.md","c":"/var/root/.codex/x","d":"/private/tmp/claude-0/y","e":"/tmp/trwork/a.ts","f":"projects/-tmp-trwork/s.jsonl","g":"/private/var/rooted","h":"/tmp/claude-01"}\n'
 
@@ -96,7 +95,6 @@ test('a plan and saved output name this machine, while file backups and binary f
   expect(text(relocate(plan, '/Users/alice/.claude/projects/-Users-alice-code-app/s/tool-results/b1.txt', mac, linux).bytes)).toBe('# Plan\n\nEdit /home/al/src/app/a.ts\n')
   expect(relocate(backup, '/Users/alice/.claude/file-history/s/0a1b@v1', mac, linux)).toEqual({ path: '/home/al/.claude/file-history/s/0a1b@v1', bytes: backup })
   expect(relocate(image, '/Users/alice/.claude/projects/-Users-alice-code-app/s/tool-results/i.png', mac, linux).bytes).toBe(image)
-  // an appended record of background output that starts inside a character still changes
   expect(Buffer.from(relocate(outputTail, '/private/tmp/claude-501/-Users-alice-code-app/s/tasks/b2.output', mac, linux).bytes)).toEqual(Buffer.from([0xa9, ...new TextEncoder().encode(' wrote /home/al/src/app/out.txt\n')]))
 })
 

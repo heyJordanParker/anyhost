@@ -18,14 +18,12 @@ const writeChanged = async (path: string, text: string): Promise<void> => {
 type Node = { id?: string; content?: unknown; children?: Node[] } & Record<string, unknown>
 const LAYOUT = 'anyhost'
 
-// The Herdr app's main layout with anyhost's session list in the place of its Agents list, as a layout of its own,
-// since the app replaces its shipped layouts at each start: Herdr's guide adds a layout by writing its file and
-// switching to it, and the person's own layout stays one ctrl-shift-l away.
-const withSessions = (node: Node): Node => ({
-  ...node,
-  ...(node.id === 'agents' ? { content: { mod: 'anyhost' } } : {}),
-  ...(node.children === undefined ? {} : { children: node.children.map(withSessions) }),
-})
+const TABS: Record<string, Node> = { agents: { title: 'Sessions', content: { mod: 'anyhost' } }, spaces: { title: 'Spaces' } }
+
+const withSessions = (node: Node): Node => {
+  if (node.id === 'sidebar-lists') return { ...node, type: 'stack', header: { content: 'tabs' }, active: 'agents', children: (node.children ?? []).map((child) => ({ ...child, ...TABS[child.id ?? ''] })) }
+  return { ...node, ...(node.children === undefined ? {} : { children: node.children.map(withSessions) }) }
+}
 
 const herdrApp = (): string | undefined => Bun.which('herdr-app', { PATH: `${process.env['PATH'] ?? ''}:${join(homedir(), '.local', 'bin')}` }) ?? undefined
 
@@ -41,8 +39,6 @@ export async function installHerdr(home = herdrHome()): Promise<void> {
   await runUnderRunner(home)
 }
 
-// The app shows the layout once, at the first start of anyhost that finds the app running, and the person's choice
-// from then on.
 async function switchOnce(home: string): Promise<void> {
   const switched = join(home, 'mods', 'anyhost', '.switched')
   const app = herdrApp()
@@ -62,6 +58,4 @@ async function runUnderRunner(home: string): Promise<void> {
   await writeChanged(file, `${JSON.stringify(written, null, 2)}\n`)
 }
 
-// The Herdr app's Claude Code runs under anyhost's runner where cmod links the program, and as it was once anyhost is
-// gone from there, so removing anyhost leaves the Herdr app working.
 const UNDER_RUNNER = 'program="$HOME/.local/share/cmod/programs/anyhost"; [ -x "$program" ] && exec "$program" run -- "$@"; exec "$@"'
