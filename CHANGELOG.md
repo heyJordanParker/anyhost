@@ -2,6 +2,21 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.6.0] - 2026-11-11
+
+### Added
+- Clicking any session in the Herdr app opens it, wherever it is: one you run in tmux comes into the Herdr app once its turn ends, one whose folder is gone comes back in a folder that exists, and one on another machine opens there.
+- Sessions an agent started fold into that agent's card as "3 subagents", and open with a click.
+- The sidebar has a Sessions tab and a Spaces tab, each the full height, and the Herdr app remembers which one you looked at.
+- `anyhost open <session>` and Claude's `open_agent` run a session on this machine in the Herdr app and say which terminal, in place of `take_agent`.
+
+### Fixed
+- A session on your screen never sleeps, in every pane of a split, and one comes awake the moment it shows.
+- A session that wakes draws on a clean screen, instead of over what the old one left.
+- A session working in your home folder never sleeps, as Claude Code asks you to trust that folder again at every start.
+- A session nobody typed in no longer shows in any list.
+- Project icons are t3code's two-letter tiles.
+
 ## [0.5.1] - 2026-11-10
 
 ### Fixed
