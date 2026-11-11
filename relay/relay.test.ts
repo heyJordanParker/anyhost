@@ -222,6 +222,7 @@ async function joinWith(code: string, device: JoiningDevice): Promise<Joined> {
   return { device, token: answer['token'], socket }
 }
 
+const claimedOf = (socket: Socket, session: string): Promise<Message> => socket.next((m) => !(m instanceof Uint8Array) && m['t'] === 'claimed' && m['session'] === session, `claimed of ${session}`)
 const codeOf = (link: string): string => link.slice(link.indexOf('#') + 1)
 async function invite(by: Joined): Promise<string> {
   const [made] = await by.socket.results({ op: 'invite' })
@@ -527,6 +528,37 @@ describe('ops', () => {
     expect(claims!['claims'][under[0]!]).toEqual({ id: mac.device.id, name: mac.device.name })
     const [all] = await mac.socket.results({ op: 'claims' })
     expect(Object.keys(all!['claims'])).toEqual(expect.arrayContaining([...under, before, after]))
+  })
+
+  test('every change of a holder gets the next number and reaches every machine once, and changes answers only those after a number', async () => {
+    const other = await joinNew(mac, 'follower')
+    const session = crypto.randomUUID()
+    const [before] = await other.socket.results({ op: 'changes', since: 0 })
+    const last = before!['last'] as number
+    await mac.socket.results({ op: 'claim', session, take: false })
+    const claimed = { t: 'claimed', changed: last + 1, session, device: mac.device.id }
+    expect(await claimedOf(other.socket, session)).toEqual(claimed)
+    expect(await claimedOf(mac.socket, session)).toEqual(claimed)
+    await mac.socket.results({ op: 'claim', session, take: false })
+    await other.socket.none('claimed', 500)
+    await other.socket.results({ op: 'claim', session, take: true })
+    expect(await claimedOf(mac.socket, session)).toEqual({ t: 'claimed', changed: last + 2, session, device: other.device.id })
+    expect(await other.socket.results({ op: 'changes', since: last })).toEqual([{ status: 200, changes: [{ ...claimed, changed: last + 2, device: other.device.id }], last: last + 2 }])
+    const back = await connect(other.token, other.device.name, other.device.roots)
+    expect(await back.message('welcome')).toMatchObject({ changed: last + 2 })
+  })
+
+  test('forget empties the holder of a session only for its holder, and a list and a take after it see no holder', async () => {
+    const other = await joinNew(mac, 'forgetter')
+    const session = crypto.randomUUID()
+    await mac.socket.results({ op: 'claim', session, take: false })
+    expect(await other.socket.results({ op: 'forget', session })).toEqual([{ status: 409, holder: { id: mac.device.id, name: mac.device.name } }])
+    expect(await mac.socket.results({ op: 'forget', session })).toEqual([{ status: 200 }])
+    expect(await claimedOf(other.socket, session)).toMatchObject({ device: mac.device.id })
+    expect(await claimedOf(other.socket, session)).toMatchObject({ device: '' })
+    expect(await mac.socket.results({ op: 'claims', prefix: session })).toEqual([{ status: 200, claims: {} }])
+    expect(await mac.socket.results({ op: 'forget', session })).toEqual([{ status: 200 }])
+    expect(await other.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
   })
 
   test('devices lists every joined machine with its roots and whether it is connected', async () => {

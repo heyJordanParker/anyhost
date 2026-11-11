@@ -203,7 +203,8 @@ export async function restore(capture: Capture, id: string, options: { take: boo
   const { relay, db, roots } = capture
   const devices = await devicesOf(relay)
   const [indexes, claims] = await Promise.all([indexesOf(relay, devices.keys()), claimsOf(relay, id)])
-  const session = (await listSessions(relay, { devices, indexes, claims })).find((entry) => entry.id === id)
+  const holders = new Map([...claims].map(([held, holder]) => [held, holder.id]))
+  const session = (await listSessions(capture, { devices, indexes, holders })).find((entry) => entry.id === id)
   if (session === undefined) throw new Error(`No machine lists the session ${id}. anyhost list shows every session.`)
   const hasMoved = [...indexes.values()].filter((index) => index.some((entry) => entry.id === id)).length > 1
   const claim = await takeClaim(relay, id, { take: options.take || !hasMoved, ...(options.take && options.if !== undefined ? { if: options.if } : {}) }).catch((error: unknown) => {

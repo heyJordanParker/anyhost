@@ -1,10 +1,11 @@
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, rmSync, statSync, type Stats } from 'node:fs'
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, rmSync, statSync, type Stats } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Listed, type Released } from '../../relay/protocol.ts'
+import { followHolders, type Holders } from './claims.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Relay } from './relay.ts'
@@ -18,7 +19,9 @@ const SEAL_WAIT_PASSES = 60
 const SWEEP_BATCH = 1000
 const REQUESTS_AHEAD = 16
 const TAIL_BYTES = 32
-const SCHEMA = 2
+const SCHEMA = 4
+const ENTRYPOINTS_READ_ONCE = 2
+const SUMMARIES_READ_ONCE = 3
 
 export type IndexedSession = {
   readonly id: string
@@ -31,6 +34,7 @@ export type IndexedSession = {
   readonly entrypoint: string
   readonly lastActivity: string
   readonly size: number
+  readonly deleted: boolean
 }
 export type Code = { readonly captureCode: typeof captureCode; readonly restoreCode: typeof restoreCode }
 export type Capture = Code & {
@@ -47,6 +51,7 @@ export type Capture = Code & {
   readonly missingFolders: Set<string>
   readonly onCode: (session: string, tool: Tool, folder: string) => void
   readonly onReleased: (session: string, holder: string) => void
+  readonly holders: Holders
   lastIndex: string
 }
 export type Problems = { set(key: string, error: unknown): void; clear(key: string): void }
@@ -75,13 +80,18 @@ export function openDatabase(folder = stateFolder()): Database {
   db.run('pragma busy_timeout = 5000')
   db.run("create table if not exists bucket (name text not null, url text not null default '')")
   if (db.query<{ name: string }, []>("select name from pragma_table_info('bucket') where name = 'url'").get() === null) db.run("alter table bucket add column url text not null default ''")
-  if (db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version !== SCHEMA) startOver(db)
+  const version = db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version
+  if (version !== SCHEMA && version !== ENTRYPOINTS_READ_ONCE && version !== SUMMARIES_READ_ONCE) startOver(db)
   makeTables(db)
+  if (version === ENTRYPOINTS_READ_ONCE) {
+    readEntrypointsAgain(db)
+    db.run(`pragma user_version = ${SUMMARIES_READ_ONCE}`)
+  }
   return db
 }
 
 function startOver(db: Database): void {
-  for (const table of ['files', 'sessions', 'journals', 'line_offsets']) db.run(`drop table if exists ${table}`)
+  for (const table of ['files', 'sessions', 'journals', 'line_offsets', 'holders', 'holders_changed']) db.run(`drop table if exists ${table}`)
   rmSync(join(dirname(db.filename), 'code'), { recursive: true, force: true })
   db.run(`pragma user_version = ${SCHEMA}`)
 }
@@ -102,6 +112,9 @@ function makeTables(db: Database): void {
     id text primary key, tool text not null, title text not null default '', title_rank integer not null default 0, first_prompt text not null default '',
     cwd text not null default '', repo text not null default '', repo_folder text not null default '', entrypoint text not null default '',
     last_activity text not null default '', size integer not null default 0)`)
+  db.run('create table if not exists holders (session text primary key, device text not null)')
+  db.run('create table if not exists holders_changed (changed integer not null)')
+  db.run('insert into holders_changed (changed) select 0 where not exists (select 1 from holders_changed)')
 }
 
 export type CountedRelay = { readonly url: string; readonly bucket: string }
@@ -136,15 +149,16 @@ export function openCapture(
     onOtherRelay = () => undefined,
   }: { readonly db?: Database; readonly code?: Code; readonly onCode?: Capture['onCode']; readonly onReleased?: Capture['onReleased']; readonly onOtherRelay?: (url: string, bucket: string) => void } = {},
 ): Capture {
-  const capture: Capture = {
-    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased, lastIndex: '',
-  }
-  const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
   relay.on('welcome', ({ bucket, waiting }) => {
     const isOther = useRelay(db, relay.url, bucket)
     for (const message of waiting) released(message)
     if (isOther) onOtherRelay(relay.url, bucket)
   })
+  const capture: Capture = {
+    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
+    holders: followHolders(relay, db), lastIndex: '',
+  }
+  const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
   relay.on('released', released)
   return capture
 }
@@ -156,6 +170,11 @@ function releasedTo(capture: Capture, session: string, holder: DeviceRef, reason
 }
 
 export const isCodePart = (path: string): boolean => path.startsWith('anyhost:code/')
+
+const isTranscript = (path: string, roots: MachineRoots): boolean => {
+  const owner = ownerOf(path, roots)
+  return owner !== undefined && 'isTranscript' in owner && owner.isTranscript
+}
 
 const position = (at: number): string => String(at).padStart(16, '0')
 export const journalPrefix = (session: string): string => `journals/${session}/`
@@ -514,6 +533,7 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
   const work = new Set(paths)
   if (journal === undefined) {
     const files = await filesOf(session, tool, roots)
+    if (![...work, ...files].some((path) => isTranscript(path, roots) && existsSync(path))) return new Set()
     rememberFiles(db, session, files)
     for (const path of files) work.add(path)
     journal = { session, tool, end: 0, sealed: 0, writtenAt: 0, stopped: '', holder: '' }
@@ -571,10 +591,7 @@ async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put
   const records = counted.flatMap(({ frame }) => frame.records)
   const last = counted.at(-1)?.frame
   const end = last === undefined ? upload.end : last.start + last.body.length
-  const transcript = changes.find((change) => {
-    const owner = ownerOf(change.header.path, roots)
-    return owner !== undefined && 'isTranscript' in owner && owner.isTranscript
-  })
+  const transcripts = changes.filter(({ header }) => isTranscript(header.path, roots) && header.path.endsWith('.jsonl'))
   if (counted.length > 0) {
     db.transaction(() => {
       db.query(`insert into journals (session, tool, end, written_at) values (?, ?, ?, ?)
@@ -586,7 +603,7 @@ async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put
   if (failure !== undefined && 'error' in failure) throw failure.error
   const own = changes.filter(({ header }) => !linesFiles(roots).has(header.path) && header.path !== codexState(roots))
   const lastActivity = new Date(own.length === 0 ? Date.now() : Math.max(...own.map((change) => change.state.mtime))).toISOString()
-  if (await recordSummary(capture, session, tool, transcript === undefined ? '' : new TextDecoder().decode(transcript.bytes), end, lastActivity)) {
+  if (await recordSummary(capture, session, tool, transcripts.map(({ bytes }) => new TextDecoder().decode(bytes)).join(''), end, lastActivity)) {
     await writeIndex(capture).then(() => problems.clear('index'), (error: unknown) => problems.set('index', error))
   }
   if (waiting !== undefined && !code.isDone) left.add(`${waiting.folder}/`)
@@ -852,14 +869,82 @@ export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: 
   return row.last_activity === '' || after.cwd !== row.cwd || repo !== row.repo || checkout.folder !== row.repo_folder
 }
 
+const TRANSCRIPT_GONE =
+  "not exists (select 1 from files where files.session = sessions.id and (files.path like '%' || sessions.id || '.jsonl' or files.path like '%' || sessions.id || '.jsonl.zst') and files.sha256 != '')"
+
+export const isDeleted = (db: Database, session: string): boolean =>
+  db.query<{ deleted: number }, [string]>(`select ${TRANSCRIPT_GONE} as deleted from sessions where id = ?`).get(session)?.deleted === 1
+
 function indexOf(db: Database): IndexedSession[] {
   return db
-    .query<SessionRow, []>('select * from sessions order by last_activity desc')
+    .query<SessionRow & { deleted: number }, []>(`select *, ${TRANSCRIPT_GONE} as deleted from sessions order by last_activity desc`)
     .all()
     .map((row) => ({
       id: row.id, tool: row.tool, title: row.title, firstPrompt: row.first_prompt, cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder,
-      entrypoint: row.entrypoint, lastActivity: row.last_activity, size: row.size,
+      entrypoint: row.entrypoint, lastActivity: row.last_activity, size: row.size, deleted: row.deleted === 1,
     }))
+}
+
+const ENTRYPOINT_BYTES = 1 << 16
+
+function newestEntrypoint(path: string, tool: Tool): string | undefined {
+  const file = openSync(path, 'r')
+  try {
+    const size = fstatSync(file).size
+    const bytes = Buffer.alloc(Math.min(size, ENTRYPOINT_BYTES))
+    readSync(file, bytes, 0, bytes.length, tool === 'codex' ? 0 : size - bytes.length)
+    const text = bytes.toString('utf8')
+    return tool === 'codex' ? /"originator":"([^"]*)"/.exec(text)?.[1] : [...text.matchAll(/"entrypoint":"([^"]*)"/g)].at(-1)?.[1]
+  } finally {
+    closeSync(file)
+  }
+}
+
+function readEntrypointsAgain(db: Database): void {
+  const transcripts = db
+    .query<{ id: string; tool: Tool; path: string }, []>(
+      "select sessions.id, sessions.tool, files.path from sessions join files on files.session = sessions.id and files.path like '%' || sessions.id || '.jsonl' and files.sha256 != ''",
+    )
+    .all()
+  const update = db.query('update sessions set entrypoint = ? where id = ?')
+  for (const { id, tool, path } of transcripts) {
+    const entrypoint = existsSync(path) ? newestEntrypoint(path, tool) : undefined
+    if (entrypoint !== undefined) update.run(entrypoint, id)
+  }
+}
+
+export async function forgetEmpty(capture: Capture): Promise<number> {
+  const { relay, db, device } = capture
+  const held = [...(await capture.holders.current())].flatMap(([session, holder]) => (holder === device.id && journalOf(db, session) === undefined ? [session] : []))
+  let forgotten = 0
+  for (let at = 0; at < held.length; at += MAX_OPS) {
+    const batch = held.slice(at, at + MAX_OPS)
+    const listed = await Promise.all(relay.run(batch.map((session) => ({ op: 'list', prefix: journalPrefix(session) }))))
+    const empty = batch.filter((_session, index) => {
+      const answer = listed[index]
+      return answer !== undefined && 'objects' in answer && answer.objects.length === 0
+    })
+    await Promise.all(relay.run(empty.map((session) => ({ op: 'forget', session }))))
+    forgotten += empty.length
+  }
+  return forgotten
+}
+
+export async function readSummariesAgain(capture: Capture): Promise<void> {
+  const { db } = capture
+  if (db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version !== SUMMARIES_READ_ONCE) return
+  const unread = db.query<SessionRow, []>("select * from sessions where first_prompt = '' or cwd = ''").all()
+  for (const row of unread) {
+    const paths = db
+      .query<{ path: string }, [string, string]>("select path from files where session = ? and path like '%' || ? || '.jsonl' and sha256 != '' order by mtime")
+      .all(row.id, row.id)
+      .map(({ path }) => path)
+      .filter((path) => existsSync(path))
+    if (paths.length === 0) continue
+    const text = (await Promise.all(paths.map((path) => Bun.file(path).text()))).join('')
+    await recordSummary(capture, row.id, row.tool, text, row.size, row.last_activity)
+  }
+  db.run(`pragma user_version = ${SCHEMA}`)
 }
 
 export async function writeIndex(capture: Capture): Promise<void> {

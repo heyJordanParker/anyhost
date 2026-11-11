@@ -14,17 +14,17 @@ const killAfterTest = (child: Subprocess): void =>
     await child.exited
   })
 
-test('a woken session runs the command it started with, with every session flag of it replaced by --resume of the session', () => {
+test('a reopened session runs the command it started with, with every session flag of it replaced by --resume of the session', () => {
   expect(resumeCommand(['claude', '--model', 'opus', '--resume', 'old', '-c', '--fork-session', '--session-id=x', '--dangerously-skip-permissions'], 'new', {})).toEqual(['claude', '--model', 'opus', '--dangerously-skip-permissions', '--resume', 'new'])
   expect(resumeCommand(['claude', '-r', '--model', 'opus'], 'new', {})).toEqual(['claude', '--model', 'opus', '--resume', 'new'])
 })
 
-test('a woken session drops the first message the Herdr app gave its command, which the conversation holds already', () => {
+test('a reopened session drops the first message the Herdr app gave its command, which the conversation holds already', () => {
   expect(resumeCommand(['claude', '--model', 'haiku', 'fix'], 'new', { firstMessage: 'fix' })).toEqual(['claude', '--model', 'haiku', '--resume', 'new'])
   expect(resumeCommand(['claude', '--model', 'haiku'], 'new', { firstMessage: 'fix the login' })).toEqual(['claude', '--model', 'haiku', '--resume', 'new'])
 })
 
-test('a woken session runs on the model and effort its last turn ran with', () => {
+test('a reopened session runs on the model and effort its last turn ran with', () => {
   expect(resumeCommand(['claude', '--model', 'opus', '--effort=high', '--verbose'], 'new', { model: 'claude-haiku-5-5', effort: 'medium' })).toEqual(['claude', '--verbose', '--model', 'claude-haiku-5-5', '--effort', 'medium', '--resume', 'new'])
 })
 
@@ -63,7 +63,7 @@ record="$CLAUDE_CONFIG_DIR/sessions/$$.json"
 printf '{"pid":%s,"sessionId":"${SESSION}","kind":"interactive","cwd":"%s","status":"idle"}' $$ "$PWD" > "$record"
 trap 'rm -f "$record"; exit 0' TERM
 trap 'echo "size $(stty size)"' WINCH
-printf 'started %s\\033]7501;state=idle:app=claude-code\\033\\\\\\n' "$*"
+printf 'started %s with %s\\033]7501;state=idle:app=claude-code\\033\\\\\\n' "$*" "$ANYHOST_PROBE"
 while IFS= read -r line; do echo "typed $line"; done <&0 &
 reader=$!
 while kill -0 $reader 2>/dev/null; do wait $reader; done
@@ -73,14 +73,22 @@ while kill -0 $reader 2>/dev/null; do wait $reader; done
   return path
 }
 
-test('anyhost run gives Claude Code the size its terminal resized to', async () => {
-  const folder = temporaryFolder()
+const machine = (stopMs?: number, extra: Record<string, string> = {}) => {
+  const folder = realpathSync(temporaryFolder())
   const claudeHome = join(folder, '.claude')
   mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
-  const claude = fakeClaude(folder)
+  const state = join(folder, 'state')
+  mkdirSync(join(state, 'anyhost'), { recursive: true })
+  writeFileSync(join(state, 'anyhost', 'environment.json'), JSON.stringify({ changedAt: 0, environment: { ANYHOST_PROBE: 'the login environment' } }))
+  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: state, ...(stopMs === undefined ? {} : { ANYHOST_STOP_MS: String(stopMs) }), ...extra }
+  const records = (): string[] => readdirSync(join(claudeHome, 'sessions'))
+  return { folder, claudeHome, env, records, claude: fakeClaude(folder), runs: join(state, 'anyhost', 'runs', `${SESSION}.json`) }
+}
+
+test('anyhost run gives Claude Code the size its terminal resized to', async () => {
+  const { env, claude } = machine()
   let shown = ''
   const terminal = new Bun.Terminal({ cols: 70, rows: 31, data: (_terminal, bytes) => void (shown += new TextDecoder().decode(bytes)) })
-  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state') }
   const owned = `ioctl(STDIN, ${process.platform === 'darwin' ? '0x20007461' : '0x540E'}, 0) or die "$!"; exec { $ARGV[0] } @ARGV`
   killAfterTest(Bun.spawn(['perl', '-e', owned, '--', 'bun', CLI, 'run', '--', claude], { env, terminal, detached: true }))
 
@@ -92,59 +100,39 @@ test('anyhost run gives Claude Code the size its terminal resized to', async () 
   terminal.close()
 }, 30_000)
 
-test('anyhost run wakes a session that never got a message with the command it started with, as Claude Code resumes only one with a transcript', async () => {
-  const folder = temporaryFolder()
-  const claudeHome = join(folder, '.claude')
-  mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
-  const claude = fakeClaude(folder)
+test('anyhost run gives Claude Code the login environment the service saved, with no login shell of its own', async () => {
+  const { env, claude } = machine()
   let shown = ''
   const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: (_terminal, bytes) => void (shown += new TextDecoder().decode(bytes)) })
-  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state'), ANYHOST_SLEEP_MS: '500' }
-  killAfterTest(Bun.spawn(['bun', CLI, 'run', '--', claude, '--session-id', SESSION], { env, terminal }))
-
-  await until(() => shown.includes(`started --session-id ${SESSION}`), 'Claude Code starting')
-  await until(() => readdirSync(join(claudeHome, 'sessions')).length === 0, 'Claude Code ending', 10_000)
-  const asleep = shown.length
-  terminal.write('book the train\r')
-  await until(() => shown.slice(asleep).includes(`started --session-id ${SESSION}`), 'Claude Code starting again')
-  await until(() => shown.includes('typed book the train'), 'the key that woke it reaching it')
-  terminal.close()
-}, 30_000)
-
-test('anyhost run asks for focus reports while Claude Code rests, and a focus wakes it before any key, with no focus report reaching it', async () => {
-  const folder = temporaryFolder()
-  const claudeHome = join(folder, '.claude')
-  mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
-  mkdirSync(join(claudeHome, 'projects', '-work'), { recursive: true })
-  writeFileSync(join(claudeHome, 'projects', '-work', `${SESSION}.jsonl`), '{"type":"user"}\n')
-  const claude = fakeClaude(folder)
-  let shown = ''
-  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: (_terminal, bytes) => void (shown += new TextDecoder().decode(bytes)) })
-  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state'), ANYHOST_SLEEP_MS: '500' }
   killAfterTest(Bun.spawn(['bun', CLI, 'run', '--', claude], { env, terminal }))
 
   await until(() => shown.includes('started'), 'Claude Code starting')
-  await until(() => readdirSync(join(claudeHome, 'sessions')).length === 0, 'Claude Code ending', 10_000)
-  await until(() => shown.endsWith('\x1b[?1004h'), 'the runner asking for focus reports')
-  const asleep = shown.length
-  terminal.write('\x1b[I')
-  await until(() => shown.slice(asleep).includes(`started --resume ${SESSION}`), 'Claude Code starting at the focus')
-  expect(shown.slice(asleep)).toStartWith('\x1bc')
-  terminal.write('book the train\r')
-  await until(() => shown.includes('typed '), 'the key reaching Claude Code')
-  expect(shown).toContain('typed book the train')
+  expect(shown).toContain('started  with the login environment')
   terminal.close()
 }, 30_000)
 
-test('anyhost run counts a turn Claude Code starts on its own as a key, and sleeps only the sleep time after it ends', async () => {
-  const folder = temporaryFolder()
-  const claudeHome = join(folder, '.claude')
-  mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
-  const claude = fakeClaude(folder)
+test('anyhost run records which runner, version, terminal and Claude Code run the session, since when', async () => {
+  const { env, claude, runs } = machine(undefined, { HC_TERMINAL_ID: 't9', PATH: `/nowhere:${process.env['PATH'] ?? ''}` })
   const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: () => undefined })
-  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state'), ANYHOST_SLEEP_MS: '2000' }
-  killAfterTest(Bun.spawn(['bun', CLI, 'run', '--', claude], { env, terminal }))
-  const records = (): string[] => readdirSync(join(claudeHome, 'sessions'))
+  const runner = Bun.spawn(['bun', CLI, 'run', '--', claude, '--model', 'opus'], { env, terminal })
+  killAfterTest(runner)
+
+  await until(() => existsSync(runs), 'the runner writing its run')
+  const written = JSON.parse(readFileSync(runs, 'utf8')) as Record<string, unknown>
+  expect(written).toMatchObject({
+    session: SESSION,
+    runner: { process: { id: runner.pid, start: expect.any(String) }, version: expect.any(String), startedAt: expect.any(String) },
+    terminal: { address: 't9', machine: expect.any(String) },
+    claude: { command: [claude, '--model', 'opus'], process: { id: expect.any(Number), start: expect.any(String) }, startedAt: expect.any(String) },
+  })
+  terminal.close()
+}, 30_000)
+
+test('anyhost run counts a turn Claude Code starts on its own as use, and stops only the stop time after it ends', async () => {
+  const { env, claude, records, claudeHome } = machine(2000)
+  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: () => undefined })
+  const runner = Bun.spawn(['bun', CLI, 'run', '--', claude], { env, terminal })
+  killAfterTest(runner)
   await until(() => records().length === 1, 'Claude Code writing its record')
   const record = join(claudeHome, 'sessions', records()[0] ?? '')
   const status = (to: string): void => writeFileSync(record, readFileSync(record, 'utf8').replace(/"status":"\w+"/, `"status":"${to}"`))
@@ -159,28 +147,19 @@ test('anyhost run counts a turn Claude Code starts on its own as a key, and slee
 }, 30_000)
 
 test('anyhost run never ends a Claude Code working in the home folder, where Claude Code asks for trust again at each start', async () => {
-  const folder = realpathSync(temporaryFolder())
-  const claudeHome = join(folder, '.claude')
-  mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
-  const claude = fakeClaude(folder)
+  const { env, claude, records, folder } = machine(500)
   const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: () => undefined })
-  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state'), ANYHOST_SLEEP_MS: '500' }
   killAfterTest(Bun.spawn(['bun', CLI, 'run', '--', claude], { env, terminal, cwd: folder }))
 
-  await until(() => readdirSync(join(claudeHome, 'sessions')).length === 1, 'Claude Code writing its record')
+  await until(() => records().length === 1, 'Claude Code writing its record')
   await Bun.sleep(2500)
 
-  expect(readdirSync(join(claudeHome, 'sessions'))).toHaveLength(1)
+  expect(records()).toHaveLength(1)
   terminal.close()
 }, 30_000)
 
-test('anyhost run wakes a resting session once a screen shows its terminal, and keeps it awake until that mark is older than 90 s', async () => {
-  const folder = temporaryFolder()
-  const claudeHome = join(folder, '.claude')
-  mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
-  mkdirSync(join(claudeHome, 'projects', '-work'), { recursive: true })
-  writeFileSync(join(claudeHome, 'projects', '-work', `${SESSION}.jsonl`), '{"type":"user"}\n')
-  const claude = fakeClaude(folder)
+test('anyhost run never stops a session a screen shows, and stops it once that mark is older than 90 s', async () => {
+  const { env, claude, records, folder } = machine(500)
   const bin = join(folder, 'bin')
   const shownAt = join(folder, 'shown-at')
   mkdirSync(bin)
@@ -195,48 +174,29 @@ esac
 `,
   )
   chmodSync(join(bin, 'hc'), 0o755)
-  let shown = ''
-  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: (_terminal, bytes) => void (shown += new TextDecoder().decode(bytes)) })
-  const env = { PATH: `${bin}:${process.env['PATH'] ?? ''}`, HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state'), ANYHOST_SLEEP_MS: '500', HC_TERMINAL_ID: 't9' }
-  killAfterTest(Bun.spawn(['bun', CLI, 'run', '--session', SESSION, '--rest', '--', claude], { env, terminal }))
+  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: () => undefined })
+  killAfterTest(Bun.spawn(['bun', CLI, 'run', '--', claude], { env: { ...env, PATH: `${bin}:${env.PATH}`, HC_TERMINAL_ID: 't9' }, terminal }))
 
-  await until(() => shown.includes(`started --resume ${SESSION}`), 'Claude Code starting as a screen shows it')
+  await until(() => records().length === 1, 'Claude Code writing its record')
   await Bun.sleep(2500)
-  const whileShown = readdirSync(join(claudeHome, 'sessions')).length
+  const whileShown = records().length
   writeFileSync(shownAt, String(Date.now() - 91_000))
 
   expect(whileShown).toBe(1)
-  await until(() => readdirSync(join(claudeHome, 'sessions')).length === 0, 'Claude Code ending once no screen shows it', 10_000)
+  await until(() => records().length === 0, 'Claude Code ending once no screen shows it', 10_000)
   terminal.close()
 }, 30_000)
 
-test('anyhost run ends an idle Claude Code after the sleep time, keeps its screen, and a key resumes the same session with the key typed into it', async () => {
-  const folder = temporaryFolder()
-  const claudeHome = join(folder, '.claude')
-  mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
-  mkdirSync(join(claudeHome, 'projects', '-work'), { recursive: true })
-  writeFileSync(join(claudeHome, 'projects', '-work', `${SESSION}.jsonl`), '{"type":"user"}\n')
-  const claude = fakeClaude(folder)
-  let shown = ''
-  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: (_terminal, bytes) => void (shown += new TextDecoder().decode(bytes)) })
-  const env = { PATH: process.env['PATH'] ?? '', HOME: folder, CLAUDE_CONFIG_DIR: claudeHome, XDG_STATE_HOME: join(folder, 'state'), ANYHOST_SLEEP_MS: '500' }
-  const runner = Bun.spawn(['bun', CLI, 'run', '--', claude, '--model', 'opus'], { env, terminal })
+test('anyhost run stops an idle session after the stop time: Claude Code ends, the runner exits and forgets its run, so its terminal closes', async () => {
+  const { env, claude, records, runs } = machine(500)
+  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: () => undefined })
+  const runner = Bun.spawn(['bun', CLI, 'run', '--', claude], { env, terminal })
   killAfterTest(runner)
-  const runs = join(folder, 'state', 'anyhost', 'runs', `${SESSION}.json`)
 
-  await until(() => shown.includes('started --model opus'), 'Claude Code starting')
   await until(() => existsSync(runs), 'the runner writing its run')
-  const written = JSON.parse(readFileSync(runs, 'utf8')) as Record<string, unknown>
-  expect(written).toEqual({ pid: runner.pid, procStart: expect.any(String), command: [claude, '--model', 'opus'] })
-  await until(() => readdirSync(join(claudeHome, 'sessions')).length === 0, 'Claude Code ending', 10_000)
-  await until(() => shown.endsWith('\x1b[?1004h'), 'the runner asking for focus reports, the last thing it does going to sleep')
-  const asleep = shown
-  await Bun.sleep(1000)
-  expect(shown).toBe(asleep)
-  expect(runner.exitCode).toBeNull()
+  await until(() => records().length === 0, 'Claude Code ending', 10_000)
 
-  terminal.write('book the train\r')
-  await until(() => shown.includes(`started --model opus --resume ${SESSION}`), 'Claude Code resuming the session')
-  await until(() => shown.includes('typed book the train'), 'the key that woke it reaching it')
+  expect(await runner.exited).toBe(0)
+  expect(existsSync(runs)).toBe(false)
   terminal.close()
 }, 30_000)

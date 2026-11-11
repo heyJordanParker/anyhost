@@ -2,14 +2,14 @@ import { mkdir, readFile, readlink, realpath, rename, rm, rmdir, stat, writeFile
 import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AgentStatus, Delivered, Device, Offline, Routed } from '../../relay/protocol.ts'
-import { captureAgainFrom, chainOf, changedFiles, checkoutOf, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
+import { captureAgainFrom, chainOf, changedFiles, checkoutOf, framesOf, holdHere, isDeleted, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { commandOf, recordedSessions, run, runOf, runSessions, statusOf, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
 import { devicesOf, otherMachine } from './device.ts'
 import { killTerminal, labelledTerminals, openTerminal, pressKeys, readTerminal, sendTo } from './hc.ts'
 import type { Relay } from './relay.ts'
 import { cloneMissing, localFolder, restore } from './resume.ts'
-import type { Tool } from './transcript.ts'
+import { ownerOf, type Tool } from './transcript.ts'
 
 const RUNNING_MS = 60_000
 const TRUST_ANSWER_MS = 86_400_000
@@ -426,7 +426,8 @@ async function startIn(capture: Capture, cwd: string, prompt: string, here: Move
   }
 }
 
-async function sessionOf(capture: Capture, asked: string): Promise<string> {
+export async function sessionOf(capture: Capture, asked: string): Promise<string> {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(asked)) return asked
   const local = capture.db.query<{ session: string }, [string]>('select session from journals where session like ?').all(`${asked}%`).map(({ session }) => session)
   const known = [...new Set([...(await claimsOf(capture.relay, asked)).keys(), ...local])]
   const [session, ...more] = known
@@ -445,16 +446,16 @@ const tagged = (told: Tell, machine: string): string => {
 }
 
 async function terminalHere(capture: Capture, session: string): Promise<string | undefined> {
-  const run = runOf(session)
-  if (run?.terminal !== undefined) return run.terminal
+  const address = runOf(session)?.terminal?.address
+  if (address !== undefined) return address
   if ((await statusOf(capture.roots.claudeHome, session)) === undefined) return undefined
   throw new Error(`${session.slice(0, 8)} runs on ${capture.device.name} outside herdr-core, so anyhost cannot type into it or read it.`)
 }
 
 async function terminalOf(capture: Capture, session: string, here: MoveHere): Promise<string> {
-  const { relay, db, device, roots } = capture
+  const { db, roots } = capture
   const id = session.slice(0, 8)
-  const ran = runOf(session)?.terminal
+  const ran = runOf(session)?.terminal?.address
   if (ran !== undefined) return ran
   if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost runs Claude Code sessions in herdr-core, and ${id} is a Codex session.`)
   if ((await statusOf(roots.claudeHome, session)) !== undefined) {
@@ -462,16 +463,12 @@ async function terminalOf(capture: Capture, session: string, here: MoveHere): Pr
     await stopCopy(roots.claudeHome, session)
   }
   const known = workingFolderOf(db, session)
-  const isHeld = (journalOf(db, session)?.holder ?? '') === '' && (await claimsOf(relay, session)).get(session)?.id === device.id
+  const journal = journalOf(db, session)
+  const isHeld = journal !== undefined && journal.holder === '' && journal.stopped === '' && !isDeleted(db, session)
   const isThere = known !== '' && (await stat(known).then((found) => found.isDirectory(), () => false))
   const cwd = isHeld && isThere ? known : (await restore(capture, session, { take: true, checkouts: here.checkouts })).cwd
   for (const stale of await labelledTerminals(session)) await killTerminal(stale)
-  await openTerminal(cwd, session, commandOf(session), { isResumed: true })
-  for (const started = Date.now(); ; await sleep(100)) {
-    const address = runOf(session)?.terminal
-    if (address !== undefined) return address
-    if (Date.now() - started > RUNNING_MS) throw new Error(`The runner of ${id} named no terminal of herdr-core on ${device.name} ${RUNNING_MS / 1000} s after it opened one.`)
-  }
+  return await openTerminal(cwd, session, commandOf(session), { isResumed: true })
 }
 
 async function tellHere(capture: Capture, session: string, told: Tell, here: MoveHere, sender = capture.device.name): Promise<{ readonly status: AgentStatus; readonly screen: string }> {
@@ -547,6 +544,26 @@ export async function statusesOf(capture: Capture): Promise<Record<string, Agent
 export async function openHere(capture: Capture, asked: string, here: MoveHere): Promise<{ readonly session: string; readonly terminal: string }> {
   const session = await sessionOf(capture, asked)
   return { session, terminal: await terminalOf(capture, session, here) }
+}
+
+export async function deleteHere(capture: Capture, asked: string, here: MoveHere): Promise<string> {
+  const { db, device, roots } = capture
+  const session = await sessionOf(capture, asked)
+  const journal = journalOf(db, session)
+  if (journal === undefined) throw new Error(`${session.slice(0, 8)} has no files on ${device.name}.`)
+  if (journal.holder !== '') throw new Error(`${session.slice(0, 8)} continues on ${journal.holder}, so delete it there.`)
+  await stopCopy(roots.claudeHome, session)
+  const owned = db.query<{ path: string }, [string]>("select path from files where session = ? and sha256 != ''").all(session).map(({ path }) => path).filter((path) => {
+    const owner = ownerOf(path, roots)
+    return owner !== undefined && 'session' in owner && owner.session === session
+  })
+  for (const path of owned) {
+    await rm(path, { force: true })
+    here.queue(session, journal.tool, path)
+  }
+  await here.flush(session, new AbortController().signal, () => undefined)
+  await writeIndex(capture)
+  return session
 }
 
 export async function receiveReleased(capture: Capture, session: string, holder: string, here: MoveHere): Promise<void> {

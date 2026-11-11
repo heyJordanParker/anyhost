@@ -16,6 +16,7 @@ import {
   decodeMessage,
   encodeMessage,
   type Answer,
+  type Claimed,
   type Condition,
   type Delivered,
   type DeviceRef,
@@ -52,7 +53,7 @@ export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
   | { readonly is: 'unjoined' | 'offline' | 'refused' | 'outdated'; readonly message: string }
-type Events = { readonly welcome: Welcome; readonly released: Released; readonly offline: Offline } & {
+type Events = { readonly welcome: Welcome; readonly released: Released; readonly claimed: Claimed; readonly offline: Offline } & {
   readonly [T in Delivered['t']]: Extract<Delivered, { readonly t: T }>
 }
 
@@ -82,6 +83,8 @@ class Refused extends Error {}
 const NOT_JOINED = 'This machine is not joined to your relay, so anyhost keeps what its sessions write and uploads nothing.'
 export const DAILY_LIMIT = 'Cloudflare refuses the relay with its error 1027: the relay\'s Worker reached the Free plan\'s limit of 100,000 requests a day, which resets at 00:00 UTC.'
 export const isDailyLimit = (status: number, body: string): boolean => status === 429 && body.includes('error code: 1027')
+export const ROWS_LIMIT = 'Cloudflare refuses the relay\'s database: it read the Free plan\'s 5,000,000 rows of the day, which resets at 00:00 UTC. The program keeps every change meanwhile and uploads it once the relay answers.'
+export const isRowsLimit = (message: string): boolean => message.includes('Exceeded allowed rows read')
 const md5 = (bytes: Uint8Array): string => new Bun.CryptoHasher('md5').update(bytes).digest('hex')
 const objectUrl = (login: Login, key: string): string => `${login.url}/v1/objects/${key.split('/').map(encodeURIComponent).join('/')}`
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))

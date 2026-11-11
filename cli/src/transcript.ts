@@ -22,7 +22,7 @@ export type Owner =
 
 const PROMPT_LENGTH = 300
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const ROLLOUT = /^rollout-.*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/
+const ROLLOUT = /^rollout-.*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(\.zst)?$/
 
 const claudeFolder = (roots: MachineRoots, ...parts: string[]): string => join(roots.claudeHome, ...parts)
 
@@ -169,7 +169,7 @@ function cwdOf(line: string, tool: Tool): string | undefined {
 function entrypointOf(line: string, tool: Tool): string | undefined {
   if (tool === 'claude') return /"entrypoint":"([^"]*)"/.exec(line.slice(0, CWD_LINE_LENGTH))?.[1]
   if (!line.slice(0, 120).includes('"type":"session_meta"')) return undefined
-  return (JSON.parse(line) as { payload?: { source?: string } }).payload?.source
+  return (JSON.parse(line) as { payload?: { originator?: string } }).payload?.originator
 }
 
 export function summarize(summary: Summary, text: string, tool: Tool): Summary {
@@ -178,7 +178,7 @@ export function summarize(summary: Summary, text: string, tool: Tool): Summary {
     if (line === '') continue
     cwd = cwdOf(line, tool) ?? cwd
     if (firstPrompt === '') firstPrompt = oneLine(promptOf(line, tool) ?? '')
-    if (entrypoint === '') entrypoint = entrypointOf(line, tool) ?? ''
+    entrypoint = entrypointOf(line, tool) ?? entrypoint
     const type = /^\{"type":"([a-z-]+)"/.exec(line)?.[1]
     const titled = type === undefined ? undefined : TITLES[type]
     if (titled !== undefined && titled[1] >= titleRank) {

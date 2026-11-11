@@ -43,6 +43,9 @@ test('a watched folder the watcher lost at its start is listed by the next backu
   } finally {
     chmodSync(sessionEnv, 0o755)
   }
+  const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
   const hook = join(sessionEnv, SESSION, 'sessionstart-hook-0.sh')
   mkdirSync(dirname(hook))
   writeFileSync(hook, 'export TRIP=train\n')
@@ -83,8 +86,11 @@ test('a listing of the watched folders and of a session\'s files follows no syml
   symlinkSync('loop', join(subagents, 'loop'))
   const subagent = join(subagents, 'agent-a1.jsonl')
   writeFileSync(subagent, `{"type":"user","message":{"role":"user","content":"Find the trains"},"sessionId":"${SESSION}"}\n`)
+  const transcript = join(home, '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
   const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000)
   utimesSync(subagent, twoHoursAgo, twoHoursAgo)
+  utimesSync(transcript, twoHoursAgo, twoHoursAgo)
   mkdirSync(join(home, '.codex'), { recursive: true })
   ranAnHourAgo(host)
   writeFileSync(join(sessionFolder, 'tasks', 'trip.output'), 'Booked the train\n')

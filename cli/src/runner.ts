@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { join } from 'node:path'
-import { forgetRun, recordAt, startOf, stoppedRuns, writeRun } from './claude.ts'
+import plugin from '../../.claude-plugin/plugin.json'
+import { forgetRun, loginEnvironment, recordAt, startOf, stoppedRuns, writeRun, type RunProcess } from './claude.ts'
 import { rootsHere } from './device.ts'
-import { followLabels, isShown, killTerminal, labelOwnTerminal, openTerminal, SESSION_LABEL, terminalAt } from './hc.ts'
+import { followLabels, isShown, killTerminal, labelOwnTerminal, SESSION_LABEL, terminalAt } from './hc.ts'
 
-const SLEEP_MS = Number(process.env['ANYHOST_SLEEP_MS'] ?? 15 * 60_000)
+const STOP_MS = Number(process.env['ANYHOST_STOP_MS'] ?? 8 * 60 * 60_000)
 const CHECK_MS = 30_000
 const EXIT_MS = 10_000
 const READY_MS = 3000
@@ -14,12 +15,6 @@ const SESSION_FLAGS = new Set(['--continue', '-c', '--fork-session'])
 const SESSION_VALUES = new Set(['--resume', '-r', '--session-id'])
 const LEFT_BEHIND = ['CLAUDECODE', 'CLAUDE_PID', 'AI_AGENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN']
 const STATUS_REPORT = '\x1b]7501;'
-const FOCUS_REPORTS_ON = '\x1b[?1004h'
-const FOCUSED = '\x1b[I'
-const BLURRED = '\x1b[O'
-const RESET = '\x1bc'
-
-type Awake = { readonly child: Bun.Subprocess; readonly terminal: Bun.Terminal; isReady: boolean; held: Uint8Array[]; readyAt?: ReturnType<typeof setTimeout> }
 
 const transcriptOf = (claudeHome: string, session: string): string | undefined => {
   if (!existsSync(join(claudeHome, 'projects'))) return undefined
@@ -64,108 +59,76 @@ export function resumeCommand(command: readonly string[], session: string, resum
   return [...kept, ...(resumed.model === undefined ? [] : ['--model', resumed.model]), ...(resumed.effort === undefined ? [] : ['--effort', resumed.effort]), '--resume', session]
 }
 
-export async function reopenStopped(): Promise<void> {
+export async function closeStopped(): Promise<void> {
   for (const { session, run } of stoppedRuns()) {
     forgetRun(session)
-    const kept = run.terminal === undefined ? undefined : await terminalAt(run.terminal)
-    if (run.terminal === undefined || kept === undefined || !kept.isLive || kept.labels[SESSION_LABEL] !== session) continue
-    await killTerminal(run.terminal)
-    await openTerminal(kept.cwd, session, run.command, { isResumed: true, isResting: true, place: kept.labels })
+    const address = run.terminal?.address
+    const kept = address === undefined ? undefined : await terminalAt(address)
+    if (address !== undefined && kept?.isLive === true && kept.labels[SESSION_LABEL] === session) await killTerminal(address)
   }
 }
 
-export async function runSession(command: readonly string[], resumed?: string, isResting = false): Promise<number> {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !LEFT_BEHIND.includes(name)))
+export async function runSession(command: readonly string[], resumed?: string): Promise<number> {
+  const login = await loginEnvironment().catch((error: unknown) => {
+    console.error(`anyhost could not read your login environment, so Claude Code starts with this terminal's: ${error instanceof Error ? error.message : String(error)}`)
+    return {}
+  })
+  const env = Object.fromEntries(Object.entries({ ...process.env, ...login }).filter(([name]) => !LEFT_BEHIND.includes(name)))
   const { claudeHome } = rootsHere()
   const decoder = new TextDecoder()
   let session = resumed
-  let awake: Awake | undefined
   let usedAt = Date.now()
-  let sleeping: Promise<void> | undefined
-  const exited = Promise.withResolvers<number>()
+  let isReady = false
+  let held: Uint8Array[] = []
+  const transcript = session === undefined ? undefined : transcriptOf(claudeHome, session)
+  const argv = session !== undefined && transcript !== undefined ? resumeCommand(command, session, await resumedOf(transcript)) : [...command]
   const size = (): { cols: number; rows: number } => ({ cols: process.stdout.columns || 80, rows: process.stdout.rows || 24 })
-
-  const ready = (woken: Awake): void => {
-    if (woken.isReady) return
-    clearTimeout(woken.readyAt)
-    woken.isReady = true
-    for (const keys of woken.held) woken.terminal.write(keys)
-    woken.held = []
+  const ready = (): void => {
+    if (isReady) return
+    isReady = true
+    for (const keys of held) terminal.write(keys)
+    held = []
   }
-  const type = (woken: Awake, keys: Uint8Array): void => {
-    if (woken.isReady) woken.terminal.write(keys)
-    else woken.held.push(keys)
-  }
-
-  let resumable: Resumed | undefined
-  const readResumable = async (): Promise<void> => {
-    const transcript = session === undefined ? undefined : transcriptOf(claudeHome, session)
-    resumable = transcript === undefined ? undefined : await resumedOf(transcript)
-  }
-
-  const wake = (): Awake => {
-    process.stdout.write(RESET)
-    const argv = session !== undefined && resumable !== undefined ? resumeCommand(command, session, resumable) : [...command]
-    const terminal = new Bun.Terminal({
-      ...size(),
-      name: process.env['TERM'] || 'xterm-256color',
-      data: (_terminal, bytes) => {
-        if (awake !== woken) return
-        process.stdout.write(bytes)
-        if (woken.isReady) return
-        if (decoder.decode(bytes).includes(STATUS_REPORT)) return ready(woken)
-        woken.readyAt ??= setTimeout(() => ready(woken), READY_MS)
-      },
-    })
-    const child = Bun.spawn(['perl', '-e', `ioctl(STDIN, ${TIOCSCTTY}, 0) or die "anyhost could not give Claude Code its terminal: $!\\n"; exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n"`, '--', ...argv], { terminal, env, detached: true })
-    const woken: Awake = { child, terminal, isReady: false, held: [] }
-    void child.exited.then((code) => {
-      terminal.close()
-      if (awake === woken) exited.resolve(code)
-    })
-    usedAt = Date.now()
-    return woken
-  }
-
-  const sleep = async (going: Awake): Promise<void> => {
-    awake = undefined
-    going.child.kill('SIGTERM')
-    const timer = setTimeout(() => going.child.kill('SIGKILL'), EXIT_MS)
-    await going.child.exited
-    clearTimeout(timer)
-    await readResumable()
-    process.stdout.write(FOCUS_REPORTS_ON)
-  }
+  let readyAt: ReturnType<typeof setTimeout> | undefined
+  const terminal = new Bun.Terminal({
+    ...size(),
+    name: process.env['TERM'] || 'xterm-256color',
+    data: (_terminal, bytes) => {
+      process.stdout.write(bytes)
+      if (isReady) return
+      if (decoder.decode(bytes).includes(STATUS_REPORT)) return ready()
+      readyAt ??= setTimeout(ready, READY_MS)
+    },
+  })
+  const child = Bun.spawn(['perl', '-e', `ioctl(STDIN, ${TIOCSCTTY}, 0) or die "anyhost could not give Claude Code its terminal: $!\\n"; exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n"`, '--', ...argv], { terminal, env, detached: true })
+  const startedAt = new Date().toISOString()
 
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
   process.stdin.on('data', (keys: Buffer) => {
     usedAt = Date.now()
-    if (awake !== undefined) return type(awake, Uint8Array.from(keys))
-    const text = keys.toString('latin1')
-    const typed = Buffer.from(text.replaceAll(FOCUSED, '').replaceAll(BLURRED, ''), 'latin1')
-    if (typed.length === 0 && !text.includes(FOCUSED)) return
-    void (sleeping ?? Promise.resolve()).then(() => {
-      awake ??= wake()
-      if (typed.length > 0) type(awake, Uint8Array.from(typed))
-    })
+    if (isReady) terminal.write(Uint8Array.from(keys))
+    else held.push(Uint8Array.from(keys))
   })
   process.stdout.on('resize', () => {
-    if (awake === undefined) return
     const { cols, rows } = size()
-    awake.terminal.resize(cols, rows)
+    terminal.resize(cols, rows)
   })
   let isSignalled = false
   for (const signal of ['SIGTERM', 'SIGHUP', 'SIGINT'] as const) {
     process.on(signal, () => {
       isSignalled = true
-      if (awake === undefined) return exited.resolve(0)
-      awake.child.kill(signal)
+      child.kill(signal)
     })
   }
-  const procStart = startOf(process.pid)
-  const terminal = process.env['HC_TERMINAL_ID']
+  const runner: RunProcess = { id: process.pid, start: startOf(process.pid) }
+  const address = process.env['HC_TERMINAL_ID']
   const own = (id: string): void => {
-    writeRun(id, { pid: process.pid, procStart, ...(terminal ? { terminal } : {}), command })
+    writeRun(id, {
+      session: id,
+      runner: { process: runner, version: plugin.version, startedAt },
+      ...(address ? { terminal: { address, machine: hostname() } } : {}),
+      claude: { command, process: { id: child.pid, start: startOf(child.pid) }, startedAt },
+    })
     void labelOwnTerminal(id).catch((error: unknown) => console.error(`anyhost could not label this terminal with ${id}: ${error instanceof Error ? error.message : String(error)}`))
   }
   const learn = (record: ReturnType<typeof recordAt>): void => {
@@ -175,35 +138,34 @@ export async function runSession(command: readonly string[], resumed?: string, i
     own(session)
   }
   const learning = setInterval(() => {
-    if (awake !== undefined) learn(recordAt(claudeHome, awake.child.pid))
+    learn(recordAt(claudeHome, child.pid))
     if (session !== undefined) clearInterval(learning)
   }, 1000)
   let isOnScreen = false
   const readShown = async (): Promise<void> => {
-    isOnScreen = terminal !== undefined && terminal !== '' && isShown((await terminalAt(terminal))?.labels ?? {})
-    if (!isOnScreen) return
-    usedAt = Date.now()
-    if (awake === undefined) void (sleeping ?? Promise.resolve()).then(() => (awake ??= wake()))
+    isOnScreen = address !== undefined && address !== '' && isShown((await terminalAt(address))?.labels ?? {})
+    if (isOnScreen) usedAt = Date.now()
   }
-  const stopFollowing = terminal === undefined || terminal === '' ? () => undefined : followLabels(terminal, () => void readShown())
+  const stopFollowing = address === undefined || address === '' ? () => undefined : followLabels(address, () => void readShown())
+  let isStopping = false
   const check = setInterval(() => {
     void readShown()
-    if (awake === undefined || sleeping !== undefined) return
-    if (isOnScreen) usedAt = Date.now()
-    const record = recordAt(claudeHome, awake.child.pid)
+    if (isStopping) return
+    const record = recordAt(claudeHome, child.pid)
     learn(record)
-    if (record !== undefined && (record.status !== 'idle' || record.cwd === homedir())) usedAt = Date.now()
-    if (record?.status !== 'idle' || session === undefined || Date.now() - usedAt < SLEEP_MS) return
-    sleeping = sleep(awake).finally(() => (sleeping = undefined))
-  }, Math.min(CHECK_MS, SLEEP_MS / 4))
+    if (isOnScreen || (record !== undefined && (record.status !== 'idle' || record.cwd === homedir()))) usedAt = Date.now()
+    if (record?.status !== 'idle' || session === undefined || Date.now() - usedAt < STOP_MS) return
+    isStopping = true
+    child.kill('SIGTERM')
+    setTimeout(() => child.kill('SIGKILL'), EXIT_MS).unref()
+  }, Math.min(CHECK_MS, STOP_MS / 4))
   if (session !== undefined) own(session)
-  await readResumable()
-  if (isResting) process.stdout.write(FOCUS_REPORTS_ON)
-  else awake = wake()
-  const code = await exited.promise
+  const code = await child.exited
+  terminal.close()
+  clearTimeout(readyAt)
   stopFollowing()
   clearInterval(check)
   clearInterval(learning)
   if (session !== undefined && !isSignalled) forgetRun(session)
-  return code
+  return isStopping ? 0 : code
 }

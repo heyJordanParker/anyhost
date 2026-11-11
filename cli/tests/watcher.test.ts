@@ -64,6 +64,8 @@ test('a watched folder removed and made again while the program runs is watched 
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${OTHER_SESSION}"}\n`)
   await until(() => isUploaded(relay, OTHER_SESSION, 'Plan the trip'), 'the session the watcher heard uploaded', 30_000)
 
+  writeFileSync(join(dirname(transcript), `${SESSION}.jsonl`), `{"type":"user","message":{"role":"user","content":"Book the train"},"sessionId":"${SESSION}"}\n`)
+  await until(() => isUploaded(relay, SESSION, 'Book the train'), 'the session that runs the command uploaded', 30_000)
   rmSync(tempRoot, { recursive: true })
   await Bun.sleep(1000)
   const output = join(tempRoot, '-work', SESSION, 'tasks', 'trip.output')

@@ -6,3 +6,7 @@ declare module '*/herdr/anyhost/main.js' {
   const pane: string
   export default pane
 }
+declare module '*.svg' {
+  const icon: string
+  export default icon
+}

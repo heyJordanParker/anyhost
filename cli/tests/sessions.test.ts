@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
+import { forgetEmpty, journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
 import { HeldElsewhere, takeClaim } from '../src/claims.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { restore } from '../src/resume.ts'
@@ -34,11 +34,72 @@ test('the index lists sessions of two devices, each held by the machine that hol
   const onServer = await captured(relay, server, 'bbbbbbbb-0000-0000-0000-000000000002', 'Fix the deploy')
   await takeClaim(onServer.relay, 'aaaaaaaa-0000-0000-0000-000000000001', { take: true })
 
-  const listed = (await listSessions(onServer.relay)).map(({ id, tool, machine, holder, firstPrompt, cwd }) => ({ id, tool, machine, holder, firstPrompt, cwd }))
+  const listed = (await listSessions(onServer)).map(({ id, tool, machine, holder, firstPrompt, cwd }) => ({ id, tool, machine, holder, firstPrompt, cwd }))
   expect(listed.sort((a, b) => a.id.localeCompare(b.id))).toEqual([
     { id: 'aaaaaaaa-0000-0000-0000-000000000001', tool: 'claude', machine: 'mac', holder: 'server', firstPrompt: 'Plan the release', cwd: '/work' },
     { id: 'bbbbbbbb-0000-0000-0000-000000000002', tool: 'claude', machine: 'server', holder: 'server', firstPrompt: 'Fix the deploy', cwd: '/work' },
   ])
+})
+
+test('a list reads where each session lives from the changes the relay pushed, and asks the relay for no holder', async () => {
+  const relay = await memoryRelay()
+  const session = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const onMac = await captured(relay, mac, session, 'Plan the release')
+  const onServer = machine(server, relay).capture
+  expect((await listSessions(onMac)).map(({ holder }) => holder)).toEqual(['mac'])
+
+  await takeClaim(onServer.relay, session, { take: true })
+  await until(async () => (await onMac.holders.current()).get(session) === server.id, 'the take reaching the mac')
+
+  expect((await listSessions(onMac)).map(({ holder }) => holder)).toEqual(['server'])
+  expect(relay.requests.flat().filter(({ op }) => op === 'claims')).toEqual([])
+})
+
+test('a machine that missed a change, as when its socket lost the message, reads every change since its last one', async () => {
+  const relay = await memoryRelay()
+  const first = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const second = 'bbbbbbbb-0000-0000-0000-000000000002'
+  const onMac = await captured(relay, mac, first, 'Plan the release')
+  const onServer = machine(server, relay).capture
+  await onServer.holders.current()
+
+  const lost = relay.dropNext(server.id, 'claimed')
+  await takeClaim(onMac.relay, second, { take: false })
+  await lost
+  await takeClaim(onMac.relay, first, { take: true })
+  await until(async () => (await onServer.holders.current()).size === 2, 'the server reading the change it missed')
+
+  expect(Object.fromEntries(await onServer.holders.current())).toEqual({ [first]: mac.id, [second]: mac.id })
+})
+
+test('a session this machine holds with no journal in R2 or here leaves the relay, and one with a journal stays', async () => {
+  const relay = await memoryRelay()
+  const kept = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const empty = 'bbbbbbbb-0000-0000-0000-000000000002'
+  const onMac = await captured(relay, mac, kept, 'Plan the release')
+  await takeClaim(onMac.relay, empty, { take: false })
+
+  expect(await forgetEmpty(onMac)).toBe(1)
+
+  expect([...(await relay.claims()).keys()]).toEqual([kept])
+  await until(async () => !(await onMac.holders.current()).has(empty), 'the mac hearing the removal')
+})
+
+test("a session with a transcript in two project folders lists its prompt and folder from both", async () => {
+  const relay = await memoryRelay()
+  const session = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const { roots, capture } = machine(mac, relay)
+  const moved = join(roots.home, '.claude', 'projects', '-design', `${session}.jsonl`)
+  const main = join(roots.home, '.claude', 'projects', '-work', `${session}.jsonl`)
+  mkdirSync(dirname(moved), { recursive: true })
+  mkdirSync(dirname(main), { recursive: true })
+  writeFileSync(moved, `{"type":"history-suppression","sessionId":"${session}"}\n`)
+  writeFileSync(main, `{"type":"user","message":{"role":"user","content":"Ship the release"},"cwd":"/work","sessionId":"${session}"}\n`)
+
+  await upload(capture, session, moved, main)
+  await writeIndex(capture)
+
+  expect((await listSessions(capture)).map(({ firstPrompt, cwd }) => ({ firstPrompt, cwd }))).toEqual([{ firstPrompt: 'Ship the release', cwd: '/work' }])
 })
 
 test("a claimed session lists the holder's entry, even when the old holder wrote later", async () => {
@@ -51,7 +112,7 @@ test("a claimed session lists the holder's entry, even when the old holder wrote
   await relay.objects.put(`sessions/${server.id}/index.json`, new TextEncoder().encode(JSON.stringify([{ ...entry, cwd: '/home/server/work', lastActivity: '2026-11-03T12:44:00.000Z' }])))
   await takeClaim(onServer.capture.relay, session, { take: false })
 
-  expect((await listSessions(onServer.capture.relay)).map(({ machine, holder, cwd, entrypoint }) => ({ machine, holder, cwd, entrypoint }))).toEqual([{ machine: 'server', holder: 'server', cwd: '/home/server/work', entrypoint: 'cli' }])
+  expect((await listSessions(onServer.capture)).map(({ machine, holder, cwd, entrypoint }) => ({ machine, holder, cwd, entrypoint }))).toEqual([{ machine: 'server', holder: 'server', cwd: '/home/server/work', entrypoint: 'cli' }])
 })
 
 test('the agents list leaves out a session nobody wrote a prompt in, and names the session whose agent started each one', async () => {
@@ -65,9 +126,47 @@ test('the agents list leaves out a session nobody wrote a prompt in, and names t
   ])))
   await relay.objects.put('shared.json', new TextEncoder().encode(JSON.stringify({ parents: { 'bbbbbbbb-0000-0000-0000-000000000002': 'aaaaaaaa-0000-0000-0000-000000000001' } })))
 
-  const { agents } = await agentsOf(capture.relay)
+  const { agents } = await agentsOf(capture)
 
   expect(agents.map(({ id, parent }) => [id.slice(0, 8), parent.slice(0, 8)]).sort()).toEqual([['aaaaaaaa', ''], ['bbbbbbbb', 'aaaaaaaa']])
+})
+
+test('a session whose transcript an agent deleted lists as deleted, and one whose transcript is there does not', async () => {
+  const relay = await memoryRelay()
+  const { roots, capture } = machine(mac, relay)
+  const transcript = join(roots.home, '.claude', 'projects', '-work', 'aaaaaaaa-0000-0000-0000-000000000001.jsonl')
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, '{"type":"user","message":{"role":"user","content":"Run the eval worker"},"cwd":"/work","sessionId":"aaaaaaaa-0000-0000-0000-000000000001"}\n')
+  await upload(capture, 'aaaaaaaa-0000-0000-0000-000000000001', transcript)
+  await writeIndex(capture)
+  const before = (await listSessions(capture)).map(({ deleted }) => deleted)
+
+  rmSync(transcript)
+  await upload(capture, 'aaaaaaaa-0000-0000-0000-000000000001', transcript)
+  await writeIndex(capture)
+
+  expect([before, (await listSessions(capture)).map(({ deleted }) => deleted)]).toEqual([[false], [true]])
+})
+
+test('a restore of a deleted session brings its transcript back as it was before the deletion, so it lists as a session again', async () => {
+  const relay = await memoryRelay()
+  const session = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const { roots, capture } = machine(mac, relay)
+  const transcript = join(roots.home, '.claude', 'projects', '-work', `${session}.jsonl`)
+  const line = (home: string): string => `{"type":"user","message":{"role":"user","content":"Run the eval worker"},"cwd":"${home}/work","sessionId":"${session}"}\n`
+  mkdirSync(dirname(transcript), { recursive: true })
+  mkdirSync(join(roots.home, 'work'))
+  writeFileSync(transcript, line(roots.home))
+  await upload(capture, session, transcript)
+  rmSync(transcript)
+  await upload(capture, session, transcript)
+  await writeIndex(capture)
+  const restorer = machine(server, relay)
+
+  await restore(restorer.capture, session, { take: true })
+
+  expect(readFileSync(join(restorer.roots.home, '.claude', 'projects', '-work', `${session}.jsonl`), 'utf8')).toBe(line(restorer.roots.home))
+  expect((await listSessions(restorer.capture)).find(({ id, device }) => id === session && device === server.id)?.deleted).toBe(false)
 })
 
 test('a session another machine resumed refuses resume without --take, and --take takes it back', async () => {
@@ -166,7 +265,7 @@ test('a new session is listed with its working folder by its first upload, so a 
   await writer.codeRuns.get(session)
   await upload(writer, session, `${cwd}/`)
 
-  expect((await listSessions(writer.relay)).map(({ id, cwd: listed }) => ({ id, cwd: listed }))).toEqual([{ id: session, cwd }])
+  expect((await listSessions(writer)).map(({ id, cwd: listed }) => ({ id, cwd: listed }))).toEqual([{ id: session, cwd }])
   const given: string[] = []
   const restorer = machine(server, relay, home, undefined, { captureCode: async () => undefined, restoreCode: async (_header, _readPart, folder) => (given.push(folder), folder) }).capture
   await restore(restorer, session, { take: true })

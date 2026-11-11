@@ -1,7 +1,6 @@
-import type { RenderElement } from 'claude-code'
 import { http, messageOf, type Mod, type Page, type PageInit, type Step } from '../../node_modules/@cmodjs/core/mod.js'
 import type { Program } from '../../node_modules/@cmodjs/core/jobs/program.js'
-import { Box, Button, Input, Link, Text } from '../../node_modules/@cmodjs/core/ui/elements.js'
+import { Box, Button, Input, Text } from '../../node_modules/@cmodjs/core/ui/elements.js'
 import type { Device as Machine } from '../../relay/protocol.ts'
 
 type Account = { readonly id: string; readonly name: string }
@@ -109,7 +108,7 @@ export const connectStep: Step<AnyhostState> = {
   isDone: async (mod) => !(await needsStep(mod)),
 }
 
-function ConnectView({ mod }: { readonly mod: Mod<AnyhostState> }): RenderElement {
+function ConnectView({ mod }: { readonly mod: Mod<AnyhostState> }): JSX.Element {
   const { connecting, joined, joining } = mod.state.memory
   return (
     <Box flexDirection="column" gap={1}>
@@ -146,7 +145,7 @@ function ConnectView({ mod }: { readonly mod: Mod<AnyhostState> }): RenderElemen
   )
 }
 
-function ConnectingView({ mod, connecting }: { readonly mod: Mod<AnyhostState>; readonly connecting: Connecting }): RenderElement {
+function ConnectingView({ mod, connecting }: { readonly mod: Mod<AnyhostState>; readonly connecting: Connecting }): JSX.Element {
   return (
     <Box flexDirection="column">
       {connecting.lines.map((line) => <Text dimColor wrap="wrap">{line}</Text>)}
@@ -162,9 +161,8 @@ function ConnectingView({ mod, connecting }: { readonly mod: Mod<AnyhostState>; 
       )}
       {connecting.r2Page === undefined ? null : (
         <Box gap={2}>
-          <Text>
-            Turn R2 on at <Link href={connecting.r2Page}>Cloudflare's R2 page</Link>, then press Next.
-          </Text>
+          <Button key="r2-page" plain href={connecting.r2Page}>[Open Cloudflare's R2 page]</Button>
+          <Text>Turn R2 on there, then press Next.</Text>
           <Button key="r2-next" plain onPress={() => connectAsk(mod, '/connect/r2', {})}>[Next]</Button>
         </Box>
       )}
@@ -245,7 +243,7 @@ export const machinesPage: PageInit<AnyhostState> = {
   },
 }
 
-function MachineList({ mod, machines, removing }: { readonly mod: Mod<AnyhostState>; readonly machines: Machines; readonly removing: string | null }): RenderElement {
+function MachineList({ mod, machines, removing }: { readonly mod: Mod<AnyhostState>; readonly machines: Machines; readonly removing: string | null }): JSX.Element {
   const width = Math.max(...machines.machines.map(({ name }) => name.length))
   const kind = ({ os, arch }: Machine): string => `${os}-${arch}`
   const kindWidth = Math.max(...machines.machines.map((machine) => kind(machine).length))

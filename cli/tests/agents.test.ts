@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { anyhostOn, CLI, copiesOn, decoder, killAfterTest, LAPTOP, logOf, machineFor, postTo, runningOn, runsOn, sentOn, serveOn, SESSION, startedOn, stepsOf, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
@@ -233,3 +233,38 @@ test('an open continues a session here from R2 while the machine that ran it is 
   expect(runsOn(worker.folder).map(({ session, command }) => ({ session, command }))).toEqual([{ session: SESSION, command: 'claude' }])
   expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)
 }, 90_000)
+
+test('a delete stops the session and removes its files, every machine lists it as deleted, and opening it brings its conversation back', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const listed = async (): Promise<{ readonly deleted: boolean } | undefined> =>
+    ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; deleted: boolean }[] }).agents.find(({ id }) => id === SESSION)
+
+  const deleted = await postTo(laptop.socket, '/agents/delete', { session: SESSION.slice(0, 8) })
+  const whileDeleted = { transcript: existsSync(laptop.transcript), stopped: laptop.claude.signalCode, listed: await listed() }
+  const opened = await postTo(laptop.socket, '/agents/open', { session: SESSION.slice(0, 8) })
+
+  expect(deleted).toEqual({ status: 200, body: { session: SESSION } })
+  expect(whileDeleted).toMatchObject({ transcript: false, stopped: 'SIGTERM', listed: { deleted: true } })
+  expect(opened.status).toBe(200)
+  expect(readFileSync(laptop.transcript, 'utf8')).toContain('Plan the trip')
+  expect(await listed()).toMatchObject({ deleted: false })
+}, 60_000)
+
+test('a visit and an archive reach every machine through the shared list, and an earlier version settled marks become archived ones', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  await relay.objects.put('shared.json', new TextEncoder().encode(JSON.stringify({ settled: { [SESSION]: { settled: true, at: '2999-01-01T00:00:00.000Z' } }, settleAfterDays: 3 })))
+  const worker = await workerOn(relay)
+  const agentOn = async (socket: string): Promise<{ readonly archived: boolean; readonly visitedAt: string } | undefined> =>
+    ((await (await fetch('http://localhost/agents', { unix: socket })).json()) as { agents: { id: string; archived: boolean; visitedAt: string }[] }).agents.find(({ id }) => id === SESSION)
+  await until(async () => (await agentOn(worker.socket))?.archived === true, 'the settled mark becoming an archived one')
+
+  const visited = await anyhostOn(laptop.env, ['visit', SESSION.slice(0, 8), '--at', '2026-11-11T16:00:00.000Z'])
+  const restored = await anyhostOn(laptop.env, ['archive', SESSION.slice(0, 8), '--undo'])
+  const shared = JSON.parse(decoder.decode((await relay.read('shared.json')) ?? new Uint8Array())) as Record<string, unknown>
+
+  expect([visited.code, restored.code]).toEqual([0, 0])
+  expect(await agentOn(worker.socket)).toMatchObject({ archived: false, visitedAt: '2026-11-11T16:00:00.000Z' })
+  expect([shared['settled'], shared['settleAfterDays'], shared['archiveAfterDays']]).toEqual([undefined, undefined, 3])
+}, 60_000)

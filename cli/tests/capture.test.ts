@@ -5,7 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import {
-  changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, hotKey, isCodePart, journalOf, markUntold, openCapture, openDatabase, QUIET_MS, seal, sealQuiet, sessionsOf,
+  changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, hotKey, isCodePart, isDeleted, journalOf, markUntold, openCapture, openDatabase, QUIET_MS, seal, sealQuiet, sessionsOf,
   startLineOffsets, takeUntold, uploadSessions, type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
@@ -522,6 +522,33 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
   expect(Buffer.from(await frameOf(relay, sealed[0] ?? '')).equals(before)).toBe(true)
 }, 60_000)
 
+test('a Codex rollout that Codex compresses starts no session when anyhost never captured it, and stays the transcript of one it did', async () => {
+  const relay = await memoryRelay()
+  const { roots, capture } = machine(deviceA, relay)
+  const upload = (session: string, path: string): Promise<Set<string>[]> => Promise.all(uploadSessions(capture, [{ session, tool: 'codex', paths: new Set([path]) }], failTest).map(([, left]) => left))
+  const old = '01a07f21-07a8-70f0-a8e9-f7d92c6c7694'
+  const compressedOld = join(roots.codexHome, 'sessions', '2026', '09', '08', `rollout-2026-09-08T06-47-46-${old}.jsonl`)
+  mkdirSync(dirname(compressedOld), { recursive: true })
+  writeFileSync(`${compressedOld}.zst`, new Uint8Array([0x28, 0xb5, 0x2f, 0xfd, 0]))
+  await upload(old, compressedOld)
+  expect(journalOf(capture.db, old)).toBeUndefined()
+
+  const rollout = join(roots.codexHome, 'sessions', '2026', '11', '04', `rollout-2026-11-04T14-54-13-${SESSION}.jsonl`)
+  mkdirSync(dirname(rollout), { recursive: true })
+  writeFileSync(rollout, `{"type":"session_meta","payload":{"id":"${SESSION}","cwd":${JSON.stringify(TRIP)}}}\n`)
+  await upload(SESSION, rollout)
+  const compressed = new Uint8Array([0x28, 0xb5, 0x2f, 0xfd, 1, 2, 3])
+  writeFileSync(`${rollout}.zst`, compressed)
+  rmSync(rollout)
+  await upload(SESSION, rollout)
+  await upload(SESSION, `${rollout}.zst`)
+
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
+  expect([...replayed.files.keys()].filter((path) => path.includes('rollout-'))).toEqual([`${rollout}.zst`])
+  expect([...replayed.deleted]).toEqual([rollout])
+  expect(isDeleted(capture.db, SESSION)).toBe(false)
+})
+
 test("a Codex thread on a machine with no Codex database gets its name into the row Codex makes, as Codex writes it", async () => {
   const relay = await memoryRelay()
   const { roots, capture } = machine(deviceA, relay)
@@ -822,10 +849,22 @@ test("the working folder is the session's own, never a folder a tool call names"
   const claude = summarize(empty, `{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"cwd":"/elsewhere"}}]},"cwd":"/work/app"}\n`, 'claude')
   const codex = summarize(
     empty,
-    `{"timestamp":"2026-10-27T20:02:13.653Z","type":"session_meta","payload":{"id":"x","cwd":"/Users/ada","source":"cli"}}\n{"timestamp":"2026-10-27T20:02:20.000Z","type":"response_item","payload":{"arguments":{"cwd":"file:///Users/ada/other"}}}\n`,
+    `{"timestamp":"2026-10-27T20:02:13.653Z","type":"session_meta","payload":{"id":"x","cwd":"/Users/ada","originator":"codex_cli_rs","source":"cli"}}\n{"timestamp":"2026-10-27T20:02:20.000Z","type":"response_item","payload":{"arguments":{"cwd":"file:///Users/ada/other"}}}\n`,
     'codex',
   )
-  expect([claude.cwd, codex.cwd, codex.entrypoint]).toEqual(['/work/app', '/Users/ada', 'cli'])
+  expect([claude.cwd, codex.cwd, codex.entrypoint]).toEqual(['/work/app', '/Users/ada', 'codex_cli_rs'])
+})
+
+test('a Codex session T3 Code runs names T3 Code as its app, though Codex calls every app client vscode', () => {
+  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
+  const meta = '{"timestamp":"2026-11-10T09:00:00.000Z","type":"session_meta","payload":{"id":"x","cwd":"/Users/ada","originator":"T3 Code","source":"vscode"}}\n'
+  expect(summarize(empty, meta, 'codex').entrypoint).toBe('T3 Code')
+})
+
+test('a Claude Code session T3 Code started and a terminal continued names the terminal as its app', () => {
+  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
+  const inT3 = summarize(empty, '{"type":"user","entrypoint":"t3-code","cwd":"/work/app"}\n', 'claude')
+  expect(summarize(inT3, '{"type":"user","entrypoint":"cli","cwd":"/work/app"}\n', 'claude').entrypoint).toBe('cli')
 })
 
 test('a session that begins with a slash command names it as its first prompt', () => {

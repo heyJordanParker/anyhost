@@ -306,7 +306,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       return object === null ? undefined : new Uint8Array(await object.arrayBuffer())
     },
     async claims() {
-      const rows = await pool.exec<{ session: string; device: string }>('select session, device from claims')
+      const rows = await pool.exec<{ session: string; device: string }>("select session, device from claims where device != ''")
       return new Map(rows.map(({ session, device }) => [session, device]))
     },
     async waiting() {

@@ -2,18 +2,18 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { changedFiles, countedRelay, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
-import { recordedSessions, runSessions, type OnRecordsChange } from './claude.ts'
+import { changedFiles, countedRelay, forgetEmpty, journalOf, openCapture, readSummariesAgain, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
+import { loginEnvironment, nestRuns, recordedSessions, runSessions, saveLoginEnvironment, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { hcPath, machinesReached } from './hc.ts'
 import { installHerdr } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { move, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, startNew, statusesOf, tell, type MoveHere, type Moving } from './move.ts'
-import { connectRelay, waitAfter, type RelayState } from './relay.ts'
-import { reopenStopped } from './runner.ts'
+import { deleteHere, sessionOf, move, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, startNew, statusesOf, tell, type MoveHere, type Moving } from './move.ts'
+import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type RelayState } from './relay.ts'
+import { closeStopped } from './runner.ts'
 import { agentsOf } from './sessions.ts'
-import { settle as settleSession, sharedOf, updateShared } from './shared.ts'
+import { archive, archiveSettled, sharedOf, updateShared, visit } from './shared.ts'
 import { codexState, filesUnder, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
@@ -55,7 +55,7 @@ process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL')).resume()
 `
 const WATCHER_MS = 10_000
 const RUNNING_MS = 2000
-const ROUTES = 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/settle and /settings'
+const ROUTES = 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/archive, /agents/visit, /agents/delete and /settings'
 
 export const serveSocket = (): string => join(stateFolder(), 'serve.sock')
 
@@ -253,8 +253,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
 
   const problems: Problems = {
     set(key, error) {
-      const message = `${new Date().toISOString()} ${key}: ${error instanceof AggregateError ? error.errors.map(String).join(', ') : String(error)}`
-      current.set(key, message)
+      const reason = error instanceof AggregateError ? error.errors.map(String).join(', ') : String(error)
+      const limited = isRowsLimit(reason)
+      const message = `${new Date().toISOString()} ${limited ? `relay: ${ROWS_LIMIT}` : `${key}: ${reason}`}`
+      if (limited && current.has('relay')) return
+      current.set(limited ? 'relay' : key, message)
       console.error(message)
     },
     clear: (key) => void current.delete(key),
@@ -274,6 +277,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         changed,
         upload.then((left) => {
           problems.clear(`upload ${changed.session}`)
+          problems.clear('relay')
           capturedAt = new Date().toISOString()
           return left
         }),
@@ -281,9 +285,18 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     (session, error) => problems.set(`upload ${session}`, error),
     () => relay.state.is === 'connected',
   )
+  let isTidied = false
   relay.on('welcome', () => {
     joining = undefined
     queue.drain()
+    void settle('archive', () => archiveSettled(relay))
+    if (isTidied) return
+    isTidied = true
+    void settle('tidy', async () => {
+      await readSummariesAgain(capture)
+      const forgotten = await forgetEmpty(capture)
+      if (forgotten > 0) console.error(`${new Date().toISOString()} anyhost removed ${forgotten} sessions from the relay that this machine held with no journal in R2.`)
+    })
   })
   const records = join(roots.claudeHome, 'sessions')
   const recordsHeard = new Set<() => void>()
@@ -513,6 +526,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     await listWritten()
     await readOptions()
     await settle('herdr', () => installHerdr())
+    await settle('environment', () => loginEnvironment())
     await settle('backup', async () => {
       queueFiles(await changedFiles(capture, isAll ? 0 : started - QUIET_MS))
       if (isAll) sweptAllAt = started
@@ -576,10 +590,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     readonly sender?: string
     readonly apiToken?: string
     readonly target?: string
-    readonly settled?: boolean
-    readonly settleAfterDays?: number | null
+    readonly archived?: boolean
+    readonly archiveAfterDays?: number | null
+    readonly at?: string
   }
-  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, sender = '', apiToken, target = '', settled = true, settleAfterDays }: Asked): Promise<Response> => {
+  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, sender = '', apiToken, target = '', archived = true, archiveAfterDays, at = '' }: Asked): Promise<Response> => {
     switch (pathname) {
       case '/connect': {
         if (connecting?.view.is === 'running') return Response.json(connecting.view)
@@ -615,10 +630,18 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           (error: unknown) => adding.set(target, { error: error instanceof Error ? error.message : String(error) }),
         )
         return Response.json({ target })
-      case '/agents/settle':
-        return await throughRelay(async () => void (await settleSession(relay, session, settled)))
+      case '/agents/archive':
+        return await throughRelay(async () => void (await archive(relay, await sessionOf(capture, session), archived)))
+      case '/agents/visit':
+        if (Number.isNaN(Date.parse(at))) return failed(400, `/agents/visit takes at, an ISO time, not ${at}.`)
+        return await throughRelay(async () => void (await visit(relay, await sessionOf(capture, session), at)))
+      case '/agents/delete':
+        return await deleteHere(capture, session, mover).then(
+          (deleted) => Response.json({ session: deleted }),
+          (error: unknown) => failed(400, error),
+        )
       case '/settings':
-        return await throughRelay(async () => void (await updateShared(relay, (shared) => ({ ...shared, settleAfterDays: settleAfterDays ?? null }))))
+        return await throughRelay(async () => void (await updateShared(relay, (shared) => ({ ...shared, archiveAfterDays: archiveAfterDays ?? null }))))
       case '/move':
         return await move(capture, session, machine, mover).then(
           (moving) => Response.json({ session: moving.session, ...shownMove(moving) }),
@@ -692,7 +715,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   relay.on('welcome', releaseHeld)
   void releaseHeld()
   void settle('herdr', () => installHerdr())
-  if (hcPath() !== undefined) void reopenStopped().catch((error: unknown) => problems.set('reopen', error))
+  nestRuns(device.name)
+  void settle('environment', () => saveLoginEnvironment())
+  if (hcPath() !== undefined) void settle('stopped', () => closeStopped())
 
   await startLineOffsets(capture)
   rmSync(socket, { force: true })
@@ -714,7 +739,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           }
         })
       if (request.method === 'GET' && pathname === '/agents')
-        return await throughRelay(async () => await agentsOf(relay, await statusesOf(capture)))
+        return await throughRelay(async () => await agentsOf(capture, await statusesOf(capture)))
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]
       if (request.method === 'GET' && claim !== undefined) return Response.json(holderOf(claim))
       if (request.method !== 'POST') return failed(404, `${ROUTES}, not ${request.method} ${pathname}.`)

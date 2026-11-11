@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES, cloneFixFor } from '../../relay/protocol.ts'
 import { hotKey, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, uploadSessions } from '../src/capture.ts'
+import { followHolders } from '../src/claims.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device } from '../src/device.ts'
 import { connectRelay, type Relay, type RelayOptions } from '../src/relay.ts'
 import { listSessions } from '../src/sessions.ts'
@@ -98,7 +99,7 @@ test('a removed machine leaves the machines list and stays in devicesOf, so its 
   expect((await machinesOf(here)).map(({ name }) => name)).toEqual(['anyhost-a'])
   expect((await devicesOf(here)).get(other.id)).toMatchObject({ name: 'anyhost-b', roots: roots('/home/bob') })
   expect((await devicesOf(here)).get(other.id)?.removedAt).toBeString()
-  expect((await listSessions(here)).map(({ id, machine }) => [id, machine])).toEqual([[SESSION, 'anyhost-b']])
+  expect((await listSessions({ relay: here, holders: followHolders(here, openDatabase(temporaryFolder())) })).map(({ id, machine }) => [id, machine])).toEqual([[SESSION, 'anyhost-b']])
   await removeMachine(here, other.id)
   await expect(removeMachine(here, 'device-never-joined')).rejects.toThrow('No machine with the id device-never-joined is joined.')
 }, 30_000)

@@ -1,5 +1,5 @@
-export const RELAY_VERSION = 2
-export const PROTOCOL_VERSION = 1
+export const RELAY_VERSION = 3
+export const PROTOCOL_VERSION = 2
 export const COMPATIBILITY_DATE = '2026-11-01'
 
 export const MAX_OPS = 100
@@ -59,6 +59,8 @@ export type Op =
   | { readonly op: 'delete'; readonly keys: readonly string[] }
   | { readonly op: 'claim'; readonly session: string; readonly take: boolean; readonly if?: { readonly at: string } }
   | { readonly op: 'claims'; readonly prefix?: string }
+  | { readonly op: 'changes'; readonly since: number }
+  | { readonly op: 'forget'; readonly session: string }
   | { readonly op: 'devices' }
   | { readonly op: 'invite' }
   | { readonly op: 'remove'; readonly device: string }
@@ -75,6 +77,8 @@ export type Results = {
     | { readonly status: 200; readonly previous: DeviceRef; readonly told: false; readonly at: string }
     | { readonly status: 409; readonly holder: DeviceRef }
   readonly claims: { readonly status: 200; readonly claims: Readonly<Record<string, DeviceRef>> }
+  readonly changes: { readonly status: 200; readonly changes: readonly Claimed[]; readonly last: number }
+  readonly forget: { readonly status: 200 } | { readonly status: 409; readonly holder: DeviceRef }
   readonly devices: { readonly status: 200; readonly devices: readonly Device[] }
   readonly invite: { readonly status: 200; readonly link: string; readonly expiresAt: string }
   readonly remove: { readonly status: 200 }
@@ -86,7 +90,8 @@ export type Answer = { readonly id: number; readonly results: readonly Result[] 
 
 export type Released = { readonly t: 'released'; readonly session: string; readonly to: DeviceRef; readonly at: string }
 export type Heard = { readonly t: 'heard'; readonly session: string; readonly to: string }
-export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceRef; readonly waiting: readonly Released[] }
+export type Welcome = Health & { readonly t: 'welcome'; readonly device: DeviceRef; readonly waiting: readonly Released[]; readonly changed: number }
+export type Claimed = { readonly t: 'claimed'; readonly changed: number; readonly session: string; readonly device: string }
 
 export type Routed =
   | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly trusted: boolean; readonly claimedAt: string; readonly command: readonly string[] }
@@ -104,7 +109,7 @@ export type AgentStatus = 'working' | 'idle' | 'waiting'
 export type Delivered = Routed & { readonly from: DeviceRef }
 export type Offline = { readonly t: 'offline'; readonly id?: string; readonly to: string }
 export type Invalid = { readonly t: 'invalid'; readonly message: string }
-export type FromPool = Welcome | Released | Delivered | Offline | Invalid
+export type FromPool = Welcome | Released | Claimed | Delivered | Offline | Invalid
 
 export function cloneFixFor(os: string): string {
   return os === 'darwin'

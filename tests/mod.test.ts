@@ -1,17 +1,19 @@
 import { expect, test } from 'bun:test'
-import type { HookStream, ProcessSpawnChunk, ProcessSpawnRequest, ProcessSpawnResult } from 'claude-code'
 import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
-import type { Mod } from '../node_modules/@cmodjs/core/mod.js'
+import type { Mod, ProcessSpawnOptions, Subprocess } from '../node_modules/@cmodjs/core/mod.js'
 import { testMod } from '../node_modules/@cmodjs/core/testing.js'
 import { anyhost } from '../src/mod.js'
 import { connectStep, type AnyhostState } from '../src/pages/machines.js'
 
-function held(): HookStream<ProcessSpawnChunk, ProcessSpawnResult> {
-  async function* read(): AsyncGenerator<ProcessSpawnChunk, ProcessSpawnResult> {
+type Spawned = ProcessSpawnOptions & { readonly argv: readonly string[] }
+type Ended = Awaited<Subprocess['result']>
+
+function held(): Subprocess {
+  async function* read(): AsyncGenerator<{ readonly stream: 'stdout'; readonly text: string }, Ended> {
     yield { stream: 'stdout', text: 'held\n' }
     return { code: 0, signal: null }
   }
-  return Object.assign(read(), { result: Promise.resolve<ProcessSpawnResult>({ code: 0, signal: null }) }) as HookStream<ProcessSpawnChunk, ProcessSpawnResult>
+  return Object.assign(read(), { result: Promise.resolve<Ended>({ code: 0, signal: null }) }) as Subprocess
 }
 
 const SOCKET = '/test/home/.local/state/anyhost/serve.sock'
@@ -19,7 +21,7 @@ const instance = { '/test/home/.local/share/cmod/instances/anyhost/anyhost.json'
 
 function withHolder(holder: { machine?: string; problem?: string; untold?: string }, status = 200) {
   const tested = testMod(anyhost, { files: instance })
-  const spawned: ProcessSpawnRequest[] = []
+  const spawned: Spawned[] = []
   const fetched: string[] = []
   tested.fakes.process.spawn = (request) => {
     spawned.push(request)
@@ -246,7 +248,7 @@ test('the Step shows the R2 page while R2 is off, and Next tells the program it 
   const { tested, asked } = withProgram({ 'POST /connect': [{ body: off }], 'POST /connect/r2': [{ body: { is: 'running', lines: off.lines } }] })
   await tested.type('/step')
   await tested.shown.page.press('connect')
-  expect((await tested.shown.page.lines()).join('\n')).toContain("Turn R2 on at Cloudflare's R2 page, then press Next.")
+  expect((await tested.shown.page.lines()).join('\n')).toContain("[Open Cloudflare's R2 page]  Turn R2 on there, then press Next.  [Next]")
 
   await tested.shown.page.press('r2-next')
   expect(asked.at(-1)).toEqual({ method: 'POST', path: '/connect/r2', body: {} })

@@ -235,7 +235,7 @@ test('a second serve on one state folder refuses to start, naming the one that r
   const unknown = await fetch('http://localhost/machines/rename', { unix: host.socket, method: 'POST', body: '{}' })
   expect(unknown.status).toBe(404)
   expect(await unknown.json()).toEqual({
-    message: 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/settle and /settings, not POST /machines/rename.',
+    message: 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/archive, /agents/visit, /agents/delete and /settings, not POST /machines/rename.',
   })
 })
 

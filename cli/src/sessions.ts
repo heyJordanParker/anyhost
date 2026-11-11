@@ -1,11 +1,10 @@
 import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
-import { chainOf, framesOf, journalPrefix, type IndexedSession, type RecordHeader } from './capture.ts'
-import { claimsOf } from './claims.ts'
+import { chainOf, framesOf, journalPrefix, type Capture, type IndexedSession, type RecordHeader } from './capture.ts'
 import { devicesOf } from './device.ts'
 import type { Relay } from './relay.ts'
-import { isSettled, sharedOf } from './shared.ts'
+import { isArchived, sharedOf } from './shared.ts'
 
 export type ListedSession = IndexedSession & { readonly machine: string; readonly device: string; readonly holder: string }
 export type Segment = Pick<RecordHeader, 'device' | 'checkout' | 'path'> & { readonly offset: number; readonly size: number }
@@ -31,40 +30,44 @@ export async function indexesOf(relay: Relay, devices: Iterable<string>): Promis
 }
 
 export async function listSessions(
-  relay: Relay,
+  capture: Pick<Capture, 'relay' | 'holders'>,
   read?: {
     readonly devices: ReadonlyMap<string, Protocol.Device>
     readonly indexes: ReadonlyMap<string, readonly IndexedSession[]>
-    readonly claims: ReadonlyMap<string, Protocol.DeviceRef>
+    readonly holders: ReadonlyMap<string, string>
   },
 ): Promise<ListedSession[]> {
+  const { relay } = capture
   const known = read?.devices ?? (await devicesOf(relay))
-  const [indexes, claims] = await Promise.all([read?.indexes ?? indexesOf(relay, known.keys()), read?.claims ?? claimsOf(relay)])
+  const [indexes, holders] = await Promise.all([read?.indexes ?? indexesOf(relay, known.keys()), read?.holders ?? capture.holders.current()])
   const latest = new Map<string, ListedSession>()
   for (const [device, index] of indexes) {
     for (const session of index) {
       if (session.cwd === '') continue
       const earlier = latest.get(session.id)
-      const holder = claims.get(session.id)
-      if (earlier !== undefined && (earlier.device === holder?.id || (device !== holder?.id && earlier.lastActivity >= session.lastActivity))) continue
-      latest.set(session.id, { ...session, device, machine: known.get(device)?.name ?? device, holder: holder?.name ?? '' })
+      const holder = holders.get(session.id)
+      if (earlier !== undefined && (earlier.device === holder || (device !== holder && earlier.lastActivity >= session.lastActivity))) continue
+      latest.set(session.id, { ...session, device, machine: known.get(device)?.name ?? device, holder: holder === undefined ? '' : (known.get(holder)?.name ?? holder) })
     }
   }
   return [...latest.values()].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
 }
 
-export type Agent = ListedSession & { readonly status: string; readonly settled: boolean; readonly parent: string }
-export type Agents = { readonly agents: readonly Agent[]; readonly settleAfterDays: number | null; readonly lastMachine: string }
+export type Agent = ListedSession & { readonly status: string; readonly archived: boolean; readonly visitedAt: string; readonly parent: string }
+export type Agents = { readonly agents: readonly Agent[]; readonly archiveAfterDays: number | null; readonly lastMachine: string }
 
-export async function agentsOf(relay: Relay, statuses: Readonly<Record<string, string>> = {}): Promise<Agents> {
-  const [sessions, shared] = await Promise.all([listSessions(relay), sharedOf(relay)])
-  const agents = sessions.filter((session) => session.firstPrompt !== '').map((session) => ({ ...session, status: statuses[session.id] ?? '', settled: isSettled(shared, session), parent: shared.parents[session.id] ?? '' }))
-  return { agents, settleAfterDays: shared.settleAfterDays, lastMachine: shared.lastMachine }
+export async function agentsOf(capture: Pick<Capture, 'relay' | 'holders'>, statuses: Readonly<Record<string, string>> = {}): Promise<Agents> {
+  const [sessions, shared] = await Promise.all([listSessions(capture), sharedOf(capture.relay)])
+  const agents = sessions
+    .filter((session) => session.firstPrompt !== '')
+    .map((session) => ({ ...session, status: statuses[session.id] ?? '', archived: isArchived(shared, session), visitedAt: shared.visited[session.id] ?? '', parent: shared.parents[session.id] ?? '' }))
+  return { agents, archiveAfterDays: shared.archiveAfterDays, lastMachine: shared.lastMachine }
 }
 
 class Replay {
   readonly files = new Map<string, { staged: string; size: number; segments: Segment[]; last: Written }>()
   readonly deleted = new Set<string>()
+  readonly removed = new Map<string, { staged: string; size: number; segments: Segment[]; last: Written }>()
   readonly code = new Map<string, { header: RecordHeader; bytes: Uint8Array }>()
   private stagedCount = 0
   private pending = new Uint8Array()
@@ -104,13 +107,16 @@ class Replay {
     }
     if (header.after === null) {
       const gone = this.files.get(file)
-      if (gone !== undefined) rmSync(gone.staged, { force: true })
+      if (gone !== undefined) this.removed.set(file, gone)
       this.files.delete(file)
       this.deleted.add(file)
       this.finish()
       return
     }
     this.deleted.delete(file)
+    const replaced = this.removed.get(file)
+    if (replaced !== undefined) rmSync(replaced.staged, { force: true })
+    this.removed.delete(file)
     const last: Written = { ...header, after: header.after }
     const known = this.files.get(file) ?? { staged: join(this.into, String((this.stagedCount += 1))), size: 0, segments: [], last }
     if (header.at > known.size) throw new Error(`The journal writes ${header.path} at byte ${header.at}, past its ${known.size} bytes.`)
@@ -161,5 +167,7 @@ export async function downloadJournal(relay: Relay, session: string, into: strin
     end = frame.start + bytes.length
   }
   replay.close()
-  return { files: replay.files, deleted: replay.deleted, code: replay.code, end, sealedEnd }
+  const isDeleted = [...replay.deleted].some((path) => path.endsWith(`${session}.jsonl`) && !path.includes('/subagents/') && !replay.files.has(`${path}.zst`))
+  if (!isDeleted) return { files: replay.files, deleted: replay.deleted, code: replay.code, end, sealedEnd }
+  return { files: new Map([...replay.files, ...replay.removed]), deleted: new Set(), code: replay.code, end, sealedEnd }
 }

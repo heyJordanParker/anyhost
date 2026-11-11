@@ -1,6 +1,7 @@
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { loginShell, run } from './claude.ts'
+import { run } from './claude.ts'
 
 export const SESSION_LABEL = 'anyhost.session'
 const SPACE_LABEL = 'herdr.space'
@@ -17,7 +18,12 @@ const hcHere = (): string => {
 const inScope = (command: readonly string[]): string[] =>
   Bun.which('systemd-run') === null || !process.env['XDG_RUNTIME_DIR'] ? [...command] :['systemd-run', '--user', '--scope', '--quiet', '--collect', '--slice', SESSIONS_SLICE, '--unit', `anyhost-hc-${crypto.randomUUID().slice(0, 8)}.scope`, ...command]
 
-const self = (): string[] => (import.meta.dir.startsWith('/$bunfs/') ? [process.execPath] : [process.execPath, join(import.meta.dir, 'main.ts')])
+const LINKED_PROGRAM = join(homedir(), '.local', 'share', 'cmod', 'programs', 'anyhost')
+
+const self = (): string[] => {
+  if (!import.meta.dir.startsWith('/$bunfs/')) return [process.execPath, join(import.meta.dir, 'main.ts')]
+  return [existsSync(LINKED_PROGRAM) ? LINKED_PROGRAM : process.execPath]
+}
 
 async function spaceOf(cwd: string): Promise<string> {
   const { terminals } = JSON.parse(await run([hcHere(), 'ls', '--json'])) as { readonly terminals: readonly { readonly address: string; readonly cwd: string }[] }
@@ -28,13 +34,12 @@ async function spaceOf(cwd: string): Promise<string> {
   return `anyhost-${new Bun.CryptoHasher('sha256').update(cwd).digest('hex').slice(0, 12)}`
 }
 
-const UNATTENDED = ['env', 'DISABLE_AUTO_UPDATE=true']
-
-export async function openTerminal(cwd: string, session: string, command: readonly string[], options: { readonly isResumed: boolean; readonly isResting?: boolean; readonly place?: Readonly<Record<string, string>> }): Promise<void> {
-  const runner = [...self(), 'run', ...(options.isResumed ? ['--session', session] : []), ...(options.isResting === true ? ['--rest'] : []), '--', ...command]
-  const placed = { [SPACE_LABEL]: options.place?.[SPACE_LABEL] ?? (await spaceOf(cwd)), 'herdr.tab': session.slice(0, 8), ...options.place, [SESSION_LABEL]: session }
+export async function openTerminal(cwd: string, session: string, command: readonly string[], options: { readonly isResumed: boolean }): Promise<string> {
+  const runner = [...self(), 'run', ...(options.isResumed ? ['--session', session] : []), '--', ...command]
+  const placed = { [SPACE_LABEL]: await spaceOf(cwd), 'herdr.tab': session.slice(0, 8), [SESSION_LABEL]: session }
   const labels = Object.entries(placed).flatMap(([key, value]) => ['--label', `${key}=${value}`])
-  await run(inScope([hcHere(), 'run', '--bg', '--keep', '--no-parent', '--cwd', cwd, ...labels, '--', ...UNATTENDED, await loginShell(), '-i', '-l', '-c', 'exec "$0" "$@"', ...runner]), { cwd })
+  const { address } = JSON.parse(await run(inScope([hcHere(), 'run', '--bg', '--json', '--keep', '--no-parent', '--cwd', cwd, ...labels, '--', ...runner]), { cwd })) as { readonly address: string }
+  return address
 }
 
 export async function terminalAt(address: string): Promise<{ readonly isLive: boolean; readonly cwd: string; readonly labels: Readonly<Record<string, string>> } | undefined> {

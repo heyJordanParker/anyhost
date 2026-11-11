@@ -83,17 +83,18 @@ echo "$(date +%s%N) $cwd $session $command" >> "$F/hc.log"
 if [ -e "$F/hang" ]; then sleep "$(cat "$F/hang")"; fi
 if [ -e "$F/fail" ]; then cat "$F/fail" >&2; exit 1; fi
 if [ -e "$F/appends" ]; then cat "$F/appends" >> "$(find "$CLAUDE_CONFIG_DIR/projects" -name "$session.jsonl" | head -n 1)"; fi
+address="t$(ls "$F/terminals" | wc -l | tr -d ' ')"
 running() {
   sleep 600 < /dev/null > /dev/null 2>&1 &
   echo $! >> "$F/copies"
-  address="t$(ls "$F/terminals" | wc -l | tr -d ' ')"
   echo "$session $!" > "$F/terminals/$address"
-  printf '{"pid":%s,"terminal":"%s","command":["claude"]}' $! "$address" > "$RUNS/$session.json"
+  if [ -r "/proc/$!/stat" ]; then stat="$(cat "/proc/$!/stat")"; start="$(echo "\${stat##*) }" | cut -d ' ' -f 20)"; else start="$(TZ=UTC ps -o lstart= -p $! | sed 's/^ *//;s/ *$//')"; fi
+  printf '{"session":"%s","runner":{"process":{"id":%s,"start":"%s"},"version":"","startedAt":""},"terminal":{"address":"%s","machine":""},"claude":{"command":["claude"]}}' "$session" $! "$start" "$address" > "$RUNS/$session.json"
   printf '{"pid":%s,"sessionId":"%s","kind":"interactive","cwd":"%s","status":"idle"}' $! "$session" "$cwd" > "$CLAUDE_CONFIG_DIR/sessions/$!.json"
 }
 if [ -e "$F/unlisted" ]; then (while [ -e "$F/unlisted" ]; do sleep 0.1; done; running) < /dev/null > /dev/null 2>&1 &
 else running; fi
-printf '{"address":"t1","state":"live"}'
+printf '{"address":"%s","state":"live"}' "$address"
 `
 
 export const killCopiesAfterTest = (folder: string): void =>

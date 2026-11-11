@@ -25,12 +25,15 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
                                      start a session on a machine, this one too, in the same repository, and type prompt into it
   anyhost tell <session> [text]      type text into a session wherever it runs, waking it, and print its screen; no text only prints it
   anyhost run [--session <id>] [-- <claude command>]
-                                     run Claude Code, ending its process while it rests and resuming it at the next key
+                                     run Claude Code with your login environment, and end it after 8 hours unused off screen
   anyhost connect                    set your relay up in your Cloudflare account and join this machine to it
   anyhost join <link>                join this machine with an invite link from another machine
-  anyhost settle <session> [--undo]  move a session out of the active list on every machine, or bring it back
-  anyhost settle --after <days|never>
-                                     settle a session by itself once it sits idle that many days, or never
+  anyhost archive <session> [--undo] move a session out of the active list on every machine, or bring it back
+  anyhost archive --after <days|never>
+                                     archive a session by itself once it sits idle that many days, or never
+  anyhost visit <session> [--at <time>]
+                                     mark a session read on every machine up to now or that ISO time, earlier than its last turn marks it unread
+  anyhost delete <session>           delete the files of a session this machine holds; Deleted lists it, and opening it brings it back
   anyhost machines [--json]          list every machine joined to your relay
   anyhost machines --add <ssh target>
                                      install anyhost on a machine ssh reaches and join it, so every machine shows it
@@ -169,9 +172,9 @@ const TERMINAL: Progress = {
 async function main(argv: string[]): Promise<number> {
   if (argv[0] === 'run') {
     const split = argv.indexOf('--')
-    const { values: run } = parseArgs({ args: argv.slice(1, split < 0 ? undefined : split), options: { session: { type: 'string' }, rest: { type: 'boolean' } } })
+    const { values: run } = parseArgs({ args: argv.slice(1, split < 0 ? undefined : split), options: { session: { type: 'string' } } })
     const command = split < 0 ? [] : argv.slice(split + 1)
-    process.exit(await runSession(command.length === 0 ? ['claude'] : command, run.session, run.rest === true))
+    process.exit(await runSession(command.length === 0 ? ['claude'] : command, run.session))
   }
   const { values, positionals } = parseArgs({
     args: argv,
@@ -185,6 +188,7 @@ async function main(argv: string[]): Promise<number> {
       remove: { type: 'string' },
       undo: { type: 'boolean' },
       after: { type: 'string' },
+      at: { type: 'string' },
       version: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -247,19 +251,31 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (command === 'list') {
-    const listed = (await askProgram<Agents>('/agents')) ?? (await connected(async ({ relay }) => await agentsOf(relay)))
-    const brief = values.brief === true ? { ...listed, agents: listed.agents.map(({ id, tool, title, firstPrompt, cwd, repo, machine, holder, lastActivity, status, settled, parent }) => ({ id, tool, title: title || firstPrompt.slice(0, 120), cwd, repo, machine, holder, lastActivity, status, settled, parent })) } : listed
+    const listed = (await askProgram<Agents>('/agents')) ?? (await connected(async (capture) => await agentsOf(capture)))
+    const brief = values.brief === true ? { ...listed, agents: listed.agents.map(({ id, tool, title, firstPrompt, cwd, repo, machine, holder, entrypoint, lastActivity, status, archived, visitedAt, deleted, parent }) => ({ id, tool, title: title || firstPrompt.slice(0, 120), cwd, repo, machine, holder, entrypoint, lastActivity, status, archived, visitedAt, deleted: deleted === true, parent })) } : listed
     console.log(values.json === true ? JSON.stringify(brief, null, values.brief === true ? undefined : 2) : table(listed.agents))
     return 0
   }
-  if (command === 'settle' && rest.length === 1 && rest[0] !== undefined && values.after === undefined) {
-    if ((await askProgram('/agents/settle', { session: rest[0], settled: values.undo !== true })) === undefined) throw noProgram()
+  if (command === 'archive' && rest.length === 1 && rest[0] !== undefined && values.after === undefined) {
+    if ((await askProgram('/agents/archive', { session: rest[0], archived: values.undo !== true })) === undefined) throw noProgram()
     return 0
   }
-  if (command === 'settle' && rest.length === 0 && values.after !== undefined) {
+  if (command === 'archive' && rest.length === 0 && values.after !== undefined) {
     const days = values.after === 'never' ? null : Number(values.after)
-    if (days !== null && !(days > 0)) throw new Error(`anyhost settle --after takes a number of days or never, not ${values.after}.`)
-    if ((await askProgram('/settings', { settleAfterDays: days })) === undefined) throw noProgram()
+    if (days !== null && !(days > 0)) throw new Error(`anyhost archive --after takes a number of days or never, not ${values.after}.`)
+    if ((await askProgram('/settings', { archiveAfterDays: days })) === undefined) throw noProgram()
+    return 0
+  }
+  if (command === 'visit' && rest.length === 1 && rest[0] !== undefined) {
+    const at = values.at ?? new Date().toISOString()
+    if (Number.isNaN(Date.parse(at))) throw new Error(`anyhost visit --at takes an ISO time, such as 2026-11-11T16:00:00.000Z, not ${at}.`)
+    if ((await askProgram('/agents/visit', { session: rest[0], at: new Date(at).toISOString() })) === undefined) throw noProgram()
+    return 0
+  }
+  if (command === 'delete' && rest.length === 1 && rest[0] !== undefined) {
+    const deleted = await askProgram<{ readonly session: string }>('/agents/delete', { session: rest[0] })
+    if (deleted === undefined) throw noProgram()
+    console.log(`Deleted ${deleted.session.slice(0, 8)}. Deleted lists it, and opening it brings it back.`)
     return 0
   }
   if (command === 'resume' && rest.length === 1 && rest[0] !== undefined) {

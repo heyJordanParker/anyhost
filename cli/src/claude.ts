@@ -1,4 +1,5 @@
-import { readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readdirSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentStatus } from '../../relay/protocol.ts'
 import { stateFolder } from './device.ts'
@@ -16,7 +17,14 @@ export type RunningSession = {
 export type OnRecordsChange = (heard: () => void) => () => void
 
 type SessionRecord = { readonly pid?: number; readonly sessionId?: string; readonly cwd?: string; readonly status?: string; readonly procStart?: string }
-export type Run = { readonly pid: number; readonly procStart: string; readonly terminal?: string; readonly command: readonly string[] }
+export type RunProcess = { readonly id: number; readonly start: string }
+export type Run = {
+  readonly session: string
+  readonly runner: { readonly process: RunProcess; readonly version: string; readonly startedAt: string }
+  readonly terminal?: { readonly address: string; readonly machine: string }
+  readonly claude: { readonly command: readonly string[]; readonly process?: RunProcess; readonly startedAt?: string }
+}
+type FlatRun = { readonly pid: number; readonly procStart: string; readonly terminal?: string; readonly command: readonly string[] }
 
 export async function run(argv: readonly string[], options: { readonly cwd?: string; readonly env?: Record<string, string> } = {}): Promise<string> {
   const child = Bun.spawn([...argv], { ...options, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
@@ -32,6 +40,39 @@ export async function loginShell(): Promise<string> {
       : (await run(['getent', 'passwd', String(process.getuid?.() ?? '')])).trim().split(':')[6]
   if (shell === undefined || shell === '') throw new Error('the account database names no shell for this user')
   return shell
+}
+
+const SHELL_STARTUP = ['.zshenv', '.zprofile', '.zshrc', '.zlogin', '.bash_profile', '.bashrc', '.profile']
+const TERMINAL_OWN = /^(TERM|TERM_PROGRAM|TERM_PROGRAM_VERSION|COLORTERM|SHLVL|PWD|OLDPWD|_|HC_.*)$/
+const ENVIRONMENT_MARK = '\0anyhost-environment\0'
+const ENVIRONMENT_MS = 20_000
+
+const environmentFile = (): string => join(stateFolder(), 'environment.json')
+
+export const startupChangedAt = (): number =>
+  Math.max(0, ...SHELL_STARTUP.map((name) => {
+    try {
+      return statSync(join(homedir(), name)).mtimeMs
+    } catch {
+      return 0
+    }
+  }))
+
+export async function saveLoginEnvironment(): Promise<Record<string, string>> {
+  const child = Bun.spawn(['env', 'DISABLE_AUTO_UPDATE=true', await loginShell(), '-i', '-l', '-c', `printf '${ENVIRONMENT_MARK.replaceAll('\0', '\\000')}'; env -0`], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', cwd: homedir(), timeout: ENVIRONMENT_MS })
+  const output = await new Response(child.stdout).text()
+  if ((await child.exited) !== 0 || !output.includes(ENVIRONMENT_MARK)) throw new Error(`the login shell gave no environment within ${ENVIRONMENT_MS / 1000} s`)
+  const pairs = output.slice(output.indexOf(ENVIRONMENT_MARK) + ENVIRONMENT_MARK.length).split('\0').filter((pair) => pair.includes('='))
+  const environment = Object.fromEntries(pairs.map((pair) => [pair.slice(0, pair.indexOf('=')), pair.slice(pair.indexOf('=') + 1)] as const).filter(([name]) => !TERMINAL_OWN.test(name)))
+  mkdirSync(stateFolder(), { recursive: true })
+  writeFileSync(environmentFile(), JSON.stringify({ changedAt: startupChangedAt(), environment }))
+  return environment
+}
+
+export async function loginEnvironment(): Promise<Record<string, string>> {
+  const saved = jsonOf(environmentFile()) as { readonly changedAt?: number; readonly environment?: Record<string, string> } | undefined
+  if (saved?.environment !== undefined && saved.changedAt === startupChangedAt()) return saved.environment
+  return await saveLoginEnvironment()
 }
 
 export const isAlive = (pid: number): boolean => {
@@ -145,7 +186,21 @@ const runsFolder = (): string => join(stateFolder(), 'runs')
 
 export const runOf = (session: string): Run | undefined => {
   const run = jsonOf(join(runsFolder(), `${session}.json`)) as Run | undefined
-  return run !== undefined && isProcess(run.pid, run.procStart) ? run : undefined
+  return run?.runner !== undefined && isProcess(run.runner.process.id, run.runner.process.start) ? run : undefined
+}
+
+export function nestRuns(machine: string): void {
+  for (const name of namesIn(runsFolder()).filter((each) => each.endsWith('.json'))) {
+    const flat = jsonOf(join(runsFolder(), name)) as Partial<FlatRun> | undefined
+    if (flat?.pid === undefined || flat.procStart === undefined) continue
+    const session = name.slice(0, -'.json'.length)
+    writeRun(session, {
+      session,
+      runner: { process: { id: flat.pid, start: flat.procStart }, version: '', startedAt: '' },
+      ...(flat.terminal === undefined ? {} : { terminal: { address: flat.terminal, machine } }),
+      claude: { command: flat.command ?? ['claude'] },
+    })
+  }
 }
 
 export const runSessions = (): string[] =>
@@ -160,7 +215,7 @@ export const stoppedRuns = (): { readonly session: string; readonly run: Run }[]
     .flatMap((name) => {
       const session = name.slice(0, -'.json'.length)
       const run = jsonOf(join(runsFolder(), name)) as Run | undefined
-      return run === undefined || isProcess(run.pid, run.procStart) ? [] : [{ session, run }]
+      return run?.runner === undefined || isProcess(run.runner.process.id, run.runner.process.start) ? [] : [{ session, run }]
     })
 
 const STATUS: Record<string, AgentStatus> ={ busy: 'working', shell: 'working', idle: 'idle', waiting: 'waiting' }
@@ -178,7 +233,7 @@ export function writeRun(session: string, run: Run): void {
 
 export const forgetRun = (session: string): void => rmSync(join(runsFolder(), `${session}.json`), { force: true })
 
-export const commandOf = (session: string): readonly string[] => runOf(session)?.command ?? ['claude']
+export const commandOf = (session: string): readonly string[] => runOf(session)?.claude.command ?? ['claude']
 
 async function ends(pid: number): Promise<boolean> {
   for (const started = Date.now(); isAlive(pid); await Bun.sleep(50)) {
@@ -201,8 +256,9 @@ export async function stopCopy(claudeHome: string, session: string): Promise<voi
   const record = (await recordedSessions(claudeHome)).find((entry) => entry.sessionId === session)
   const recorded = record !== undefined && isProcess(record.pid, recordAt(claudeHome, record.pid)?.procStart) ? record.pid : undefined
   const ran = runOf(session)
-  if (ran?.terminal !== undefined) await killTerminal(ran.terminal).catch((error: unknown) => console.error(`anyhost could not close terminal ${ran.terminal} of ${session}: ${error instanceof Error ? error.message : String(error)}`))
-  const pids = [ran?.pid, recorded].filter((pid): pid is number => pid !== undefined)
+  const terminal = ran?.terminal?.address
+  if (terminal !== undefined) await killTerminal(terminal).catch((error: unknown) => console.error(`anyhost could not close terminal ${terminal} of ${session}: ${error instanceof Error ? error.message : String(error)}`))
+  const pids = [ran?.runner.process.id, recorded].filter((pid): pid is number => pid !== undefined)
   signal(pids, 'SIGTERM')
   const stuck = (await Promise.all(pids.map(async (pid) => ((await ends(pid)) ? [] : [pid])))).flat()
   signal(stuck, 'SIGKILL')
