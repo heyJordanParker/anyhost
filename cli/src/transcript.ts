@@ -14,11 +14,6 @@ export type Summary = {
   readonly entrypoint: string
 }
 
-// Who a file belongs to:
-// - `session`: the path names its session, and `isTranscript` says it is the session's own transcript
-// - `prefix`: `tasks/session-<8 hex>/` names the first 8 hex digits of the session id
-// - `lines`: a file every session writes lines to, each naming its session in the key `lines`
-// - `named`: a plan or a pasted text, which belongs to the sessions whose files name it
 export type Owner =
   | { readonly session: string; readonly tool: Tool; readonly isTranscript: boolean }
   | { readonly prefix: string }
@@ -31,7 +26,6 @@ const ROLLOUT = /^rollout-.*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 
 const claudeFolder = (roots: MachineRoots, ...parts: string[]): string => join(roots.claudeHome, ...parts)
 
-// Codex keeps a thread's row in this database. Its JSON form is the session's record of it.
 export const codexState = (roots: MachineRoots): string => join(roots.codexHome, 'state_5.sqlite')
 
 export const linesFiles = (roots: MachineRoots): Map<string, { readonly lines: string; readonly tool: Tool }> =>
@@ -41,11 +35,6 @@ export const linesFiles = (roots: MachineRoots): Map<string, { readonly lines: s
     [join(roots.codexHome, 'session_index.jsonl'), { lines: 'id', tool: 'codex' }],
   ])
 
-// The folders the program watches, each with the levels of folders in it that hold a session's files, counting the
-// folder itself: 1 for the lines files beside other files, and 4 for background output in the temp root,
-// `<folder>/<session>/tasks/<task>.output`, as its scratchpads beside `tasks/` hold whole checkouts. A folder of more
-// than one level is watched with every level under it. `jobs/` holds no file of a session: `jobs/<8 hex>/state.json`
-// is the record of a job this machine's Claude Code daemon ran, which names a job that never ran on any other machine.
 export const watchedFolders = (roots: MachineRoots): { readonly folder: string; readonly depth: number }[] => [
   { folder: claudeFolder(roots), depth: 1 },
   ...['projects', 'file-history', 'tasks', 'session-env', 'plans', 'paste-cache'].map((name) => ({ folder: claudeFolder(roots, name), depth: Infinity })),
@@ -54,7 +43,6 @@ export const watchedFolders = (roots: MachineRoots): { readonly folder: string; 
   { folder: join(roots.codexHome, 'sessions'), depth: Infinity },
 ]
 
-// A file no session keeps: a dotfile such as `.lock`, or the temp file of an atomic write, `custom-title.json.tmp.2cbcf23f`.
 const isTransient = (path: string): boolean => basename(path).startsWith('.') || /\.tmp\.[0-9a-f]+$/.test(path)
 
 export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
@@ -76,7 +64,6 @@ export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
     if (name === 'tasks' && prefix !== undefined) return { prefix }
   }
   if (under(claudeFolder(roots, 'plans')).length > 0 || under(claudeFolder(roots, 'paste-cache')).length === 1) return { named: true }
-  // background output: <temp root>/<encoded working folder>/<session>/tasks/<task>.output
   const output = under(roots.claudeTmp)
   if (output.length === 4 && ID.test(output[1] ?? '') && output[2] === 'tasks' && output[3]?.endsWith('.output') === true) return { session: output[1] ?? '', tool: 'claude', isTranscript: false }
   const rollout = under(join(roots.codexHome, 'sessions')).length > 0 ? ROLLOUT.exec(basename(path))?.[1] : undefined
@@ -84,10 +71,7 @@ export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
   return undefined
 }
 
-// each folder and reason a listing failed at, which the log names once
 const failedListings = new Set<string>()
-// A folder a listing could not read costs only its own files, and the log names it once with the reason, but for a
-// folder gone meanwhile.
 const listingFailed = (folder: string, error: unknown): void => {
   const line = `anyhost lists no file in ${folder}: ${error instanceof Error ? error.message : String(error)}`
   if ((error as NodeJS.ErrnoException).code === 'ENOENT' || failedListings.has(line)) return
@@ -95,10 +79,6 @@ const listingFailed = (folder: string, error: unknown): void => {
   console.error(`${new Date().toISOString()} ${line}`)
 }
 
-// Every file `depth` levels of folders down from `folder` or fewer, counting the folder itself, with its modified time.
-// The walk follows no symlink, as Bun's recursive `readdir` follows one into a cycle and fails the whole listing with
-// ELOOP, which it did 6.4 s into the temp root at a cycle in another agent's scratchpad. It lists and stats in this
-// thread and yields after each folder, as `changedFiles` stats.
 export async function filesUnder(folder: string, depth = Infinity): Promise<{ readonly path: string; readonly mtimeMs: number }[]> {
   const files: { path: string; mtimeMs: number }[] = []
   const left = [{ folder, depth }]
@@ -128,8 +108,6 @@ const foldersIn = async (folder: string): Promise<string[]> => {
   }
 }
 
-// Every file of a session that exists now, and the files it will write to whose names are known: the program
-// captures a session it sees for the first time from byte 0 of each.
 export async function filesOf(session: string, tool: Tool, roots: MachineRoots): Promise<string[]> {
   const lines = [...linesFiles(roots)].filter(([, file]) => file.tool === tool).map(([path]) => path)
   if (tool === 'codex') return [...lines, codexState(roots)]
@@ -144,7 +122,6 @@ export async function filesOf(session: string, tool: Tool, roots: MachineRoots):
   return [...found.flat(), ...lines]
 }
 
-// The plans and pasted texts a session's bytes name: Claude Code's `planFilePath` and history's `contentHash`.
 export function namedIn(text: string, roots: MachineRoots): string[] {
   const plans = [...text.matchAll(/"planFilePath":("(?:[^"\\]|\\.)*")/g)].map((match) => JSON.parse(match[1] ?? '""') as string)
   const pastes = [...text.matchAll(/"contentHash":"([0-9a-f]+)"/g)].map((match) => claudeFolder(roots, 'paste-cache', `${match[1]}.txt`))
@@ -163,9 +140,10 @@ function promptOf(line: string, tool: Tool): string | undefined {
     if (value.type !== 'user' || value.isMeta === true || value.message?.role !== 'user') return undefined
     const content = value.message.content
     const text = typeof content === 'string' ? content : Array.isArray(content) ? (content as { type?: string; text?: string }[]).find((block) => block.type === 'text')?.text : undefined
-    // a slash command, as Claude Code writes it: `<command-name>/loop</command-name>` and `<command-args>2m …</command-args>`
     const command = text === undefined ? undefined : /<command-name>([^<]*)<\/command-name>/.exec(text)?.[1]
     if (command !== undefined) return `${command} ${/<command-args>([^<]*)<\/command-args>/.exec(text ?? '')?.[1] ?? ''}`.trim()
+    const told = text === undefined ? undefined : /^\s*<anyhost from="[^"]*" reach="[^"]*">([\s\S]*)<\/anyhost>\s*$/.exec(text)?.[1]
+    if (told !== undefined) return told
     return text === undefined || text.trimStart().startsWith('<') ? undefined : text
   }
   if (!line.includes('"user_message"') && !line.includes('"UserMessage"')) return undefined
@@ -188,7 +166,6 @@ function cwdOf(line: string, tool: Tool): string | undefined {
   return typeof found === 'string' ? found : undefined
 }
 
-// How the session started: Claude Code's `entrypoint` (`cli`, `sdk-cli`), Codex's `source` (`cli`, `vscode`, `exec`).
 function entrypointOf(line: string, tool: Tool): string | undefined {
   if (tool === 'claude') return /"entrypoint":"([^"]*)"/.exec(line.slice(0, CWD_LINE_LENGTH))?.[1]
   if (!line.slice(0, 120).includes('"type":"session_meta"')) return undefined

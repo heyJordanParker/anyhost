@@ -12,14 +12,11 @@ import { cloneMissing, localFolder, restore } from './resume.ts'
 import type { Tool } from './transcript.ts'
 
 const RUNNING_MS = 60_000
-// how long a new session in a folder Claude Code asks the person to trust waits for their answer before its first message
 const TRUST_ANSWER_MS = 86_400_000
 const CONNECTED_MS = 10_000
-// a tell answers within a tool call of Claude Code's, and a woken session starts its turn within 3 s
 const TELL_MS = 25_000
 const TURN_STARTS_MS = 10_000
 const LIST_MS = 5000
-// an asker repeats a tell or a list only while it waits for its answer
 const FORGET_MS = 120_000
 const LOCK_STALE_MS = 10_000
 const LOCK_WAITS_MS = [200, 400, 800, 1600, 3200, 4000]
@@ -297,13 +294,8 @@ export async function move(capture: Capture, asked: string, machine: string, her
   return moving
 }
 
-// A move's id starts with its session, so the answer names it to a program that forgot the move.
 const moveId = (session: string): string => `${session}/${crypto.randomUUID()}`
 
-// A failed move's answer that no move of this program waits for: this program restarted during the move, as when cmod
-// set the program up again, and the other machine took the session and then could not run it, so it holds the session
-// and runs it nowhere. This machine takes it back and opens it, as the move's own failure does: a move to mac-studio
-// stranded a session this way.
 export async function receiveMoved(capture: Capture, answer: Extract<Delivered, { readonly t: 'moved' }>, here: MoveHere): Promise<void> {
   const session = answer.id.split('/')[0] ?? ''
   const journal = journalOf(capture.db, session)
@@ -313,7 +305,7 @@ export async function receiveMoved(capture: Capture, answer: Extract<Delivered, 
   try {
     await takeClaim(capture.relay, session, { take: true })
     await continueHere(capture, session, journal.tool, here)
-    await takeHere(capture, session, here)
+    await openHere(capture, session, here)
     console.error(`${stamp()} ${answer.from.name} could not take ${session} in a move this program forgot, so ${capture.device.name} took it back and runs it: ${reasonOf(answer.error)}.`)
   } catch (error) {
     console.error(`${stamp()} ${answer.from.name} could not take ${session} in a move this program forgot, and ${capture.device.name} could not take it back: ${messageOf(error)}`)
@@ -354,7 +346,6 @@ async function takeSession(capture: Capture, asked: Extract<Delivered, { readonl
     await stopCopy(roots.claudeHome, asked.session)
     const { session, cwd } = await restore(capture, asked.session, { take: true, if: { at: asked.claimedAt }, checkouts: here.checkouts })
     if (asked.trusted) await trustHere(capture, cwd, asked.from.name)
-    // the asking machine's flags, with this machine's own Claude Code
     await openTerminal(cwd, session.id, ['claude', ...asked.command.slice(1)], { isResumed: true })
     isOpened = true
     const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session.id), RUNNING_MS, here.onRecordsChange)
@@ -371,7 +362,6 @@ async function takeSession(capture: Capture, asked: Extract<Delivered, { readonl
   }
 }
 
-// Starts a new session in a terminal of herdr-core on `machine`, this one too, and types `prompt` into it once it runs.
 export async function startNew(capture: Capture, machine: string, cwd: string, prompt: string, here: MoveHere): Promise<string> {
   if (machine === '' || machine === capture.device.name) return await startIn(capture, cwd, prompt, here)
   const target = await otherMachine(capture.relay, capture.device, machine, 'Run claude here.')
@@ -410,10 +400,6 @@ async function startSession(capture: Capture, asked: Extract<Delivered, { readon
   }
 }
 
-// A new session in a terminal of herdr-core here, which this machine holds once Claude Code runs it, with `prompt` typed
-// into it. A start that fails once the terminal opened stops its copy. In a folder Claude Code does not trust here, Claude
-// Code first asks the person in that terminal, as it does when they run it there themselves, so the start answers once
-// the terminal opened, and the session takes its first message whenever they answer.
 async function startIn(capture: Capture, cwd: string, prompt: string, here: MoveHere): Promise<string> {
   const { relay, roots, device } = capture
   const session = crypto.randomUUID()
@@ -427,7 +413,6 @@ async function startIn(capture: Capture, cwd: string, prompt: string, here: Move
     const isTrusted = await trusts(capture, cwd)
     await openTerminal(cwd, session, ['claude', '--session-id', session], { isResumed: false })
     isOpened = true
-    // the runner writes its run, which names the terminal a message goes to, within a second of Claude Code's record
     const running = whenSessions(roots.claudeHome, (sessions) => (runOf(session)?.terminal === undefined ? undefined : sessions.find((entry) => entry.sessionId === session)), isTrusted ? RUNNING_MS : TRUST_ANSWER_MS, here.onRecordsChange)
     if (!isTrusted) {
       void running.then(begin).catch((error: unknown) => console.error(`${stamp()} ${device.name} could not give ${session} its first message: ${messageOf(error)}`))
@@ -441,7 +426,6 @@ async function startIn(capture: Capture, cwd: string, prompt: string, here: Move
   }
 }
 
-// The whole id of the session `asked` names, or begins.
 async function sessionOf(capture: Capture, asked: string): Promise<string> {
   const local = capture.db.query<{ session: string }, [string]>('select session from journals where session like ?').all(`${asked}%`).map(({ session }) => session)
   const known = [...new Set([...(await claimsOf(capture.relay, asked)).keys(), ...local])]
@@ -451,9 +435,6 @@ async function sessionOf(capture: Capture, asked: string): Promise<string> {
   return session
 }
 
-// What a tell does: types `text` and presses Enter, presses `keys`, or only reads the screen with `lines` lines of
-// history when both are empty. `sender` is the session of the agent that sends it, which the text names, as herdr-core
-// tags a message one agent sends another.
 export type Tell = { readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string }
 export type Told = { readonly machine: string; readonly session: string; readonly status: AgentStatus; readonly screen: string }
 
@@ -463,8 +444,6 @@ const tagged = (told: Tell, machine: string): string => {
   return `<anyhost from="${sender} on ${machine}" reach="tell_agent ${sender} when done or stuck">${told.text}</anyhost>`
 }
 
-// The terminal of herdr-core the session's runner runs in here. One the session runs in outside herdr-core, as under
-// `anyhost resume` in another terminal, holds Claude Code's input itself, so nothing types into it.
 async function terminalHere(capture: Capture, session: string): Promise<string | undefined> {
   const run = runOf(session)
   if (run?.terminal !== undefined) return run.terminal
@@ -472,26 +451,37 @@ async function terminalHere(capture: Capture, session: string): Promise<string |
   throw new Error(`${session.slice(0, 8)} runs on ${capture.device.name} outside herdr-core, so anyhost cannot type into it or read it.`)
 }
 
-// Tells the session here, opening a terminal that resumes it when its runner runs in none, which wakes it, and waits
-// for the turn a text starts. A kept terminal of herdr-core whose runner it lost, as after a reboot, holds a shell with
-// the session's label, which goes first.
+async function terminalOf(capture: Capture, session: string, here: MoveHere): Promise<string> {
+  const { relay, db, device, roots } = capture
+  const id = session.slice(0, 8)
+  const ran = runOf(session)?.terminal
+  if (ran !== undefined) return ran
+  if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost runs Claude Code sessions in herdr-core, and ${id} is a Codex session.`)
+  if ((await statusOf(roots.claudeHome, session)) !== undefined) {
+    await whenSessions(roots.claudeHome, (sessions) => (sessions.find((entry) => entry.sessionId === session)?.status === 'busy' ? undefined : true), Infinity, here.onRecordsChange)
+    await stopCopy(roots.claudeHome, session)
+  }
+  const known = workingFolderOf(db, session)
+  const isHeld = (journalOf(db, session)?.holder ?? '') === '' && (await claimsOf(relay, session)).get(session)?.id === device.id
+  const isThere = known !== '' && (await stat(known).then((found) => found.isDirectory(), () => false))
+  const cwd = isHeld && isThere ? known : (await restore(capture, session, { take: true, checkouts: here.checkouts })).cwd
+  for (const stale of await labelledTerminals(session)) await killTerminal(stale)
+  await openTerminal(cwd, session, commandOf(session), { isResumed: true })
+  for (const started = Date.now(); ; await sleep(100)) {
+    const address = runOf(session)?.terminal
+    if (address !== undefined) return address
+    if (Date.now() - started > RUNNING_MS) throw new Error(`The runner of ${id} named no terminal of herdr-core on ${device.name} ${RUNNING_MS / 1000} s after it opened one.`)
+  }
+}
+
 async function tellHere(capture: Capture, session: string, told: Tell, here: MoveHere, sender = capture.device.name): Promise<{ readonly status: AgentStatus; readonly screen: string }> {
   const { db, device, roots } = capture
   const id = session.slice(0, 8)
-  const { holder = '', tool = 'claude' } = journalOf(db, session) ?? {}
+  const holder = journalOf(db, session)?.holder ?? ''
   if (holder !== '') throw new Error(`${id} continues on ${holder}.`)
-  let address = await terminalHere(capture, session)
-  if (address === undefined) {
-    if (told.text === '') throw new Error(`${id} runs in no terminal of herdr-core on ${device.name}. Tell it something to start it again.`)
-    if (tool !== 'claude') throw new Error(`anyhost runs Claude Code sessions, and ${id} is a Codex session.`)
-    const cwd = workingFolderOf(db, session)
-    if (cwd === '') throw new Error(`${device.name} knows no working folder of ${id}.`)
-    for (const stale of await labelledTerminals(session)) await killTerminal(stale)
-    await openTerminal(cwd, session, commandOf(session), { isResumed: true })
-    for (const started = Date.now(); (address = runOf(session)?.terminal) === undefined; await sleep(100)) {
-      if (Date.now() - started > RUNNING_MS) throw new Error(`The runner of ${id} named no terminal of herdr-core on ${device.name} ${RUNNING_MS / 1000} s after it opened one.`)
-    }
-  }
+  const isRead = told.text === '' && told.keys.length === 0
+  const address = isRead ? await terminalHere(capture, session) : await terminalOf(capture, session, here)
+  if (address === undefined) throw new Error(`${id} runs in no terminal of herdr-core on ${device.name}. Tell it something to start it again.`)
   if (told.keys.length > 0) await pressKeys(address, told.keys)
   if (told.text !== '') {
     await sendTo(address, tagged(told, sender))
@@ -500,7 +490,6 @@ async function tellHere(capture: Capture, session: string, told: Tell, here: Mov
   return { status: (await statusOf(roots.claudeHome, session)) ?? 'idle', screen: await readTerminal(address, told.lines) }
 }
 
-// Tells the session wherever it runs: here, or through the relay on the machine that holds it.
 export async function tell(capture: Capture, asked: string, told: Tell, here: MoveHere): Promise<Told> {
   const { relay, device } = capture
   const session = await sessionOf(capture, asked)
@@ -510,7 +499,7 @@ export async function tell(capture: Capture, asked: string, told: Tell, here: Mo
     if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.4.0 there does not answer at all.`)
     throw error
   })
-  if (answer.t === 'offline') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, is offline. take_agent continues it on another machine.`)
+  if (answer.t === 'offline') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, is offline. open_agent continues it on another machine.`)
   if ('error' in answer) throw new Error(`${holder.name}: ${answer.error}`)
   return { machine: holder.name, session, status: answer.status, screen: answer.screen }
 }
@@ -528,7 +517,6 @@ export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readon
     FORGET_MS,
   )
 
-// What every session that runs here does now.
 async function statusesHere(capture: Capture): Promise<Record<string, AgentStatus>> {
   const sessions = new Set([...(await recordedSessions(capture.roots.claudeHome)).map(({ sessionId }) => sessionId), ...runSessions()])
   const statuses: Record<string, AgentStatus> = {}
@@ -542,8 +530,6 @@ async function statusesHere(capture: Capture): Promise<Record<string, AgentStatu
 export const receiveList = (capture: Capture, asked: Extract<Delivered, { readonly t: 'list' }>, here: MoveHere): Promise<void> =>
   answerOnce(capture.relay, here.answers, asked, async () => ({ t: 'listed', id: asked.id, to: asked.from.id, statuses: await statusesHere(capture) }), FORGET_MS)
 
-// What every session of every connected machine does now: this machine's own, and each other's as it answers within
-// LIST_MS. A machine that does not answer in time adds nothing.
 export async function statusesOf(capture: Capture): Promise<Record<string, AgentStatus>> {
   const { relay, device } = capture
   const others = [...(await devicesOf(relay)).values()].filter((machine) => machine.id !== device.id && machine.connected && machine.removedAt === undefined)
@@ -558,20 +544,9 @@ export async function statusesOf(capture: Capture): Promise<Record<string, Agent
   return Object.assign({}, ...answers, await statusesHere(capture)) as Record<string, AgentStatus>
 }
 
-// Continues a session here, in a terminal of herdr-core, from R2 when another machine holds it, which then stops its
-// copy, so an agent on a machine that sleeps or died goes on here.
-export async function takeHere(capture: Capture, asked: string, here: MoveHere): Promise<string> {
-  const { relay, device, roots } = capture
+export async function openHere(capture: Capture, asked: string, here: MoveHere): Promise<{ readonly session: string; readonly terminal: string }> {
   const session = await sessionOf(capture, asked)
-  const id = session.slice(0, 8)
-  if ((await statusOf(roots.claudeHome, session)) !== undefined) throw new Error(`${id} runs on ${device.name} already.`)
-  const held = (await claimsOf(relay, session)).get(session)?.id === device.id
-  const cwd = held ? workingFolderOf(capture.db, session) : (await restore(capture, session, { take: true, checkouts: here.checkouts })).cwd
-  if (cwd === '') throw new Error(`${device.name} knows no working folder of ${id}.`)
-  await openTerminal(cwd, session, ['claude'], { isResumed: true })
-  const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session), RUNNING_MS, here.onRecordsChange)
-  if (running === undefined) throw new Error(`Claude Code listed ${id} running on ${device.name} no ${RUNNING_MS / 1000} s after its start.`)
-  return session
+  return { session, terminal: await terminalOf(capture, session, here) }
 }
 
 export async function receiveReleased(capture: Capture, session: string, holder: string, here: MoveHere): Promise<void> {

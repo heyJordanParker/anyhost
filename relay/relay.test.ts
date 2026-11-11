@@ -1,7 +1,3 @@
-// The relay end to end: its Worker and Pool run in workerd through Miniflare, with the SQLite Durable Object, an R2
-// bucket and real WebSockets, and every test speaks to it over HTTP and WebSockets as a machine does.
-// ANYHOST_RELAY_TARGET names a module whose `startRelay` runs the same suite against a deployed relay instead.
-// ANYHOST_RELAY_SLOW=1 adds the expired invite, which waits out the invite's 10 minutes.
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -30,11 +26,9 @@ import {
   type Roots,
 } from './protocol.ts'
 
-// A relay whose Pool never started, with `objects` in its bucket and the setup code's sha256 as its secret.
 export type TestRelay = {
   readonly url: () => string
   readonly bucket: string
-  // uploads a new setup code's sha256, as setup run again does
   setSetupCode(code: string): Promise<void>
   stop(): Promise<void>
 }
@@ -50,7 +44,6 @@ const bytesOf = (size: number, fill = 7): Uint8Array => new Uint8Array(size).fil
 const startLocal: StartRelay = async ({ objects, setupCode }) => {
   const folder = mkdtempSync(join(tmpdir(), 'anyhost-relay-'))
   const contents = await bundleRelay()
-  // Miniflare 5 still reads the flat options of Miniflare 4, through its own converter.
   const options = (code: string) =>
     convertV4MiniflareOptions({
       modules: [{ type: 'ESModule', path: 'relay.js', contents }],
@@ -58,7 +51,6 @@ const startLocal: StartRelay = async ({ objects, setupCode }) => {
       durableObjects: { POOL: { className: 'Pool', useSQLite: true } },
       r2Buckets: { BUCKET },
       bindings: { BUCKET_NAME: BUCKET, SETUP_CODE_SHA256: sha256(code) },
-      // the bucket and the Pool's database outlive setOptions, as they outlive a new secret in Cloudflare
       resourcePersistencePath: folder,
     })
   let miniflare = new Miniflare(options(setupCode))
@@ -68,8 +60,6 @@ const startLocal: StartRelay = async ({ objects, setupCode }) => {
   return {
     url: () => url,
     bucket: BUCKET,
-    // Miniflare's setOptions fails under Bun (`runtimeDispatcher.close is not a function`), so a new secret starts a
-    // new workerd on the same folders
     async setSetupCode(code) {
       await miniflare.dispose()
       miniflare = new Miniflare(options(code))
@@ -82,10 +72,6 @@ const startLocal: StartRelay = async ({ objects, setupCode }) => {
   }
 }
 
-// A relay whose Worker holds the setup code `code` while its Pool runs with `poolCode`, as after a new secret: Cloudflare
-// serves each Worker request with the newest version, and a Pool busy with requests keeps the environment of the
-// version it started with for up to 300 s (durable-objects/deployments/durable-objects-code-updates). Miniflare gives
-// each of its workers its own bindings, so the Pool's class runs in a second worker of the same module.
 async function startSplit(code: string, poolCode: string): Promise<Miniflare> {
   const shared = { modules: [{ type: 'ESModule' as const, path: 'relay.js', contents: await bundleRelay() }], compatibilityDate: COMPATIBILITY_DATE, r2Buckets: { BUCKET } }
   return new Miniflare(
@@ -111,9 +97,6 @@ const machine = (name: string, os = 'linux'): JoiningDevice => ({ id: hex(16), n
 type Json = Record<string, any>
 type Message = Json | Uint8Array
 
-// One machine's socket, whose messages wait in its inbox until a test takes them. It pings well within LIVE_MS, as the
-// program does, so the Pool counts it alive until `silence` stops it, as a machine that went to sleep stops, and it
-// answers each `released` it takes, live or in a welcome, with `heard`, as the program does once it applied it.
 class Socket {
   readonly ws: WebSocket
   readonly closed: Promise<{ code: number; reason: string }>
@@ -124,7 +107,6 @@ class Socket {
   #id = 0
 
   constructor(url: string, token: string, name: string, roots: Roots) {
-    // Bun's WebSocket takes headers, which the Workers types' WebSocket, loaded beside Bun's, does not name
     const headers = { authorization: `Bearer ${token}`, 'x-anyhost-name': name, 'x-anyhost-roots': JSON.stringify(roots) }
     this.ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, { headers } as any)
     this.ws.binaryType = 'arraybuffer'
@@ -143,14 +125,11 @@ class Socket {
     )
   }
 
-  // The machine sends nothing more by itself, neither a ping nor a heard, its socket left open, as a machine that went
-  // to sleep does.
   silence(): void {
     clearInterval(this.#pinger)
     this.#isAsleep = true
   }
 
-  // the next message `match` accepts, from those that came already or the ones still to come
   async next(match: (message: Message) => boolean, what: string, ms = 15_000): Promise<Message> {
     const until = Date.now() + ms
     for (;;) {
@@ -168,7 +147,6 @@ class Socket {
     return (await this.next((m) => !(m instanceof Uint8Array) && m['t'] === t, `${t} message`)) as Json
   }
 
-  // nothing of type `t` arrives within `ms`
   async none(t: string, ms = 1500): Promise<void> {
     await Bun.sleep(ms)
     expect(this.#inbox.filter((m) => !(m instanceof Uint8Array) && m['t'] === t)).toEqual([])
@@ -178,7 +156,6 @@ class Socket {
     this.ws.send(message instanceof Uint8Array || typeof message === 'string' ? message : JSON.stringify(message))
   }
 
-  // Sends one request and answers its header and each get's bytes, in the order of its gets.
   async request(ops: readonly Op[], parts: readonly Uint8Array[] = []): Promise<{ answer: Json; gets: Uint8Array[] }> {
     const id = ++this.#id
     this.send(encodeMessage(REQUEST, { id, ops }, parts))
@@ -192,7 +169,6 @@ class Socket {
     const gets: Uint8Array[] = []
     let at = 0
     for (const result of answer['results'] ?? []) {
-      // a get answered 200 is the one result that names a size
       if (result.status !== 200 || result.size === undefined) continue
       gets.push(bytes.subarray(at, at + result.size))
       at += result.size
@@ -201,7 +177,6 @@ class Socket {
     return { answer, gets }
   }
 
-  // the results of one request's ops
   async results(...ops: Op[]): Promise<Json[]> {
     const { answer } = await this.request(ops)
     expect(answer['error']).toBeUndefined()
@@ -259,11 +234,8 @@ const putObject = (token: string, key: string, body: Uint8Array | string, header
   fetch(objectUrl(key), { method: 'PUT', body, headers: { authorization: `Bearer ${token}`, ...headers } })
 const getObject = (token: string, key: string, headers: Record<string, string> = {}): Promise<Response> => fetch(objectUrl(key), { headers: { authorization: `Bearer ${token}`, ...headers } })
 
-// What the bucket held before anyhost had a relay: one record per machine and per claim, which the Pool's first
-// start moves into SQLite.
 const imported = {
   mac: { id: hex(16), record: { name: `mac-${run}`, os: 'darwin', arch: 'arm64', ssh: `mac-${run}`, ...roots('/Users/jordan') } },
-  // anyhost 0.1 wrote no claudeHome
   old: { id: hex(16), record: { name: `old-${run}`, os: 'linux', arch: 'x64', ssh: `old-${run}`, home: '/home/old', claudeTmp: '/tmp/claude-1000', codexHome: '/home/old/.codex' } },
   session: crypto.randomUUID(),
   broken: hex(16),
@@ -281,13 +253,9 @@ beforeAll(async () => {
       [`claims/${imported.session}.json`]: JSON.stringify({ device: imported.old.id, at: '2026-11-05T06:52:05.684Z' }),
     },
   })
-  // the Pool's first start, which imports the records, is the first machine's join
   mac = await joinWith(firstCode, { id: imported.mac.id, ...imported.mac.record, roots: roots('/Users/jordan') })
-  // A target that deploys a relay waits for its route to settle: a Worker deployed again after its deletion answered
-  // Cloudflare's 404 page now and then for 41 seconds.
 }, 300_000)
 
-// The objects the tests wrote leave the bucket, as a deployed relay's bucket outlives the run.
 afterAll(async () => {
   if (mac !== undefined) {
     const cleaner = await connect(mac.token, mac.device.name, mac.device.roots)
@@ -333,17 +301,13 @@ describe('joining', () => {
     expect(used['message']).toContain(mac.device.name)
     const nextCode = hex(32)
     await relay.setSetupCode(nextCode)
-    // the restart dropped the first machine's socket
     mac.socket = await connect(mac.token, mac.device.name, mac.device.roots)
     const setup = await joinWith(nextCode, machine('setup'))
-    // the setup machine's join whose answer it never got, sent again, joins it again
     expect(await json(await post('/v1/join', { invite: nextCode, device: setup.device }))).toMatchObject({ status: 200, device: { id: setup.device.id } })
     expect(await json(await post('/v1/join', { invite: nextCode, device: machine('third') }))).toMatchObject({ status: 403, error: 'invite_used' })
     expect(await json(await post('/v1/join', { invite: firstCode, device: machine('third') }))).toMatchObject({ status: 403, error: 'invite_used' })
   })
 
-  // The suite missed it: the Worker and the Pool always ran with one environment, so no test met a Pool that kept an
-  // older setup code, which a live run met for 300 s while another machine kept the Pool busy. Only workerd shows it.
   test.skipIf(target !== undefined)('the setup code the Worker holds joins one machine while the Pool still holds an older one, which joins none', async () => {
     const [older, newer] = [hex(32), hex(32)]
     const split = await startSplit(newer, older)
@@ -412,7 +376,6 @@ describe('joining', () => {
     expect(refused['message']).toContain(cloneFixFor('darwin'))
     const cloned = await connect(original.token, clone.name, clone.roots)
     expect(await cloned.closed).toMatchObject({ code: CLOSE_DEVICE_LIVE })
-    // the original keeps working
     expect(await original.socket.results({ op: 'claims' })).toMatchObject([{ status: 200 }])
   })
 
@@ -446,11 +409,8 @@ describe('the socket', () => {
     expect(await mac.socket.message('pong')).toEqual({ t: 'pong' })
   })
 
-  // The suite missed it: every socket the tests kept alive pinged on time, while a ping waits behind the uploads a
-  // link still carries, 10.5 s behind 1 MiB at 100 KB/s.
   test('counts a machine connected while its uploads arrive, though its ping waits 15 s behind them, past LIVE_MS', async () => {
     const busy = await joinNew(mac, 'busy-link')
-    // the Pool hears its uploads and none of its pings, as the ping due at 30 s waits behind them until 45 s
     busy.socket.silence()
     const pingArrives = Date.now() + LIVE_MS + 5000
     for (let upload = 0; Date.now() < pingArrives; upload += 1) {
@@ -460,7 +420,6 @@ describe('the socket', () => {
     }
     const [devices] = await mac.socket.results({ op: 'devices' })
     expect((devices!['devices'] as Json[]).find((device) => device['id'] === busy.device.id)).toMatchObject({ connected: true })
-    // a message for it goes to it, not back as offline
     mac.socket.send({ t: 'move', id: 'busy', to: busy.device.id, session: crypto.randomUUID(), trusted: false })
     expect(await busy.socket.message('move')).toMatchObject({ id: 'busy', from: { id: mac.device.id } })
   }, 90_000)
@@ -509,7 +468,6 @@ describe('ops', () => {
     const [first, second] = [`${prefix}ops/big-1`, `${prefix}ops/big-2`]
     const { answer: stored } = await mac.socket.request([{ op: 'put', key: first, size: big.length }], [big])
     expect(stored['results']).toEqual([{ status: 200, etag: md5(big) }])
-    // two of them are past one message, so the second goes up as its own object
     expect((await putObject(mac.token, second, big)).status).toBe(200)
     const { answer, gets } = await mac.socket.request([{ op: 'get', key: first }, { op: 'get', key: second }])
     expect(answer['results']).toEqual([
@@ -526,7 +484,6 @@ describe('ops', () => {
       const { answer } = await mac.socket.request(ops, [bytesOf(ops.length)])
       expect((answer['results'] as Json[]).every((result) => result['status'] === 200)).toBe(true)
     }
-    // R2 may answer fewer than 1,000 keys on a page that is not the last
     const pages: Json[] = []
     let cursor: string | undefined
     do {
@@ -562,7 +519,6 @@ describe('ops', () => {
   test('claims with a prefix answers only the sessions whose id begins with it', async () => {
     const stem = hex(4)
     const under = [`${stem}-${crypto.randomUUID()}`, `${stem}${'f'.repeat(4)}-${crypto.randomUUID()}`]
-    // the ids that sort right before and right after the prefix's
     const before = `${stem.slice(0, -1)}-${crypto.randomUUID()}`
     const after = `${stem.slice(0, -1)}${String.fromCharCode(stem.charCodeAt(stem.length - 1) + 1)}-${crypto.randomUUID()}`
     for (const session of [...under, before, after]) expect(await mac.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
@@ -601,8 +557,6 @@ describe('objects over HTTP', () => {
       },
     })
     const chunked = await json(await fetch(objectUrl(`${key}.chunked`), { method: 'PUT', body: unsized, headers: { authorization: `Bearer ${mac.token}` } }))
-    // workerd hands the Worker a chunked body without a length, which R2 refuses, while Cloudflare takes the whole
-    // body first and names its length
     if (target === undefined) expect(chunked).toMatchObject({ status: 411, error: 'length_required' })
     else expect(chunked).toEqual({ status: 200, etag: md5('no length') })
   })
@@ -636,13 +590,11 @@ describe('objects over HTTP', () => {
     const body = Uint8Array.from({ length: 256 }, (_, index) => index)
     expect((await putObject(mac.token, key, body)).status).toBe(200)
     const past = await getObject(mac.token, key, { range: 'bytes=300-' })
-    // Miniflare's R2 serves the whole object for a range past its end, which R2 refuses with its error 10039
     if (target === undefined) {
       expect(past.status).toBe(200)
       expect(past.headers.get('content-range')).toBeNull()
       expect(new Uint8Array(await past.arrayBuffer())).toEqual(body)
     } else expect(await json(past)).toMatchObject({ status: 416, error: 'invalid', message: `${key} has no bytes in bytes=300-.` })
-    // R2 refuses a key over 1,024 bytes with its error 10020, which no range causes
     const failed = await json(await getObject(mac.token, `${prefix}http/${'k'.repeat(1100)}`, { range: 'bytes=10-' }))
     expect(failed).toMatchObject({ status: 503, error: 'unavailable' })
     expect(failed['message']).toContain('(10020)')
@@ -663,7 +615,6 @@ describe('the holder', () => {
     const { answer: written } = await mac.socket.request([{ op: 'put', key: frame(0), size: 3, if: { none: '*' }, holder: session }], [bytesOf(3)])
     expect(written['results']).toEqual([{ status: 200, etag: md5(bytesOf(3)) }])
     expect((await putObject(mac.token, frame(3), 'abc', { 'if-none-match': '*', 'x-anyhost-holder': session })).status).toBe(200)
-    // a session no machine holds takes any machine's frame
     expect((await putObject(taker.token, `${prefix}free`, 'abc', { 'x-anyhost-holder': crypto.randomUUID() })).status).toBe(200)
     expect(await taker.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     const { answer: refused } = await mac.socket.request([{ op: 'put', key: frame(6), size: 3, if: { none: '*' }, holder: session }], [bytesOf(3)])
@@ -677,8 +628,6 @@ describe('the holder', () => {
     expect((listed!['objects'] as Json[]).map((object) => object['key'])).toEqual([frame(0), frame(3)])
   })
 
-  // The suite missed it: every session a test wrote frames of was claimed first, as the program's first drain did with
-  // a claim of its own, which a session held from its first frame needs no more.
   test("the first frame of a session no machine holds claims it for its writer, on the socket and over HTTP, and refuses another machine's frame after it", async () => {
     const other = await joinNew(mac, 'second-writer')
     const [bySocket, byHttp] = [crypto.randomUUID(), crypto.randomUUID()]
@@ -700,7 +649,6 @@ describe('the holder', () => {
     const session = crypto.randomUUID()
     const key = `${prefix}journals/${session}/hot/0000000000000000.zst`
     expect(await mac.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
-    // the body arrives over 3 seconds, so the frame's write is in flight while the takeover runs
     const size = 64 * 1024
     const body = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -723,12 +671,10 @@ describe('the holder', () => {
     const put = await putting
     const [got] = await taker.socket.results({ op: 'get', key })
     if (put.status === 200) {
-      // the takeover waited out the 2 seconds of body left, and the new holder reads the frame
       expect(takenAt - takeAt).toBeGreaterThan(1000)
       expect(put.at).toBeLessThanOrEqual(takenAt + 50)
       expect(got).toMatchObject({ status: 200, size })
     } else {
-      // Cloudflare took the whole body before the Worker ran, which asked the Pool after the takeover
       expect(put.status).toBe(409)
       expect(got).toEqual({ status: 404 })
     }
@@ -750,8 +696,6 @@ describe('the holder', () => {
     expect(taken).toEqual({ status: 200, told: true, at: expect.any(String) })
   })
 
-  // The suite missed it because no test sent a take again, as the program does on its next socket once the first
-  // take's answer was lost.
   test('a take sent again while the offline holder\'s PUT streams answers as the first did, after the PUT ended', async () => {
     const away = await joinNew(mac, 'twice-away')
     const taker = await joinNew(mac, 'twice-taker')
@@ -759,7 +703,6 @@ describe('the holder', () => {
     expect(await away.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     away.socket.close()
     await away.socket.closed
-    // the Pool hears the close a moment after the machine does
     await Bun.sleep(500)
     const size = 64 * 1024
     const body = new ReadableStream<Uint8Array>({
@@ -777,7 +720,6 @@ describe('the holder', () => {
       at: performance.now(),
     }))
     await Bun.sleep(1000)
-    // the take sent again goes on the taker's next socket, as after a drop
     const next = await connect(taker.token, taker.device.name, taker.device.roots)
     await next.message('welcome')
     const take = (on: Socket) => on.results({ op: 'claim', session, take: true }).then(([answer]) => ({ answer, at: performance.now() }))
@@ -785,10 +727,8 @@ describe('the holder', () => {
     const again = take(next)
     const answers = await Promise.all([first, again])
     const put = await putting
-    // a take writes a later at each time, its repeat too
     const untold = { status: 200, previous: { id: away.device.id, name: away.device.name }, told: false, at: expect.any(String) }
     expect(answers.map(({ answer }) => answer)).toEqual([untold, untold])
-    // Cloudflare takes the whole body before the Worker runs, which then asks the Pool after the takes
     if (put.status === 200) for (const { at } of answers) expect(put.at).toBeLessThanOrEqual(at + 50)
     else expect(put.status).toBe(409)
   })
@@ -799,7 +739,6 @@ describe('the holder', () => {
     expect(await away.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     away.socket.close()
     await away.socket.closed
-    // the Pool hears the close a moment after the machine does
     await Bun.sleep(500)
     expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, previous: { id: away.device.id, name: away.device.name }, told: false, at: expect.any(String) }])
     const back = await connect(away.token, away.device.name, away.device.roots)
@@ -810,8 +749,6 @@ describe('the holder', () => {
     expect(await again.message('welcome')).toMatchObject({ waiting: [] })
   })
 
-  // The suite missed it: every machine a test took a session from had closed its socket, so the Pool never held the
-  // open socket of a machine gone silent, as a sleeping laptop's is, and counted a message sent on it as delivered.
   test('a take of a session whose holder\'s socket is open but silent past LIVE_MS answers told false with previous, and the holder\'s next welcome carries released, while a holder that pinged hears it at once', async () => {
     const asleep = await joinNew(mac, 'asleep')
     const awake = await joinNew(mac, 'awake')
@@ -819,7 +756,6 @@ describe('the holder', () => {
     expect(await asleep.socket.results({ op: 'claim', session: sleeping, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     expect(await awake.socket.results({ op: 'claim', session: pinging, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     asleep.socket.silence()
-    // both sockets connected longer ago than LIVE_MS, so only the awake one's pings keep it alive
     await Bun.sleep(LIVE_MS + 2000)
 
     expect(await mac.socket.results({ op: 'claim', session: sleeping, take: true })).toEqual([{ status: 200, previous: { id: asleep.device.id, name: asleep.device.name }, told: false, at: expect.any(String) }])
@@ -828,23 +764,18 @@ describe('the holder', () => {
     const [devices] = await mac.socket.results({ op: 'devices' })
     const connected = (id: string): unknown => (devices!['devices'] as Json[]).find((device) => device['id'] === id)?.['connected']
     expect([connected(asleep.device.id), connected(awake.device.id)]).toEqual([false, true])
-    // the Pool sent nothing on the silent socket, which a sleeping machine never reads
     await asleep.socket.none('released', 500)
     const woken = await connect(asleep.token, asleep.device.name, asleep.device.roots)
     expect(await woken.message('welcome')).toMatchObject({ waiting: [{ t: 'released', session: sleeping, to: { id: mac.device.id, name: mac.device.name } }] })
   })
 
-  // The suite missed it: no machine took back a session it lost while the released of it waited for it, so the next
-  // welcome stopped the session there while the claims said it held it.
   test('a machine that took back a session it lost hears no released of it at its next welcome, and holds it', async () => {
     const laptop = await joinNew(mac, 'took-back')
     const session = crypto.randomUUID()
     expect(await laptop.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
-    // the laptop sleeps past LIVE_MS, so the released of the take waits for it
     laptop.socket.silence()
     await Bun.sleep(LIVE_MS + 2000)
     expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, previous: { id: laptop.device.id, name: laptop.device.name }, told: false, at: expect.any(String) }])
-    // it wakes on the same socket and takes the session back, as a move that failed does
     expect(await laptop.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
 
     const again = await connect(laptop.token, laptop.device.name, laptop.device.roots)
@@ -853,8 +784,6 @@ describe('the holder', () => {
     expect(claims!['claims']).toEqual({ [session]: { id: laptop.device.id, name: laptop.device.name } })
   }, 90_000)
 
-  // The suite missed it: every take a test sent took the session from whoever held it, so a move's take that came after
-  // the laptop gave up on the move took the session from the laptop anyway.
   test("a take whose if names another at than the claim's is refused with 409 and takes nothing, one that names the claim's at takes the session, and a take by the holder passes", async () => {
     const laptop = await joinNew(mac, 'fence-holder')
     const worker = await joinNew(mac, 'fence-taker')
@@ -862,7 +791,6 @@ describe('the holder', () => {
     const [claimed] = await laptop.socket.results({ op: 'claim', session, take: false })
     expect(claimed).toEqual({ status: 200, told: true, at: expect.any(String) })
     const read = claimed!['at'] as string
-    // the holder's claim keeps the at it read, and its take writes a new one, as a laptop that gives up on a move does
     expect(await laptop.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: read }])
     const [kept] = await laptop.socket.results({ op: 'claim', session, take: true })
     const at = kept!['at'] as string
@@ -873,19 +801,15 @@ describe('the holder', () => {
     expect((await laptop.socket.results({ op: 'claims', prefix: session }))[0]!['claims']).toEqual({ [session]: { id: laptop.device.id, name: laptop.device.name } })
     expect(await worker.socket.results({ op: 'claim', session, take: true, if: { at } })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     expect(await laptop.socket.message('released')).toMatchObject({ session, to: { id: worker.device.id } })
-    // a worker whose program restarted after its take sends it again, and holds the session already
     expect(await worker.socket.results({ op: 'claim', session, take: true, if: { at } })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
   })
 
-  // The suite missed it: no test removed a machine a take had left untold, so every later take named it as a machine
-  // that may take one more prompt, though a removed machine connects no more.
   test('a take sent again after the machine it took the session from was removed answers told true', async () => {
     const away = await joinNew(mac, 'removed-holder')
     const session = crypto.randomUUID()
     expect(await away.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     away.socket.close()
     await away.socket.closed
-    // the Pool hears the close a moment after the machine does
     await Bun.sleep(500)
     expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, previous: { id: away.device.id, name: away.device.name }, told: false, at: expect.any(String) }])
     expect(await mac.socket.results({ op: 'remove', device: away.device.id })).toEqual([{ status: 200 }])
@@ -911,8 +835,6 @@ describe('remove', () => {
     expect(await json(await getObject(gone.token, `${prefix}http/range.bin`))).toMatchObject({ status: 401 })
   })
 
-  // The suite missed it because no test sent a remove again, as the program does on its next socket once the first
-  // remove's answer was lost.
   test('a remove sent again answers 200 as the first did', async () => {
     const gone = await joinNew(mac, 'removed-twice')
     expect(await mac.socket.results({ op: 'remove', device: gone.device.id })).toEqual([{ status: 200 }])

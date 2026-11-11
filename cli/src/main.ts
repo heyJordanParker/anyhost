@@ -12,13 +12,14 @@ import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, resumeHere } from './resume.ts'
 import { runSession } from './runner.ts'
 import { serve, serveSocket, type JoinedRelay, type Status } from './serve.ts'
-import { listSessions, type ListedSession } from './sessions.ts'
-import { isSettled, sharedOf } from './shared.ts'
+import { agentsOf, type Agents, type ListedSession } from './sessions.ts'
 
 const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex session of every machine in your own Cloudflare account.
 
   anyhost list [--json]              list every session of every machine
   anyhost resume <session> [--take]  continue a Claude Code or Codex session on this machine, in this terminal
+  anyhost open <session> [--json]    run a session on this machine in a terminal of herdr-core, the one it runs in already when it does,
+                                     and print that terminal: one in tmux comes in once its turn ends, one another machine holds comes here
   anyhost move <session> <machine>   move a session this machine runs to another machine, which runs it from then on
   anyhost new <machine> <folder> [prompt]
                                      start a session on a machine, this one too, in the same repository, and type prompt into it
@@ -70,11 +71,8 @@ const machineTable = (machines: readonly Protocol.Device[], here: string): strin
     machines.map((machine) => [machine.id === here ? `${machine.name} (this machine)` : machine.name, `${machine.os}-${machine.arch}`, machine.connected ? 'connected' : `last seen ${minute(machine.seenAt)}`]),
   )
 
-// how often anyhost move and anyhost connect read the program's step, as the mod's /move and Step do
 const FOLLOW_MS = 1000
 
-// One answer of this machine's program at its unix socket, as the mod's askProgram asks it: a GET, or a POST of `body`
-// as JSON. It answers undefined when no program answers there, and throws the program's own message when it refuses.
 async function askProgram<T>(path: string, body?: object): Promise<T | undefined> {
   const unix = serveSocket()
   const answer = await fetch(`http://localhost${path}`, { unix, ...(body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) }).catch(() => undefined)
@@ -86,9 +84,6 @@ async function askProgram<T>(path: string, body?: object): Promise<T | undefined
 
 const noProgram = (): Error => new Error(`The anyhost program does not answer at ${serveSocket()}. Start Claude Code on this machine, and the anyhost mod starts it.`)
 
-// Asks this machine's program to move the session, as /move in the session does, since only the program holds the
-// session's upload queue, and prints each step of the move until it ends, however long the move waits. Ctrl-C ends
-// only the command, as the move runs in the program.
 async function moveThroughProgram(session: string, machine: string): Promise<number> {
   const started = await askProgram<{ readonly session: string }>('/move', { session, machine })
   if (started === undefined) throw noProgram()
@@ -98,8 +93,6 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
   })
   let said = ''
   for (;;) {
-    // the program's /claims/<session> answer carries the move it runs, as serve.ts serves it, and a program that
-    // restarts answers nothing for a moment, then knows no move
     const { move } = (await askProgram<{ readonly move?: Pick<Moving, 'step' | 'line'> }>(`/claims/${started.session}`)) ?? {}
     if (move === undefined) throw new Error(`The anyhost program at ${serveSocket()} restarted during the move, so it no longer knows where ${session} is.`)
     if (move.line !== said) (move.step === 'failed' ? console.error : console.log)(move.line)
@@ -109,38 +102,25 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
   }
 }
 
-// Asks this machine's program to start a session on the machine named `machine` for `folder`, since the relay sends
-// that machine's answer to the sockets this machine has open as it comes, and only the program's own socket stays open
-// while the session starts. The program waits for its relay, and so does the command, saying so first when the relay
-// is not connected, until Ctrl-C ends it. Answers the session.
 async function startThroughProgram(machine: string, folder: string, prompt: string): Promise<string> {
   const status = await askProgram<Status>('/status')
   if (status === undefined) throw noProgram()
   const { relay } = status
   if (relay.state !== 'connected') console.log(`Waiting for the relay at ${relay.url} to connect.${relay.message === '' ? '' : ` ${relay.message}`} Ctrl-C stops waiting.`)
-  // the program works in a folder of its own
   const started = await askProgram<{ readonly session: string }>('/new', { machine, folder: resolve(folder), prompt })
   if (started === undefined) throw new Error(`The anyhost program at ${serveSocket()} stopped answering before ${machine} started a session. anyhost list shows whether it did.`)
   return started.session
 }
 
-// Asks this machine's program to join, as the Step does, since the program saves the login in turn with its forget of
-// a login the relay refused. With no program answering, no forget runs, and the join runs here.
 async function joinThroughProgram(link: string): Promise<string> {
   const joined = await askProgram<JoinedRelay>('/join', { link })
   if (joined === undefined) return await join(link, await cmodDevice())
   return joined.url
 }
 
-// Asks this machine's program to run Connect Cloudflare, as the Step does, since the program saves the login in turn
-// with its forget of a login the relay refused, and follows it once a second, printing each line and asking each
-// question on the terminal. The program's service environment has no CLOUDFLARE_API_TOKEN, so the request carries this
-// command's, over the program's unix socket, for that run alone. With no program answering, Connect Cloudflare runs
-// here.
 async function connectThroughProgram(): Promise<void> {
   const started = await askProgram<Connecting>('/connect', { apiToken: process.env['CLOUDFLARE_API_TOKEN'] })
   if (started === undefined) return await connectCloudflare(TERMINAL, await cmodDevice())
-  // a program that stops during the run, as at a restart, answers nothing for a moment
   const during = async <T>(path: string, body?: object): Promise<T> => {
     const asked = await askProgram<T>(path, body)
     if (asked === undefined) throw new Error(`The anyhost program at ${serveSocket()} stopped answering during Connect Cloudflare. Run anyhost connect again once it runs.`)
@@ -158,7 +138,6 @@ async function connectThroughProgram(): Promise<void> {
       view = await during<Connecting>('/connect/r2', {})
     } else {
       await Bun.sleep(FOLLOW_MS)
-      // a program that started again since knows no run
       const { connecting } = await during<Status>('/status')
       if (connecting === undefined) throw new Error(`The anyhost program at ${serveSocket()} restarted during Connect Cloudflare. Run anyhost connect again.`)
       view = connecting
@@ -166,7 +145,6 @@ async function connectThroughProgram(): Promise<void> {
   }
 }
 
-// The person answers each question Connect Cloudflare asks on the terminal, one line each.
 let lines: AsyncIterator<string> | undefined
 async function answer(question: string): Promise<string> {
   console.log(question)
@@ -216,7 +194,6 @@ async function main(argv: string[]): Promise<number> {
     console.log(plugin.version)
     return 0
   }
-  // A command keeps its own connection to the relay while it runs, and fails once the relay cannot be reached.
   const connected = async <T>(work: (capture: Capture) => Promise<T>): Promise<T> => {
     const device = await cmodDevice()
     const roots = rootsHere()
@@ -264,22 +241,14 @@ async function main(argv: string[]): Promise<number> {
     console.log(`Added ${target}. Its sessions show on every machine, and the Herdr app reaches it.`)
     return 0
   }
-  // the program answers from the socket it keeps to the relay, so a command opens one only while no program runs
   if (command === 'machines' && rest.length === 0 && values.invite !== true && values.remove === undefined) {
     const listed = (await askProgram<{ readonly here: string; readonly machines: Protocol.Device[] }>('/machines')) ?? (await connected(async ({ relay, device }) => ({ here: device.id, machines: await machinesOf(relay) })))
     console.log(values.json === true ? JSON.stringify(listed) : machineTable(listed.machines, listed.here))
     return 0
   }
   if (command === 'list') {
-    type Listed = { readonly agents: readonly (ListedSession & { readonly status: string; readonly settled: boolean })[]; readonly settleAfterDays: number | null; readonly lastMachine: string }
-    const listed =
-      (await askProgram<Listed>('/agents')) ??
-      (await connected(async ({ relay }): Promise<Listed> => {
-        const [agents, shared] = await Promise.all([listSessions(relay), sharedOf(relay)])
-        return { agents: agents.map((agent) => ({ ...agent, status: '', settled: isSettled(shared, agent) })), settleAfterDays: shared.settleAfterDays, lastMachine: shared.lastMachine }
-      }))
-    // the Herdr app's sidebar reads every session of every machine in one go, so it gets what a card shows alone
-    const brief = values.brief === true ? { ...listed, agents: listed.agents.map(({ id, tool, title, firstPrompt, cwd, repo, machine, holder, lastActivity, status, settled }) => ({ id, tool, title: title || firstPrompt.slice(0, 120), cwd, repo, machine, holder, lastActivity, status, settled })) } : listed
+    const listed = (await askProgram<Agents>('/agents')) ?? (await connected(async ({ relay }) => await agentsOf(relay)))
+    const brief = values.brief === true ? { ...listed, agents: listed.agents.map(({ id, tool, title, firstPrompt, cwd, repo, machine, holder, lastActivity, status, settled, parent }) => ({ id, tool, title: title || firstPrompt.slice(0, 120), cwd, repo, machine, holder, lastActivity, status, settled, parent })) } : listed
     console.log(values.json === true ? JSON.stringify(brief, null, values.brief === true ? undefined : 2) : table(listed.agents))
     return 0
   }
@@ -296,7 +265,6 @@ async function main(argv: string[]): Promise<number> {
   if (command === 'resume' && rest.length === 1 && rest[0] !== undefined) {
     const id = rest[0]
     const { checkouts } = await personOptions()
-    // the session opens once the connection is closed, as it runs for as long as the person works in it
     const { tool, cwd } = await connected(async (capture) => await resumeHere(capture, id, { take: values.take === true, checkouts: checkouts ?? '' }))
     return await openSession(tool, id, cwd)
   }
@@ -305,6 +273,12 @@ async function main(argv: string[]): Promise<number> {
     const [machine, folder, prompt = ''] = rest
     const session = await startThroughProgram(machine, folder, prompt)
     console.log(`${machine} started ${session.slice(0, 8)} in a terminal of herdr-core there.`)
+    return 0
+  }
+  if (command === 'open' && rest.length === 1 && rest[0] !== undefined) {
+    const opened = await askProgram<{ readonly session: string; readonly terminal: string; readonly machine: string }>('/agents/open', { session: rest[0] })
+    if (opened === undefined) throw noProgram()
+    console.log(values.json === true ? JSON.stringify(opened) : `${opened.session.slice(0, 8)} runs on ${opened.machine} in terminal ${opened.terminal} of herdr-core.`)
     return 0
   }
   if (command === 'tell' && (rest.length === 1 || rest.length === 2) && rest[0] !== undefined) {

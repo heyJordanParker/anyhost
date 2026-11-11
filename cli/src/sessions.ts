@@ -5,20 +5,15 @@ import { chainOf, framesOf, journalPrefix, type IndexedSession, type RecordHeade
 import { claimsOf } from './claims.ts'
 import { devicesOf } from './device.ts'
 import type { Relay } from './relay.ts'
+import { isSettled, sharedOf } from './shared.ts'
 
 export type ListedSession = IndexedSession & { readonly machine: string; readonly device: string; readonly holder: string }
-// A run of one record's bytes in a replayed file: `size` bytes from `offset`, as `device` wrote them at `path` while the
-// session worked in `checkout` there.
 export type Segment = Pick<RecordHeader, 'device' | 'checkout' | 'path'> & { readonly offset: number; readonly size: number }
-// A file of the journal, replayed into `staged`: its bytes as each writer wrote them, and its last record, which is
-// never a deletion.
 type Written = RecordHeader & { readonly after: NonNullable<RecordHeader['after']> }
 export type ReplayedFile = { readonly staged: string; readonly size: number; readonly segments: readonly Segment[]; readonly last: Written }
 export type Replayed = {
   readonly files: ReadonlyMap<string, ReplayedFile>
-  // the files whose last record is a deletion
   readonly deleted: ReadonlySet<string>
-  // the last code record of each working folder, a record whose path ends in `/`, the latest folder last
   readonly code: ReadonlyMap<string, { readonly header: RecordHeader; readonly bytes: Uint8Array }>
   readonly end: number
   readonly sealedEnd: number
@@ -26,7 +21,6 @@ export type Replayed = {
 
 const decoded = (body: Uint8Array): unknown => JSON.parse(new TextDecoder().decode(body))
 
-// The index each machine wrote, by its device id, read in as few requests as the indexes fit.
 export async function indexesOf(relay: Relay, devices: Iterable<string>): Promise<Map<string, IndexedSession[]>> {
   const ids = [...devices]
   const read = await Promise.all(relay.run(ids.map((device) => ({ op: 'get', key: `sessions/${device}/index.json` }))))
@@ -36,10 +30,6 @@ export async function indexesOf(relay: Relay, devices: Iterable<string>): Promis
   }))
 }
 
-// Every session with a conversation the machines' indexes name, each from the index of the machine that holds it, else
-// the latest. A session that never got a message has no transcript, whose first line names its working folder, and
-// nothing to resume, as Claude Code's own /resume lists it nowhere. `read` is the machines, their indexes and the
-// claims a caller read already, as a restore reads only its own session's claim.
 export async function listSessions(
   relay: Relay,
   read?: {
@@ -63,9 +53,15 @@ export async function listSessions(
   return [...latest.values()].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
 }
 
-// Applies journal bytes as they arrive, across frame boundaries: each record makes its file its first `at` bytes
-// followed by the record's bytes. `identify` names the file a record writes, so records two machines wrote at their
-// own paths land in one file.
+export type Agent = ListedSession & { readonly status: string; readonly settled: boolean; readonly parent: string }
+export type Agents = { readonly agents: readonly Agent[]; readonly settleAfterDays: number | null; readonly lastMachine: string }
+
+export async function agentsOf(relay: Relay, statuses: Readonly<Record<string, string>> = {}): Promise<Agents> {
+  const [sessions, shared] = await Promise.all([listSessions(relay), sharedOf(relay)])
+  const agents = sessions.filter((session) => session.firstPrompt !== '').map((session) => ({ ...session, status: statuses[session.id] ?? '', settled: isSettled(shared, session), parent: shared.parents[session.id] ?? '' }))
+  return { agents, settleAfterDays: shared.settleAfterDays, lastMachine: shared.lastMachine }
+}
+
 class Replay {
   readonly files = new Map<string, { staged: string; size: number; segments: Segment[]; last: Written }>()
   readonly deleted = new Set<string>()
@@ -143,7 +139,6 @@ class Replay {
   private finish(): void {
     const current = this.current
     if (current?.header.path.endsWith('/') === true) {
-      // the folder written last ends the map, so the session's latest working folder comes last
       this.code.delete(current.file)
       this.code.set(current.file, { header: current.header, bytes: Buffer.concat(current.parts) })
     }
@@ -155,7 +150,6 @@ class Replay {
   }
 }
 
-// Downloads a session's journal, the chain of frames from byte 0, and replays it into `into`.
 export async function downloadJournal(relay: Relay, session: string, into: string, identify: (header: RecordHeader) => string): Promise<Replayed> {
   const { frames, sealedEnd } = framesOf(session, await relay.list(journalPrefix(session)))
   if (frames[0]?.start !== 0) throw new Error(`The bucket holds no journal of the session ${session} from byte 0.`)

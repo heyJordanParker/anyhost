@@ -1,5 +1,3 @@
-// Bundles the relay into the one ES module Cloudflare runs, which the program uploads as the Worker's `relay.js` and
-// the tests run in workerd. `bun build.ts <file>` writes it to that file.
 import { join } from 'node:path'
 
 export async function bundleRelay(): Promise<string> {

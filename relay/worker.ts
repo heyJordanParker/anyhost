@@ -1,5 +1,3 @@
-// The relay's Worker: the HTTP routes under /v1. It streams each object over 1 MiB straight between the machine and
-// R2, and hands everything else to the Pool, the one Durable Object of the person's machines.
 import { Pool, conditionalPut, healthOf, refuse, reply, type Env } from './pool.ts'
 import { tokenOf } from './protocol.ts'
 
@@ -7,11 +5,7 @@ export { Pool }
 
 const OBJECTS = '/v1/objects/'
 
-// Streams the request's body into R2, which reads its If-Match and If-None-Match as the binding's `onlyIf`. A journal
-// frame names its session in X-Anyhost-Holder: the Pool refuses it once another machine holds the session, and a
-// takeover waits until the write ends.
 async function putObject(env: Env, pool: DurableObjectStub<Pool>, key: string, request: Request): Promise<Response> {
-  // the R2 binding refuses a stream of unknown length
   if (!request.headers.has('content-length')) return reply(refuse(411, 'length_required', 'A PUT of an object names its Content-Length.'))
   const holder = request.headers.get('x-anyhost-holder') ?? undefined
   using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')), holder)
@@ -21,10 +15,6 @@ async function putObject(env: Env, pool: DurableObjectStub<Pool>, key: string, r
   return reply(refuse(412, 'precondition', `${key} failed the request's If-Match or If-None-Match.`, written.etag === undefined ? {} : { etag: written.etag }))
 }
 
-// Streams an object from R2, or the part its Range names, which R2 reads from the request's headers, so a broken
-// download resumes. R2 serves the whole object for a range it does not serve, as one of several ranges, and refuses a
-// range past the object's end with its error 10039, "Requested byte range is not satisfiable" (r2/api/error-codes),
-// which names its code at the end of the message. Every other error of R2 answers 503, which the program tries again.
 async function getObject(env: Env, pool: DurableObjectStub<Pool>, key: string, request: Request): Promise<Response> {
   using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')))
   if ('refused' in authorized) return reply(authorized.refused)
@@ -34,7 +24,6 @@ async function getObject(env: Env, pool: DurableObjectStub<Pool>, key: string, r
   })
   if (object === undefined) return reply(refuse(416, 'invalid', `${key} has no bytes in ${request.headers.get('range')}.`))
   if (object === null) return reply(refuse(404, 'missing', `No object ${key} is in the bucket.`))
-  // an object without a type is text to Cloudflare, which compresses it and drops its Content-Length
   const headers = new Headers({ 'content-type': 'application/octet-stream', etag: object.httpEtag, 'last-modified': object.uploaded.toUTCString(), 'accept-ranges': 'bytes' })
   const { offset, end } = servedOf(object.range, object.size)
   if (offset === 0 && end === object.size) return new Response(object.body, { headers })
@@ -42,9 +31,6 @@ async function getObject(env: Env, pool: DurableObjectStub<Pool>, key: string, r
   return new Response(object.body, { status: 206, headers })
 }
 
-// The bytes R2 served of an object of `size` bytes, as its `range` names them: from an offset, up to a length, or the
-// last `suffix` bytes. workerd names all three on every range it serves, `suffix` with no value, which R2Range's
-// types, one kind of range each, do not allow.
 function servedOf(range: R2Range | undefined, size: number): { readonly offset: number; readonly end: number } {
   const { offset = 0, length, suffix } = (range ?? {}) as { readonly offset?: number; readonly length?: number; readonly suffix?: number }
   if (suffix !== undefined) return { offset: Math.max(0, size - suffix), end: size }
@@ -57,7 +43,6 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (pathname === '/v1/health' && request.method === 'GET') return Response.json(healthOf(env))
   if (pathname === '/v1/join' && request.method === 'POST') {
     const body: unknown = await request.json().catch(() => undefined)
-    // the setup code of the newest secret, which a busy Pool's own environment lacks for up to 300 s
     return reply(await pool.join(body, env.SETUP_CODE_SHA256))
   }
   if (pathname === '/v1/connect' && request.method === 'GET') {
@@ -77,8 +62,6 @@ async function route(request: Request, env: Env): Promise<Response> {
 }
 
 export default {
-  // A failure of the Pool or of R2, such as the Pool's reset by a new version, answers JSON a machine reads and
-  // retries, never Cloudflare's error page.
   async fetch(request, env): Promise<Response> {
     try {
       return await route(request, env)

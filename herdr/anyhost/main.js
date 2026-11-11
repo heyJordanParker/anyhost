@@ -1,10 +1,6 @@
-// Every session of every machine, after t3code's thread sidebar, in the place of the Herdr app's Agents list: a search
-// and a new session on top, then cards of the sessions that came back to you, a Working shelf and a Settled shelf. It
-// keeps what the Agents list does: the other agents the Herdr app runs, sub-agents under their parent, pins, and the
-// order agent.next follows. The same mod draws its own dialogs, by `props().view`.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, closeOverlay, exec, focused, home, layout, notify, openOverlay, props, run, setAgentOrder, spaces, terminals, theme } from "herdr";
+import { agents, closeOverlay, exec, focused, hc, home, layout, notify, openOverlay, panes, props, run, setAgentOrder, terminals, theme } from "herdr";
 
 const REFRESH_MS = 30_000;
 const LONG_MS = 900_000;
@@ -13,22 +9,39 @@ const ACTIVE_PAGE = 20;
 const FOUND_MAX = 40;
 const ICON = "mods/workspace-chrome";
 const ANYHOST = 'PATH="$HOME/.local/share/cmod/programs:$HOME/.local/bin:$PATH" exec anyhost "$@"';
-// Herdr's space avatars: one strong color per hue, light and dark alike
-const MARK = ["#22a99a", "#e3814f", "#5b8def", "#8b7cf6", "#3fae6a", "#d9649a"];
+const HUES = [
+  ["#4b5563", "#9ca3af"],
+  ["#dc2626", "#f87171"],
+  ["#ea580c", "#fb923c"],
+  ["#d97706", "#fbbf24"],
+  ["#ca8a04", "#facc15"],
+  ["#65a30d", "#a3e635"],
+  ["#16a34a", "#4ade80"],
+  ["#059669", "#34d399"],
+  ["#0d9488", "#2dd4bf"],
+  ["#0891b2", "#22d3ee"],
+  ["#0284c7", "#38bdf8"],
+  ["#2563eb", "#60a5fa"],
+  ["#4f46e5", "#818cf8"],
+  ["#7c3aed", "#a78bfa"],
+  ["#9333ea", "#c084fc"],
+  ["#c026d3", "#e879f9"],
+  ["#db2777", "#f472b6"],
+  ["#e11d48", "#fb7185"],
+];
 const SETTLE_AFTER = [1, 3, 7, 14, 30, null];
+const SHOWN_LABEL = "anyhost.shown.";
 
-const anyhost = async (args, timeout = 60_000) => {
-  const r = await exec("sh", ["-c", ANYHOST, "anyhost", ...args], { timeout });
+const anyhost = async (args, timeout = 60_000, on = null) => {
+  const r = await exec("sh", ["-c", ANYHOST, "anyhost", ...args], { timeout, on });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `anyhost ${args[0]} exited with ${r.code}`);
   return r.stdout;
 };
-// what a terminal of the Herdr app runs to run anyhost, here or on another machine
 const anyhostArgv = (...args) => ["sh", "-c", ANYHOST, "anyhost", ...args];
 
 const find = (node, id) => (node?.id === id ? node : (node?.children ?? []).map((child) => find(child, id)).find(Boolean) ?? null);
 const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
 
-// t3code's compact time: now, 5m, 3h, 2d
 const ago = (at) => {
   const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 60_000));
   if (minutes < 1) return "now";
@@ -38,9 +51,20 @@ const ago = (at) => {
 };
 const titleOf = (s) => s.title || s.firstPrompt || s.id.slice(0, 8);
 const projectOf = (s) => (s.repo ? s.repo.replace(/\.git$/, "").split(/[/:]/).slice(-1)[0] : s.cwd.split("/").slice(-1)[0] || "~");
-const markOf = (name) => MARK[[...name].reduce((sum, c) => sum + c.charCodeAt(0), 0) % MARK.length];
+const normalized = (name) => name.normalize("NFKC").trim();
+const hueOf = (name) => {
+  let index = 0;
+  for (const glyph of normalized(name).toLowerCase() || "project") index = (index * 31 + glyph.codePointAt(0)) % HUES.length;
+  return HUES[index];
+};
+const monogramOf = (name) => {
+  const words = normalized(name).match(/[\p{L}\p{N}]+/gu) ?? [];
+  if (words.length === 0) return [...normalized(name)][0] ?? "PR";
+  const glyphs = [...words[0]];
+  const second = glyphs.slice(1).find((glyph) => /\p{N}/u.test(glyph)) ?? (words.length > 1 ? [...words.at(-1)][0] : glyphs.at(-1)) ?? glyphs[0];
+  return [...`${glyphs[0]}${second}`.toUpperCase()].slice(0, 2).join("");
+};
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
-// what a machine says a session does, as the Herdr app names it
 const SAID = { working: "working", waiting: "blocked", idle: "idle" };
 
 const saved = (key, fallback) => {
@@ -75,6 +99,9 @@ export default class Anyhost extends View {
     this.settledShown = SETTLED_PAGE;
     this.activeShown = ACTIVE_PAGE;
     this.folded = new Set(saved("folded", ["working", "settled"]));
+    this.unfolded = new Set(saved("unfolded", []));
+    this.marked = new Set();
+    this.focusing = null;
     this.cards = [];
     this.found = null;
     this.search = InputState.new({ placeholder: "Search" });
@@ -94,8 +121,6 @@ export default class Anyhost extends View {
         const { here, machines: devices, candidates = [] } = JSON.parse(machines);
         const { agents: sessions, settleAfterDays, lastMachine } = JSON.parse(listed);
         const hereName = devices.find((d) => d.id === here)?.name ?? "";
-        // Every session's card, worked out once a refresh, newest first as the program lists them: a render runs at each
-        // change of the Herdr app's live data and gets 50 ms, so it only lays the cards it shows over the live terminals.
         const cards = sessions.map((s) => {
           const project = projectOf(s);
           const title = titleOf(s);
@@ -103,7 +128,11 @@ export default class Anyhost extends View {
           return { key: s.id, session: s, address: null, status: SAID[s.status] ?? "idle", pinned: false, project, title, machine, isRemote: machine !== hereName, at: s.lastActivity, settled: s.settled, searched: `${title} ${project} ${machine} ${s.cwd}`.toLowerCase() };
         });
         const byKey = new Map(cards.map((card) => [card.key, card]));
-        Object.assign(this, { here, devices, candidates, sessions, settleAfterDays, lastMachine, cards, byKey, unsettled: cards.filter((c) => !c.settled), settledCards: cards.filter((c) => c.settled), error: null });
+        const isChild = (card) => byKey.has(card.session.parent);
+        const childrenOf = new Map();
+        for (const card of cards.filter(isChild)) childrenOf.set(card.session.parent, [...(childrenOf.get(card.session.parent) ?? []), card]);
+        const parents = cards.filter((card) => !isChild(card));
+        Object.assign(this, { here, devices, candidates, sessions, settleAfterDays, lastMachine, cards, byKey, childrenOf, unsettled: parents.filter((c) => !c.settled), settledCards: parents.filter((c) => c.settled), error: null });
       } catch (error) {
         this.error = String(error.message ?? error);
       }
@@ -125,29 +154,50 @@ export default class Anyhost extends View {
     return this.devices.find((d) => d.id === this.here)?.name ?? "";
   }
 
-  // The session's terminal when it runs, which a focus wakes, else where it continues: here when this machine or none
-  // holds it, on its machine when the Herdr app reaches that machine, else here once its machine moves it here, or
-  // here from R2 when its machine is offline. It opens as a tab of its project's space, as the program opens one.
   open(item, cx) {
     if (item.address) return run("pane.focus", { terminal: item.address });
     const s = item.session;
     const holder = this.deviceOf(s.holder || s.machine);
-    const name = titleOf(s).slice(0, 30);
-    if (holder === null || holder.id === this.here) return this.openIn(null, s.cwd, name, anyhostArgv("resume", s.id));
-    if (holder.herdr) return this.openIn(holder.herdr, s.cwd, name, anyhostArgv("resume", s.id));
-    // a take restores the session into the folder this machine keeps its checkout in, which its space then follows
-    if (!holder.connected) return run("space.new", { tab: name, argv: anyhostArgv("resume", s.id, "--take") });
-    this.act(cx, s.id, this.hereName(), ["tell", s.id, `/move ${this.hereName()}`], `${holder.name} moves ${name} here once its turn ends`);
+    const isElsewhere = holder !== null && holder.id !== this.here && holder.connected;
+    if (s.tool !== "claude") return run("space.new", { tab: titleOf(s).slice(0, 30), argv: anyhostArgv("resume", s.id, ...(isElsewhere ? [] : ["--take"])) });
+    if (isElsewhere && !holder.herdr) return this.act(cx, s.id, this.hereName(), ["tell", s.id, `/move ${this.hereName()}`], `${holder.name} moves ${titleOf(s).slice(0, 30)} here once its turn ends`);
+    const on = isElsewhere ? holder.herdr : null;
+    this.moving[s.id] = "Opening";
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const { terminal } = JSON.parse(await anyhost(["open", s.id, "--json"], LONG_MS, on));
+        this.focusing = on ? `${on}/${terminal}` : terminal;
+      } catch (error) {
+        notify({ title: "anyhost could not open it", body: String(error.message ?? error), level: "error" });
+      }
+      delete this.moving[s.id];
+      this.refresh(cx);
+    });
   }
 
-  // A tab in the space that works in `folder` on `machine` (null: this one), else a new space there.
-  openIn(machine, folder, name, argv) {
-    const space = spaces().find((each) => each.machine === machine && each.folder === folder);
-    if (space) return run("tab.new", { space: space.id, name, argv });
-    run("space.new", { ...(machine ? { machine } : {}), folder, tab: name, argv });
+  focusWhenShown() {
+    if (!this.focusing || !panes().some((pane) => pane.terminal === this.focusing)) return;
+    run("pane.focus", { terminal: this.focusing });
+    this.focusing = null;
   }
 
-  // Runs anyhost for a card, showing where its session goes meanwhile, and a toast once it is done.
+  markShown() {
+    if (!this.here) return;
+    const at = focused();
+    const tab = panes().filter((pane) => pane.tab === at?.tab && pane.terminal);
+    const zoomed = tab.some((pane) => pane.zoomed);
+    const onScreen = new Set([...tab.filter((pane) => !zoomed || pane.zoomed).map((pane) => pane.terminal), at?.terminal, at?.shown].filter(Boolean));
+    const sessions = new Set(terminals().filter((each) => each.state === "live" && each.labels?.["anyhost.session"] && onScreen.has(each.address)).map((each) => each.address));
+    const key = `${SHOWN_LABEL}${this.here}`;
+    const now = Date.now();
+    const stale = now - (this.markedAt ?? 0) > REFRESH_MS;
+    for (const address of sessions) if (stale || !this.marked.has(address)) void hc(["label", address, `${key}=${now}`]);
+    for (const address of this.marked) if (!sessions.has(address)) void hc(["label", address, `${key}=`]);
+    if (stale) this.markedAt = now;
+    this.marked = sessions;
+  }
+
   act(cx, id, to, args, title) {
     this.moving[id] = to;
     this.picking = null;
@@ -191,8 +241,6 @@ export default class Anyhost extends View {
     openOverlay({ mod: "anyhost", kind: "dialog", width: 420, props: { view: "add", candidates: this.candidates } });
   }
 
-  // The cards that run now: each session with a live terminal, with what the Herdr app sees it do, and each other agent
-  // the Herdr app runs, as its Agents list shows it. A sub-agent shows under its parent instead.
   liveCards() {
     const listed = agents();
     const statusOf = new Map(listed.map((a) => [a.address, a]));
@@ -220,13 +268,14 @@ export default class Anyhost extends View {
     if (view === "new") return this.renderNew(t);
     if (view === "add") return this.renderAdd(t);
     if (view === "settle") return this.renderSettle(t);
+    this.isDark = cx.theme().is_dark;
+    this.markShown();
+    this.focusWhenShown();
     const { live, others, all, statusOf } = this.liveCards();
     const shown = focused()?.terminal ?? null;
     const withLive = (card) => live.get(card.key) ?? card;
-    // Only the cards a shelf shows, plus the ones running now: the program lists sessions newest first, and an agent
-    // that needs you or finished comes first.
     const near = (cards, count) => cards.slice(0, count + live.size).map(withLive);
-    const running = [...live.values(), ...others];
+    const running = [...[...live.values()].filter((card) => !this.byKey?.has(card.session?.parent)), ...others];
     const listedWorking = (this.unsettled ?? []).filter((c) => c.status === "working" && !live.has(c.key));
     const pinned = running.filter((i) => i.pinned);
     const working = [...running.filter((i) => !i.pinned && i.status === "working"), ...listedWorking];
@@ -238,7 +287,7 @@ export default class Anyhost extends View {
     const items = { length: running.length + (this.cards?.length ?? 0) };
     setAgentOrder([...pinned, ...active, ...working].map((i) => i.address).filter(Boolean));
     const kidsOf = (address) => (address ? all.filter((x) => x.parent === address) : []);
-    const card = (i) => this.card(t, i, shown, kidsOf(i.address), statusOf);
+    const card = (i) => this.card(t, i, shown, kidsOf(i.address), (this.childrenOf?.get(i.key) ?? []).map(withLive), statusOf);
     if (narrow()) return this.rail(t, [...pinned, ...active, ...working].filter((i) => i.address));
     const empty = (text) => div().px(12).py(24).text_size(12).text_color(t.dim).text_center().child(text);
     const found = this.found === null ? null : this.found.map(withLive);
@@ -323,6 +372,7 @@ export default class Anyhost extends View {
   }
 
   mark(t, name, dim = false) {
+    const hue = hueOf(name || "~")[this.isDark ? 1 : 0];
     return div()
       .size(16)
       .flex_none()
@@ -330,14 +380,14 @@ export default class Anyhost extends View {
       .items_center()
       .justify_center()
       .rounded(4)
-      .bg(markOf(name || "~") + (dim ? "66" : ""))
-      .text_size(10)
+      .opacity(dim ? 0.4 : 1)
+      .bg(hue + "24")
+      .text_size(8)
       .font_bold()
-      .text_color("#ffffff")
-      .child((name || "~").slice(0, 1).toUpperCase());
+      .text_color(hue)
+      .child(monogramOf(name || "~"));
   }
 
-  // The status slot: what the agent does now, else how long ago it last did something. Hovered, the card's actions.
   status(t, i) {
     const moving = this.moving[i.key];
     if (moving) return h_flex().gap(4).items_center().text_size(12).text_color(t.working).child(svg(`${ICON}/spinner.svg`).size(12).spin(900)).child(moving);
@@ -405,8 +455,10 @@ export default class Anyhost extends View {
       .on_click((_e, cx) => this.open(i, cx));
   }
 
-  // t3code's card: the project and the status on top, then the title, and the machine when it is another one
-  card(t, i, shown, kids, statusOf) {
+  card(t, i, shown, kids, children, statusOf) {
+    const count = kids.length + children.length;
+    const isOpen = this.unfolded.has(i.key);
+    const statuses = [...kids.map((k) => statusOf.get(k.address)?.status ?? k.status), ...children.map((c) => c.status)];
     const recede = (i.status === "idle" || i.status === "working") && i.address !== shown;
     const machineIcon = i.isRemote ? div().id(`ah-on-${i.key}`).flex_none().text_color(t.dim).tooltip(`On ${i.machine}`).child(svg(`${ICON}/server.svg`).size(12)) : null;
     return this.frame(t, i, shown)
@@ -433,16 +485,44 @@ export default class Anyhost extends View {
               .when(machineIcon !== null, (el) => el.child(machineIcon)),
           ),
       )
-      .when(kids.length > 0, (el) => el.children(kids.map((k) => this.kid(t, k, statusOf))))
+      .when(count > 0, (el) => el.child(this.childToggle(t, i.key, count, statuses, isOpen)))
+      .when(count > 0 && isOpen, (el) =>
+        el
+          .children(children.map((c) => this.kid(t, `ah-child-${c.key}`, c.title, c.status, (cx) => this.open(c, cx))))
+          .children(kids.map((k) => this.kid(t, `ah-kid-${k.address}`, k.name || k.template || k.program?.name || k.address, statusOf.get(k.address)?.status ?? k.status, () => run(statusOf.has(k.address) ? "pane.focus" : "terminal.peek", { terminal: k.address })))),
+      )
       .when(this.picking === i.key, (el) => el.child(this.targets(t, i)));
   }
 
-  kid(t, k, statusOf) {
-    const status = statusOf.get(k.address)?.status ?? k.status;
+  childToggle(t, key, count, statuses, isOpen) {
     return h_flex()
-      .id(`ah-kid-${k.address}`)
+      .id(`ah-fold-${key}`)
       .h(24)
       .pl(32)
+      .pr(10)
+      .gap(6)
+      .items_center()
+      .rounded(6)
+      .text_size(12)
+      .text_color(t.dim)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.unfolded.has(key) ? this.unfolded.delete(key) : this.unfolded.add(key);
+        save("unfolded", [...this.unfolded]);
+        cx.notify();
+      })
+      .child(svg(`${ICON}/chevron-${isOpen ? "down" : "right"}.svg`).size(12))
+      .child(div().flex_1().min_w(0).child(`${count} ${count === 1 ? "subagent" : "subagents"}`))
+      .when(statuses.includes("blocked"), (el) => el.child(div().size(6).rounded(3).bg(t.blocked)))
+      .when(!statuses.includes("blocked") && statuses.includes("working"), (el) => el.child(svg(`${ICON}/spinner.svg`).size(11).text_color(t.working).spin(900)));
+  }
+
+  kid(t, id, title, status, onClick) {
+    return h_flex()
+      .id(id)
+      .h(24)
+      .pl(50)
       .pr(10)
       .gap(6)
       .items_center()
@@ -450,9 +530,9 @@ export default class Anyhost extends View {
       .hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        run(statusOf.has(k.address) ? "pane.focus" : "terminal.peek", { terminal: k.address });
+        onClick(cx);
       })
-      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(k.name || k.template || k.program?.name || k.address))
+      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(title))
       .when(status === "working", (el) => el.child(svg(`${ICON}/spinner.svg`).size(11).text_color(t.working).spin(900)))
       .when(status === "blocked", (el) => el.child(div().size(6).rounded(3).bg(t.blocked)));
   }
@@ -484,7 +564,6 @@ export default class Anyhost extends View {
       );
   }
 
-  // t3code's slim row, for settled sessions and search results
   slim(t, i, shown) {
     return this.frame(t, i, shown).child(
       h_flex()
@@ -518,7 +597,6 @@ export default class Anyhost extends View {
       .child(`Show ${count} more`);
   }
 
-  // t3code's shelf header: its label, a rule, its count and its chevron, folding what is under it
   shelf(t, id, label, count, accessory = null) {
     const open = !this.folded.has(id);
     return h_flex()
@@ -542,7 +620,6 @@ export default class Anyhost extends View {
       .child(svg(`${ICON}/chevron-${open ? "down" : "right"}.svg`).size(12));
   }
 
-  // The sidebar folded to a rail, as the Agents list draws it: the running agents by number, with their status.
   rail(t, items) {
     return v_flex()
       .size_full()
@@ -566,7 +643,6 @@ export default class Anyhost extends View {
       );
   }
 
-  // The new session dialog: the project, then the machine it runs on, this one or the last one picked by default.
   initNew(cx) {
     const p = props();
     this.machine = p.pick;
@@ -661,8 +737,6 @@ export default class Anyhost extends View {
       .when(this.failed !== null, (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.failed ?? "")));
   }
 
-  // The add machine dialog, after the Herdr app's own: the machines of the Tailscale network to pick from, or one typed
-  // as ssh reaches it. anyhost installs itself there and joins it, and every machine then shows it.
   initAdd(cx) {
     this.adding = null;
     this.failed = null;
@@ -726,7 +800,6 @@ export default class Anyhost extends View {
       .when(this.failed !== null, (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.failed ?? "")));
   }
 
-  // When a session settles by itself, shared by every machine.
   renderSettle(t) {
     const p = props();
     return v_flex()

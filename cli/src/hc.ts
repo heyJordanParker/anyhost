@@ -4,9 +4,6 @@ import { loginShell, run } from './claude.ts'
 
 export const SESSION_LABEL = 'anyhost.session'
 const SPACE_LABEL = 'herdr.space'
-// systemd stops every process of the service's cgroup as the service restarts, and herdr-core's server starts as a
-// child of the first `hc` that finds none, so on Linux each `hc run` runs in a scope of its own inside this slice,
-// wherever the user's systemd listens, as it does for each of its services in `XDG_RUNTIME_DIR`.
 const SESSIONS_SLICE = 'anyhost-sessions.slice'
 
 export const hcPath = (): string | undefined => Bun.which('hc', { PATH: `${process.env['PATH'] ?? ''}:${join(homedir(), '.local', 'bin')}` }) ?? undefined
@@ -22,8 +19,6 @@ const inScope = (command: readonly string[]): string[] =>
 
 const self = (): string[] => (import.meta.dir.startsWith('/$bunfs/') ? [process.execPath] : [process.execPath, join(import.meta.dir, 'main.ts')])
 
-// The Herdr app's space that works in `cwd`, as a terminal there carries its label, so a session opens beside its
-// project's other tabs, else a space of that folder's own, which the Herdr app makes and names after the folder.
 async function spaceOf(cwd: string): Promise<string> {
   const { terminals } = JSON.parse(await run([hcHere(), 'ls', '--json'])) as { readonly terminals: readonly { readonly address: string; readonly cwd: string }[] }
   for (const { address } of terminals.filter((terminal) => terminal.cwd === cwd)) {
@@ -33,23 +28,15 @@ async function spaceOf(cwd: string): Promise<string> {
   return `anyhost-${new Bun.CryptoHasher('sha256').update(cwd).digest('hex').slice(0, 12)}`
 }
 
-// oh-my-zsh asks `Would you like to update? [Y/n]` as an interactive shell starts once its update is due, and nobody
-// answers in a terminal anyhost opens, so a session moved to mac-studio never started. oh-my-zsh skips the check for this
-// variable when the person's config sets no update mode of its own (`check_for_upgrade.sh`).
 const UNATTENDED = ['env', 'DISABLE_AUTO_UPDATE=true']
 
-// Opens the session's runner in a terminal of herdr-core, which the Herdr app shows in the space and tab its labels name:
-// the space of its folder and a tab of the session, unless `place` names the labels of the terminal it replaces. A
-// resting runner starts Claude Code only once the terminal is opened or typed into.
 export async function openTerminal(cwd: string, session: string, command: readonly string[], options: { readonly isResumed: boolean; readonly isResting?: boolean; readonly place?: Readonly<Record<string, string>> }): Promise<void> {
   const runner = [...self(), 'run', ...(options.isResumed ? ['--session', session] : []), ...(options.isResting === true ? ['--rest'] : []), '--', ...command]
   const placed = { [SPACE_LABEL]: options.place?.[SPACE_LABEL] ?? (await spaceOf(cwd)), 'herdr.tab': session.slice(0, 8), ...options.place, [SESSION_LABEL]: session }
   const labels = Object.entries(placed).flatMap(([key, value]) => ['--label', `${key}=${value}`])
-  // kept, so a restart of the machine leaves a shell in its place that reopenStopped gives the session back
   await run(inScope([hcHere(), 'run', '--bg', '--keep', '--no-parent', '--cwd', cwd, ...labels, '--', ...UNATTENDED, await loginShell(), '-i', '-l', '-c', 'exec "$0" "$@"', ...runner]), { cwd })
 }
 
-// A terminal of herdr-core here: whether it still runs a program and the labels that place it.
 export async function terminalAt(address: string): Promise<{ readonly isLive: boolean; readonly cwd: string; readonly labels: Readonly<Record<string, string>> } | undefined> {
   const found = await run([hcHere(), 'get', address, '--json']).catch(() => undefined)
   if (found === undefined) return undefined
@@ -57,8 +44,6 @@ export async function terminalAt(address: string): Promise<{ readonly isLive: bo
   return { isLive: state === 'live', cwd, labels }
 }
 
-// Every live terminal that carries the session's label, which herdr-core keeps on the shell it starts in a kept
-// terminal whose program it lost, as after a reboot.
 export async function labelledTerminals(session: string): Promise<string[]> {
   const { terminals } = JSON.parse(await run([hcHere(), 'ls', '--json', '--label', `${SESSION_LABEL}=${session}`])) as { readonly terminals: readonly { readonly address: string }[] }
   return terminals.map(({ address }) => address)
@@ -66,14 +51,24 @@ export async function labelledTerminals(session: string): Promise<string[]> {
 
 export const killTerminal = async (address: string): Promise<void> => void (await run([hcHere(), 'kill', address]))
 
-// herdr-core types nothing into a program in its first seconds until its screen was still a moment, and refuses the
-// send with this, which its own first message sends again every 100 ms for up to 60 s (`first_message` in
-// `templates.rs`), as only that refusal is sure nothing was typed.
+export const SHOWN_LABEL = 'anyhost.shown.'
+const SHOWN_MS = 90_000
+
+export const isShown = (labels: Readonly<Record<string, string>>, now = Date.now()): boolean =>
+  Object.entries(labels).some(([key, value]) => key.startsWith(SHOWN_LABEL) && now - Number(value) < SHOWN_MS)
+
+export function followLabels(address: string, changed: () => void): () => void {
+  const events = Bun.spawn([hcHere(), 'events', '--terminal', address, '--json'], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
+  void (async () => {
+    const decoder = new TextDecoder()
+    for await (const chunk of events.stdout) if (decoder.decode(chunk).includes('"labels"')) changed()
+  })()
+  return () => events.kill()
+}
+
 const STILL_STARTING = 'is still starting: its output has not settled'
 const SETTLE_MS = 60_000
 
-// Pastes `text` and presses Enter, as herdr-core does once a person's unfinished draft is sent, and refuses while the
-// program is blocked on a dialog. A program that just started gets the text once its screen settles.
 export async function sendTo(address: string, text: string): Promise<void> {
   for (const started = Date.now(); ; await Bun.sleep(100)) {
     try {
@@ -84,14 +79,11 @@ export async function sendTo(address: string, text: string): Promise<void> {
   }
 }
 
-// Presses named keys, as `down enter` answers a permission prompt and `esc` stops a turn.
 export const pressKeys = async (address: string, keys: readonly string[]): Promise<void> => void (await run([hcHere(), 'keys', address, ...keys]))
 
-// The terminal's screen with `lines` lines of history above it, with no blank lines.
 export const readTerminal = async (address: string, lines: number): Promise<string> =>
   (await run([hcHere(), 'read', address, ...(lines > 0 ? ['--lines', String(lines)] : [])])).split('\n').filter((line) => line.trim() !== '').join('\n')
 
-// A machine herdr-core reaches from here: the name terminals there carry (`<name>/t7`) and how herdr-core dials it.
 export type Reached = { readonly name: string; readonly target: string; readonly connected: boolean }
 
 export async function machinesReached(): Promise<Reached[]> {
@@ -99,10 +91,6 @@ export async function machinesReached(): Promise<Reached[]> {
   return machines.filter((machine) => !machine.temporary).map(({ name, target, state }) => ({ name, target, connected: state === 'connected' }))
 }
 
-// Dials the machine at `target`, as ssh reaches it, and keeps it, installing herdr-core there when it lacks it, as the
-// Herdr app's Add a machine does, unless herdr-core reaches it at that target already, which it refuses to add twice.
-// Answers the name herdr-core gave it, after the target, as herdr-core refuses anyhost's machine names with capitals:
-// `bad name "Jordans-Mac-Studio": use 1-32 of a-z 0-9 - _ .`.
 export async function reachMachine(target: string): Promise<string> {
   const known = (await machinesReached()).find((machine) => machine.target === target)
   if (known !== undefined) return known.name
@@ -112,13 +100,9 @@ export async function reachMachine(target: string): Promise<string> {
 
 export const forgetMachine = async (name: string): Promise<void> => void (await run([hcHere(), 'machine', 'rm', name]))
 
-// Runs `script` in the person's login shell on a machine herdr-core reaches, where cmod and npm are on its PATH, and
-// answers what it printed. It gets herdr-core's longest run, 600 s, as a first `cmod install` there outlives its 60 s.
 export const runOn = async (machine: string, script: string): Promise<string> =>
   await run([hcHere(), 'exec', '--on', machine, '--timeout', '600', 'sh', '-c', 'exec "${SHELL:-sh}" -i -l -c "$0"', script])
 
-// The runner's own terminal, which herdr-core names in HC_TERMINAL_ID, gets the session's label, so a session the Herdr
-// app started is found as one anyhost opened is.
 export async function labelOwnTerminal(session: string): Promise<void> {
   const address = process.env['HC_TERMINAL_ID']
   if (address === undefined || address === '') return

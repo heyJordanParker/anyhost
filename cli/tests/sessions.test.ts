@@ -1,24 +1,20 @@
-import { afterEach, expect, test } from 'bun:test'
+import { expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
 import { HeldElsewhere, takeClaim } from '../src/claims.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { restore } from '../src/resume.ts'
-import { downloadJournal, listSessions } from '../src/sessions.ts'
-import { failTest, memoryRelay, noCode, stopRelays, temporaryFolder, until, type MemoryRelay } from './memory.ts'
-
-afterEach(stopRelays)
+import { agentsOf, downloadJournal, listSessions } from '../src/sessions.ts'
+import { failTest, memoryRelay, noCode, temporaryFolder, until, type MemoryRelay } from './memory.ts'
 
 const mac: Device = { id: 'device-mac', name: 'mac', os: 'darwin', arch: 'arm64' }
 const server: Device = { id: 'device-server', name: 'server', os: 'linux', arch: 'x64' }
-// a drain of the Claude Code session's paths, answering the paths it left
 const upload = (capture: Capture, session: string, ...paths: string[]): Promise<Set<string>[]> =>
   Promise.all(uploadSessions(capture, [{ session, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
 
 function machine(device: Device, relay: MemoryRelay, home = join(temporaryFolder(), 'home'), state = join(temporaryFolder(), 'state'), code = noCode) {
   const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') }
-  // the same roots on both machines, where relocate places every byte as its writer wrote it
   return { roots, capture: openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(state), code }) }
 }
 
@@ -58,12 +54,27 @@ test("a claimed session lists the holder's entry, even when the old holder wrote
   expect((await listSessions(onServer.capture.relay)).map(({ machine, holder, cwd, entrypoint }) => ({ machine, holder, cwd, entrypoint }))).toEqual([{ machine: 'server', holder: 'server', cwd: '/home/server/work', entrypoint: 'cli' }])
 })
 
+test('the agents list leaves out a session nobody wrote a prompt in, and names the session whose agent started each one', async () => {
+  const relay = await memoryRelay()
+  const entry = { tool: 'claude', title: '', cwd: '/work', repo: '', repoFolder: '', entrypoint: 'cli', size: 10, lastActivity: new Date().toISOString() }
+  const { capture } = machine(mac, relay)
+  await relay.objects.put(`sessions/${mac.id}/index.json`, new TextEncoder().encode(JSON.stringify([
+    { ...entry, id: 'aaaaaaaa-0000-0000-0000-000000000001', firstPrompt: 'You are the CTO.' },
+    { ...entry, id: 'bbbbbbbb-0000-0000-0000-000000000002', firstPrompt: 'Fix the login' },
+    { ...entry, id: 'cccccccc-0000-0000-0000-000000000003', firstPrompt: '' },
+  ])))
+  await relay.objects.put('shared.json', new TextEncoder().encode(JSON.stringify({ parents: { 'bbbbbbbb-0000-0000-0000-000000000002': 'aaaaaaaa-0000-0000-0000-000000000001' } })))
+
+  const { agents } = await agentsOf(capture.relay)
+
+  expect(agents.map(({ id, parent }) => [id.slice(0, 8), parent.slice(0, 8)]).sort()).toEqual([['aaaaaaaa', ''], ['bbbbbbbb', 'aaaaaaaa']])
+})
+
 test('a session another machine resumed refuses resume without --take, and --take takes it back', async () => {
   const relay = await memoryRelay()
   const session = 'aaaaaaaa-0000-0000-0000-000000000001'
   const onMac = await captured(relay, mac, session, 'Plan the release', temporaryFolder())
   const onServer = machine(server, relay)
-  // a session only its writer wrote goes to the machine that resumes it
   await restore(onServer.capture, session, { take: false })
 
   await expect(restore(onMac, session, { take: false })).rejects.toThrow(`This session continues on server. Run anyhost resume ${session} --take to continue it here.`)
@@ -84,12 +95,10 @@ test("a session's upload holds no job record of Claude Code's, and a restore pla
   mkdirSync(cwd, { recursive: true })
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"cwd":"${cwd}","sessionId":"${session}"}\n`)
   writeFileSync(jobOf(writer.roots), `{"state":"done","cwd":"${cwd}"}`)
-  // the first upload of a session takes every file it has
   await upload(writer.capture, session, transcript)
   const paths = async (): Promise<string[]> => [...(await downloadJournal(relay.connect(server, writer.roots), session, temporaryFolder(), ({ path }) => path)).files.keys()]
   expect(await paths()).toEqual([transcript])
 
-  // what an earlier version uploaded: the job record, then its deletion
   await upload(writer.capture, session, jobOf(writer.roots))
   rmSync(jobOf(writer.roots))
   await upload(writer.capture, session, jobOf(writer.roots))
@@ -202,13 +211,11 @@ test("restore onto another home rewrites the writer's paths, and a /rewind backu
   expect(readFileSync(here.transcript, 'utf8')).toContain(`"cwd":${JSON.stringify(join(second, 'work', 'shop'))}`)
 })
 
-// The other restore tests keep the working folder under the home, the one place restore moved a folder outside git to.
 test("a session that worked in macOS's temp root continues in this machine's, and every path in it names this machine's", async () => {
   const relay = await memoryRelay()
   const session = '44444444-0000-4000-8000-000000000004'
   const encoded = (path: string): string => path.replace(/[^a-zA-Z0-9]/g, '-')
   const home = join(temporaryFolder(), 'home')
-  // the temp root as rootsHere records it on macOS, where Claude Code writes it with /private and the model without
   const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: '/private/tmp/claude-501', codexHome: join(home, '.codex') }
   const writer = openCapture(relay.connect(mac, roots), mac, roots, { db: openDatabase(join(temporaryFolder(), 'state')), code: noCode })
   const scratchpad = (tmp: string, at: string): string => `${tmp}/${encoded(join(at, 'dotfiles'))}/${session}/scratchpad`
@@ -267,7 +274,6 @@ test('a session restores on another machine byte for byte from the bucket alone,
   await writeIndex(a.capture)
   const originals = new Map([transcript, plan, task, toolResult, output, silent].map((path) => [path, readFileSync(path)]))
 
-  // the second machine has the same home and none of the session's files
   rmSync(claude, { recursive: true })
   rmSync(a.roots.claudeTmp, { recursive: true })
   writeFileSync(join(home, 'unrelated'), '')
@@ -303,7 +309,6 @@ test("a session comes back to a machine that kept a longer copy, although the hi
   writeFileSync(there.history, prompt('Plan the release'))
   await upload(a.capture, session, ...Object.values(there))
   await writeIndex(a.capture)
-  // server refused this prompt while mac held the session, and its history keeps it
   const here = at(b.roots.home)
   mkdirSync(dirname(here.history), { recursive: true })
   writeFileSync(here.history, prompt('Refused on server'))
@@ -312,7 +317,6 @@ test("a session comes back to a machine that kept a longer copy, although the hi
   await upload(b.capture, session, here.history)
   await writeIndex(b.capture)
 
-  // mac took one more prompt before it heard of the takeover: its transcript runs longer than the journal's
   const journaled = readFileSync(there.transcript)
   appendFileSync(there.transcript, `{"type":"user","message":{"role":"user","content":"${'one more prompt '.repeat(20)}"},"sessionId":"${session}"}\n`)
   await restore(a.capture, session, { take: true })
@@ -340,7 +344,6 @@ test('a plan and a task the session deleted stay gone after a restore, also on a
   await restore(b.capture, session, { take: true })
   const here = at(b.roots.home)
   expect([existsSync(here.task), existsSync(here.plan)]).toEqual([true, true])
-  // server's /rewind takes the plan back and Claude Code deletes the task
   rmSync(here.plan)
   rmSync(here.task)
   await upload(b.capture, session, here.plan, here.task)
@@ -366,14 +369,12 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
   await upload(writer, session, transcript)
   await writer.codeRuns.get(session)
   await upload(writer, session, `${cwd}/`)
-  // the shop repository, as an index that read its remote lists it
   const index = JSON.parse(new TextDecoder().decode(await relay.read(`sessions/${mac.id}/index.json`))) as Record<string, unknown>[]
   await relay.objects.put(`sessions/${mac.id}/index.json`,new TextEncoder().encode(JSON.stringify(index.map((entry) => ({ ...entry, repo: 'git@github.com:alice/shop.git', repoFolder: '' })))))
 
   const restoredInto = async (setUp: (folder: string, capture: Capture) => Promise<void>, checkouts?: string): Promise<string> => {
     const folder = join(temporaryFolder(), 'bob')
     const given: string[] = []
-    // restoreCode leaves the checkout with its remote, which this machine's index then names
     const restoreCode = async (_header: Uint8Array, _readPart: unknown, at: string): Promise<string> => {
       given.push(at)
       mkdirSync(at, { recursive: true })
@@ -386,7 +387,6 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
     await restore(restorer, session, { take: true, ...(checkouts === undefined ? {} : { checkouts: checkouts.replace('<home>', folder) }) })
     return (given[0] ?? '').replace(folder, '<home>')
   }
-  // two checkouts of other repositories this machine wrote sessions in
   const withCheckouts = async (folder: string, capture: Capture): Promise<void> => {
     for (const name of ['blog', 'docs']) {
       const repo = join(folder, 'code', name)
@@ -396,8 +396,6 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
       await recordSummary(capture, crypto.randomUUID(), 'claude', `{"type":"user","cwd":${JSON.stringify(repo)}}\n`, 1, new Date().toISOString())
     }
   }
-  // The suite missed it: a session that came back to a machine went to the first checkout of its repository there,
-  // a worktree beside the person's own checkout, instead of the folder it ran in on that machine.
   const ranInElsewhere = async (folder: string, capture: Capture): Promise<void> => {
     for (const [name, id] of [['code/shop', crypto.randomUUID()], ['elsewhere/shop', session]] as const) {
       const repo = join(folder, name)
@@ -411,7 +409,6 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
   expect(await restoredInto(async () => undefined)).toBe('<home>/shop')
   expect(await restoredInto(withCheckouts, '<home>/src')).toBe('<home>/src/shop')
   expect(await restoredInto(ranInElsewhere)).toBe('<home>/elsewhere/shop')
-  // The suite missed it: on a Mac, the search read ~/Desktop, where macOS held git on a privacy prompt nobody answered.
   const onDesktop = async (folder: string): Promise<void> => {
     const desktop = join(folder, 'Desktop')
     mkdirSync(desktop, { recursive: true })
@@ -421,9 +418,6 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
   expect(await restoredInto(onDesktop)).toBe(process.platform === 'darwin' ? '<home>/shop' : '<home>/Desktop')
 })
 
-// The suite missed it: a session that came back to devbox continued in a worktree beside the checkout it ran in there
-// before, so devbox's records named two folders, restore read both from its index's one, and the mac's take failed with
-// `The journal writes … at byte 1388993, past its 0 bytes.`
 test('a session that ran on one machine in a checkout and then a worktree beside it restores whole on the other, and the old copy there goes', async () => {
   const relay = await memoryRelay()
   const session = '99999999-0000-4000-8000-000000000009'
@@ -435,7 +429,6 @@ test('a session that ran on one machine in a checkout and then a worktree beside
     Bun.spawnSync(['git', '-C', folder, 'remote', 'add', 'origin', remote])
     return folder
   }
-  // each machine's code: a header to carry, and a restore that gives the folder asked, or `diverted` once
   let diverted = ''
   const code = {
     captureCode: async () => ({ header: new TextEncoder().encode('header'), parts: [] }),
@@ -476,7 +469,6 @@ test('a session that ran on one machine in a checkout and then a worktree beside
   expect(lines.every((line) => line.includes(`"cwd":${JSON.stringify(onA)}`))).toBe(true)
 })
 
-// The session mac captures, which server then takes over. `isOffline` closes mac's connection first.
 async function takenOver(isOffline: boolean) {
   const relay = await memoryRelay()
   const session = '77777777-0000-4000-8000-000000000007'
@@ -490,7 +482,6 @@ async function takenOver(isOffline: boolean) {
   await writeIndex(old.capture)
   if (isOffline) old.capture.relay.close()
   const taker = machine(server, relay)
-  // the Pool counts mac offline once it read the end of its socket
   if (isOffline) await until(async () => (await devicesOf(taker.capture.relay)).get(mac.id)?.connected === false)
   await restore(taker.capture, session, { take: true })
   appendFileSync(transcript, line('Keep going'))
