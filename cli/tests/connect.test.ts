@@ -9,6 +9,7 @@ import { forgetRelayLogin, personOptions, relayLogin, saveRelayLogin } from '../
 import { connectRelay, type Relay } from '../src/relay.ts'
 import type { Status } from '../src/serve.ts'
 import { memoryRelay, temporaryFolder, until, welcomed, type MemoryRelay } from './memory.ts'
+import { fakeHc, script } from './program.ts'
 
 const NAMES = { worker: 'anyhost-test-connect', bucket: 'anyhost-test' }
 const ACCOUNT: Account = { id: '0534ffa9', name: 'Parker Labs' }
@@ -971,8 +972,9 @@ const statusOf = async (socket: string): Promise<Status> => (await (await fetch(
 function machineEnv(): Record<string, string> {
   const folder = temporaryFolder()
   writeFileSync(join(home, 'data', 'cmod', 'programs', 'settings.json'), '{"uploadEvery":0}')
+  script(join(folder, 'bin', 'hc'), fakeHc(folder))
   return {
-    PATH: process.env['PATH'] ?? '',
+    PATH: `${join(folder, 'bin')}:${process.env['PATH'] ?? ''}`,
     HOME: folder,
     XDG_STATE_HOME: process.env['XDG_STATE_HOME'] ?? '',
     XDG_DATA_HOME: join(home, 'data'),
