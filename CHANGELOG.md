@@ -2,6 +2,14 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.7.1] - 2026-11-12
+
+### Fixed
+- No update can drop a session from your history again. An older anyhost that opened this machine's database dropped what it knew of its sessions, and the next index it uploaded listed 5 of them. Each machine's index now keeps every session it ever listed. At each start, anyhost lists again every session that has a backup in R2 and a transcript on this machine. An older anyhost now refuses a newer database whole instead of emptying it.
+- Every session this Mac lost from the list on 2026-11-12 is listed again: 254 came back from their transcripts and backups at the first start.
+- Resuming a session in your home folder no longer asks whether you trust the folder. anyhost passes Claude Code the trust you gave the session, as Claude Code does for a copy it relaunches, and sessions in the home folder now stop after 8 idle hours like any other.
+- A failed refresh of the session list keeps the list it last read and shows one toast, instead of printing the error in the sidebar.
+
 ## [0.7.0] - 2026-11-11
 
 ### Fixed

@@ -2,7 +2,7 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { changedFiles, countedRelay, forgetEmpty, journalOf, openCapture, readSummariesAgain, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, forgetEmpty, journalOf, openCapture, readSummariesAgain, relistSessions, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
 import { loginEnvironment, nestRuns, recordedSessions, runSessions, saveLoginEnvironment, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
@@ -294,6 +294,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     isTidied = true
     void settle('tidy', async () => {
       await readSummariesAgain(capture)
+      const relisted = await relistSessions(capture)
+      if (relisted > 0) console.error(`${new Date().toISOString()} anyhost listed ${relisted} sessions again from their transcripts here and their journals in R2.`)
+      await writeIndex(capture)
       const forgotten = await forgetEmpty(capture)
       if (forgotten > 0) console.error(`${new Date().toISOString()} anyhost removed ${forgotten} sessions from the relay that this machine held with no journal in R2.`)
     })

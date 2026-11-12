@@ -336,7 +336,7 @@ test('a refused position that holds the same bytes counts as uploaded, as a retr
   await upload(transcript)
   expect(journalOf(capture.db, SESSION)).toMatchObject({ end: (await frameOf(relay, hotKey(SESSION, 0))).length, stopped: '' })
   expect(relay.puts.map(({ key }) => key)).toEqual([`sessions/${deviceA.id}/index.json`])
-  expect(relay.requests.flat().some(({ op }) => op === 'get')).toBe(false)
+  expect(relay.requests.flat().some((op) => op.op === 'get' && op.key.startsWith('journals/'))).toBe(false)
 })
 
 test("a frame this machine put up that its journal never counted is written over, and a restore never reads one off the journal's chain", async () => {
@@ -916,4 +916,18 @@ test('the database keeps what one relay holds, and a welcome from another relay 
   const otherBucket = machine(deviceA, await memoryRelay('anyhost-other'), folder)
   await welcomed(otherBucket.capture.relay)
   expect([journals(otherBucket.capture.db), existsSync(parts)]).toEqual([0, false])
+})
+
+test('a database of a newer anyhost is refused whole, so an older anyhost drops none of its sessions', async () => {
+  const relay = await memoryRelay()
+  const folder = temporaryFolder()
+  const { transcript, upload, capture } = machine(deviceA, relay, folder)
+  writeFileSync(transcript, lines.join(''))
+  await upload(transcript)
+  capture.db.run('pragma user_version = 99')
+  capture.db.close()
+
+  expect(() => openDatabase(join(folder, 'state'))).toThrow(`${join(folder, 'state', 'anyhost.db')} is a database of a newer anyhost, at version 99, and this anyhost reads version 4, so it changes nothing there. Update anyhost on this machine.`)
+  const kept = new Database(join(folder, 'state', 'anyhost.db'))
+  expect(kept.query<{ count: number }, []>('select count(*) as count from sessions').get()?.count).toBe(1)
 })

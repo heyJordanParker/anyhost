@@ -218,7 +218,9 @@ export default class Anyhost extends View {
         const [machines, listed] = await Promise.all([anyhost(["machines", "--json"]), anyhost(["list", "--json", "--brief"])]);
         this.apply(machines, listed);
         save("listed", { machines, listed });
+        this.error = null;
       } catch (error) {
+        if (this.error === null) notify({ title: "anyhost could not refresh your sessions", body: `${String(error.message ?? error)}\nThe list shows what it last read, and tries again every 30 seconds.`, level: "error" });
         this.error = String(error.message ?? error);
       }
       cx.notify();
@@ -541,7 +543,6 @@ export default class Anyhost extends View {
       .border_color(t.border)
       .text_color(t.foreground)
       .child(this.page === null ? this.searchBar(t) : this.pageHead(t, cx))
-      .when(this.error !== null, (el) => el.child(div().px(14).pb(6).text_size(12).text_color(t.blocked).child(this.error ?? "")))
       .child(
         v_flex()
           .id(`ah-list-${this.page ?? view ?? "sessions"}`)
@@ -551,7 +552,7 @@ export default class Anyhost extends View {
           .pb(8)
           .gap(1)
           .overflow_y_scrollbar()
-          .when(this.here === null && this.error === null, (el) => el.child(this.empty(t, "Reading your sessions…")))
+          .when(this.here === null, (el) => el.child(this.empty(t, this.error === null ? "Reading your sessions…" : "anyhost could not read your sessions yet. It tries again every 30 seconds.")))
           .when(this.here !== null, (el) => el.children(this.pageRows(ctx, { view, found, pinned, attention, working }))),
       )
       .when(this.page === null && this.here !== null && found === null, (el) => el.child(this.archiveEntry(t, archivedCount)))

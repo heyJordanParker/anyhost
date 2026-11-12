@@ -3,7 +3,8 @@ import type { Subprocess } from 'bun'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { installHerdr } from '../src/herdr.ts'
-import { resumeCommand } from '../src/runner.ts'
+import { startOf } from '../src/claude.ts'
+import { resumeCommand, START_CLAUDE } from '../src/runner.ts'
 import { temporaryFolder, until } from './memory.ts'
 
 const CLI = join(import.meta.dir, '..', 'src', 'main.ts')
@@ -13,6 +14,16 @@ const killAfterTest = (child: Subprocess): void =>
     child.kill('SIGKILL')
     await child.exited
   })
+
+test("a resumed session carries the home folder's trust as Claude Code carries it into a copy it relaunches: its own pid and start", async () => {
+  let shown = ''
+  const terminal = new Bun.Terminal({ cols: 120, rows: 24, data: (_terminal, bytes) => void (shown += new TextDecoder().decode(bytes)) })
+  const child = Bun.spawn(['perl', '-e', START_CLAUDE, '--', 'sh', '-c', 'echo "trust=$CLAUDE_CODE_RELAUNCH_HOME_TRUST;"; sleep 10'], { terminal, env: { ...process.env, ANYHOST_HOME_TRUST: '1' }, detached: true })
+  killAfterTest(child)
+
+  await until(() => shown.includes(';'), 'the started program printing its environment')
+  expect(shown).toContain(`trust=${child.pid}:${startOf(child.pid)};`)
+})
 
 test('a reopened session runs the command it started with, with every session flag of it replaced by --resume of the session', () => {
   expect(resumeCommand(['claude', '--model', 'opus', '--resume', 'old', '-c', '--fork-session', '--session-id=x', '--dangerously-skip-permissions'], 'new', {})).toEqual(['claude', '--model', 'opus', '--dangerously-skip-permissions', '--resume', 'new'])
@@ -143,18 +154,6 @@ test('anyhost run counts a turn Claude Code starts on its own as use, and stops 
   const idleAt = Date.now()
   await until(() => records().length === 0, 'Claude Code ending once its turn ended', 10_000)
   expect(Date.now() - idleAt).toBeGreaterThanOrEqual(1400)
-  terminal.close()
-}, 30_000)
-
-test('anyhost run never ends a Claude Code working in the home folder, where Claude Code asks for trust again at each start', async () => {
-  const { env, claude, records, folder } = machine(500)
-  const terminal = new Bun.Terminal({ cols: 80, rows: 24, data: () => undefined })
-  killAfterTest(Bun.spawn(['bun', CLI, 'run', '--', claude], { env, terminal, cwd: folder }))
-
-  await until(() => records().length === 1, 'Claude Code writing its record')
-  await Bun.sleep(2500)
-
-  expect(records()).toHaveLength(1)
   terminal.close()
 }, 30_000)
 

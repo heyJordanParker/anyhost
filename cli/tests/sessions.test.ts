@@ -1,7 +1,7 @@
 import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { forgetEmpty, journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
+import { forgetEmpty, journalOf, openCapture, openDatabase, recordSummary, relistSessions, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
 import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
@@ -28,6 +28,52 @@ async function captured(relay: MemoryRelay, device: Device, session: string, pro
   await writeIndex(capture)
   return capture
 }
+
+function transcriptOf(roots: MachineRoots, session: string, prompt: string): string {
+  const transcript = join(roots.home, '.claude', 'projects', '-work', `${session}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":${JSON.stringify(prompt)}},"cwd":"/work","sessionId":"${session}"}\n`)
+  return transcript
+}
+
+const listedOf = async (capture: Capture): Promise<{ id: string; firstPrompt: string; deleted: boolean }[]> =>
+  (await listSessions(capture)).map(({ id, firstPrompt, deleted }) => ({ id, firstPrompt, deleted })).sort((a, b) => a.id.localeCompare(b.id))
+
+test('a machine whose database starts over, as one an older anyhost dropped, keeps every session its index listed', async () => {
+  const relay = await memoryRelay()
+  const home = join(temporaryFolder(), 'home')
+  const first = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const second = 'bbbbbbbb-0000-0000-0000-000000000002'
+  const before = machine(mac, relay, home)
+  await upload(before.capture, first, transcriptOf(before.roots, first, 'Plan the release'))
+  await writeIndex(before.capture)
+
+  const after = machine(mac, relay, home)
+  await upload(after.capture, second, transcriptOf(after.roots, second, 'Fix the deploy'))
+  await writeIndex(after.capture)
+
+  expect(await listedOf(after.capture)).toEqual([
+    { id: first, firstPrompt: 'Plan the release', deleted: false },
+    { id: second, firstPrompt: 'Fix the deploy', deleted: false },
+  ])
+})
+
+test('a session with a journal in R2 and a transcript here that no index lists is listed again, and a transcript R2 holds no journal of is not', async () => {
+  const relay = await memoryRelay()
+  const home = join(temporaryFolder(), 'home')
+  const backedUp = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const never = 'bbbbbbbb-0000-0000-0000-000000000002'
+  const before = machine(mac, relay, home)
+  await upload(before.capture, backedUp, transcriptOf(before.roots, backedUp, 'Plan the release'))
+  transcriptOf(before.roots, never, 'Never backed up')
+  const after = machine(mac, relay, home)
+  await after.capture.relay.runOne({ op: 'put', key: `sessions/${mac.id}/index.json`, bytes: new TextEncoder().encode('[]') })
+
+  expect(await relistSessions(after.capture)).toBe(1)
+  await writeIndex(after.capture)
+
+  expect(await listedOf(after.capture)).toEqual([{ id: backedUp, firstPrompt: 'Plan the release', deleted: false }])
+})
 
 test('the index lists sessions of two devices, each held by the machine that holds it', async () => {
   const relay = await memoryRelay()
