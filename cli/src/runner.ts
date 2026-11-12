@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { homedir, hostname } from 'node:os'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import plugin from '../../.claude-plugin/plugin.json'
 import { forgetRun, loginEnvironment, recordAt, startOf, stoppedRuns, writeRun, type RunProcess } from './claude.ts'
@@ -13,6 +13,17 @@ const READY_MS = 3000
 const TIOCSCTTY = process.platform === 'darwin' ? '0x20007461' : '0x540E'
 const SESSION_FLAGS = new Set(['--continue', '-c', '--fork-session'])
 const SESSION_VALUES = new Set(['--resume', '-r', '--session-id'])
+export const START_CLAUDE = [
+  `ioctl(STDIN, ${TIOCSCTTY}, 0) or die "anyhost could not give Claude Code its terminal: $!\\n";`,
+  'if (delete $ENV{ANYHOST_HOME_TRUST}) {',
+  '  my $start;',
+  '  if ($^O eq "linux") { if (open(my $file, "<", "/proc/$$/stat")) { my $stat = <$file>; $start = (split / /, substr($stat, rindex($stat, ")") + 2))[19] } }',
+  '  else { local $ENV{TZ} = "UTC"; $start = `ps -o lstart= -p $$` }',
+  '  $start =~ s/^\\s+|\\s+$//g if defined $start;',
+  '  $ENV{CLAUDE_CODE_RELAUNCH_HOME_TRUST} = "$$:$start" if defined $start && $start ne "";',
+  '}',
+  'exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n";',
+].join('\n')
 const LEFT_BEHIND = ['CLAUDECODE', 'CLAUDE_PID', 'AI_AGENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN']
 const STATUS_REPORT = '\x1b]7501;'
 
@@ -100,7 +111,7 @@ export async function runSession(command: readonly string[], resumed?: string): 
       readyAt ??= setTimeout(ready, READY_MS)
     },
   })
-  const child = Bun.spawn(['perl', '-e', `ioctl(STDIN, ${TIOCSCTTY}, 0) or die "anyhost could not give Claude Code its terminal: $!\\n"; exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n"`, '--', ...argv], { terminal, env, detached: true })
+  const child = Bun.spawn(['perl', '-e', START_CLAUDE, '--', ...argv], { terminal, env: transcript === undefined ? env : { ...env, ANYHOST_HOME_TRUST: '1' }, detached: true })
   const startedAt = new Date().toISOString()
 
   if (process.stdin.isTTY) process.stdin.setRawMode(true)
@@ -153,7 +164,7 @@ export async function runSession(command: readonly string[], resumed?: string): 
     if (isStopping) return
     const record = recordAt(claudeHome, child.pid)
     learn(record)
-    if (isOnScreen || (record !== undefined && (record.status !== 'idle' || record.cwd === homedir()))) usedAt = Date.now()
+    if (isOnScreen || (record !== undefined && record.status !== 'idle')) usedAt = Date.now()
     if (record?.status !== 'idle' || session === undefined || Date.now() - usedAt < STOP_MS) return
     isStopping = true
     child.kill('SIGTERM')

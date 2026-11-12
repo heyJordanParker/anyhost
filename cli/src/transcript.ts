@@ -97,6 +97,21 @@ export async function filesUnder(folder: string, depth = Infinity): Promise<{ re
   return files
 }
 
+export async function transcriptsOn(roots: MachineRoots): Promise<Map<string, { readonly tool: Tool; readonly paths: string[] }>> {
+  const found = new Map<string, { readonly tool: Tool; readonly paths: string[] }>()
+  const folders = [{ folder: claudeFolder(roots, 'projects'), depth: 2 }, { folder: join(roots.codexHome, 'sessions'), depth: Infinity }]
+  for (const { folder, depth } of folders) {
+    for (const { path } of await filesUnder(folder, depth)) {
+      const owner = ownerOf(path, roots)
+      if (owner === undefined || !('isTranscript' in owner) || !owner.isTranscript) continue
+      const entry = found.get(owner.session) ?? { tool: owner.tool, paths: [] }
+      entry.paths.push(path)
+      found.set(owner.session, entry)
+    }
+  }
+  return found
+}
+
 const sessionFilesUnder = async (folder: string): Promise<string[]> => (await filesUnder(folder)).map(({ path }) => path).filter((path) => !isTransient(path))
 
 const foldersIn = async (folder: string): Promise<string[]> => {

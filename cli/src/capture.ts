@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, rmSync, statSync, type Stats } from 'node:fs'
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, type Stats } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -9,7 +9,7 @@ import { followHolders, type Holders } from './claims.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Relay } from './relay.ts'
-import { codexNameOf, codexState, filesOf, linesFiles, namedIn, ownerOf, summarize, type Summary, type Tool } from './transcript.ts'
+import { codexNameOf, codexState, filesOf, linesFiles, namedIn, ownerOf, summarize, transcriptsOn, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
 export const CODE_PIECE_BYTES = 128 * 2 ** 10
@@ -53,6 +53,7 @@ export type Capture = Code & {
   readonly onReleased: (session: string, holder: string) => void
   readonly holders: Holders
   lastIndex: string
+  keptIndex?: Promise<readonly IndexedSession[]> | undefined
 }
 export type Problems = { set(key: string, error: unknown): void; clear(key: string): void }
 export type RecordHeader = {
@@ -81,6 +82,10 @@ export function openDatabase(folder = stateFolder()): Database {
   db.run("create table if not exists bucket (name text not null, url text not null default '')")
   if (db.query<{ name: string }, []>("select name from pragma_table_info('bucket') where name = 'url'").get() === null) db.run("alter table bucket add column url text not null default ''")
   const version = db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version
+  if (version !== undefined && version > SCHEMA) {
+    db.close()
+    throw new Error(`${join(folder, 'anyhost.db')} is a database of a newer anyhost, at version ${version}, and this anyhost reads version ${SCHEMA}, so it changes nothing there. Update anyhost on this machine.`)
+  }
   if (version !== SCHEMA && version !== ENTRYPOINTS_READ_ONCE && version !== SUMMARIES_READ_ONCE) startOver(db)
   makeTables(db)
   if (version === ENTRYPOINTS_READ_ONCE) {
@@ -869,8 +874,8 @@ export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: 
   return row.last_activity === '' || after.cwd !== row.cwd || repo !== row.repo || checkout.folder !== row.repo_folder
 }
 
-const TRANSCRIPT_GONE =
-  "not exists (select 1 from files where files.session = sessions.id and (files.path like '%' || sessions.id || '.jsonl' or files.path like '%' || sessions.id || '.jsonl.zst') and files.sha256 != '')"
+const IS_TRANSCRIPT = "files.session = sessions.id and (files.path like '%' || sessions.id || '.jsonl' or files.path like '%' || sessions.id || '.jsonl.zst')"
+const TRANSCRIPT_GONE = `(exists (select 1 from files where ${IS_TRANSCRIPT}) and not exists (select 1 from files where ${IS_TRANSCRIPT} and files.sha256 != ''))`
 
 export const isDeleted = (db: Database, session: string): boolean =>
   db.query<{ deleted: number }, [string]>(`select ${TRANSCRIPT_GONE} as deleted from sessions where id = ?`).get(session)?.deleted === 1
@@ -947,9 +952,47 @@ export async function readSummariesAgain(capture: Capture): Promise<void> {
   db.run(`pragma user_version = ${SCHEMA}`)
 }
 
+const indexKey = (device: Device): string => `sessions/${device.id}/index.json`
+
+function keptIndexOf(capture: Capture): Promise<readonly IndexedSession[]> {
+  capture.keptIndex ??= capture.relay.runOne({ op: 'get', key: indexKey(capture.device) }).then(
+    (answer) => ('bytes' in answer ? (JSON.parse(new TextDecoder().decode(answer.bytes)) as IndexedSession[]) : []),
+    (error: unknown) => {
+      capture.keptIndex = undefined
+      throw error
+    },
+  )
+  return capture.keptIndex
+}
+
+export async function relistSessions(capture: Capture): Promise<number> {
+  const { relay, db } = capture
+  const journaled = new Set<string>()
+  let cursor: string | undefined
+  do {
+    const answer = await relay.runOne({ op: 'list', prefix: 'journals/', ...(cursor === undefined ? {} : { cursor }) })
+    for (const { key } of answer.objects) journaled.add(key.split('/')[1] ?? '')
+    cursor = answer.cursor
+  } while (cursor !== undefined)
+  const listed = new Set([...db.query<{ id: string }, []>('select id from sessions').all().map(({ id }) => id), ...(await keptIndexOf(capture)).map(({ id }) => id)])
+  let relisted = 0
+  for (const [id, { tool, paths }] of await transcriptsOn(capture.roots)) {
+    if (!journaled.has(id) || listed.has(id)) continue
+    const files = paths.map((path) => ({ path, info: statSync(path) })).sort((a, b) => a.info.mtimeMs - b.info.mtimeMs)
+    const text = files.map(({ path }) => (path.endsWith('.zst') ? new TextDecoder().decode(decompress(readFileSync(path))) : readFileSync(path, 'utf8'))).join('')
+    const size = files.reduce((total, { info }) => total + info.size, 0)
+    await recordSummary(capture, id, tool, text, size, new Date(Math.max(...files.map(({ info }) => info.mtimeMs))).toISOString())
+    relisted += 1
+  }
+  return relisted
+}
+
 export async function writeIndex(capture: Capture): Promise<void> {
-  const index = JSON.stringify(indexOf(capture.db))
+  const here = indexOf(capture.db)
+  const ids = new Set(here.map(({ id }) => id))
+  const kept = (await keptIndexOf(capture)).filter(({ id }) => !ids.has(id))
+  const index = JSON.stringify([...here, ...kept].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)))
   if (index === capture.lastIndex) return
-  await capture.relay.runOne({ op: 'put', key: `sessions/${capture.device.id}/index.json`, bytes: new TextEncoder().encode(index) })
+  await capture.relay.runOne({ op: 'put', key: indexKey(capture.device), bytes: new TextEncoder().encode(index) })
   capture.lastIndex = index
 }
