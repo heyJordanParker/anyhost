@@ -2,6 +2,25 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.7.0] - 2026-11-11
+
+### Fixed
+- Backups no longer stop for the day on Cloudflare's free plan. Every refresh of the session list read where every session lives from the relay, 2.8 million rows an hour, until Cloudflare refused the relay at 16:49 UTC. Each machine now learns of each change once, as the relay sends it, and lists from its own copy.
+- Codex compressing its old transcripts no longer adds thousands of empty sessions: a session starts once a transcript of it exists, and a compressed `.jsonl.zst` is still its transcript, so a Codex session keeps its history after 7 idle days.
+- Sessions that ran in two folders show again, with their first prompt and folder, in Sessions or Archived.
+- A used-up free plan shows as one line, saying uploads wait on disk until 00:00 UTC, instead of one error per session.
+
+### Added
+- **Archived sessions** in place of the Settled shelf: a dated list of every archived session, with Background and Deleted below it. Archive, Restore and Delete work from a card's hover and its right-click menu, and Claude's `archive_agent` and `anyhost archive` do the same.
+- A session shows **Done** once its turn ends after you last looked at it, on every machine, and **Mark unread** brings that back, as t3code does.
+- The right-click menu follows t3code's: Pin and Move to, Mark unread and Copy, then Archive, Restore and Delete.
+- Clicking a session shows its screen at once, and its terminal takes its place as soon as it draws. A session T3 Code runs shows Open in T3 Code and Move it here instead of a terminal.
+- A **Projects** tab groups the active sessions of every machine by repository.
+
+### Changed
+- An idle session stops its Claude Code after 8 hours with nobody looking, and the next open or message resumes it.
+- Connect your machines opens Cloudflare's R2 page with a button, which works over ssh too, and anyhost needs cmod 6.
+
 ## [0.6.0] - 2026-11-11
 
 ### Added

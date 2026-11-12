@@ -13,7 +13,7 @@ type Agent = {
   readonly lastActivity: string
   readonly repo: string
   readonly cwd: string
-  readonly settled: boolean
+  readonly archived: boolean
 }
 type Machines = { readonly here: string; readonly machines: readonly { readonly id: string; readonly name: string; readonly connected: boolean; readonly seenAt: string }[] }
 type Told = { readonly machine: string; readonly session: string; readonly status: string; readonly screen: string }
@@ -55,14 +55,14 @@ export function agentTools(mod: Mod<AnyhostState>) {
     tool({
       name: 'list_agents',
       description:
-        'List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder and whether it is settled. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. Settled agents are left out unless settled is true.',
-      inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, description: 'How many to list, 30 by default.' }, settled: { type: 'boolean', description: 'List settled agents too.' } } },
-      execute: async ({ limit = 30, settled = false }) => {
+        'List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder and whether it is archived. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. Archived agents are left out unless archived is true.',
+      inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, description: 'How many to list, 30 by default.' }, archived: { type: 'boolean', description: 'List archived agents too.' } } },
+      execute: async ({ limit = 30, archived = false }) => {
         const { agents } = await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')
         return agents
-          .filter((agent) => settled || !agent.settled)
+          .filter((agent) => archived || !agent.archived)
           .slice(0, limit)
-          .map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd, settled: isSettled }) => ({ id, tool: kind, title, firstPrompt: firstPrompt.slice(0, 200), machine, holder, status, lastActivity, repo, cwd, settled: isSettled }))
+          .map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd, archived: isArchived }) => ({ id, tool: kind, title, firstPrompt: firstPrompt.slice(0, 200), machine, holder, status, lastActivity, repo, cwd, archived: isArchived }))
       },
     }),
     tool({
@@ -112,15 +112,15 @@ export function agentTools(mod: Mod<AnyhostState>) {
       },
     }),
     tool({
-      name: 'settle_agent',
-      description: 'Settle an agent whose work is finished, which moves it out of the active list on every machine, or bring a settled one back with settled false. Working in a settled agent brings it back by itself.',
-      inputSchema: { type: 'object', properties: { agent: AGENT, settled: { type: 'boolean', description: 'true by default.' } }, required: ['agent'] },
-      execute: async ({ agent, settled = true }) => {
+      name: 'archive_agent',
+      description: 'Archive an agent whose work is finished, which moves it out of the active list on every machine, or bring an archived one back with archived false. Working in an archived agent brings it back by itself.',
+      inputSchema: { type: 'object', properties: { agent: AGENT, archived: { type: 'boolean', description: 'true by default.' } }, required: ['agent'] },
+      execute: async ({ agent, archived = true }) => {
         const { agents } = await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')
         const found = agents.find(({ id }) => id.startsWith(agent))
         if (found === undefined) throw new Error(`No agent's id begins with ${agent}. list_agents lists them.`)
-        await askProgram(mod, '/agents/settle', { session: found.id, settled })
-        return `${settled ? 'Settled' : 'Brought back'} ${found.id.slice(0, 8)}.`
+        await askProgram(mod, '/agents/archive', { session: found.id, archived })
+        return `${archived ? 'Archived' : 'Brought back'} ${found.id.slice(0, 8)}.`
       },
     }),
     tool({
