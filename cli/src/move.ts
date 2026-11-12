@@ -13,6 +13,7 @@ import { sharedOf } from './shared.ts'
 import { messagesOf, ownerOf, type Tool } from './transcript.ts'
 
 const RUNNING_MS = 60_000
+const IDLE_SETTLES_MS = 2000
 const TRUST_ANSWER_MS = 86_400_000
 const CONNECTED_MS = 10_000
 const TELL_MS = 25_000
@@ -206,6 +207,15 @@ async function continueHere(capture: Capture, session: string, tool: Tool, here:
   for (const path of captureAgainFrom(capture, session, tool, at, end, here.problems)) here.queue(session, tool, path)
 }
 
+async function untilSettledIdle(capture: Capture, session: string, here: MoveHere, signal?: AbortSignal): Promise<void> {
+  const isIdle = (sessions: readonly RunningSession[]): boolean => !sessions.some((entry) => entry.sessionId === session && statusOfRecord(entry.status) !== 'idle')
+  for (;;) {
+    await whenSessions(capture.roots.claudeHome, (sessions) => (isIdle(sessions) ? true : undefined), Infinity, here.onRecordsChange, signal)
+    await sleep(IDLE_SETTLES_MS, undefined, signal === undefined ? {} : { signal })
+    if (isIdle(await recordedSessions(capture.roots.claudeHome))) return
+  }
+}
+
 const recordOf = async (capture: Capture, session: string): Promise<RunningSession | undefined> => (await recordedSessions(capture.roots.claudeHome)).find((entry) => entry.sessionId === session)
 
 export async function move(capture: Capture, asked: string, machine: string, here: MoveHere): Promise<Moving> {
@@ -262,8 +272,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
       say('failed', `${line} anyhost could not take it back here: ${messageOf(error)}`)
     }
   }
-  const untilIdle = (signal: AbortSignal): Promise<true | undefined> =>
-    whenSessions(capture.roots.claudeHome, (sessions) => (sessions.some((listed) => listed.sessionId === session && statusOfRecord(listed.status) !== 'idle') ? undefined : true), Infinity, here.onRecordsChange, signal)
+  const untilIdle = (signal: AbortSignal): Promise<void> => untilSettledIdle(capture, session, here, signal)
   const keepsWaiting = async (): Promise<boolean> => {
     if ((await claimsOf(relay, session)).get(session)?.id !== target.id) return false
     const line = `${machine} took ${id} and does not answer. Keep it here takes the session back.`
@@ -490,7 +499,7 @@ async function placeInTerminal(capture: Capture, session: string, here: MoveHere
   if (ran !== undefined) return ran
   if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost runs Claude Code sessions in herdr-core, and ${id} is a Codex session.`)
   if ((await statusOf(roots.claudeHome, session)) !== undefined) {
-    await whenSessions(roots.claudeHome, (sessions) => (sessions.some((entry) => entry.sessionId === session && statusOfRecord(entry.status) !== 'idle') ? undefined : true), Infinity, here.onRecordsChange)
+    await untilSettledIdle(capture, session, here)
     await stopCopy(roots.claudeHome, session)
   }
   const known = workingFolderOf(db, session)

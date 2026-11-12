@@ -309,7 +309,7 @@ test('/machines lists every machine, adds one over ssh from your Tailscale netwo
 const moveIs = (step: string, line: string, machine?: string): Answer => ({ body: { ...(machine === undefined ? {} : { machine }), move: { to: 'anyhost-a', step, line } } })
 const moveToasts = (tested: ReturnType<typeof withProgram>['tested']) => tested.shown.toasts.filter(({ message }) => message !== 'Installed')
 
-test('/move asks the program to move the session, refuses prompts while it moves, and follows each step in its toast', async () => {
+test('/move asks the program to move the session, takes prompts until another machine holds the session, and follows each step in its toast', async () => {
   const { tested, asked, every } = withProgram({
     'POST /move': [{ body: { session: 'test-session', to: 'anyhost-a', step: 'waiting', line: 'Waiting for test-ses to finish its turn.' } }],
     'GET /claims/test-session': [
@@ -330,9 +330,9 @@ test('/move asks the program to move the session, refuses prompts while it moves
   }
   await follow()
   expect(moveToasts(tested)).toEqual([{ type: 'loading', message: 'Moving to anyhost-a…', description: 'Uploading test-ses.' }])
-  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
   await follow()
-  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session continues on anyhost-a.' })
 
   await follow()
   const continues = 'This session continues on anyhost-a, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.'
@@ -352,7 +352,7 @@ test('a program slow to answer holds no prompt: it goes through within the 1.5 s
   expect(moveToasts(tested)).toEqual([])
 })
 
-test('a prompt during a move is refused while the program is too slow to answer it', async () => {
+test('a prompt during a move goes through, as the move waits for its turn before it stops the session, though the program answers slowly', async () => {
   const { tested } = withProgram({
     'POST /move': [{ body: { session: 'test-session', to: 'anyhost-a', step: 'uploading', line: 'Uploading test-ses.' } }],
     'GET /claims/test-session': [{ ...moveIs('uploading', 'Uploading test-ses.'), delayMs: SLOW_MS }],
@@ -360,7 +360,7 @@ test('a prompt during a move is refused while the program is too slow to answer 
   await tested.type('/move anyhost-a')
 
   const started = Date.now()
-  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
   expect(Date.now() - started).toBeLessThan(2000)
 })
 
@@ -394,7 +394,7 @@ test('a move anyhost move asked for, which a prompt finds running, gets the toas
   const { tested, every } = withProgram({ 'GET /claims/test-session': [moveIs('moving', waiting, 'anyhost-a')] })
   await tested.start()
 
-  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session is moving to anyhost-a.' })
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toEqual({ refuse: 'This session continues on anyhost-a.' })
   await every.get(1000)?.()
   await tested.settle()
 

@@ -98,7 +98,6 @@ export const anyhost = defineMod({
           })
         })
         const { machine, move } = answered ?? known.get(session) ?? {}
-        if (move !== undefined && MOVING.has(move.step)) return { refuse: `This session is moving to ${move.to}.` }
         if (machine === undefined) return undefined
         return { refuse: move?.step === 'moved' ? continuesOn(machine) : `This session continues on ${machine}.` }
       },

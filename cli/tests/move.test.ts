@@ -41,6 +41,27 @@ test("a move waits for the turn to end, stops the laptop's Claude Code, uploads 
   expect(await claimOn(laptop.socket)).toMatchObject({ machine: WORKER.name, move: { step: 'moved' } })
 }, 60_000)
 
+test('a move waits out the turn that starts as one ends, as a background command\'s note starts one, and stops the copy only once idle held for 2 s', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  await workerOn(relay)
+  laptop.status('busy')
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  await stepsOf(laptop.socket, new Set(['waiting']))
+
+  laptop.status('idle')
+  await Bun.sleep(500)
+  laptop.status('busy')
+  await Bun.sleep(3000)
+  const isRunning = laptop.claude.exitCode === null && laptop.claude.signalCode === null
+  laptop.status('idle')
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(isRunning).toBe(true)
+  expect(last.step).toBe('moved')
+  expect(laptop.claude.signalCode).toBe('SIGTERM')
+}, 60_000)
+
 test('a move of a session whose first frame R2 lost uploads its files whole again, and the worker restores every byte', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
