@@ -918,23 +918,6 @@ function readEntrypointsAgain(db: Database): void {
   }
 }
 
-export async function forgetEmpty(capture: Capture): Promise<number> {
-  const { relay, db, device } = capture
-  const held = [...(await capture.holders.current())].flatMap(([session, holder]) => (holder === device.id && journalOf(db, session) === undefined ? [session] : []))
-  let forgotten = 0
-  for (let at = 0; at < held.length; at += MAX_OPS) {
-    const batch = held.slice(at, at + MAX_OPS)
-    const listed = await Promise.all(relay.run(batch.map((session) => ({ op: 'list', prefix: journalPrefix(session) }))))
-    const empty = batch.filter((_session, index) => {
-      const answer = listed[index]
-      return answer !== undefined && 'objects' in answer && answer.objects.length === 0
-    })
-    await Promise.all(relay.run(empty.map((session) => ({ op: 'forget', session }))))
-    forgotten += empty.length
-  }
-  return forgotten
-}
-
 export async function readSummariesAgain(capture: Capture): Promise<void> {
   const { db } = capture
   if (db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version !== SUMMARIES_READ_ONCE) return

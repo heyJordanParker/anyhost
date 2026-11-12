@@ -1,7 +1,7 @@
 import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { forgetEmpty, journalOf, openCapture, openDatabase, recordSummary, relistSessions, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
+import { journalOf, openCapture, openDatabase, recordSummary, relistSessions, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
 import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
@@ -138,19 +138,6 @@ test('a read of the holders that a closed connection cuts off fails that read al
   await expect(holders.current()).rejects.toThrow('anyhost closed its connection to the relay.')
   await Bun.sleep(100)
   expect(unhandled).toEqual([])
-})
-
-test('a session this machine holds with no journal in R2 or here leaves the relay, and one with a journal stays', async () => {
-  const relay = await memoryRelay()
-  const kept = 'aaaaaaaa-0000-0000-0000-000000000001'
-  const empty = 'bbbbbbbb-0000-0000-0000-000000000002'
-  const onMac = await captured(relay, mac, kept, 'Plan the release')
-  await takeClaim(onMac.relay, empty, { take: false })
-
-  expect(await forgetEmpty(onMac)).toBe(1)
-
-  expect([...(await relay.claims()).keys()]).toEqual([kept])
-  await until(async () => !(await onMac.holders.current()).has(empty), 'the mac hearing the removal')
 })
 
 test("a session with a transcript in two project folders lists its prompt and folder from both", async () => {
