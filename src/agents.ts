@@ -64,7 +64,7 @@ export function agentTools(mod: Mod<AnyhostState>) {
     tool({
       name: 'list_agents',
       description:
-        "List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder, whether it is archived, and its parent: the agent that started it with start_agent, with that agent's title and the machine that holds it, or null. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. Archived agents are left out unless archived is true. children_of lists only the agents one agent started, `me` the ones this agent started.",
+        "List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder, whether it is archived, and its parent: the agent that started it with start_agent, with that agent's title and the machine that holds it, or null. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. tell_agent, read_agent, press_keys, move_agent and open_agent reach Claude Code agents alone, so a Codex agent is listed and archived but not prompted. Archived agents are left out unless archived is true. children_of lists only the agents one agent started, `me` the ones this agent started.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -177,7 +177,7 @@ export function agentTools(mod: Mod<AnyhostState>) {
     }),
     tool({
       name: 'open_agent',
-      description: 'Run an agent on this machine in a terminal of herdr-core and answer that terminal: the one it runs in when it runs here, else one that resumes it, from its history in R2 when another machine holds it, as when that machine is closed, offline or died, which then stops its copy as it next connects. move_agent moves an agent whose machine is connected without that.',
+      description: 'Run an agent on this machine in a terminal of herdr-core and answer that terminal: the one it runs in when it runs here, else one that resumes it, from its history in R2 when the machine that holds it is not connected, as when it is closed, offline or died, which then stops its copy as it next connects. An agent whose machine is connected stays there, and move_agent moves it.',
       inputSchema: { type: 'object', properties: { agent: AGENT }, required: ['agent'] },
       execute: ({ agent }) => askProgram<{ readonly session: string; readonly terminal: string; readonly machine: string }>(mod, '/agents/open', { session: agent }),
     }),

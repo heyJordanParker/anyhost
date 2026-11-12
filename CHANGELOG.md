@@ -2,6 +2,20 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.8.0] - 2026-11-12
+
+### Fixed
+- A move never runs a session on two machines at once. The machine a session leaves now stops its copy before the other machine starts one, once the turn has ended, so a prompt typed during the move can no longer run on the old machine and be lost. A move that fails opens the session here again.
+- A click on a session another connected machine runs never takes it from that machine, even when the sidebar's list is a few seconds old. The open answers that the session opens there.
+- A turn a sleeping laptop took after another machine took the session is kept, not lost. When that laptop next opens the session, the turn becomes a session of its own, titled "Conflicted copy of …", listed beside the original.
+- A frame a relay restart let through after a takeover no longer stops the new machine from backing up the session.
+- A session started on another machine never starts twice, even when that machine's anyhost restarts while it answers.
+- The warning that another machine may take one more prompt shows once, not each time anyhost checks the session.
+
+### Faster
+- The sidebar's refresh every 30 seconds downloads the session lists and the shared list only when they changed, instead of every time.
+- Sealing a quiet session no longer downloads what this machine just uploaded.
+
 ## [0.7.3] - 2026-11-12
 
 ### New

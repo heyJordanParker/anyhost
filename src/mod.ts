@@ -74,7 +74,9 @@ export const anyhost = defineMod({
       if (holder === undefined) return undefined
       known.set(session, holder)
       if (holder.problem !== undefined) showOnce('anyhost captures nothing on this machine', holder.problem)
-      if (holder.untold !== undefined) {
+      const untold = `untold ${session} ${holder.untold}`
+      if (holder.untold !== undefined && !shown.has(untold)) {
+        shown.add(untold)
         mod.toast.warning(`${holder.untold} may take one more prompt of this session`, {
           description: `${holder.untold}'s anyhost was not connected when this machine took the session, so it learns that this machine holds the session when it next connects.`,
           duration: Infinity,
