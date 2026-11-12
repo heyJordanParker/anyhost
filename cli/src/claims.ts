@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite'
-import { MAX_KEYS, type Claimed, type DeviceRef } from '../../relay/protocol.ts'
+import { MAX_KEYS, type Claimed, type DeviceRef, type TakeCondition } from '../../relay/protocol.ts'
 import type { Relay } from './relay.ts'
 
 export class HeldElsewhere extends Error {
@@ -16,7 +16,7 @@ export async function claimsOf(relay: Relay, prefix: string): Promise<ReadonlyMa
   return new Map(Object.entries(claims))
 }
 
-export async function takeClaim(relay: Relay, session: string, options: { readonly take: boolean; readonly if?: { readonly at: string } }): Promise<{ readonly previous?: DeviceRef; readonly told: boolean; readonly at: string }> {
+export async function takeClaim(relay: Relay, session: string, options: { readonly take: boolean; readonly if?: TakeCondition }): Promise<{ readonly previous?: DeviceRef; readonly told: boolean; readonly at: string }> {
   const answer = await relay.runOne({ op: 'claim', session, take: options.take, ...(options.if === undefined ? {} : { if: options.if }) })
   if (answer.status === 409) throw new HeldElsewhere(answer.holder)
   return answer

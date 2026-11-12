@@ -1,7 +1,7 @@
 import { expect, onTestFinished, test } from 'bun:test'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { journalOf, openCapture, openDatabase, recordSummary, relistSessions, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
+import { journalOf, openCapture, openDatabase, recordSummary, relistSessions, seal, untoldOf, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
 import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
@@ -645,7 +645,7 @@ async function takenOver(isOffline: boolean) {
 test('a takeover tells the old machine at once, which refuses its next prompt and uploads nothing, with the relay stalled', async () => {
   const { relay, session, old, transcript, taker } = await takenOver(false)
   await until(() => journalOf(old.capture.db, session)?.holder === 'server')
-  expect(takeUntold(taker.capture.db, session)).toBe('')
+  expect(untoldOf(taker.capture.db, session)).toBe('')
   relay.stalled = true
 
   const asked = performance.now()
@@ -654,10 +654,28 @@ test('a takeover tells the old machine at once, which refuses its next prompt an
   expect(journalOf(old.capture.db, session)?.stopped).toContain('server took the session')
 })
 
+test('a restore over a turn only this machine holds, as one a sleeping machine took after another took the session, keeps that turn as a conflicted copy, once', async () => {
+  const { relay, session, old, state, transcript } = await takenOver(true)
+  appendFileSync(transcript, `{"type":"assistant","uuid":"only-on-mac","message":{"role":"assistant","content":"Kept going here"},"sessionId":"${session}"}\n`)
+  const back = machine(mac, relay, old.roots.home, state)
+  await until(() => back.capture.relay.state.is === 'connected')
+
+  await restore(back.capture, session, { take: true })
+  await restore(back.capture, session, { take: true })
+
+  const copies = readdirSync(dirname(transcript)).filter((name) => name !== `${session}.jsonl`)
+  expect(copies).toHaveLength(1)
+  const copy = readFileSync(join(dirname(transcript), copies[0] ?? ''), 'utf8')
+  expect(copy).toContain('Kept going here')
+  expect(copy).not.toContain(`"sessionId":"${session}"`)
+  expect(copy).toContain(`"customTitle":"Conflicted copy of ${session.slice(0, 8)} from mac"`)
+  expect(readFileSync(transcript, 'utf8')).not.toContain('Kept going here')
+})
+
 test('a machine offline during a takeover learns it in its next welcome, before it captures, and the session opened says so once', async () => {
   const { relay, session, old, state, taker } = await takenOver(true)
   expect(journalOf(old.capture.db, session)?.holder).toBe('')
-  expect([takeUntold(taker.capture.db, session), takeUntold(taker.capture.db, session)]).toEqual(['mac', ''])
+  expect([untoldOf(taker.capture.db, session), untoldOf(taker.capture.db, session)]).toEqual(['mac', 'mac'])
 
   const back = machine(mac, relay, old.roots.home, state)
   await until(() => back.capture.relay.state.is === 'connected')

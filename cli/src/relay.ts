@@ -47,7 +47,8 @@ const OBJECT_TRIES = 6
 export type Login = { readonly url: string; readonly token: string }
 export type Call = Exclude<Op, { readonly op: 'put' }> | { readonly op: 'put'; readonly key: string; readonly bytes: Uint8Array; readonly if?: Condition; readonly holder?: string }
 type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly bytes: Uint8Array }
-export type RanOf<K extends Op['op']> = K extends 'get' ? Got | { readonly status: 404 } : Results[K]
+export type RanOf<K extends Op['op']> = K extends 'get' ? Got | { readonly status: 304; readonly etag: string } | { readonly status: 404 } : Results[K]
+export type Read = Got | { readonly status: 404 }
 type Ran = RanOf<Op['op']>
 export type RelayState =
   | { readonly is: 'connecting' }
@@ -64,6 +65,7 @@ export type Relay = {
   runOne<C extends Call>(call: C): Promise<RanOf<C['op']>>
   list(prefix: string): Promise<Listed[]>
   getObject(key: string): Promise<Got | undefined>
+  read(keys: readonly string[]): Promise<Read[]>
   send(message: Routed | Heard): boolean
   on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): () => void
   reconnect(): void
@@ -398,6 +400,26 @@ export function connectRelay(options: RelayOptions): Relay {
     return found === 'missing' ? undefined : found
   }
 
+  const known = new Map<string, Got>()
+  const read = (keys: readonly string[]): Promise<Read[]> => {
+    const answers = run(keys.map((key): Call => {
+      const etag = known.get(key)?.etag
+      return { op: 'get', key, ...(etag === undefined ? {} : { if: { noneMatch: etag } }) }
+    }))
+    return Promise.all(
+      answers.map(async (answer, at): Promise<Read> => {
+        const key = keys[at] ?? ''
+        const result = (await answer) as RanOf<'get'>
+        const kept = known.get(key)
+        if (result.status === 304 && kept !== undefined) return kept
+        if (result.status === 304) throw new Error(`The relay answered that ${key} did not change, and anyhost has no copy of it.`)
+        if (result.status === 404) known.delete(key)
+        else known.set(key, result)
+        return result
+      }),
+    )
+  }
+
   const run = (calls: readonly Call[]): Promise<Ran>[] => {
     const answers: Promise<Ran>[] = []
     let batch: { readonly position: number; readonly call: Call }[] = []
@@ -418,6 +440,7 @@ export function connectRelay(options: RelayOptions): Relay {
           const result = all[index]
           if (result === undefined) throw new Error(`The relay answered no result for ${call.op}${'key' in call ? ` ${call.key}` : ''}.`)
           if ('error' in result) throw new Error(result.message)
+          if (result.status === 413 && call.op === 'get' && 'etag' in result && result.etag === call.if?.noneMatch) return { status: 304, etag: result.etag }
           if (result.status === 413 && call.op === 'get') return (await getObject(call.key)) ?? { status: 404 }
           return written(call, result as Ran)
         })
@@ -461,6 +484,7 @@ export function connectRelay(options: RelayOptions): Relay {
       return listed
     },
     getObject,
+    read,
     send(message) {
       if (state.is !== 'connected' || socket === undefined || isLate()) return false
       socket.send(JSON.stringify(message))

@@ -1,4 +1,4 @@
-export const RELAY_VERSION = 3
+export const RELAY_VERSION = 4
 export const PROTOCOL_VERSION = 2
 export const COMPATIBILITY_DATE = '2026-11-01'
 
@@ -52,12 +52,14 @@ export type Condition = { readonly none: '*' } | { readonly match: string }
 
 export const conditionHeaders = (condition: Condition): Record<string, string> => ('none' in condition ? { 'if-none-match': '*' } : { 'if-match': `"${condition.match}"` })
 
+export type TakeCondition = { readonly at: string } | { readonly gone: true }
+
 export type Op =
-  | { readonly op: 'get'; readonly key: string }
+  | { readonly op: 'get'; readonly key: string; readonly if?: { readonly noneMatch: string } }
   | { readonly op: 'put'; readonly key: string; readonly size: number; readonly if?: Condition; readonly holder?: string }
   | { readonly op: 'list'; readonly prefix: string; readonly cursor?: string }
   | { readonly op: 'delete'; readonly keys: readonly string[] }
-  | { readonly op: 'claim'; readonly session: string; readonly take: boolean; readonly if?: { readonly at: string } }
+  | { readonly op: 'claim'; readonly session: string; readonly take: boolean; readonly if?: TakeCondition }
   | { readonly op: 'claims'; readonly prefix?: string }
   | { readonly op: 'changes'; readonly since: number }
   | { readonly op: 'forget'; readonly session: string }
@@ -68,7 +70,7 @@ export type Op =
 export type Listed = { readonly key: string; readonly size: number }
 
 export type Results = {
-  readonly get: { readonly status: 200; readonly etag: string; readonly size: number } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
+  readonly get: { readonly status: 200; readonly etag: string; readonly size: number } | { readonly status: 304; readonly etag: string } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
   readonly put: { readonly status: 200; readonly etag: string } | { readonly status: 412; readonly etag?: string } | { readonly status: 409; readonly holder: DeviceRef }
   readonly list: { readonly status: 200; readonly objects: readonly Listed[]; readonly cursor?: string }
   readonly delete: { readonly status: 200 }

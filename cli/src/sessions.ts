@@ -22,7 +22,7 @@ const decoded = (body: Uint8Array): unknown => JSON.parse(new TextDecoder().deco
 
 export async function indexesOf(relay: Relay, devices: Iterable<string>): Promise<Map<string, IndexedSession[]>> {
   const ids = [...devices]
-  const read = await Promise.all(relay.run(ids.map((device) => ({ op: 'get', key: `sessions/${device}/index.json` }))))
+  const read = await relay.read(ids.map((device) => `sessions/${device}/index.json`))
   return new Map(ids.flatMap((device, at) => {
     const index = read[at]
     return index !== undefined && 'bytes' in index ? [[device, decoded(index.bytes) as IndexedSession[]] as const] : []

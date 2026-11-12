@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import {
   changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, hotKey, isCodePart, isDeleted, journalOf, markUntold, openCapture, openDatabase, QUIET_MS, seal, sealQuiet, sessionsOf,
-  startLineOffsets, takeUntold, uploadSessions, type Problems, type RecordHeader,
+  spoolOf, startLineOffsets, untoldOf, uploadSessions, type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
@@ -312,6 +312,25 @@ test('a refused position stops the machine that lost it, and its lines from ther
   logged.mockRestore()
 })
 
+test('a frame another machine wrote at this machine\'s position after this machine took the session, as a write the relay let through as it restarted, is written over, and capture goes on', async () => {
+  const relay = await memoryRelay()
+  const a = machine(deviceA, relay)
+  writeFileSync(a.transcript, lines[0] ?? '')
+  await a.upload(a.transcript)
+  const start = journalOf(a.capture.db, SESSION)?.end ?? 0
+  const late = new TextEncoder().encode(lines[1])
+  await relay.objects.put(hotKey(SESSION, start), compressHot(Buffer.concat(encodeRecord({ device: deviceB.id, path: a.transcript, at: start, size: late.length, after: { size: late.length, sha256: '' } }, late))))
+  const logged = spyOn(console, 'error').mockImplementation(() => undefined)
+
+  appendFileSync(a.transcript, lines[2] ?? '')
+  await a.upload(a.transcript)
+
+  expect(recordsOf(await journalBytes(relay)).map(({ text }) => text)).toEqual([lines[0] ?? '', lines[2] ?? ''])
+  expect(journalOf(a.capture.db, SESSION)).toMatchObject({ holder: '', stopped: '' })
+  expect(logged).toHaveBeenCalledWith(expect.stringContaining(`writes its own frame over it`))
+  logged.mockRestore()
+})
+
 test('a session another machine holds refuses this machine\'s frames, and it stops capturing the session', async () => {
   const relay = await memoryRelay()
   const a = machine(deviceA, relay)
@@ -508,6 +527,24 @@ test('a session that keeps writing has its code read once within a minute, howev
   expect(capture.codeStale.has(SESSION)).toBe(true)
 })
 
+test('a seal of frames this machine wrote reads none of them back from R2, and seals every byte', async () => {
+  const relay = await memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay)
+  for (const line of lines) {
+    appendFileSync(transcript, line)
+    await upload(transcript)
+  }
+  const before = await journalBytes(relay)
+  const asked = relay.requests.length
+
+  expect(await seal(capture, SESSION)).toBe(before.length)
+  expect(relay.requests.slice(asked).flat().filter((op) => op.op === 'get')).toEqual([])
+  expect(await hotFrames(relay)).toEqual([])
+  const [sealed, ...more] = await relay.keys(`journals/${SESSION}/sealed/`)
+  expect(more).toEqual([])
+  expect(Buffer.from(await frameOf(relay, sealed ?? '')).equals(Buffer.from(before))).toBe(true)
+})
+
 test('a seal reads small frames many to a request, and at most 16 requests at once', async () => {
   const relay = await memoryRelay()
   const { transcript, capture } = machine(deviceA, relay)
@@ -687,7 +724,7 @@ test('the repair of a journal R2 lost a frame of keeps the warning a takeover le
 
   expect((await sealQuiet(capture, failTest, quiet)).has(SESSION)).toBe(true)
   logged.mockRestore()
-  expect(takeUntold(capture.db, SESSION)).toBe('anyhost-b')
+  expect(untoldOf(capture.db, SESSION)).toBe('anyhost-b')
 })
 
 test('a seal that keeps failing is tried again after 1, 2, 4 and 8 minutes, and a seal that succeeds ends the wait', async () => {
@@ -735,6 +772,7 @@ async function bigFrames(relay: MemoryRelay) {
   expect(sizes).toHaveLength(frames)
   expect(sizes[0]).toBeLessThan(MAX_MESSAGE_BYTES)
   expect((sizes.at(-1) ?? 0) * 2).toBeGreaterThan(MAX_MESSAGE_BYTES)
+  rmSync(spoolOf(capture.db, SESSION), { recursive: true, force: true })
   return { capture, frames, sizes, quiet: (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000 }
 }
 

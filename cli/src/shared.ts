@@ -10,35 +10,24 @@ export type Shared = {
   readonly parents: Readonly<Record<string, string>>
 }
 
-type Settled = { readonly settled?: Readonly<Record<string, { readonly settled: boolean; readonly at: string }>>; readonly settleAfterDays?: number | null }
-
 const KEY = 'shared.json'
 const EMPTY: Shared = { archived: {}, archiveAfterDays: 7, visited: {}, lastMachine: '', reach: {}, parents: {} }
 
-const read = async (relay: Relay): Promise<{ readonly shared: Shared & Settled; readonly etag?: string }> => {
-  const answer = await relay.runOne({ op: 'get', key: KEY })
-  if (answer.status !== 200 || !('bytes' in answer)) return { shared: EMPTY }
-  return { shared: { ...EMPTY, ...(JSON.parse(new TextDecoder().decode(answer.bytes)) as Partial<Shared & Settled>) }, etag: answer.etag }
+const read = async (relay: Relay): Promise<{ readonly shared: Shared; readonly etag?: string }> => {
+  const [answer] = await relay.read([KEY])
+  if (answer === undefined || answer.status === 404) return { shared: EMPTY }
+  return { shared: { ...EMPTY, ...(JSON.parse(new TextDecoder().decode(answer.bytes)) as Partial<Shared>) }, etag: answer.etag }
 }
 
 export const sharedOf = async (relay: Relay): Promise<Shared> => (await read(relay)).shared
 
-export async function updateShared(relay: Relay, change: (shared: Shared & Settled) => Shared & Settled): Promise<Shared> {
+export async function updateShared(relay: Relay, change: (shared: Shared) => Shared): Promise<Shared> {
   for (;;) {
     const { shared, etag } = await read(relay)
     const changed = change(shared)
     const put = await relay.runOne({ op: 'put', key: KEY, bytes: new TextEncoder().encode(JSON.stringify(changed)), if: etag === undefined ? { none: '*' } : { match: etag } })
     if (put.status === 200) return changed
   }
-}
-
-export async function archiveSettled(relay: Relay): Promise<void> {
-  if ((await read(relay)).shared.settled === undefined) return
-  await updateShared(relay, ({ settled = {}, settleAfterDays, ...shared }) => ({
-    ...shared,
-    archived: { ...Object.fromEntries(Object.entries(settled).map(([session, { settled: archived, at }]) => [session, { archived, at }])), ...shared.archived },
-    archiveAfterDays: settleAfterDays === undefined ? shared.archiveAfterDays : settleAfterDays,
-  }))
 }
 
 export function isArchived(shared: Shared, session: Pick<IndexedSession, 'id' | 'lastActivity'>, now = Date.now()): boolean {

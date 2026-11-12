@@ -24,7 +24,6 @@ export type Run = {
   readonly terminal?: { readonly address: string; readonly machine: string }
   readonly claude: { readonly command: readonly string[]; readonly process?: RunProcess; readonly startedAt?: string }
 }
-type FlatRun = { readonly pid: number; readonly procStart: string; readonly terminal?: string; readonly command: readonly string[] }
 
 export async function run(argv: readonly string[], options: { readonly cwd?: string; readonly env?: Record<string, string> } = {}): Promise<string> {
   const child = Bun.spawn([...argv], { ...options, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
@@ -187,20 +186,6 @@ const runsFolder = (): string => join(stateFolder(), 'runs')
 export const runOf = (session: string): Run | undefined => {
   const run = jsonOf(join(runsFolder(), `${session}.json`)) as Run | undefined
   return run?.runner !== undefined && isProcess(run.runner.process.id, run.runner.process.start) ? run : undefined
-}
-
-export function nestRuns(machine: string): void {
-  for (const name of namesIn(runsFolder()).filter((each) => each.endsWith('.json'))) {
-    const flat = jsonOf(join(runsFolder(), name)) as Partial<FlatRun> | undefined
-    if (flat?.pid === undefined || flat.procStart === undefined) continue
-    const session = name.slice(0, -'.json'.length)
-    writeRun(session, {
-      session,
-      runner: { process: { id: flat.pid, start: flat.procStart }, version: '', startedAt: '' },
-      ...(flat.terminal === undefined ? {} : { terminal: { address: flat.terminal, machine } }),
-      claude: { command: flat.command ?? ['claude'] },
-    })
-  }
 }
 
 export const runSessions = (): string[] =>

@@ -75,11 +75,12 @@ test('a cloned machine shows why anyhost captures nothing, once a session', asyn
   expect(tested.shown.toasts.filter(({ type }) => type === 'error')).toEqual([{ type: 'error', message: 'anyhost captures nothing on this machine', description: 'This machine, anyhost-c, has the id of anyhost-a.' }])
 })
 
-test('a session resumed from a machine that was not connected names that machine as it starts', async () => {
+test('a session resumed from a machine that was not connected names that machine once, however often it asks', async () => {
   const { tested, fetched } = withHolder({ untold: 'anyhost-a' })
 
   await tested.raise.onSessionStart({ source: 'resume' })
-  expect(fetched).toEqual([`${SOCKET} http://localhost/claims/test-session`])
+  await tested.raise.beforePrompt({ text: 'Keep going' })
+  expect(fetched).toEqual([`${SOCKET} http://localhost/claims/test-session`, `${SOCKET} http://localhost/claims/test-session`])
   expect(tested.shown.toasts.filter(({ type }) => type === 'warning')).toEqual([
     {
       type: 'warning',

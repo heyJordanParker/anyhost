@@ -1,11 +1,11 @@
 import { Database } from 'bun:sqlite'
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, type Stats } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, type Stats } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Listed, type Released } from '../../relay/protocol.ts'
-import { followHolders, type Holders } from './claims.ts'
+import { claimsOf, followHolders, type Holders } from './claims.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Relay } from './relay.ts'
@@ -21,8 +21,6 @@ const SWEEP_BATCH = 1000
 const REQUESTS_AHEAD = 16
 const TAIL_BYTES = 32
 const SCHEMA = 4
-const ENTRYPOINTS_READ_ONCE = 2
-const SUMMARIES_READ_ONCE = 3
 
 export type IndexedSession = {
   readonly id: string
@@ -84,24 +82,19 @@ export function openDatabase(folder = stateFolder()): Database {
   db.run('pragma journal_mode = wal')
   db.run('pragma busy_timeout = 5000')
   db.run("create table if not exists bucket (name text not null, url text not null default '')")
-  if (db.query<{ name: string }, []>("select name from pragma_table_info('bucket') where name = 'url'").get() === null) db.run("alter table bucket add column url text not null default ''")
   const version = db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version
   if (version !== undefined && version > SCHEMA) {
     db.close()
     throw new Error(`${join(folder, 'anyhost.db')} is a database of a newer anyhost, at version ${version}, and this anyhost reads version ${SCHEMA}, so it changes nothing there. Update anyhost on this machine.`)
   }
-  if (version !== SCHEMA && version !== ENTRYPOINTS_READ_ONCE && version !== SUMMARIES_READ_ONCE) startOver(db)
+  if (version !== SCHEMA) startOver(db)
   makeTables(db)
-  if (version === ENTRYPOINTS_READ_ONCE) {
-    readEntrypointsAgain(db)
-    db.run(`pragma user_version = ${SUMMARIES_READ_ONCE}`)
-  }
   return db
 }
 
 function startOver(db: Database): void {
   for (const table of ['files', 'sessions', 'journals', 'line_offsets', 'holders', 'holders_changed']) db.run(`drop table if exists ${table}`)
-  rmSync(join(dirname(db.filename), 'code'), { recursive: true, force: true })
+  for (const folder of ['code', 'spool']) rmSync(join(dirname(db.filename), folder), { recursive: true, force: true })
   db.run(`pragma user_version = ${SCHEMA}`)
 }
 
@@ -109,9 +102,6 @@ function makeTables(db: Database): void {
   db.run(`create table if not exists journals (
     session text primary key, tool text not null, end integer not null default 0, sealed integer not null default 0,
     written_at integer not null default 0, stopped text not null default '', holder text not null default '', untold text not null default '')`)
-  for (const column of ['holder', 'untold']) {
-    if (db.query<{ name: string }, [string]>("select name from pragma_table_info('journals') where name = ?").get(column) === null) db.run(`alter table journals add column ${column} text not null default ''`)
-  }
   db.run(`create table if not exists files (
     session text not null, path text not null, journal_size integer not null default 0, local_size integer not null default 0,
     tail blob not null default x'', sha256 text not null default '', mtime integer not null default 0, primary key (session, path))`)
@@ -222,11 +212,18 @@ export function framesOf(session: string, listed: readonly Listed[]): { readonly
   return { frames, sealedEnd, stale: hot.filter((frame) => frame.start < sealedEnd).map(({ key }) => key) }
 }
 
-export async function* chainOf(relay: Relay, frames: readonly Frame[], from: number): AsyncGenerator<{ readonly frame: Frame; readonly bytes: Uint8Array }> {
+export const spoolOf = (db: Database, session: string): string => join(dirname(db.filename), 'spool', session)
+
+export async function* chainOf(relay: Relay, frames: readonly Frame[], from: number, spool?: string): AsyncGenerator<{ readonly frame: Frame; readonly bytes: Uint8Array }> {
+  const spooled = new Map(spool === undefined ? [] : frames.flatMap((frame) => (frame.end === undefined && existsSync(join(spool, String(frame.start))) ? [[frame.key, join(spool, String(frame.start))] as const] : [])))
   const requests: Frame[][] = []
   const requestOf: number[] = []
   let bytes = 0
   for (const frame of frames) {
+    if (spooled.has(frame.key)) {
+      requestOf.push(-1)
+      continue
+    }
     const last = requests.at(-1)
     const fits = last !== undefined && frame.size <= MAX_MESSAGE_BYTES && last.length < MAX_OPS && bytes + frame.size <= MAX_MESSAGE_BYTES
     if (fits) last.push(frame)
@@ -248,17 +245,21 @@ export async function* chainOf(relay: Relay, frames: readonly Frame[], from: num
         }),
       )
     })())
+  const fetchedBytes = (fetched: Map<string, Uint8Array>, key: string): Uint8Array => {
+    const frameBytes = fetched.get(key)
+    if (frameBytes === undefined) throw new Error(`The journal's chain holds ${key} twice.`)
+    fetched.delete(key)
+    return decompress(frameBytes)
+  }
   let end = from
   for (const [index, frame] of frames.entries()) {
     if (frame.start > end) break
     if (frame.start < end) continue
-    const request = requestOf[index] ?? 0
-    for (let ahead = request; ahead < Math.min(requests.length, request + REQUESTS_AHEAD); ahead += 1) void fetchRequest(ahead).catch(() => undefined)
-    const fetched = await fetchRequest(request)
-    const frameBytes = fetched.get(frame.key)
-    if (frameBytes === undefined) throw new Error(`The journal's chain holds ${frame.key} twice.`)
-    const bytes = decompress(frameBytes)
-    fetched.delete(frame.key)
+    const local = spooled.get(frame.key)
+    const request = requestOf[index] ?? -1
+    const nextRequest = request >= 0 ? request : (requestOf.slice(index).find((each) => each >= 0) ?? requests.length)
+    for (let ahead = nextRequest; ahead < Math.min(requests.length, nextRequest + REQUESTS_AHEAD); ahead += 1) void fetchRequest(ahead).catch(() => undefined)
+    const bytes = local === undefined ? await fetchedBytes(await fetchRequest(request), frame.key) : new Uint8Array(readFileSync(local))
     if (frame.end !== undefined && frame.start + bytes.length !== frame.end) throw new Error(`${frame.key} holds ${bytes.length} bytes, not the ${frame.end - frame.start} its name says.`)
     yield { frame, bytes }
     end = frame.start + bytes.length
@@ -294,6 +295,7 @@ export function holdHere(db: Database, session: string): void {
 }
 
 function restartJournal(db: Database, journal: Omit<Journal, 'writtenAt' | 'stopped' | 'holder'>, files: readonly FileState[]): void {
+  rmSync(spoolOf(db, journal.session), { recursive: true, force: true })
   db.transaction(() => {
     db.query(`insert into journals (session, tool, end, sealed, written_at) values (?, ?, ?, ?, ?)
       on conflict (session) do update set end = excluded.end, sealed = excluded.sealed, written_at = excluded.written_at, stopped = '', holder = ''`).run(
@@ -315,11 +317,7 @@ export function markUntold(db: Database, session: string, machine: string): void
   db.query('update journals set untold = ? where session = ?').run(machine, session)
 }
 
-export function takeUntold(db: Database, session: string): string {
-  const machine = db.query<{ untold: string }, [string]>('select untold from journals where session = ?').get(session)?.untold ?? ''
-  if (machine !== '') db.query("update journals set untold = '' where session = ?").run(session)
-  return machine
-}
+export const untoldOf = (db: Database, session: string): string => db.query<{ untold: string }, [string]>('select untold from journals where session = ?').get(session)?.untold ?? ''
 
 export const journalOf = (db: Database, session: string): Journal | undefined => {
   const row = journalRow(db, session)
@@ -630,7 +628,9 @@ async function frameWritten(capture: Capture, session: string, tool: Tool, start
     const there = await relay.runOne({ op: 'get', key })
     const written = there.status === 200 ? decompress(there.bytes) : undefined
     const writer = written === undefined ? undefined : (JSON.parse(new TextDecoder().decode(written.subarray(0, written.indexOf(10)))) as RecordHeader).device
-    if (writer === device.id || writer === undefined) {
+    const isStale = start > 0 && writer !== undefined && writer !== device.id && (await claimsOf(relay, session)).get(session)?.id === device.id
+    if (writer === device.id || writer === undefined || isStale) {
+      if (isStale) console.error(`${new Date().toISOString()} ${device.name} holds the session ${session}, and a frame another machine wrote after it took the session sits at byte ${start} of its journal, so ${device.name} writes its own frame over it.`)
       answer = await relay.runOne({ op: 'put', key, bytes: compressHot(body), if: there.status === 200 ? { match: there.etag } : { none: '*' }, holder: session })
     }
     if (answer.status === 412) {
@@ -646,6 +646,7 @@ async function frameWritten(capture: Capture, session: string, tool: Tool, start
     releasedTo(capture, session, answer.holder, `${new Date().toISOString()} ${answer.holder.name} took the session ${session} over, so ${device.name} stops capturing it.`, tool)
     return false
   }
+  await Bun.write(join(spoolOf(db, session), String(start)), body)
   return true
 }
 
@@ -791,7 +792,8 @@ export async function seal(capture: Capture, session: string): Promise<number> {
     if (put.status !== 200) throw new Error(`The relay answered ${put.status} to the put of ${key}, so anyhost deletes no hot frame of ${session}.`)
     ;[at, run, runBytes] = [at + runBytes, [], 0]
   }
-  for await (const { bytes } of chainOf(relay, hot, sealedEnd)) {
+  const spool = spoolOf(db, session)
+  for await (const { bytes } of chainOf(relay, hot, sealedEnd, spool)) {
     if (runBytes > 0 && runBytes + bytes.length > FRAME_BYTES) await flush()
     run.push(bytes)
     runBytes += bytes.length
@@ -801,6 +803,7 @@ export async function seal(capture: Capture, session: string): Promise<number> {
   const deletes: Call[] = []
   for (let from = 0; from < sealed.length; from += MAX_KEYS) deletes.push({ op: 'delete', keys: sealed.slice(from, from + MAX_KEYS) })
   await Promise.all(relay.run(deletes))
+  for (const frame of hot) rmSync(join(spool, String(frame.start)), { force: true })
   return at
 }
 
@@ -909,51 +912,6 @@ function indexOf(db: Database): IndexedSession[] {
       id: row.id, tool: row.tool, title: row.title, firstPrompt: row.first_prompt, cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder,
       entrypoint: row.entrypoint, lastActivity: row.last_activity, size: row.size, deleted: row.deleted === 1,
     }))
-}
-
-const ENTRYPOINT_BYTES = 1 << 16
-
-function newestEntrypoint(path: string, tool: Tool): string | undefined {
-  const file = openSync(path, 'r')
-  try {
-    const size = fstatSync(file).size
-    const bytes = Buffer.alloc(Math.min(size, ENTRYPOINT_BYTES))
-    readSync(file, bytes, 0, bytes.length, tool === 'codex' ? 0 : size - bytes.length)
-    const text = bytes.toString('utf8')
-    return tool === 'codex' ? /"originator":"([^"]*)"/.exec(text)?.[1] : [...text.matchAll(/"entrypoint":"([^"]*)"/g)].at(-1)?.[1]
-  } finally {
-    closeSync(file)
-  }
-}
-
-function readEntrypointsAgain(db: Database): void {
-  const transcripts = db
-    .query<{ id: string; tool: Tool; path: string }, []>(
-      "select sessions.id, sessions.tool, files.path from sessions join files on files.session = sessions.id and files.path like '%' || sessions.id || '.jsonl' and files.sha256 != ''",
-    )
-    .all()
-  const update = db.query('update sessions set entrypoint = ? where id = ?')
-  for (const { id, tool, path } of transcripts) {
-    const entrypoint = existsSync(path) ? newestEntrypoint(path, tool) : undefined
-    if (entrypoint !== undefined) update.run(entrypoint, id)
-  }
-}
-
-export async function readSummariesAgain(capture: Capture): Promise<void> {
-  const { db } = capture
-  if (db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version !== SUMMARIES_READ_ONCE) return
-  const unread = db.query<SessionRow, []>("select * from sessions where first_prompt = '' or cwd = ''").all()
-  for (const row of unread) {
-    const paths = db
-      .query<{ path: string }, [string, string]>("select path from files where session = ? and path like '%' || ? || '.jsonl' and sha256 != '' order by mtime")
-      .all(row.id, row.id)
-      .map(({ path }) => path)
-      .filter((path) => existsSync(path))
-    if (paths.length === 0) continue
-    const text = (await Promise.all(paths.map((path) => Bun.file(path).text()))).join('')
-    await recordSummary(capture, row.id, row.tool, text, row.size, row.last_activity)
-  }
-  db.run(`pragma user_version = ${SCHEMA}`)
 }
 
 const indexKey = (device: Device): string => `sessions/${device.id}/index.json`

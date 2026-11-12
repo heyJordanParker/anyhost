@@ -2,8 +2,8 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { changedFiles, countedRelay, journalOf, openCapture, readSummariesAgain, relistSessions, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, takeUntold, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
-import { loginEnvironment, nestRuns, recordedSessions, runSessions, saveLoginEnvironment, type OnRecordsChange } from './claude.ts'
+import { changedFiles, countedRelay, journalOf, openCapture, relistSessions, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
+import { loginEnvironment, recordedSessions, runSessions, saveLoginEnvironment, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { hcPath, machinesReached } from './hc.ts'
@@ -13,7 +13,7 @@ import { deleteAgent, sessionOf, move, noteWaiting, receiveDelete, receiveList, 
 import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type RelayState } from './relay.ts'
 import { closeStopped } from './runner.ts'
 import { agentsOf } from './sessions.ts'
-import { archive, archiveSettled, sharedOf, updateShared, visit } from './shared.ts'
+import { archive, sharedOf, updateShared, visit } from './shared.ts'
 import { codexState, filesUnder, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
@@ -289,11 +289,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   relay.on('welcome', () => {
     joining = undefined
     queue.drain()
-    void settle('archive', () => archiveSettled(relay))
     if (isTidied) return
     isTidied = true
     void settle('tidy', async () => {
-      await readSummariesAgain(capture)
       const relisted = await relistSessions(capture)
       if (relisted > 0) console.error(`${new Date().toISOString()} anyhost listed ${relisted} sessions again from their transcripts here and their journals in R2.`)
       await writeIndex(capture)
@@ -561,7 +559,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     const { state } = relay
     if (state.is === 'refused' || state.is === 'outdated') return { problem: state.message, ...move }
     const holder = journalOf(capture.db, session)?.holder ?? ''
-    const untold = takeUntold(capture.db, session)
+    const untold = untoldOf(capture.db, session)
     return { ...(holder === '' ? {} : { machine: holder }), ...(untold === '' ? {} : { untold }), ...move }
   }
   const statusOf = (): Status => {
@@ -721,7 +719,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   relay.on('welcome', releaseHeld)
   void releaseHeld()
   void settle('herdr', () => installHerdr())
-  nestRuns(device.name)
   void settle('environment', () => saveLoginEnvironment())
   if (hcPath() !== undefined) void settle('stopped', () => closeStopped())
 

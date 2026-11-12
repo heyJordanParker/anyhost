@@ -5,10 +5,14 @@ import { decompress, hotKey } from '../src/capture.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { claimOn, decoder, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, stepsOf, WORKER, workerOn } from './program.ts'
 
-test('a move waits for the turn to end, uploads and seals the session, the worker restores it and runs it in a terminal of herdr-core with the same command, and only then the laptop\'s Claude Code ends', async () => {
+test("a move waits for the turn to end, stops the laptop's Claude Code, uploads and seals the session, and only then the worker restores it and runs it in a terminal of herdr-core with the same command", async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
+  let laptopEndedAt = Infinity
+  void laptop.claude.exited.then(() => (laptopEndedAt = performance.now()))
+  let workerRanAt = Infinity
+  void until(() => runsOn(worker.folder).length > 0, 'the worker running the session', 60_000).then(() => (workerRanAt = performance.now()))
   laptop.status('busy')
 
   const asked = await postTo(laptop.socket, '/move', { session: SESSION.slice(0, 8), machine: WORKER.name })
@@ -32,8 +36,8 @@ test('a move waits for the turn to end, uploads and seals the session, the worke
   expect(more).toEqual([])
   expect(started).toMatchObject({ session: SESSION, command: 'claude' })
   expect(realpathSync(started?.cwd ?? '')).toBe(realpathSync(workerCwd))
-  await laptop.claude.exited
   expect(laptop.claude.signalCode).toBe('SIGTERM')
+  expect(laptopEndedAt).toBeLessThan(workerRanAt)
   expect(await claimOn(laptop.socket)).toMatchObject({ machine: WORKER.name, move: { step: 'moved' } })
 }, 60_000)
 
@@ -57,7 +61,7 @@ test('a move of a session whose first frame R2 lost uploads its files whole agai
   expect(readFileSync(join(workerCwd, 'notes.txt'), 'utf8')).toBe('the plan for the trip\n')
 }, 60_000)
 
-test('a move to a machine that is offline keeps the session running here, with its claim', async () => {
+test('a move to a machine that is offline keeps the session here, with its claim, and runs it again in a terminal of herdr-core', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   await relay.join(WORKER, roots('/home/worker'))
@@ -68,7 +72,7 @@ test('a move to a machine that is offline keeps the session running here, with i
   expect(last.line).toBe(`${WORKER.name} is offline, so the session keeps running here.`)
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
-  expect(laptop.claude.exitCode).toBeNull()
+  expect(runsOn(laptop.folder).map(({ session }) => session)).toEqual([SESSION])
 }, 60_000)
 
 test('a move the worker cannot take takes the claim back, and the laptop captures the session again', async () => {
@@ -85,7 +89,7 @@ test('a move the worker cannot take takes the claim back, and the laptop capture
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   await until(async () => (await claimOn(worker.socket)).machine === LAPTOP.name, 'the worker hearing it lost the session')
-  expect(laptop.claude.exitCode).toBeNull()
+  expect(runsOn(laptop.folder).map(({ session }) => session)).toEqual([SESSION])
   const frames = relay.puts.filter(({ key }) => key.startsWith(`journals/${SESSION}/hot/`)).length
   writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"And the hotel"}}\n`, { flag: 'a' })
   await until(() => relay.puts.filter(({ key }) => key.startsWith(`journals/${SESSION}/hot/`)).length > frames, 'the next line uploading', 15_000)
@@ -185,13 +189,14 @@ test('a move whose copy here ignores its SIGTERM ends it with SIGKILL 10 s later
   const laptop = await runningOn(relay, LAPTOP, {}, ['bash', '-c', "trap '' TERM; while true; do sleep 1; done"])
   await workerOn(relay)
 
+  const askedAt = Date.now()
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
-  await stepsOf(laptop.socket, new Set(['moving', 'moved', 'failed']))
-  const stoppingAt = Date.now()
-  const { last } = await stepsOf(laptop.socket)
+  const { steps } = await stepsOf(laptop.socket, new Set(['moving', 'failed']))
+  const { last } = await stepsOf(laptop.socket, undefined, steps)
 
   expect(last.step).toBe('moved')
-  expect(Date.now() - stoppingAt).toBeGreaterThan(9000)
+  expect(steps).toEqual(['uploading', 'moving'])
+  expect(Date.now() - askedAt).toBeGreaterThan(9000)
   await laptop.claude.exited
   expect(laptop.claude.signalCode).toBe('SIGKILL')
   expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)

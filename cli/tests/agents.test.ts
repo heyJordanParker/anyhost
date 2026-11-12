@@ -28,7 +28,7 @@ test('anyhost new starts a session on the worker in a terminal of herdr-core in 
   expect(trustedIn(worker)).toEqual([realpathSync(join(worker.env['HOME'] ?? '', 'trip'))])
 }, 60_000)
 
-test('anyhost new to a worker whose program ends after it took the start ends with the reason within the check of its connection', async () => {
+test('anyhost new to a worker whose program ends after it took the start ends with the reason once the relay counts it gone', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
   const worker = await workerOn(relay, (folder) => writeFileSync(join(folder, 'hang'), '60'))
@@ -45,7 +45,7 @@ test('anyhost new to a worker whose program ends after it took the start ends wi
 
   expect(Date.now() - endedAt).toBeLessThan(25_000)
   expect(code).toBe(1)
-  expect(err.trim()).toBe(`${WORKER.name} is offline or its program restarted before it answered. anyhost list shows whether a session started there.`)
+  expect(err.trim()).toBe(`${WORKER.name} went offline before it answered. anyhost list shows whether a session started there.`)
 }, 60_000)
 
 test("anyhost new whose command's own socket drops while the worker starts the session prints the session it started and exits 0", async () => {
@@ -364,6 +364,20 @@ test('an open continues a session here from R2 while the machine that ran it is 
   expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)
 }, 90_000)
 
+test('an open of a session a connected machine runs, as a click on a list read before that machine connected again asks, takes nothing and leaves its copy running there', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+
+  const opened = await postTo(worker.socket, '/agents/open', { session: SESSION.slice(0, 8) })
+
+  expect(opened.status).toBe(400)
+  expect(opened.body['message']).toBe(`${LAPTOP.name} runs ${SESSION.slice(0, 8)} and is connected, so ${SESSION.slice(0, 8)} opens there and not on ${WORKER.name}.`)
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
+  expect(runsOn(worker.folder)).toEqual([])
+  expect(laptop.claude.exitCode).toBeNull()
+}, 60_000)
+
 test('a delete stops the session and removes its files, every machine lists it as deleted, and opening it brings its conversation back', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
@@ -381,22 +395,25 @@ test('a delete stops the session and removes its files, every machine lists it a
   expect(await listed()).toMatchObject({ deleted: false })
 }, 60_000)
 
-test('a visit and an archive reach every machine through the shared list, and an earlier version settled marks become archived ones', async () => {
+test('a visit and an archive reach every machine through the shared list, which a machine that read it once reads again only once it changed', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  await relay.objects.put('shared.json', new TextEncoder().encode(JSON.stringify({ settled: { [SESSION]: { settled: true, at: '2999-01-01T00:00:00.000Z' } }, settleAfterDays: 3 })))
   const worker = await workerOn(relay)
   const agentOn = async (socket: string): Promise<{ readonly archived: boolean; readonly visitedAt: string } | undefined> =>
     ((await (await fetch('http://localhost/agents', { unix: socket })).json()) as { agents: { id: string; archived: boolean; visitedAt: string }[] }).agents.find(({ id }) => id === SESSION)
-  await until(async () => (await agentOn(worker.socket))?.archived === true, 'the settled mark becoming an archived one')
+  const archived = await anyhostOn(laptop.env, ['archive', SESSION.slice(0, 8)])
+  await until(async () => (await agentOn(worker.socket))?.archived === true, 'the worker reading the archive')
+  const before = relay.requests.length
+  await agentOn(worker.socket)
+  const unchanged = relay.requests.slice(before).flat().filter((op) => op.op === 'get')
 
   const visited = await anyhostOn(laptop.env, ['visit', SESSION.slice(0, 8), '--at', '2026-11-11T16:00:00.000Z'])
   const restored = await anyhostOn(laptop.env, ['archive', SESSION.slice(0, 8), '--undo'])
-  const shared = JSON.parse(decoder.decode((await relay.read('shared.json')) ?? new Uint8Array())) as Record<string, unknown>
 
-  expect([visited.code, restored.code]).toEqual([0, 0])
+  expect([archived.code, visited.code, restored.code]).toEqual([0, 0, 0])
+  expect(unchanged.length).toBeGreaterThan(0)
+  expect(unchanged.every((op) => op.op === 'get' && op.if !== undefined)).toBe(true)
   expect(await agentOn(worker.socket)).toMatchObject({ archived: false, visitedAt: '2026-11-11T16:00:00.000Z' })
-  expect([shared['settled'], shared['settleAfterDays'], shared['archiveAfterDays']]).toEqual([undefined, undefined, 3])
 }, 60_000)
 
 test('an archive asked while the relay connects again waits for it and archives the session, as the Herdr pane asks one whenever its button is pressed', async () => {

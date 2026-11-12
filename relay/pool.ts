@@ -28,6 +28,7 @@ import {
   type Joined,
   type Op,
   type Refusal,
+  type TakeCondition,
   type Released,
   type Result,
   type Roots,
@@ -485,8 +486,11 @@ export class Pool extends DurableObject<Env> {
     switch (op.op) {
       case 'get': {
         if (!isText(op.key)) return invalid('A get names its key.')
-        const object = await this.env.BUCKET.get(op.key)
-        return object === null ? { status: 404 } : { object }
+        const unless: unknown = op.if
+        if (unless !== undefined && !(isRecord(unless) && isText(unless['noneMatch']))) return invalid('A get\'s if is {"noneMatch":"<etag>"}.')
+        const object = await this.env.BUCKET.get(op.key, op.if === undefined ? {} : { onlyIf: { etagDoesNotMatch: op.if.noneMatch } })
+        if (object === null) return { status: 404 }
+        return 'body' in object ? { object } : { status: 304, etag: object.etag }
       }
       case 'put': {
         if (!isText(op.key)) return invalid('A put names its key.')
@@ -513,8 +517,8 @@ export class Pool extends DurableObject<Env> {
       case 'claim': {
         if (!isText(op.session) || typeof op.take !== 'boolean') return invalid('A claim names its session and whether it takes it from another machine.')
         const condition: unknown = op.if
-        if (condition !== undefined && !(isRecord(condition) && isText(condition['at']))) return invalid('A claim\'s if is {"at":"<the at of the claim it takes>"}.')
-        return await this.#claim(device, op.session, op.take, op.if?.at)
+        if (condition !== undefined && !(isRecord(condition) && (isText(condition['at']) || condition['gone'] === true))) return invalid('A claim\'s if is {"at":"<the at of the claim it takes>"} or {"gone":true}.')
+        return await this.#claim(device, op.session, op.take, op.if)
       }
       case 'claims': {
         if (op.prefix !== undefined && typeof op.prefix !== 'string') return invalid('A claims names the start of the sessions it asks for in prefix.')
@@ -575,10 +579,15 @@ export class Pool extends DurableObject<Env> {
     }
   }
 
-  async #claim(device: DeviceRef, session: string, take: boolean, ifAt?: string): Promise<Result> {
+  async #claim(device: DeviceRef, session: string, take: boolean, condition?: TakeCondition): Promise<Result> {
     const held = this.#holderOf(session)
     const before = this.#sql.exec<{ at: number }>('select at from claims where session = ?', session).toArray()[0]?.at
-    if (held !== undefined && held.id !== device.id && (!take || (ifAt !== undefined && iso(before ?? 0) !== ifAt))) return { status: 409, holder: held }
+    const isRefused = (holder: DeviceRef): boolean => {
+      if (!take || condition === undefined) return !take
+      if ('at' in condition) return iso(before ?? 0) !== condition.at
+      return this.ctx.getWebSockets(holder.id).some((socket) => this.#isLive(socket))
+    }
+    if (held !== undefined && held.id !== device.id && isRefused(held)) return { status: 409, holder: held }
     const isKept = held?.id === device.id && !take
     const at = isKept && before !== undefined ? before : Math.max(Date.now(), (before ?? 0) + 1)
     if (!isKept) this.#setHolder(session, device.id, at)

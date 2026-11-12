@@ -184,6 +184,36 @@ async function placeFile(session: string, file: ReplayedFile, writers: Writers, 
   return { session, path, ...known, localSize: size, tail: Uint8Array.from(tail), sha256: hasher.digest('hex'), mtime: (await stat(path)).mtimeMs }
 }
 
+type LocalTranscript = { readonly path: string; readonly text: string }
+
+async function transcriptsHere(claudeHome: string, session: string): Promise<LocalTranscript[]> {
+  const projects = join(claudeHome, 'projects')
+  if (!existsSync(projects)) return []
+  const paths = [...new Bun.Glob(`*/${session}.jsonl`).scanSync({ cwd: projects })].map((path) => join(projects, path))
+  return await Promise.all(paths.map(async (path) => ({ path, text: await Bun.file(path).text() })))
+}
+
+const linesOfTurns = (text: string): { readonly uuid: string; readonly isTurn: boolean }[] =>
+  text.split('\n').flatMap((line) => {
+    try {
+      const entry = JSON.parse(line) as { readonly uuid?: unknown; readonly type?: unknown; readonly isMeta?: unknown; readonly isSidechain?: unknown }
+      if (typeof entry.uuid !== 'string') return []
+      return [{ uuid: entry.uuid, isTurn: (entry.type === 'user' || entry.type === 'assistant') && entry.isMeta !== true && entry.isSidechain !== true }]
+    } catch {
+      return []
+    }
+  })
+
+async function keepConflictedCopy(capture: Capture, session: string, local: LocalTranscript, restored: string): Promise<void> {
+  const kept = new Set(linesOfTurns(restored).map(({ uuid }) => uuid))
+  if (!linesOfTurns(local.text).some(({ uuid, isTurn }) => isTurn && !kept.has(uuid))) return
+  const copy = crypto.randomUUID()
+  const title = JSON.stringify({ type: 'custom-title', customTitle: `Conflicted copy of ${session.slice(0, 8)} from ${capture.device.name}`, sessionId: copy })
+  const text = local.text.replaceAll(`"sessionId":"${session}"`, `"sessionId":"${copy}"`)
+  await Bun.write(join(dirname(local.path), `${copy}.jsonl`), `${text}${text.endsWith('\n') ? '' : '\n'}${title}\n`)
+  console.error(`${new Date().toISOString()} ${capture.device.name} held turns of ${session} that the session's journal in R2 does not, so it keeps them as the session ${copy} before it restores ${session}.`)
+}
+
 export async function openSession(tool: Tool, id: string, cwd: string): Promise<number> {
   process.chdir(cwd)
   if (tool === 'claude') return await runSession(['claude'], id)
@@ -199,7 +229,7 @@ export async function resumeHere(capture: Capture, id: string, options: { take: 
   return { tool: session.tool, cwd: restored }
 }
 
-export async function restore(capture: Capture, id: string, options: { take: boolean; if?: { readonly at: string }; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
+export async function restore(capture: Capture, id: string, options: { take: boolean; if?: Protocol.TakeCondition; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
   const { relay, db, roots } = capture
   const devices = await devicesOf(relay)
   const [indexes, claims] = await Promise.all([indexesOf(relay, devices.keys()), claimsOf(relay, id)])
@@ -239,6 +269,7 @@ export async function restore(capture: Capture, id: string, options: { take: boo
   else await cloneMissing(session, folder, roots.home)
   await mkdir(cwd, { recursive: true })
   const here: Roots = { ...roots, checkout: checkoutOfEntry({ ...session, cwd }, roots.home) }
+  const before = session.tool === 'claude' ? await transcriptsHere(roots.claudeHome, id) : []
   stopJournal(db, id, session.tool, `anyhost resume is placing the files of ${id}, and stopped there.`)
   const placed: FileState[] = []
   for (const [path, file] of files) {
@@ -260,7 +291,9 @@ export async function restore(capture: Capture, id: string, options: { take: boo
     const owner = ownerOf(path, roots)
     return owner !== undefined && 'isTranscript' in owner && owner.isTranscript
   })
-  await recordSummary(capture, id, session.tool, transcript === undefined ? '' : await Bun.file(transcript.path).text(), replayed.end, session.lastActivity)
+  const restoredText = transcript === undefined ? '' : await Bun.file(transcript.path).text()
+  for (const kept of before) await keepConflictedCopy(capture, id, kept, restoredText)
+  await recordSummary(capture, id, session.tool, restoredText, replayed.end, session.lastActivity)
   await writeIndex(capture)
   await rm(staging, { recursive: true, force: true })
   if (claim.previous !== undefined && !claim.told) markUntold(db, id, claim.previous.name)
