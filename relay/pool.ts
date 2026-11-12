@@ -488,7 +488,7 @@ export class Pool extends DurableObject<Env> {
         if (!isText(op.key)) return invalid('A get names its key.')
         const unless: unknown = op.if
         if (unless !== undefined && !(isRecord(unless) && isText(unless['noneMatch']))) return invalid('A get\'s if is {"noneMatch":"<etag>"}.')
-        const object = await this.env.BUCKET.get(op.key, op.if === undefined ? {} : { onlyIf: { etagDoesNotMatch: op.if.noneMatch } })
+        const object: R2Object | R2ObjectBody | null = await this.env.BUCKET.get(op.key, op.if === undefined ? {} : { onlyIf: { etagDoesNotMatch: op.if.noneMatch } })
         if (object === null) return { status: 404 }
         return 'body' in object ? { object } : { status: 304, etag: object.etag }
       }

@@ -453,6 +453,18 @@ describe('ops', () => {
     expect(new TextDecoder().decode(gets[0])).toBe('hello')
   })
 
+  test('get with if noneMatch answers 304 with no bytes while the etag matches, and the bytes once it changed', async () => {
+    const key = `${prefix}ops/unchanged.txt`
+    await mac.socket.request([{ op: 'put', key, size: 3 }], [new TextEncoder().encode('one')])
+    const same = await mac.socket.request([{ op: 'get', key, if: { noneMatch: md5('one') } }])
+    expect(same.answer['results']).toEqual([{ status: 304, etag: md5('one') }])
+    expect(same.gets).toEqual([])
+    await mac.socket.request([{ op: 'put', key, size: 3 }], [new TextEncoder().encode('two')])
+    const changed = await mac.socket.request([{ op: 'get', key, if: { noneMatch: md5('one') } }])
+    expect(changed.answer['results']).toEqual([{ status: 200, etag: md5('two'), size: 3 }])
+    expect(new TextDecoder().decode(changed.gets[0])).toBe('two')
+  })
+
   test('put with if none or if match stores only when it holds, and a refusal names the etag there', async () => {
     const key = `${prefix}ops/conditional.txt`
     const put = async (body: string, condition: Condition): Promise<Json> =>
