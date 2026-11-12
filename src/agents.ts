@@ -14,16 +14,25 @@ type Agent = {
   readonly repo: string
   readonly cwd: string
   readonly archived: boolean
+  readonly parent: string
 }
+type Message = { readonly role: 'user' | 'assistant'; readonly at: string; readonly text: string }
 type Machines = { readonly here: string; readonly machines: readonly { readonly id: string; readonly name: string; readonly connected: boolean; readonly seenAt: string }[] }
-type Told = { readonly machine: string; readonly session: string; readonly status: string; readonly screen: string }
+type Told = { readonly machine: string; readonly session: string; readonly status: string; readonly screen: string; readonly messages?: readonly Message[] }
 
 const AGENT = { type: 'string', description: 'The agent id, or its first 8 characters.' } as const
 const WAKES = 'An idle agent takes the message at once, works, and rests again on its own.'
 
 export function agentTools(mod: Mod<AnyhostState>) {
-  const tell = (agent: string, told: { readonly text?: string; readonly keys?: readonly string[]; readonly lines?: number; readonly sender?: string }): Promise<Told> =>
+  const tell = (agent: string, told: { readonly text?: string; readonly keys?: readonly string[]; readonly lines?: number; readonly messages?: number; readonly sender?: string }): Promise<Told> =>
     askProgram<Told>(mod, '/agents/tell', { session: agent, ...told })
+  const agentsNow = async (): Promise<readonly Agent[]> => (await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')).agents
+  const found = (agents: readonly Agent[], agent: string): Agent => {
+    const matches = agents.filter(({ id }) => id.startsWith(agent))
+    if (matches[0] === undefined) throw new Error(`No agent's id begins with ${agent}. list_agents lists them.`)
+    if (matches.length > 1) throw new Error(`${matches.length} agents' ids begin with ${agent}. Give more of it.`)
+    return matches[0]
+  }
   return [
     tool({
       name: 'list_machines',
@@ -55,19 +64,44 @@ export function agentTools(mod: Mod<AnyhostState>) {
     tool({
       name: 'list_agents',
       description:
-        'List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder and whether it is archived. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. Archived agents are left out unless archived is true.',
-      inputSchema: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, description: 'How many to list, 30 by default.' }, archived: { type: 'boolean', description: 'List archived agents too.' } } },
-      execute: async ({ limit = 30, archived = false }) => {
-        const { agents } = await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')
+        "List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder, whether it is archived, and its parent: the agent that started it with start_agent, with that agent's title and the machine that holds it, or null. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. Archived agents are left out unless archived is true. children_of lists only the agents one agent started, `me` the ones this agent started.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', minimum: 1, description: 'How many to list, 30 by default.' },
+          archived: { type: 'boolean', description: 'List archived agents too.' },
+          children_of: { type: 'string', description: 'An agent id, its first 8 characters, or `me`: list only the agents it started.' },
+        },
+      },
+      execute: async ({ limit = 30, archived = false, children_of: childrenOf }) => {
+        const agents = await agentsNow()
+        const parent = childrenOf === undefined ? undefined : childrenOf === 'me' ? sessions.current.id : found(agents, childrenOf).id
+        const byId = new Map(agents.map((agent) => [agent.id, agent]))
         return agents
-          .filter((agent) => archived || !agent.archived)
+          .filter((agent) => (archived || !agent.archived) && (parent === undefined || agent.parent === parent))
           .slice(0, limit)
-          .map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd, archived: isArchived }) => ({ id, tool: kind, title, firstPrompt: firstPrompt.slice(0, 200), machine, holder, status, lastActivity, repo, cwd, archived: isArchived }))
+          .map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd, archived: isArchived, parent: startedBy }) => {
+            const starter = byId.get(startedBy)
+            return {
+              id,
+              tool: kind,
+              title,
+              firstPrompt: firstPrompt.slice(0, 200),
+              machine,
+              holder,
+              status,
+              lastActivity,
+              repo,
+              cwd,
+              archived: isArchived,
+              parent: startedBy === '' ? null : { id: startedBy, title: starter?.title || starter?.firstPrompt.slice(0, 80) || '', machine: starter === undefined ? '' : starter.holder || starter.machine },
+            }
+          })
       },
     }),
     tool({
       name: 'start_agent',
-      description: `Start a new Claude Code agent on a machine, this one when machine is left out, in its checkout of the repository the folder is in, and type prompt into it as its first message. Answers the agent's id. ${WAKES}`,
+      description: `Start a new Claude Code agent on a machine, this one when machine is left out, in its checkout of the repository the folder is in, and type prompt into it as its first message. This agent becomes its parent: the prompt names this agent and its machine as its sender, so the new agent reports back with tell_agent when it is done or stuck, which wakes this agent, and list_agents lists it with children_of me. Answers the agent's id and machine. ${WAKES}`,
       inputSchema: {
         type: 'object',
         properties: {
@@ -87,9 +121,18 @@ export function agentTools(mod: Mod<AnyhostState>) {
     }),
     tool({
       name: 'read_agent',
-      description: 'Read the status and screen of an agent wherever it runs, without waking it.',
-      inputSchema: { type: 'object', properties: { agent: AGENT, lines: { type: 'integer', minimum: 0, description: 'Lines of history above the screen, 0 by default. herdr-core reads history only while the agent is not working.' } }, required: ['agent'] },
-      execute: ({ agent, lines = 0 }) => tell(agent, { lines }),
+      description:
+        "Read an agent wherever it runs, without waking it: its status and screen, or with messages its last messages, what it was told and what it answered, from its conversation on the machine that holds it, running or not. An agent's answer to the task start_agent gave it is its last assistant message.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agent: AGENT,
+          lines: { type: 'integer', minimum: 0, description: 'Lines of history above the screen, 0 by default. herdr-core reads history only while the agent is not working.' },
+          messages: { type: 'integer', minimum: 1, description: 'Read this many of its last messages instead of its screen.' },
+        },
+        required: ['agent'],
+      },
+      execute: ({ agent, lines = 0, messages }) => tell(agent, messages === undefined ? { lines } : { messages }),
     }),
     tool({
       name: 'press_keys',
@@ -102,13 +145,12 @@ export function agentTools(mod: Mod<AnyhostState>) {
       description: 'Move an agent to another machine, which runs it from then on with its whole conversation and code. The machine that runs the agent moves it once its turn ends.',
       inputSchema: { type: 'object', properties: { agent: AGENT, machine: { type: 'string' } }, required: ['agent', 'machine'] },
       execute: async ({ agent, machine }) => {
-        const [{ agents }, { here, machines }] = await Promise.all([askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents'), askProgram<Machines>(mod, '/machines')])
-        const found = agents.find(({ id }) => id.startsWith(agent))
-        if (found === undefined) throw new Error(`No agent's id begins with ${agent}. list_agents lists them.`)
-        const runsOn = found.holder || found.machine
-        if (runsOn === machines.find(({ id }) => id === here)?.name) return await askProgram<{ readonly session: string; readonly line: string }>(mod, '/move', { session: found.id, machine })
-        await tell(found.id, { text: `/move ${machine}` })
-        return `${runsOn} moves ${found.id.slice(0, 8)} to ${machine} once its turn ends. read_agent shows how it goes.`
+        const [agents, { here, machines }] = await Promise.all([agentsNow(), askProgram<Machines>(mod, '/machines')])
+        const moved = found(agents, agent)
+        const runsOn = moved.holder || moved.machine
+        if (runsOn === machines.find(({ id }) => id === here)?.name) return await askProgram<{ readonly session: string; readonly line: string }>(mod, '/move', { session: moved.id, machine })
+        await tell(moved.id, { text: `/move ${machine}` })
+        return `${runsOn} moves ${moved.id.slice(0, 8)} to ${machine} once its turn ends. read_agent shows how it goes.`
       },
     }),
     tool({
@@ -116,11 +158,21 @@ export function agentTools(mod: Mod<AnyhostState>) {
       description: 'Archive an agent whose work is finished, which moves it out of the active list on every machine, or bring an archived one back with archived false. Working in an archived agent brings it back by itself.',
       inputSchema: { type: 'object', properties: { agent: AGENT, archived: { type: 'boolean', description: 'true by default.' } }, required: ['agent'] },
       execute: async ({ agent, archived = true }) => {
-        const { agents } = await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')
-        const found = agents.find(({ id }) => id.startsWith(agent))
-        if (found === undefined) throw new Error(`No agent's id begins with ${agent}. list_agents lists them.`)
-        await askProgram(mod, '/agents/archive', { session: found.id, archived })
-        return `${archived ? 'Archived' : 'Brought back'} ${found.id.slice(0, 8)}.`
+        const { id } = found(await agentsNow(), agent)
+        await askProgram(mod, '/agents/archive', { session: id, archived })
+        return `${archived ? 'Archived' : 'Brought back'} ${id.slice(0, 8)}.`
+      },
+    }),
+    tool({
+      name: 'delete_agent',
+      description:
+        'Delete an agent wherever it is held: the machine that holds it stops it, working or not, and deletes its conversation and files there and in R2, so every machine lists it under Deleted. Opening a deleted agent with open_agent brings it back. An agent cannot delete itself.',
+      inputSchema: { type: 'object', properties: { agent: AGENT }, required: ['agent'] },
+      execute: async ({ agent }) => {
+        const { id } = found(await agentsNow(), agent)
+        if (id === sessions.current.id) throw new Error(`${id.slice(0, 8)} is this agent, which cannot delete itself.`)
+        await askProgram(mod, '/agents/delete', { session: id })
+        return `Deleted ${id.slice(0, 8)}.`
       },
     }),
     tool({

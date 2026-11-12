@@ -2,6 +2,26 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.7.3] - 2026-11-12
+
+### New
+- Agents replace Claude Code's own subagents. `delete_agent` deletes an agent wherever it is held. `read_agent` with `messages` reads an agent's last messages, so an agent reads a child's answer as its last message, whether it still runs or not. `list_agents` shows who started each agent and on which machine, and `children_of: "me"` lists an agent's own children. A child's first message names its parent and that machine, so it reports back when it is done or stuck. A child that waits at a permission prompt tells its parent which keys answer it.
+- `anyhost tell <session> --messages <count>` prints a session's last messages, and `anyhost delete` deletes a session wherever it is held.
+
+### Fixed
+- Clicking a session that runs in tmux, Herdr's terminal app or a plain terminal, on any machine, never moves it by itself. It shows Move it here, and the move waits until the session's turn, its background commands and its permission prompts have ended, then stops that copy and resumes the session in the Herdr app. The original always closes, so the session never runs twice.
+- Two clicks or messages at once no longer open two terminals of one session.
+- A move that waits longer than the Herdr app's 10-minute limit for a command no longer fails with an error. The screen shows "Moves here once its turn ends" until it arrives.
+
+## [0.7.2] - 2026-11-12
+
+### Fixed
+- No session runs twice anymore. A message or a click on a session whose live Claude Code ran outside its anyhost terminal, as in tmux beside an older anyhost's sleeping copy, typed into that sleeping copy and started a second one. anyhost now uses a session's terminal only while every live Claude Code of the session is its own, and otherwise stops every copy once its turn ends and continues the session in one new terminal.
+- The errors on every prompt, and the Archive button that did nothing, are gone. anyhost's background program spent all of its time starting git for code backups and re-reading every session's record, so it answered seconds late or not at all. It now reads a session's code at most once a minute and lists folders off its main thread, and `/status` answers in 35 ms at the 99th percentile on a Mac with 61 live sessions.
+- Archive, the session list and the machine list wait out a reconnect to the relay instead of failing with "anyhost connects to the relay at …".
+- Clicking a session that runs in another terminal shows "This session is working in another terminal" with Move it here, as a T3 Code session does, and moves nothing by itself.
+- The sidebar draws every session with one card, with t3code's colored status: Working, Pending Approval and Completed. Working sessions stay in the list, and only background runs fold away.
+
 ## [0.7.1] - 2026-11-12
 
 ### Fixed
