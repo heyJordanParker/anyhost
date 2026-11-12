@@ -54,10 +54,14 @@ export function followHolders(relay: Relay, db: Database): Holders {
   let reading: Promise<void> | undefined
   let isCaughtUp = false
   const catchUp = (): Promise<void> => {
-    const after = reading ?? Promise.resolve()
-    const next = after.then(readChanges).then(() => void (isCaughtUp = true))
-    reading = next.finally(() => {
-      if (reading === next) reading = undefined
+    const next = (reading ?? Promise.resolve()).then(readChanges).then(() => void (isCaughtUp = true))
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    )
+    reading = settled
+    void settled.then(() => {
+      if (reading === settled) reading = undefined
     })
     return next
   }

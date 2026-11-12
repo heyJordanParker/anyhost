@@ -1,8 +1,9 @@
-import { expect, test } from 'bun:test'
+import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { forgetEmpty, journalOf, openCapture, openDatabase, recordSummary, seal, takeUntold, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
-import { HeldElsewhere, takeClaim } from '../src/claims.ts'
+import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
+import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { restore } from '../src/resume.ts'
 import { agentsOf, downloadJournal, listSessions } from '../src/sessions.ts'
@@ -70,6 +71,27 @@ test('a machine that missed a change, as when its socket lost the message, reads
   await until(async () => (await onServer.holders.current()).size === 2, 'the server reading the change it missed')
 
   expect(Object.fromEntries(await onServer.holders.current())).toEqual({ [first]: mac.id, [second]: mac.id })
+})
+
+test('a read of the holders that a closed connection cuts off fails that read alone, with no error left unhandled', async () => {
+  const welcomes: ((welcome: { readonly changed: number }) => void)[] = []
+  const closed = {
+    on: (kind: string, listener: (welcome: { readonly changed: number }) => void) => (kind === 'welcome' && welcomes.push(listener), () => undefined),
+    runOne: async () => {
+      throw new Error('anyhost closed its connection to the relay.')
+    },
+  } as unknown as Relay
+  const holders = followHolders(closed, openDatabase(temporaryFolder()))
+  const unhandled: unknown[] = []
+  const heard = (reason: unknown): void => void unhandled.push(reason)
+  process.on('unhandledRejection', heard)
+  onTestFinished(() => void process.off('unhandledRejection', heard))
+
+  for (const welcome of welcomes) welcome({ changed: 5 })
+
+  await expect(holders.current()).rejects.toThrow('anyhost closed its connection to the relay.')
+  await Bun.sleep(100)
+  expect(unhandled).toEqual([])
 })
 
 test('a session this machine holds with no journal in R2 or here leaves the relay, and one with a journal stays', async () => {
