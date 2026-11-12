@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.8.1] - 2026-11-12
+
+### Fixed
+- A move no longer drops the note a finished background command sends the session, nor a prompt typed while the move uploads. Both run, and the move waits for their turn before it stops the session.
+
 ## [0.8.0] - 2026-11-12
 
 ### Fixed
