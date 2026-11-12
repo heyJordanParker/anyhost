@@ -2,6 +2,17 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.7.3] - 2026-11-12
+
+### New
+- Agents replace Claude Code's own subagents. `delete_agent` deletes an agent wherever it is held. `read_agent` with `messages` reads an agent's last messages, so an agent reads a child's answer as its last message, whether it still runs or not. `list_agents` shows who started each agent and on which machine, and `children_of: "me"` lists an agent's own children. A child's first message names its parent and that machine, so it reports back when it is done or stuck. A child that waits at a permission prompt tells its parent which keys answer it.
+- `anyhost tell <session> --messages <count>` prints a session's last messages, and `anyhost delete` deletes a session wherever it is held.
+
+### Fixed
+- Clicking a session that runs in tmux, Herdr's terminal app or a plain terminal, on any machine, never moves it by itself. It shows Move it here, and the move waits until the session's turn, its background commands and its permission prompts have ended, then stops that copy and resumes the session in the Herdr app. The original always closes, so the session never runs twice.
+- Two clicks or messages at once no longer open two terminals of one session.
+- A move that waits longer than the Herdr app's 10-minute limit for a command no longer fails with an error. The screen shows "Moves here once its turn ends" until it arrives.
+
 ## [0.7.2] - 2026-11-12
 
 ### Fixed

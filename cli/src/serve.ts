@@ -9,7 +9,7 @@ import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relay
 import { hcPath, machinesReached } from './hc.ts'
 import { installHerdr } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { deleteHere, sessionOf, move, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, startNew, statusesOf, tell, type MoveHere, type Moving } from './move.ts'
+import { deleteAgent, sessionOf, move, noteWaiting, receiveDelete, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, startNew, statusesOf, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type RelayState } from './relay.ts'
 import { closeStopped } from './runner.ts'
 import { agentsOf } from './sessions.ts'
@@ -309,7 +309,22 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       followRecords()
     }
   }
+  const moves = new Map<string, Moving>()
+  const mover: MoveHere = {
+    moves,
+    answers: new Map(),
+    problems,
+    get checkouts() {
+      return checkouts
+    },
+    queue: (session, tool, path) => queue.add(session, tool, path),
+    flush: (session, signal, onRelay) => queue.flush(session, signal, onRelay),
+    onRecordsChange,
+    opening: new Map(),
+  }
+  const noteChildren = noteWaiting(capture, mover)
   const recordsChanged = (): void => {
+    noteChildren()
     for (const read of recordsHeard) read()
   }
   const watchable: readonly { readonly folder: string; readonly depth: number }[] = [...watchedFolders(roots), { folder: records, depth: 1 }]
@@ -539,7 +554,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     queueFiles(await sealQuiet(capture, problems))
     await settle('herdr machines', () => keepHerdrReaching(relay, device))
   }
-  const moves = new Map<string, Moving>()
   const shownMove = ({ to, step, line }: Moving): Pick<Moving, 'to' | 'step' | 'line'> => ({ to, step, line })
   const holderOf = (session: string): { machine?: string; problem?: string; untold?: string; move?: Pick<Moving, 'to' | 'step' | 'line'> } => {
     const moving = moves.get(session)
@@ -588,6 +602,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     readonly text?: string
     readonly keys?: readonly string[]
     readonly lines?: number
+    readonly messages?: number
     readonly sender?: string
     readonly apiToken?: string
     readonly target?: string
@@ -595,7 +610,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     readonly archiveAfterDays?: number | null
     readonly at?: string
   }
-  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, sender = '', apiToken, target = '', archived = true, archiveAfterDays, at = '' }: Asked): Promise<Response> => {
+  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, sender = '', apiToken, target = '', archived = true, archiveAfterDays, at = '' }: Asked): Promise<Response> => {
     switch (pathname) {
       case '/connect': {
         if (connecting?.view.is === 'running') return Response.json(connecting.view)
@@ -637,7 +652,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         if (Number.isNaN(Date.parse(at))) return failed(400, `/agents/visit takes at, an ISO time, not ${at}.`)
         return await throughRelay(async () => void (await visit(relay, await sessionOf(capture, session), at)))
       case '/agents/delete':
-        return await deleteHere(capture, session, mover).then(
+        return await deleteAgent(capture, session, mover).then(
           (deleted) => Response.json({ session: deleted }),
           (error: unknown) => failed(400, error),
         )
@@ -652,7 +667,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         if (moves.get(session)?.keep() !== true) return failed(400, `No move of ${session} can keep it here now: none runs, or its machine answered already.`)
         return Response.json({})
       case '/new':
-        return await startNew(capture, machine, folder, prompt, mover).then(
+        return await startNew(capture, machine, folder, prompt, mover, parent).then(
           async (started) => {
             await updateShared(relay, (shared) => ({ ...shared, lastMachine: machine || device.name, parents: parent === '' ? shared.parents : { ...shared.parents, [started]: parent } }))
             return Response.json({ session: started, machine: machine || device.name })
@@ -660,7 +675,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           (error: unknown) => failed(400, error),
         )
       case '/agents/tell':
-        return await tell(capture, session, { text, keys, lines, sender }, mover).then(
+        return await tell(capture, session, { text, keys, lines, sender, messages }, mover).then(
           (told) => Response.json(told),
           (error: unknown) => failed(400, error),
         )
@@ -685,20 +700,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       process.kill(process.pid, signal)
     })
   }
-  const mover: MoveHere = {
-    moves,
-    answers: new Map(),
-    problems,
-    get checkouts() {
-      return checkouts
-    },
-    queue: (session, tool, path) => queue.add(session, tool, path),
-    flush: (session, signal, onRelay) => queue.flush(session, signal, onRelay),
-    onRecordsChange,
-  }
   relay.on('move', (message) => void receiveMove(capture, message, mover))
   relay.on('start', (message) => void receiveStart(capture, message, mover))
   relay.on('tell', (message) => void receiveTell(capture, message, mover))
+  relay.on('delete', (message) => void receiveDelete(capture, message, mover))
   relay.on('list', (message) => void receiveList(capture, message, mover))
   relay.on('moved', (message) => void receiveMoved(capture, message, mover))
   const releasing = new Set<string>()

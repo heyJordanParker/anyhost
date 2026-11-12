@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { startOf } from '../src/claude.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
-import { anyhostOn, CLI, copiesOn, decoder, killAfterTest, LAPTOP, logOf, machineFor, postTo, runningOn, runsOn, sentOn, serveOn, SESSION, startedOn, stepsOf, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
+import { anyhostOn, CLI, copiesOn, decoder, isUploaded, killAfterTest, LAPTOP, logOf, machineFor, postTo, runningOn, runsOn, sentOn, serveOn, SESSION, startedOn, stepsOf, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
 
 test('anyhost new starts a session on the worker in a terminal of herdr-core in its clone of the same repository, routed by start and started', async () => {
   const relay = await memoryRelay()
@@ -182,6 +182,63 @@ test('anyhost tell to a session its machine holds in no live terminal opens one 
 
 const CTO = 'c7000000-0000-4000-8000-000000000000'
 
+test('an agent started on another machine for an agent gets its first message from that agent and its machine, lists it as its parent, answers its last messages from there, and is deleted there', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const worker = await workerOn(relay)
+  await serveOn(laptop.env)
+  await until(() => relay.isConnected(LAPTOP.id), 'the laptop connecting')
+  const checkout = tripOn(laptop)
+
+  const started = await postTo(laptop.socket, '/new', { machine: WORKER.name, folder: checkout, prompt: 'Book the train', parent: CTO })
+  const session = String(started.body['session'])
+  await until(() => sentOn(worker.folder).length > 0, 'the first message going in')
+  const cwd = runsOn(worker.folder)[0]?.cwd ?? ''
+  const transcript = join(worker.env['HOME'] ?? '', '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
+  const line = (value: object): string => `${JSON.stringify({ sessionId: session, cwd, ...value })}\n`
+  mkdirSync(join(transcript, '..'), { recursive: true })
+  writeFileSync(
+    transcript,
+    line({ type: 'user', timestamp: '2026-11-12T10:00:00.000Z', message: { role: 'user', content: '<anyhost from="c7000000 on anyhost-b" reach="tell_agent c7000000 when done or stuck">Book the train</anyhost>' } }) +
+      line({ type: 'assistant', timestamp: '2026-11-12T10:00:01.000Z', message: { id: 'msg_1', role: 'assistant', content: [{ type: 'text', text: 'Looking at the trains.' }] } }) +
+      line({ type: 'assistant', timestamp: '2026-11-12T10:00:02.000Z', message: { id: 'msg_1', role: 'assistant', content: [{ type: 'tool_use', id: 'tool_1', name: 'Bash', input: {} }] } }) +
+      line({ type: 'user', timestamp: '2026-11-12T10:00:03.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool_1', content: 'the 9:15 is free' }] } }) +
+      line({ type: 'assistant', timestamp: '2026-11-12T10:00:04.000Z', message: { id: 'msg_2', role: 'assistant', content: [{ type: 'text', text: 'Booked the 9:15 train.' }] } }),
+  )
+  await until(() => isUploaded(relay, session, 'Booked the 9:15 train.'), 'the worker uploading the transcript')
+
+  const read = await postTo(laptop.socket, '/agents/tell', { session: session.slice(0, 8), messages: 2 })
+  const parentOf = async (): Promise<string | undefined> => ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; parent: string }[] }).agents.find(({ id }) => id === session)?.parent
+  await until(async () => (await parentOf()) !== undefined, 'the laptop listing the session')
+  const parent = await parentOf()
+  const deleted = await postTo(laptop.socket, '/agents/delete', { session: session.slice(0, 8) })
+
+  expect(sentOn(worker.folder)).toEqual(['t0 <anyhost from="c7000000 on anyhost-b" reach="tell_agent c7000000 when done or stuck">Book the train</anyhost>'])
+  expect(read).toMatchObject({ status: 200, body: { machine: WORKER.name, messages: [{ role: 'assistant', at: '2026-11-12T10:00:01.000Z', text: 'Looking at the trains.' }, { role: 'assistant', at: '2026-11-12T10:00:04.000Z', text: 'Booked the 9:15 train.' }] } })
+  expect(parent).toBe(CTO)
+  expect(deleted).toEqual({ status: 200, body: { session } })
+  expect(existsSync(transcript)).toBe(false)
+  expect(copiesOn(worker.folder).filter(({ isRunning }) => isRunning)).toEqual([])
+}, 90_000)
+
+test('an agent that starts waiting at a permission prompt on another machine tells the agent that started it which keys answer it', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+  const checkout = tripOn(laptop)
+  const started = await postTo(laptop.socket, '/new', { machine: WORKER.name, folder: checkout, prompt: 'Book the train', parent: SESSION })
+  const child = String(started.body['session'])
+  await until(() => sentOn(worker.folder).length > 0, 'the first message going in')
+  const records = join(worker.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions')
+  const record = readdirSync(records).map((name) => join(records, name)).find((path) => readFileSync(path, 'utf8').includes(child)) ?? ''
+
+  writeFileSync(record, readFileSync(record, 'utf8').replace(/"status":"[a-z]+"/, '"status":"waiting"'))
+  await until(() => sentOn(laptop.folder).length > 0, 'the note reaching the agent that started it', 30_000)
+
+  const id = child.slice(0, 8)
+  expect(sentOn(laptop.folder)).toEqual([`t0 <anyhost from="${id} on ${WORKER.name}" reach="tell_agent ${id} when done or stuck">${id} waits at a permission prompt on ${WORKER.name}. read_agent ${id} shows it, and press_keys ${id} answers it.</anyhost>`])
+}, 90_000)
+
 test("GET /agents lists what a session another machine runs does now, and an agent's message to it names the agent and the machine that sent it, so the agent it reaches answers it, and keys answer a prompt", async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
@@ -256,6 +313,28 @@ test("an open of a session whose live Claude Code is not its run's own, as the H
   expect(opened.body['terminal']).not.toBe('opened-before')
   expect([laptop.claude.signalCode, runner.signalCode === null]).toEqual(['SIGTERM', false])
   expect(copiesOn(laptop.folder).filter(({ isRunning }) => isRunning)).toHaveLength(1)
+}, 60_000)
+
+test('a session working in another terminal, as in tmux, moves into one terminal of herdr-core only once its turn and its background commands ended, however many opens ask for it meanwhile', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  laptop.status('busy')
+
+  const opens = [postTo(laptop.socket, '/agents/open', { session: SESSION }), postTo(laptop.socket, '/agents/open', { session: SESSION.slice(0, 8) })]
+  await Bun.sleep(1500)
+  const whileWorking = { stopped: laptop.claude.signalCode, terminals: runsOn(laptop.folder).length }
+  laptop.status('shell')
+  await Bun.sleep(1500)
+  const whileItsCommandRuns = { stopped: laptop.claude.signalCode, terminals: runsOn(laptop.folder).length }
+  laptop.status('idle')
+  const [first, second] = await Promise.all(opens)
+
+  expect(whileWorking).toEqual({ stopped: null, terminals: 0 })
+  expect(whileItsCommandRuns).toEqual({ stopped: null, terminals: 0 })
+  expect([first?.status, second?.status]).toEqual([200, 200])
+  expect(second?.body['terminal']).toBe(first?.body['terminal'])
+  expect(laptop.claude.signalCode).toBe('SIGTERM')
+  expect(runsOn(laptop.folder).map(({ session }) => session)).toEqual([SESSION])
 }, 60_000)
 
 test('a tell to a machine that holds the session and does not answer gets its answer after 25 s over the socket, which keeps a request open past 10 s', async () => {

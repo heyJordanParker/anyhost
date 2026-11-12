@@ -1,7 +1,7 @@
 import { mkdir, readFile, readlink, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import type { AgentStatus, Delivered, Device, Offline, Routed } from '../../relay/protocol.ts'
+import type { AgentStatus, Delivered, Device, Message, Offline, Routed } from '../../relay/protocol.ts'
 import { captureAgainFrom, chainOf, changedFiles, checkoutOf, framesOf, holdHere, isDeleted, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { commandOf, recordedSessions, run, runOf, runSessions, runTerminalOf, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
@@ -9,7 +9,8 @@ import { devicesOf, otherMachine } from './device.ts'
 import { killTerminal, labelledTerminals, openTerminal, pressKeys, readTerminal, sendTo } from './hc.ts'
 import type { Relay } from './relay.ts'
 import { cloneMissing, localFolder, restore } from './resume.ts'
-import { ownerOf, type Tool } from './transcript.ts'
+import { sharedOf } from './shared.ts'
+import { messagesOf, ownerOf, type Tool } from './transcript.ts'
 
 const RUNNING_MS = 60_000
 const TRUST_ANSWER_MS = 86_400_000
@@ -31,10 +32,11 @@ export type MoveHere = {
   readonly queue: (session: string, tool: Tool, path: string) => void
   readonly flush: (session: string, signal: AbortSignal, onRelay: (isConnected: boolean) => void) => Promise<void>
   readonly onRecordsChange: OnRecordsChange
+  readonly opening: Map<string, Promise<string>>
 }
 
-type Reply = Extract<Routed, { readonly t: 'moved' | 'started' | 'told' | 'listed' }>
-const ANSWER = { move: 'moved', start: 'started', tell: 'told', list: 'listed' } as const
+type Reply = Extract<Routed, { readonly t: 'moved' | 'started' | 'told' | 'listed' | 'deleted' }>
+const ANSWER = { move: 'moved', start: 'started', tell: 'told', list: 'listed', delete: 'deleted' } as const
 type Asked = Extract<Routed, { readonly t: keyof typeof ANSWER }>
 type AnswerTo<A extends Asked> = Extract<Delivered, { readonly t: (typeof ANSWER)[A['t']] }> | Offline
 
@@ -362,15 +364,15 @@ async function takeSession(capture: Capture, asked: Extract<Delivered, { readonl
   }
 }
 
-export async function startNew(capture: Capture, machine: string, cwd: string, prompt: string, here: MoveHere): Promise<string> {
-  if (machine === '' || machine === capture.device.name) return await startIn(capture, cwd, prompt, here)
+export async function startNew(capture: Capture, machine: string, cwd: string, prompt: string, here: MoveHere, parent = ''): Promise<string> {
+  if (machine === '' || machine === capture.device.name) return await startIn(capture, cwd, prompt, here, { session: parent, machine: capture.device.name })
   const target = await otherMachine(capture.relay, capture.device, machine, 'Run claude here.')
   const { repo, folder: inside } = await checkoutOf(cwd)
   const branch = repo === '' ? '' : (await run(['git', '-C', cwd, 'branch', '--show-current'])).trim()
   const trusted = await trusts(capture, cwd)
   const answer = await ask(
     capture.relay,
-    { t: 'start', id: crypto.randomUUID(), to: target.id, repo, branch, folder: repo === '' ? cwd : inside, trusted, prompt },
+    { t: 'start', id: crypto.randomUUID(), to: target.id, repo, branch, folder: repo === '' ? cwd : inside, trusted, prompt, sender: parent },
     { keepsWaiting: async () => false, countsGone: (asked, now) => now.seenAt !== asked.seenAt },
   )
   if (answer.t === 'offline') throw new Error(`${machine} is offline or its program restarted before it answered. anyhost list shows whether a session started there.`)
@@ -391,7 +393,7 @@ async function startSession(capture: Capture, asked: Extract<Delivered, { readon
     await cloneMissing(place, cwd, roots.home, asked.branch)
     await mkdir(cwd, { recursive: true })
     if (asked.trusted) await trustHere(capture, cwd, asked.from.name)
-    const session = await startIn(capture, cwd, asked.prompt, here)
+    const session = await startIn(capture, cwd, asked.prompt, here, { session: asked.sender ?? '', machine: asked.from.name })
     console.error(`${stamp()} ${device.name} started ${session} in ${cwd} for ${asked.from.name}.`)
     return { t: 'started', id: asked.id, to: asked.from.id, session }
   } catch (error) {
@@ -400,13 +402,13 @@ async function startSession(capture: Capture, asked: Extract<Delivered, { readon
   }
 }
 
-async function startIn(capture: Capture, cwd: string, prompt: string, here: MoveHere): Promise<string> {
+async function startIn(capture: Capture, cwd: string, prompt: string, here: MoveHere, parent: { readonly session: string; readonly machine: string }): Promise<string> {
   const { relay, roots, device } = capture
   const session = crypto.randomUUID()
   const begin = async (running: RunningSession | undefined): Promise<void> => {
     if (running === undefined) throw new Error(`Claude Code listed the new session ${session.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start, or no day after it in a folder it asked the person to trust.`)
     await takeClaim(relay, session, { take: false })
-    if (prompt !== '') await tellHere(capture, session, { text: prompt, keys: [], lines: 0, sender: '' }, here)
+    if (prompt !== '') await tellHere(capture, session, { text: prompt, keys: [], lines: 0, sender: parent.session }, here, parent.machine)
   }
   let isOpened = false
   try {
@@ -436,8 +438,17 @@ export async function sessionOf(capture: Capture, asked: string): Promise<string
   return session
 }
 
-export type Tell = { readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string }
-export type Told = { readonly machine: string; readonly session: string; readonly status: AgentStatus; readonly screen: string }
+export type Tell = { readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string; readonly messages?: number }
+export type Told = { readonly machine: string; readonly session: string; readonly status: AgentStatus; readonly screen: string; readonly messages?: readonly Message[] }
+
+async function messagesHere(capture: Capture, session: string, count: number): Promise<Message[]> {
+  if ((journalOf(capture.db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost reads the messages of Claude Code sessions, and ${session.slice(0, 8)} is a Codex session.`)
+  const projects = join(capture.roots.claudeHome, 'projects')
+  const found = await Promise.all([...new Bun.Glob(`*/${session}.jsonl`).scanSync({ cwd: projects })].map(async (path) => ({ path: join(projects, path), at: (await stat(join(projects, path))).mtimeMs })))
+  const newest = found.sort((a, b) => b.at - a.at)[0]
+  if (newest === undefined) throw new Error(`${session.slice(0, 8)} has no transcript on ${capture.device.name}.`)
+  return messagesOf(await Bun.file(newest.path).text(), count)
+}
 
 const tagged = (told: Tell, machine: string): string => {
   if (told.sender === '') return told.text
@@ -452,14 +463,22 @@ async function terminalHere(capture: Capture, session: string): Promise<string |
   throw new Error(`${session.slice(0, 8)} runs on ${capture.device.name} outside herdr-core, so anyhost cannot type into it or read it.`)
 }
 
-async function terminalOf(capture: Capture, session: string, here: MoveHere): Promise<string> {
+function terminalOf(capture: Capture, session: string, here: MoveHere): Promise<string> {
+  const opening = here.opening.get(session)
+  if (opening !== undefined) return opening
+  const opened = placeInTerminal(capture, session, here).finally(() => here.opening.delete(session))
+  here.opening.set(session, opened)
+  return opened
+}
+
+async function placeInTerminal(capture: Capture, session: string, here: MoveHere): Promise<string> {
   const { db, roots } = capture
   const id = session.slice(0, 8)
   const ran = await runTerminalOf(roots.claudeHome, session)
   if (ran !== undefined) return ran
   if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost runs Claude Code sessions in herdr-core, and ${id} is a Codex session.`)
   if ((await statusOf(roots.claudeHome, session)) !== undefined) {
-    await whenSessions(roots.claudeHome, (sessions) => (sessions.some((entry) => entry.sessionId === session && entry.status === 'busy') ? undefined : true), Infinity, here.onRecordsChange)
+    await whenSessions(roots.claudeHome, (sessions) => (sessions.some((entry) => entry.sessionId === session && statusOfRecord(entry.status) !== 'idle') ? undefined : true), Infinity, here.onRecordsChange)
     await stopCopy(roots.claudeHome, session)
   }
   const known = workingFolderOf(db, session)
@@ -471,11 +490,12 @@ async function terminalOf(capture: Capture, session: string, here: MoveHere): Pr
   return await openTerminal(cwd, session, commandOf(session), { isResumed: true })
 }
 
-async function tellHere(capture: Capture, session: string, told: Tell, here: MoveHere, sender = capture.device.name): Promise<{ readonly status: AgentStatus; readonly screen: string }> {
+async function tellHere(capture: Capture, session: string, told: Tell, here: MoveHere, sender = capture.device.name): Promise<Omit<Told, 'machine' | 'session'>> {
   const { db, device, roots } = capture
   const id = session.slice(0, 8)
   const holder = journalOf(db, session)?.holder ?? ''
   if (holder !== '') throw new Error(`${id} continues on ${holder}.`)
+  if ((told.messages ?? 0) > 0) return { status: (await statusOf(roots.claudeHome, session)) ?? 'idle', screen: '', messages: await messagesHere(capture, session, told.messages ?? 0) }
   const isRead = told.text === '' && told.keys.length === 0
   const address = isRead ? await terminalHere(capture, session) : await terminalOf(capture, session, here)
   if (address === undefined) throw new Error(`${id} runs in no terminal of herdr-core on ${device.name}. Tell it something to start it again.`)
@@ -498,7 +518,33 @@ export async function tell(capture: Capture, asked: string, told: Tell, here: Mo
   })
   if (answer.t === 'offline') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, is offline. open_agent continues it on another machine.`)
   if ('error' in answer) throw new Error(`${holder.name}: ${answer.error}`)
-  return { machine: holder.name, session, status: answer.status, screen: answer.screen }
+  return { machine: holder.name, session, status: answer.status, screen: answer.screen, ...(answer.messages === undefined ? {} : { messages: answer.messages }) }
+}
+
+export function noteWaiting(capture: Capture, here: MoveHere): () => void {
+  let waiting: ReadonlySet<string> | undefined
+  let isAsked = false
+  let reading = Promise.resolve()
+  const read = async (): Promise<void> => {
+    isAsked = false
+    const now = new Set((await recordedSessions(capture.roots.claudeHome)).filter(({ status }) => status === 'waiting').map(({ sessionId }) => sessionId))
+    const fresh = waiting === undefined ? [] : [...now].filter((session) => !waiting?.has(session))
+    waiting = now
+    if (fresh.length === 0) return
+    const { parents } = await sharedOf(capture.relay)
+    for (const session of fresh) {
+      const parent = parents[session]
+      if (parent === undefined) continue
+      const id = session.slice(0, 8)
+      const note = `${id} waits at a permission prompt on ${capture.device.name}. read_agent ${id} shows it, and press_keys ${id} answers it.`
+      void tell(capture, parent, { text: note, keys: [], lines: 0, sender: session }, here).catch((error: unknown) => console.error(`${stamp()} anyhost could not tell ${parent} that ${id} waits at a permission prompt: ${messageOf(error)}`))
+    }
+  }
+  return () => {
+    if (isAsked) return
+    isAsked = true
+    reading = reading.then(read).catch((error: unknown) => console.error(`${stamp()} anyhost could not read which sessions wait at a permission prompt: ${messageOf(error)}`))
+  }
 }
 
 export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readonly t: 'tell' }>, here: MoveHere): Promise<void> =>
@@ -508,7 +554,7 @@ export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readon
     asked,
     () =>
       tellHere(capture, asked.session, asked, here, asked.from.name).then(
-        ({ status, screen }): Reply => ({ t: 'told', id: asked.id, to: asked.from.id, status, screen }),
+        ({ status, screen, messages }): Reply => ({ t: 'told', id: asked.id, to: asked.from.id, status, screen, ...(messages === undefined ? {} : { messages }) }),
         (error: unknown): Reply => ({ t: 'told', id: asked.id, to: asked.from.id, error: messageOf(error) }),
       ),
     FORGET_MS,
@@ -542,7 +588,34 @@ export async function openHere(capture: Capture, asked: string, here: MoveHere):
   return { session, terminal: await terminalOf(capture, session, here) }
 }
 
-export async function deleteHere(capture: Capture, asked: string, here: MoveHere): Promise<string> {
+export async function deleteAgent(capture: Capture, asked: string, here: MoveHere): Promise<string> {
+  const { relay, device } = capture
+  const session = await sessionOf(capture, asked)
+  const holder = (await claimsOf(relay, session)).get(session)
+  if (holder === undefined || holder.id === device.id) return await deleteHere(capture, session, here)
+  const answer = await ask(relay, { t: 'delete', id: crypto.randomUUID(), to: holder.id, session }, { signal: AbortSignal.timeout(TELL_MS), keepsWaiting: async () => false, countsGone: () => false }).catch((error: unknown) => {
+    if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.7.3 there does not answer at all.`)
+    throw error
+  })
+  if (answer.t === 'offline') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, is offline, so delete it once ${holder.name} connects.`)
+  if ('error' in answer) throw new Error(`${holder.name}: ${answer.error}`)
+  return answer.session
+}
+
+export const receiveDelete = (capture: Capture, asked: Extract<Delivered, { readonly t: 'delete' }>, here: MoveHere): Promise<void> =>
+  answerOnce(
+    capture.relay,
+    here.answers,
+    asked,
+    () =>
+      deleteHere(capture, asked.session, here).then(
+        (session): Reply => ({ t: 'deleted', id: asked.id, to: asked.from.id, session }),
+        (error: unknown): Reply => ({ t: 'deleted', id: asked.id, to: asked.from.id, error: messageOf(error) }),
+      ),
+    FORGET_MS,
+  )
+
+async function deleteHere(capture: Capture, asked: string, here: MoveHere): Promise<string> {
   const { db, device, roots } = capture
   const session = await sessionOf(capture, asked)
   const journal = journalOf(db, session)

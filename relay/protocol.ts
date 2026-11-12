@@ -97,15 +97,19 @@ export type Routed =
   | { readonly t: 'move'; readonly id: string; readonly to: string; readonly session: string; readonly trusted: boolean; readonly claimedAt: string; readonly command: readonly string[] }
   | { readonly t: 'moved'; readonly id: string; readonly to: string }
   | { readonly t: 'moved'; readonly id: string; readonly to: string; readonly error: string }
-  | { readonly t: 'start'; readonly id: string; readonly to: string; readonly repo: string; readonly branch: string; readonly folder: string; readonly trusted: boolean; readonly prompt: string }
+  | { readonly t: 'start'; readonly id: string; readonly to: string; readonly repo: string; readonly branch: string; readonly folder: string; readonly trusted: boolean; readonly prompt: string; readonly sender?: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly session: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly error: string }
-  | { readonly t: 'tell'; readonly id: string; readonly to: string; readonly session: string; readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string }
-  | { readonly t: 'told'; readonly id: string; readonly to: string; readonly status: AgentStatus; readonly screen: string }
+  | { readonly t: 'tell'; readonly id: string; readonly to: string; readonly session: string; readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string; readonly messages?: number }
+  | { readonly t: 'told'; readonly id: string; readonly to: string; readonly status: AgentStatus; readonly screen: string; readonly messages?: readonly Message[] }
   | { readonly t: 'told'; readonly id: string; readonly to: string; readonly error: string }
+  | { readonly t: 'delete'; readonly id: string; readonly to: string; readonly session: string }
+  | { readonly t: 'deleted'; readonly id: string; readonly to: string; readonly session: string }
+  | { readonly t: 'deleted'; readonly id: string; readonly to: string; readonly error: string }
   | { readonly t: 'list'; readonly id: string; readonly to: string }
   | { readonly t: 'listed'; readonly id: string; readonly to: string; readonly statuses: Readonly<Record<string, AgentStatus>> }
 export type AgentStatus = 'working' | 'idle' | 'waiting'
+export type Message = { readonly role: 'user' | 'assistant'; readonly at: string; readonly text: string }
 export type Delivered = Routed & { readonly from: DeviceRef }
 export type Offline = { readonly t: 'offline'; readonly id?: string; readonly to: string }
 export type Invalid = { readonly t: 'invalid'; readonly message: string }

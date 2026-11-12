@@ -1,6 +1,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, sep } from 'node:path'
+import type { Message } from '../../relay/protocol.ts'
 import type { MachineRoots } from './device.ts'
 
 export type Tool = 'claude' | 'codex'
@@ -203,6 +204,26 @@ export function summarize(summary: Summary, text: string, tool: Tool): Summary {
     if (tool === 'codex' && line.includes('"type":"session_meta"')) repo = (JSON.parse(line) as { payload?: { git?: { repository_url?: string } } }).payload?.git?.repository_url ?? repo
   }
   return { title, titleRank, firstPrompt, cwd, repo, entrypoint }
+}
+
+type Line = { type?: string; isMeta?: boolean; isSidechain?: boolean; timestamp?: string; message?: { id?: string; role?: string; content?: unknown } }
+
+export function messagesOf(text: string, count: number): Message[] {
+  const messages: (Message & { readonly id: string })[] = []
+  for (const line of text.split('\n')) {
+    if (!line.startsWith('{"') || (!line.includes('"type":"user"') && !line.includes('"type":"assistant"'))) continue
+    const value = JSON.parse(line) as Line
+    if ((value.type !== 'user' && value.type !== 'assistant') || value.isMeta === true || value.isSidechain === true) continue
+    const content = value.message?.content
+    const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? (content as { type?: string; text?: string }[]) : []
+    const said = blocks.flatMap((block) => (block.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '' ? [block.text] : [])).join('\n')
+    if (said === '' || (value.type === 'user' && said.trimStart().startsWith('<') && !said.trimStart().startsWith('<anyhost '))) continue
+    const id = value.message?.id ?? ''
+    const last = messages.at(-1)
+    if (value.type === 'assistant' && id !== '' && last?.id === id) messages[messages.length - 1] = { ...last, text: `${last.text}\n${said}` }
+    else messages.push({ role: value.type, at: value.timestamp ?? '', text: said, id })
+  }
+  return messages.slice(-count).map(({ role, at, text: said }) => ({ role, at, text: said }))
 }
 
 let codexNames = { modifiedAt: -1, names: new Map<string, string>() }

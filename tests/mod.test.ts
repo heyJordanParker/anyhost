@@ -408,7 +408,7 @@ test('/move names the machine to move to, and shows why the program refused the 
   expect(moveToasts(tested)).toEqual([])
 })
 
-const AGENT = { id: '3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4', tool: 'claude', title: 'Checkout retry', firstPrompt: 'Make the checkout retry a declined card once', machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: '2026-11-10T14:02:00.000Z', repo: 'git@github.com:acme/shop.git', cwd: '/home/jordan/shop', entrypoint: 'cli', device: 'd1' }
+const AGENT = { id: '3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4', tool: 'claude', title: 'Checkout retry', firstPrompt: 'Make the checkout retry a declined card once', machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: '2026-11-10T14:02:00.000Z', repo: 'git@github.com:acme/shop.git', cwd: '/home/jordan/shop', entrypoint: 'cli', device: 'd1', archived: false, parent: '' }
 const MACHINES = { here: 'd0', machines: [{ id: 'd0', name: 'test-computer', connected: true, seenAt: '' }, { id: 'd1', name: 'devbox', connected: true, seenAt: '' }] }
 
 test('Claude lists every agent of every machine with what it does, starts one on a machine with its first message, and tells, reads or answers one wherever it runs', async () => {
@@ -420,7 +420,7 @@ test('Claude lists every agent of every machine with what it does, starts one on
   })
 
   expect(await tested.callTool('list_agents', { limit: 1 })).toEqual({
-    result: JSON.stringify([{ id: AGENT.id, tool: 'claude', title: 'Checkout retry', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd }]),
+    result: JSON.stringify([{ id: AGENT.id, tool: 'claude', title: 'Checkout retry', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd, archived: false, parent: null }]),
   })
   expect(await tested.callTool('start_agent', { folder: '/Users/jordan/shop', machine: 'devbox', prompt: 'You are the CTO. Watch every agent.' })).toEqual({ result: JSON.stringify({ session: 'c3', machine: 'devbox' }) })
   expect(await tested.callTool('tell_agent', { agent: '3f9c2b1e', text: 'Book the train' })).toEqual({ result: JSON.stringify(told) })
@@ -431,6 +431,27 @@ test('Claude lists every agent of every machine with what it does, starts one on
     { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', text: 'Book the train', sender: 'test-session' } },
     { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', lines: 40 } },
     { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', keys: ['down', 'enter'] } },
+  ])
+})
+
+test("Claude lists the agents it started with their parent and its machine, reads a child's last messages, and deletes a child but never itself", async () => {
+  const child = { ...AGENT, id: 'c4000000-0000-4000-8000-000000000000', title: 'Book the train', parent: 'test-session' }
+  const messages = [{ role: 'assistant', at: '2026-11-12T10:00:04.000Z', text: 'Booked the 9:15 train.' }]
+  const { tested, asked } = withProgram({
+    'GET /agents': [{ body: { agents: [child, { ...AGENT, id: 'test-session', title: 'CTO', holder: 'mac-studio' }, AGENT] } }],
+    'POST /agents/tell': [{ body: { machine: 'devbox', session: child.id, status: 'idle', screen: '', messages } }],
+    'POST /agents/delete': [{ body: { session: child.id } }],
+  })
+
+  expect(await tested.callTool('list_agents', { children_of: 'me' })).toEqual({
+    result: JSON.stringify([{ id: child.id, tool: 'claude', title: 'Book the train', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd, archived: false, parent: { id: 'test-session', title: 'CTO', machine: 'mac-studio' } }]),
+  })
+  expect(await tested.callTool('read_agent', { agent: 'c4000000', messages: 1 })).toEqual({ result: JSON.stringify({ machine: 'devbox', session: child.id, status: 'idle', screen: '', messages }) })
+  expect(await tested.callTool('delete_agent', { agent: 'c4000000' })).toEqual({ result: 'Deleted c4000000.' })
+  expect(await tested.callTool('delete_agent', { agent: 'test-session' })).toEqual({ deny: 'The delete_agent tool failed: test-ses is this agent, which cannot delete itself.' })
+  expect(asked.filter(({ method }) => method === 'POST')).toEqual([
+    { method: 'POST', path: '/agents/tell', body: { session: 'c4000000', messages: 1 } },
+    { method: 'POST', path: '/agents/delete', body: { session: child.id } },
   ])
 })
 

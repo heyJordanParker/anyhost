@@ -7,7 +7,7 @@ import { openCapture, type Capture } from './capture.ts'
 import { connectCloudflare, join, type Connecting, type Progress } from './connect.ts'
 import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, otherMachine, personOptions, relayLogin, removeMachine, rootsHere } from './device.ts'
 import { doctor } from './doctor.ts'
-import type { Moving } from './move.ts'
+import type { Moving, Told } from './move.ts'
 import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, resumeHere } from './resume.ts'
 import { runSession } from './runner.ts'
@@ -24,6 +24,8 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost new <machine> <folder> [prompt]
                                      start a session on a machine, this one too, in the same repository, and type prompt into it
   anyhost tell <session> [text]      type text into a session wherever it runs, waking it, and print its screen; no text only prints it
+  anyhost tell <session> --messages <count>
+                                     print the last messages of a session's conversation, wherever it is held, running or not
   anyhost run [--session <id>] [-- <claude command>]
                                      run Claude Code with your login environment, and end it after 8 hours unused off screen
   anyhost connect                    set your relay up in your Cloudflare account and join this machine to it
@@ -33,7 +35,7 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
                                      archive a session by itself once it sits idle that many days, or never
   anyhost visit <session> [--at <time>]
                                      mark a session read on every machine up to now or that ISO time, earlier than its last turn marks it unread
-  anyhost delete <session>           delete the files of a session this machine holds; Deleted lists it, and opening it brings it back
+  anyhost delete <session>           stop a session and delete its files on the machine that holds it; Deleted lists it, and opening it brings it back
   anyhost machines [--json]          list every machine joined to your relay
   anyhost machines --add <ssh target>
                                      install anyhost on a machine ssh reaches and join it, so every machine shows it
@@ -189,6 +191,7 @@ async function main(argv: string[]): Promise<number> {
       undo: { type: 'boolean' },
       after: { type: 'string' },
       at: { type: 'string' },
+      messages: { type: 'string' },
       version: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -298,9 +301,11 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (command === 'tell' && (rest.length === 1 || rest.length === 2) && rest[0] !== undefined) {
-    const told = await askProgram<{ readonly machine: string; readonly screen: string }>('/agents/tell', { session: rest[0], text: rest[1] ?? '' })
+    const messages = Number(values.messages ?? 0)
+    if (!Number.isInteger(messages) || messages < 0) throw new Error(`--messages takes a count of messages, not ${values.messages}.`)
+    const told = await askProgram<Pick<Told, 'screen' | 'messages'>>('/agents/tell', { session: rest[0], text: rest[1] ?? '', messages })
     if (told === undefined) throw noProgram()
-    console.log(told.screen)
+    console.log(told.messages === undefined ? told.screen : values.json === true ? JSON.stringify(told.messages) : told.messages.map(({ role, at, text }) => `${role} ${at}\n${text}\n`).join('\n'))
     return 0
   }
   if (command === 'doctor') return await doctor()

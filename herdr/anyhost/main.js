@@ -3,7 +3,8 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { agents, closeOverlay, exec, focused, hc, home, layout, nextCommand, notify, openOverlay, panes, props, run, setAgentOrder, setShared, shared, spaces, terminals, theme } from "herdr";
 
 const REFRESH_MS = 30_000;
-const LONG_MS = 900_000;
+const LONG_MS = 600_000;
+const MOVING = "anyhost.moving";
 const ARCHIVE_PAGE = 40;
 const ACTIVE_PAGE = 20;
 const FOUND_MAX = 40;
@@ -292,24 +293,40 @@ export default class Anyhost extends View {
     if (s.tool !== "claude") return run("space.new", { tab: titleOf(s).slice(0, 30), argv: anyhostArgv("resume", s.id, ...(isElsewhere ? [] : ["--take"])) });
     const on = isElsewhere ? holder.herdr || null : null;
     if (item.stage === "archived") this.archive(cx, s, false);
-    const place = isHere ? null : (item.app ?? (!isElsewhere && Boolean(s.status) ? "another terminal" : null));
+    const place = isHere ? null : (item.app ?? (s.status ? (isElsewhere ? `another terminal on ${holder.name}` : "another terminal") : null));
     this.showScreen(item, on, place);
     if (place) return;
-    if (isElsewhere && !holder.herdr) return this.act(cx, s.id, this.hereName(), ["tell", s.id, `/move ${this.hereName()}`], `${holder.name} moves ${titleOf(s).slice(0, 30)} here once its turn ends`);
-    this.moving[s.id] = "Opening";
+    if (isElsewhere && !holder.herdr) return this.act(cx, s.id, "Moves here once its turn ends", ["tell", s.id, `/move ${this.hereName()}`], `${holder.name} moves ${titleOf(s).slice(0, 30)} here once its turn ends`);
+    this.setMoving(s.id, s.status && s.status !== "idle" ? "Moves here once its turn ends" : "Opening");
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const { terminal } = JSON.parse(await anyhost(["open", s.id, "--json"], LONG_MS, on));
+        const { terminal } = JSON.parse(await this.untilOpened(s.id, on));
         const screen = this.opening.get(s.id);
         if (screen) screen.terminal = on ? `${on}/${terminal}` : terminal;
       } catch (error) {
         this.closeScreen(s.id);
         notify({ title: "anyhost could not open it", body: String(error.message ?? error), level: "error" });
       }
-      delete this.moving[s.id];
+      this.setMoving(s.id, null);
       this.refresh(cx);
     });
+  }
+
+  async untilOpened(id, on) {
+    for (;;) {
+      try {
+        return await anyhost(["open", id, "--json"], LONG_MS, on);
+      } catch (error) {
+        if (!String(error.message ?? error).includes("took longer than")) throw error;
+      }
+    }
+  }
+
+  setMoving(id, line) {
+    if (line === null) delete this.moving[id];
+    else this.moving[id] = line;
+    setShared(MOVING, { ...this.moving });
   }
 
   showScreen(item, on, place = null) {
@@ -371,8 +388,8 @@ export default class Anyhost extends View {
     this.marked = sessions;
   }
 
-  act(cx, id, to, args, title) {
-    this.moving[id] = to;
+  act(cx, id, line, args, title) {
+    this.setMoving(id, line);
     cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -381,7 +398,7 @@ export default class Anyhost extends View {
       } catch (error) {
         notify({ title: "anyhost could not do it", body: String(error.message ?? error), level: "error" });
       }
-      delete this.moving[id];
+      this.setMoving(id, null);
       this.refresh(cx);
     });
   }
@@ -1057,7 +1074,7 @@ export default class Anyhost extends View {
     if (asked.action === "restore") return this.archive(cx, item.session, false);
     if (asked.action === "unread") return this.markUnread(cx, item);
     if (asked.action === "delete") return this.remove(cx, item);
-    if (asked.action === "move") this.act(cx, asked.key, asked.to, ["move", asked.key, asked.to], `Moved ${item.title?.slice(0, 40) ?? asked.key.slice(0, 8)} to ${asked.to}`);
+    if (asked.action === "move") this.act(cx, asked.key, `Moving to ${asked.to}`, ["move", asked.key, asked.to], `Moved ${item.title?.slice(0, 40) ?? asked.key.slice(0, 8)} to ${asked.to}`);
   }
 
   initMenu(cx) {
@@ -1188,6 +1205,8 @@ export default class Anyhost extends View {
   renderScreen(t) {
     const p = props();
     const isT3 = p.app === "T3 Code";
+    const moving = shared(MOVING)?.[p.key] ?? null;
+    const isAsking = Boolean(p.place) && moving === null;
     const ask = (action) => setShared(MENU_ASKED, { at: Date.now(), view: "sessions", key: p.key, address: null, ...action });
     const ghost = v_flex()
       .absolute()
@@ -1247,7 +1266,7 @@ export default class Anyhost extends View {
           .opacity(this.revealed ? 1 : 0)
           .transition("opacity", { duration: 200, easing: "ease-out" })
           .child(svg(`${ICON}/spinner.svg`).size(12).text_color(t.working).spin(900))
-          .child(p.tool === "codex" ? "Starting Codex" : "Starting Claude Code"),
+          .child(moving ?? (p.tool === "codex" ? "Starting Codex" : "Starting Claude Code")),
       );
     return div()
       .id("ah-screen")
@@ -1256,8 +1275,8 @@ export default class Anyhost extends View {
       .overflow_hidden()
       .bg(t.background)
       .child(ghost)
-      .when(Boolean(p.place), (el) => el.child(h_flex().absolute().inset_0().items_center().justify_center().child(handoff)))
-      .when(!p.place, (el) => el.child(opening));
+      .when(isAsking, (el) => el.child(h_flex().absolute().inset_0().items_center().justify_center().child(handoff)))
+      .when(!isAsking, (el) => el.child(opening));
   }
 
   more(t, id, count, showMore) {
