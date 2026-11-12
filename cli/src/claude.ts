@@ -218,11 +218,23 @@ export const stoppedRuns = (): { readonly session: string; readonly run: Run }[]
       return run?.runner === undefined || isProcess(run.runner.process.id, run.runner.process.start) ? [] : [{ session, run }]
     })
 
-const STATUS: Record<string, AgentStatus> ={ busy: 'working', shell: 'working', idle: 'idle', waiting: 'waiting' }
+const STATUS: Record<string, AgentStatus> = { busy: 'working', shell: 'working', idle: 'idle', waiting: 'waiting' }
+export const statusOfRecord = (status: string | undefined): AgentStatus => STATUS[status ?? 'idle'] ?? 'working'
+
+const copiesOf = async (claudeHome: string, session: string): Promise<number[]> =>
+  (await recordedSessions(claudeHome)).filter((entry) => entry.sessionId === session && isProcess(entry.pid, recordAt(claudeHome, entry.pid)?.procStart)).map(({ pid }) => pid)
+
+export async function runTerminalOf(claudeHome: string, session: string): Promise<string | undefined> {
+  const run = runOf(session)
+  const address = run?.terminal?.address
+  if (address === undefined) return undefined
+  const own = new Set([run?.runner.process.id, run?.claude.process?.id])
+  return (await copiesOf(claudeHome, session)).every((pid) => own.has(pid)) ? address : undefined
+}
 
 export async function statusOf(claudeHome: string, session: string): Promise<AgentStatus | undefined> {
   const record = (await recordedSessions(claudeHome)).find((entry) => entry.sessionId === session)
-  if (record !== undefined) return STATUS[record.status ?? 'idle'] ?? 'working'
+  if (record !== undefined) return statusOfRecord(record.status)
   return runOf(session) === undefined ? undefined : 'idle'
 }
 
@@ -253,12 +265,11 @@ const signal = (pids: readonly number[], name: NodeJS.Signals): void => {
 }
 
 export async function stopCopy(claudeHome: string, session: string): Promise<void> {
-  const record = (await recordedSessions(claudeHome)).find((entry) => entry.sessionId === session)
-  const recorded = record !== undefined && isProcess(record.pid, recordAt(claudeHome, record.pid)?.procStart) ? record.pid : undefined
+  const copies = await copiesOf(claudeHome, session)
   const ran = runOf(session)
   const terminal = ran?.terminal?.address
   if (terminal !== undefined) await killTerminal(terminal).catch((error: unknown) => console.error(`anyhost could not close terminal ${terminal} of ${session}: ${error instanceof Error ? error.message : String(error)}`))
-  const pids = [ran?.runner.process.id, recorded].filter((pid): pid is number => pid !== undefined)
+  const pids = [...(ran === undefined ? [] : [ran.runner.process.id]), ...copies]
   signal(pids, 'SIGTERM')
   const stuck = (await Promise.all(pids.map(async (pid) => ((await ends(pid)) ? [] : [pid])))).flat()
   signal(stuck, 'SIGKILL')

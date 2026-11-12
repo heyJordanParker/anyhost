@@ -1,5 +1,4 @@
-import { readdirSync, statSync } from 'node:fs'
-import { readdir } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, sep } from 'node:path'
 import type { MachineRoots } from './device.ts'
@@ -79,19 +78,20 @@ const listingFailed = (folder: string, error: unknown): void => {
   console.error(`${new Date().toISOString()} ${line}`)
 }
 
+const STATS_AT_ONCE = 256
+
 export async function filesUnder(folder: string, depth = Infinity): Promise<{ readonly path: string; readonly mtimeMs: number }[]> {
   const files: { path: string; mtimeMs: number }[] = []
   const left = [{ folder, depth }]
   for (let next = left.pop(); next !== undefined; next = left.pop()) {
-    await new Promise((resolve) => setImmediate(resolve))
-    try {
-      for (const entry of readdirSync(next.folder, { withFileTypes: true })) {
-        const path = join(next.folder, entry.name)
-        if (entry.isDirectory() && next.depth > 1) left.push({ folder: path, depth: next.depth - 1 })
-        else if (entry.isFile()) files.push({ path, mtimeMs: statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0 })
-      }
-    } catch (error) {
-      listingFailed(next.folder, error)
+    const { folder: here, depth: below } = next
+    const entries = await readdir(here, { withFileTypes: true }).catch((error: unknown) => void listingFailed(here, error))
+    if (entries === undefined) continue
+    for (const entry of entries) if (entry.isDirectory() && below > 1) left.push({ folder: join(here, entry.name), depth: below - 1 })
+    const paths = entries.filter((entry) => entry.isFile()).map((entry) => join(here, entry.name))
+    for (let from = 0; from < paths.length; from += STATS_AT_ONCE) {
+      const batch = paths.slice(from, from + STATS_AT_ONCE)
+      files.push(...(await Promise.all(batch.map(async (path) => ({ path, mtimeMs: (await stat(path).catch(() => undefined))?.mtimeMs ?? 0 })))))
     }
   }
   return files

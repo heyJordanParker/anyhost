@@ -32,7 +32,7 @@ function machine(device: Device, relay: MemoryRelay, folder = temporaryFolder(),
   const roots = rootsUnder(folder)
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
-  const capture = openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(join(folder, 'state')), code, ...(onCode === undefined ? {} : { onCode }) })
+  const capture = openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(join(folder, 'state')), code, codeEveryMs: 0, ...(onCode === undefined ? {} : { onCode }) })
   const upload = (...paths: string[]): Promise<Set<string>[]> => Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
   return { roots, transcript, capture, upload }
 }
@@ -488,6 +488,24 @@ test('a quiet session seals its hot frames into one sealed frame, and the journa
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '', 'utf8')).toBe(`${lines.join('')}${lines[0]}`)
   expect(replayed.sealedEnd).toBe(before.length)
+})
+
+test('a session that keeps writing has its code read once within a minute, however many drains carry its lines', async () => {
+  const relay = await memoryRelay()
+  const folder = temporaryFolder()
+  const roots = rootsUnder(folder)
+  const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  let reads = 0
+  const capture = openCapture(relay.connect(deviceA, roots), deviceA, roots, { db: openDatabase(join(folder, 'state')), code: { ...noCode, captureCode: async () => void (reads += 1) }, codeEveryMs: 60_000 })
+  for (const line of [...lines, ...lines]) {
+    appendFileSync(transcript, line)
+    await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], failTest).map(([, left]) => left))
+    await capture.codeRuns.get(SESSION)
+  }
+
+  expect(reads).toBe(1)
+  expect(capture.codeStale.has(SESSION)).toBe(true)
 })
 
 test('a seal reads small frames many to a request, and at most 16 requests at once', async () => {

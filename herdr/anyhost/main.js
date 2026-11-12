@@ -96,6 +96,11 @@ const monogramOf = (name) => {
   return [...`${glyphs[0]}${second}`.toUpperCase()].slice(0, 2).join("");
 };
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
+const PILLS = {
+  blocked: ["Pending Approval", "#d97706", "#fcd34d", false],
+  working: ["Working", "#0284c7", "#7dd3fc", true],
+  done: ["Completed", "#059669", "#6ee7b7", false],
+};
 const SAID = { working: "working", waiting: "blocked", idle: "idle" };
 const byRecent = (a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0);
 const iconPath = (icon) => (icon.includes("/") ? `${icon}.svg` : `${ICON}/${icon}.svg`);
@@ -177,7 +182,7 @@ export default class Anyhost extends View {
     this.page = null;
     this.archiveShown = ARCHIVE_PAGE;
     this.activeShown = ACTIVE_PAGE;
-    this.folded = new Set(saved("folded", ["working"]));
+    this.folded = new Set(saved("folded", ["background"]));
     this.unfolded = new Set(saved("unfolded", []));
     this.marked = new Set();
     this.opening = new Map();
@@ -287,8 +292,9 @@ export default class Anyhost extends View {
     if (s.tool !== "claude") return run("space.new", { tab: titleOf(s).slice(0, 30), argv: anyhostArgv("resume", s.id, ...(isElsewhere ? [] : ["--take"])) });
     const on = isElsewhere ? holder.herdr || null : null;
     if (item.stage === "archived") this.archive(cx, s, false);
-    this.showScreen(item, on);
-    if (item.app === "T3 Code" && !isHere) return;
+    const place = isHere ? null : (item.app ?? (!isElsewhere && Boolean(s.status) ? "another terminal" : null));
+    this.showScreen(item, on, place);
+    if (place) return;
     if (isElsewhere && !holder.herdr) return this.act(cx, s.id, this.hereName(), ["tell", s.id, `/move ${this.hereName()}`], `${holder.name} moves ${titleOf(s).slice(0, 30)} here once its turn ends`);
     this.moving[s.id] = "Opening";
     cx.notify();
@@ -306,7 +312,7 @@ export default class Anyhost extends View {
     });
   }
 
-  showScreen(item, on) {
+  showScreen(item, on, place = null) {
     const s = item.session;
     const name = item.title.slice(0, 28);
     const existing = this.screenTab(name);
@@ -317,7 +323,7 @@ export default class Anyhost extends View {
     }
     const space = spaces().find((sp) => sp.folder === s.cwd && (sp.machine ?? null) === on)?.id ?? null;
     if (space) run("space.select", { id: space });
-    run("tab.new", { name, mod: "anyhost", props: { view: "screen", key: s.id, title: item.title, label: this.labelOf(item), app: item.app, tool: s.tool, on }, ...(space ? { space } : {}) });
+    run("tab.new", { name, mod: "anyhost", props: { view: "screen", key: s.id, title: item.title, label: this.labelOf(item), app: item.app, place, tool: s.tool, on }, ...(space ? { space } : {}) });
     this.opening.set(s.id, { name, terminal: null, listedAt: null });
   }
 
@@ -527,11 +533,11 @@ export default class Anyhost extends View {
     const kidsOf = (address) => (address ? l.all.filter((x) => x.parent === address) : []);
     const ctx = { t, shown, kidsOf, l };
     const pinned = l.active.filter((i) => i.pinned);
-    const working = [...l.active.filter((i) => !i.pinned && i.status === "working"), ...l.runningBackground];
-    const resting = l.active.filter((i) => !i.pinned && i.status !== "working");
-    const attention = [...resting.filter((i) => RANK[i.status] >= 3), ...resting.filter((i) => !(RANK[i.status] >= 3)).sort(byRecent)];
-    setAgentOrder([...pinned, ...attention, ...working].map((i) => i.address).filter(Boolean));
-    if (narrow()) return this.rail(t, [...pinned, ...attention, ...working].filter((i) => i.address));
+    const rest = l.active.filter((i) => !i.pinned);
+    const attention = [...rest.filter((i) => RANK[i.status] >= 3), ...rest.filter((i) => !(RANK[i.status] >= 3)).sort(byRecent)];
+    const background = l.runningBackground;
+    setAgentOrder([...pinned, ...attention, ...background].map((i) => i.address).filter(Boolean));
+    if (narrow()) return this.rail(t, [...pinned, ...attention, ...background].filter((i) => i.address));
     const found = this.found === null ? null : this.found.map(l.withLive);
     const archivedCount = l.archived.length + l.background.length + l.deleted.length;
     return v_flex()
@@ -553,29 +559,29 @@ export default class Anyhost extends View {
           .gap(1)
           .overflow_y_scrollbar()
           .when(this.here === null, (el) => el.child(this.empty(t, this.error === null ? "Reading your sessions…" : "anyhost could not read your sessions yet. It tries again every 30 seconds.")))
-          .when(this.here !== null, (el) => el.children(this.pageRows(ctx, { view, found, pinned, attention, working }))),
+          .when(this.here !== null, (el) => el.children(this.pageRows(ctx, { view, found, pinned, attention, background }))),
       )
       .when(this.page === null && this.here !== null && found === null, (el) => el.child(this.archiveEntry(t, archivedCount)))
       .when(this.page === "archive" && this.here !== null, (el) => el.child(this.archiveCorners(t, l)));
   }
 
-  pageRows(ctx, { view, found, pinned, attention, working }) {
+  pageRows(ctx, { view, found, pinned, attention, background }) {
     const { t, l } = ctx;
     if (found !== null) return found.length === 0 ? [this.empty(t, "No sessions found")] : found.map((i) => this.sessionRow(ctx, i));
     if (this.page === "machines") return this.machineRows(t, l);
     if (this.page === "archive") return this.dated(ctx, l.archived, "Nothing archived yet");
     if (this.page === "archive:background") return this.dated(ctx, l.background, "No background runs");
     if (this.page === "archive:deleted") return this.dated(ctx, l.deleted, "No deleted sessions");
-    if (view === "projects") return this.projectRows(ctx, [...pinned, ...attention, ...working.filter((i) => !i.isBackground)]);
+    if (view === "projects") return this.projectRows(ctx, [...pinned, ...attention]);
     const card = (i) => this.sessionRow(ctx, i);
-    const hasNone = pinned.length + attention.length + working.length === 0;
+    const hasNone = pinned.length + attention.length + background.length === 0;
     return [
       ...(hasNone ? [this.empty(t, "No active sessions")] : []),
       ...pinned.map(card),
       ...attention.slice(0, this.activeShown).map(card),
       ...(attention.length > this.activeShown ? [this.more(t, "ah-more-active", Math.min(ACTIVE_PAGE, attention.length - this.activeShown), () => (this.activeShown += ACTIVE_PAGE))] : []),
-      ...(working.length > 0 ? [this.shelf(t, "working", "Working", working.length)] : []),
-      ...(this.folded.has("working") ? [] : working.map(card)),
+      ...(background.length > 0 ? [this.shelf(t, "background", "Background", background.length)] : []),
+      ...(this.folded.has("background") ? [] : background.map(card)),
     ];
   }
 
@@ -767,7 +773,7 @@ export default class Anyhost extends View {
     const open = !this.folded.has(id);
     const hovered = this.hovered === id;
     const statuses = f.cards.map((c) => c.status);
-    const dot = open ? null : statuses.includes("blocked") ? t.blocked : statuses.includes("done") ? t.done : statuses.includes("working") ? t.working : null;
+    const dot = open ? null : this.pillColor(["blocked", "done", "working"].find((status) => statuses.includes(status)));
     const cards = [...f.cards.filter((c) => RANK[c.status] >= 3), ...f.cards.filter((c) => !(RANK[c.status] >= 3)).sort(byRecent)];
     const isOther = f.key === "other";
     const isHereOnly = f.machines.size === 1 && f.machines.has(this.hereName());
@@ -800,7 +806,7 @@ export default class Anyhost extends View {
       .flex_none()
       .gap(1)
       .child(head)
-      .when(open, (el) => el.children(cards.map((i) => this.projectRow(ctx, i, isOther))).children(f.shells.map((s) => this.shell(t, s))));
+      .when(open, (el) => el.children(cards.map((i) => this.sessionRow(ctx, i, { inFolder: true, withProject: isOther }))).children(f.shells.map((s) => this.shell(t, s))));
   }
 
   harnessIcon(t, i, size = 14) {
@@ -816,16 +822,17 @@ export default class Anyhost extends View {
       .child(harness.tint ? svg(harness.icon).size(size - 2).text_color(harness.tint) : image(harness.icon).size(size - 2));
   }
 
-  sessionRow(ctx, i) {
+  sessionRow(ctx, i, { inFolder = false, withProject = true } = {}) {
     const { t, shown, kidsOf, l } = ctx;
     const isShown = Boolean(i.address) && i.address === shown;
     const isHovered = this.hovered === i.key;
-    const recede = i.stage !== "active" || ((i.status === "idle" || i.status === "working") && !isShown);
+    const recede = i.stage !== "active" || (i.status === "idle" && !isShown);
     const subs = this.subsOf(i, kidsOf(i.address), (l.withLive ? (this.childrenOf?.get(i.key) ?? []).map(l.withLive) : []), l.statusOf);
     return this.frame(t, i, shown)
       .child(
         v_flex()
-          .px(10)
+          .pl(inFolder ? FOLDER_INSET - 12 : 10)
+          .pr(10)
           .py(7)
           .gap(2)
           .child(
@@ -843,34 +850,11 @@ export default class Anyhost extends View {
               .pl(22)
               .gap(6)
               .items_center()
-              .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(this.labelOf(i)))
+              .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(this.labelOf(i, withProject)))
               .when(subs.rows.length > 0, (el) => el.child(this.subagentFold(t, i, subs))),
           ),
       )
-      .when(subs.isOpen, (el) => el.pb(4).children(this.subRows(t, subs, 30)));
-  }
-
-  projectRow(ctx, i, withProject) {
-    const { t, shown, kidsOf, l } = ctx;
-    const isShown = Boolean(i.address) && i.address === shown;
-    const isHovered = this.hovered === i.key;
-    const subs = this.subsOf(i, kidsOf(i.address), (this.childrenOf?.get(i.key) ?? []).map(l.withLive), l.statusOf);
-    const place = [withProject ? i.project : null, i.isRemote ? this.placeOf(i.machine) : null, i.app].filter(Boolean).join(" · ");
-    return this.frame(t, i, shown)
-      .child(
-        h_flex()
-          .h(32)
-          .pl(FOLDER_INSET - 22)
-          .pr(10)
-          .gap(8)
-          .items_center()
-          .child(this.harnessIcon(t, i))
-          .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(isHovered || isShown ? t.foreground : t.muted).child(i.title))
-          .when(place !== "" && !isHovered, (el) => el.child(div().flex_none().max_w(110).truncate().text_size(12).text_color(t.dim).child(place)))
-          .when(subs.rows.length > 0, (el) => el.child(this.subagentFold(t, i, subs)))
-          .child(isHovered && i.session ? this.actions(t, i) : this.status(t, i)),
-      )
-      .when(subs.isOpen, (el) => el.children(this.subRows(t, subs, FOLDER_INSET)));
+      .when(subs.isOpen, (el) => el.pb(4).children(this.subRows(t, subs, inFolder ? FOLDER_INSET + 8 : 30)));
   }
 
   iconButton(t, id, icon, tooltip, onClick, size = 28) {
@@ -910,13 +894,26 @@ export default class Anyhost extends View {
       .child(monogramOf(name || "~"));
   }
 
+  pillColor(status) {
+    const pill = PILLS[status];
+    return pill ? pill[this.isDark ? 2 : 1] : null;
+  }
+
   status(t, i) {
     const moving = this.moving[i.key];
-    if (moving) return h_flex().flex_none().gap(4).items_center().text_size(12).text_color(t.working).child(svg(`${ICON}/spinner.svg`).size(12).spin(900)).child(moving);
-    if (i.status === "working") return h_flex().flex_none().gap(4).items_center().text_size(12).text_color(t.working).child(svg(`${ICON}/spinner.svg`).size(12).spin(900)).child("Working");
-    if (i.status === "blocked") return div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(12).font_medium().text_color(t.blocked).child("Needs you");
-    if (i.status === "done") return h_flex().flex_none().gap(4).items_center().text_size(12).font_medium().text_color(t.done).child(svg(`${ICON}/circle-check.svg`).size(12)).child("Done");
-    return div().flex_none().text_size(12).text_color(t.dim).child(ago(i.at));
+    if (moving) return h_flex().flex_none().gap(4).items_center().text_size(12).text_color(this.pillColor("working")).child(svg(`${ICON}/spinner.svg`).size(12).spin(900)).child(moving);
+    const pill = PILLS[i.status];
+    if (!pill) return div().flex_none().text_size(12).text_color(t.dim).child(ago(i.at));
+    const color = this.pillColor(i.status);
+    return h_flex()
+      .flex_none()
+      .gap(5)
+      .items_center()
+      .text_size(12)
+      .font_medium()
+      .text_color(color)
+      .child(div().size(6).rounded(3).flex_none().bg(color).when(pill[3], (el) => el.loop("opacity", { from: 0.3, to: 1, period: 1200, easing: "ease-in-out" })))
+      .child(pill[0]);
   }
 
   actions(t, i) {
@@ -1026,8 +1023,7 @@ export default class Anyhost extends View {
         })
         .child(div().self_start().mt(-4).w(9).h(17).mr(6).flex_none().border_l(1.5).border_b(1.5).rounded_bl(6).border_color(t.input).when(n < subs.rows.length - 1, (el) => el.rounded_bl(0)))
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(s.title))
-        .when(s.status === "working", (el) => el.child(svg(`${ICON}/spinner.svg`).size(11).flex_none().text_color(t.working).spin(900)))
-        .when(s.status === "blocked", (el) => el.child(div().size(6).rounded(3).flex_none().bg(t.blocked))),
+        .when(Boolean(PILLS[s.status]), (el) => el.child(div().size(6).rounded(3).flex_none().bg(this.pillColor(s.status)).when(PILLS[s.status]?.[3] === true, (dot) => dot.loop("opacity", { from: 0.3, to: 1, period: 1200, easing: "ease-in-out" })))),
     );
   }
 
@@ -1221,14 +1217,14 @@ export default class Anyhost extends View {
         v_flex()
           .gap(4)
           .items_center()
-          .child(div().text_size(14).font_semibold().text_color(t.foreground).child("This session is working in T3 Code"))
+          .child(div().text_size(14).font_semibold().text_color(t.foreground).child(`This session is working in ${p.place}`))
           .child(div().max_w(280).truncate().text_size(12).text_color(t.dim).child(p.title)),
       )
       .child(
         h_flex()
           .gap(8)
-          .child(this.screenButton(t, "ah-open-t3", "Open in T3 Code", true, () => exec("sh", ["-c", 'open -a "T3 Code (Beta)" 2>/dev/null || open -a "T3 Code"'], { on: p.on ?? null })))
-          .child(this.screenButton(t, "ah-move-here", "Move it here", false, () => ask({ action: "open", here: true }))),
+          .when(isT3, (el) => el.child(this.screenButton(t, "ah-open-t3", "Open in T3 Code", true, () => exec("sh", ["-c", 'open -a "T3 Code (Beta)" 2>/dev/null || open -a "T3 Code"'], { on: p.on ?? null }))))
+          .child(this.screenButton(t, "ah-move-here", "Move it here", !isT3, () => ask({ action: "open", here: true }))),
       );
     const opening = h_flex()
       .absolute()
@@ -1260,8 +1256,8 @@ export default class Anyhost extends View {
       .overflow_hidden()
       .bg(t.background)
       .child(ghost)
-      .when(isT3, (el) => el.child(h_flex().absolute().inset_0().items_center().justify_center().child(handoff)))
-      .when(!isT3, (el) => el.child(opening));
+      .when(Boolean(p.place), (el) => el.child(h_flex().absolute().inset_0().items_center().justify_center().child(handoff)))
+      .when(!p.place, (el) => el.child(opening));
   }
 
   more(t, id, count, showMore) {

@@ -14,6 +14,7 @@ import { codexNameOf, codexState, filesOf, linesFiles, namedIn, ownerOf, summari
 export const FRAME_BYTES = 64 * 2 ** 20
 export const CODE_PIECE_BYTES = 128 * 2 ** 10
 export const CODE_PIECES = 4
+const CODE_EVERY_MS = 60_000
 export const QUIET_MS = 10 * 60_000
 const SEAL_WAIT_PASSES = 60
 const SWEEP_BATCH = 1000
@@ -46,6 +47,9 @@ export type Capture = Code & {
   readonly codeRuns: Map<string, Promise<Error | undefined>>
   readonly codeWaiting: Map<string, { readonly folder: string; readonly code: CodeCapture }>
   readonly codeStale: Set<string>
+  readonly codeReadAt: Map<string, number>
+  readonly codeLater: Map<string, ReturnType<typeof setTimeout>>
+  readonly codeEveryMs: number
   readonly codeSkipped: Set<string>
   readonly sealWaits: Map<string, { readonly failures: number; passes: number }>
   readonly missingFolders: Set<string>
@@ -152,7 +156,8 @@ export function openCapture(
     onCode = () => undefined,
     onReleased = () => undefined,
     onOtherRelay = () => undefined,
-  }: { readonly db?: Database; readonly code?: Code; readonly onCode?: Capture['onCode']; readonly onReleased?: Capture['onReleased']; readonly onOtherRelay?: (url: string, bucket: string) => void } = {},
+    codeEveryMs = CODE_EVERY_MS,
+  }: { readonly db?: Database; readonly code?: Code; readonly onCode?: Capture['onCode']; readonly onReleased?: Capture['onReleased']; readonly onOtherRelay?: (url: string, bucket: string) => void; readonly codeEveryMs?: number } = {},
 ): Capture {
   relay.on('welcome', ({ bucket, waiting }) => {
     const isOther = useRelay(db, relay.url, bucket)
@@ -160,7 +165,7 @@ export function openCapture(
     if (isOther) onOtherRelay(relay.url, bucket)
   })
   const capture: Capture = {
-    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
+    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
     holders: followHolders(relay, db), lastIndex: '',
   }
   const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
@@ -689,13 +694,29 @@ function codeRecord(capture: Capture, session: string, path: string, bytes: Uint
   }
 }
 
-export function startCode(capture: Capture, session: string, tool: Tool, problems: Problems): void {
+export function startCode(capture: Capture, session: string, tool: Tool, problems: Problems, isNow = false): void {
   const folder = workingFolderOf(capture.db, session)
   if (folder === '') return
   if (capture.codeRuns.has(session) || capture.codeWaiting.has(session)) {
     capture.codeStale.add(session)
     return
   }
+  const wait = (capture.codeReadAt.get(session) ?? -Infinity) + capture.codeEveryMs - Date.now()
+  if (!isNow && wait > 0) {
+    capture.codeStale.add(session)
+    if (!capture.codeLater.has(session)) {
+      const later = setTimeout(() => {
+        capture.codeLater.delete(session)
+        if (capture.codeStale.has(session)) startCode(capture, session, tool, problems)
+      }, wait)
+      later.unref()
+      capture.codeLater.set(session, later)
+    }
+    return
+  }
+  clearTimeout(capture.codeLater.get(session))
+  capture.codeLater.delete(session)
+  capture.codeReadAt.set(session, Date.now())
   capture.codeStale.delete(session)
   const run = stat(folder)
     .then(

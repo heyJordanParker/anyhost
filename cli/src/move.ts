@@ -4,7 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { AgentStatus, Delivered, Device, Offline, Routed } from '../../relay/protocol.ts'
 import { captureAgainFrom, chainOf, changedFiles, checkoutOf, framesOf, holdHere, isDeleted, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
-import { commandOf, recordedSessions, run, runOf, runSessions, statusOf, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
+import { commandOf, recordedSessions, run, runOf, runSessions, runTerminalOf, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
 import { devicesOf, otherMachine } from './device.ts'
 import { killTerminal, labelledTerminals, openTerminal, pressKeys, readTerminal, sendTo } from './hc.ts'
 import type { Relay } from './relay.ts'
@@ -176,7 +176,7 @@ async function upload(capture: Capture, session: string, tool: Tool, here: MoveH
     await drained(paths)
     await Promise.race([capture.codeRuns.get(session), aborted])
     await drained()
-    if (!capture.codeRuns.has(session) && !capture.codeWaiting.has(session)) startCode(capture, session, tool, here.problems)
+    if (!capture.codeRuns.has(session) && !capture.codeWaiting.has(session)) startCode(capture, session, tool, here.problems, true)
     const failure = await Promise.race([capture.codeRuns.get(session), aborted])
     if (failure !== undefined) throw new Error(`anyhost could not read the code of ${session.slice(0, 8)}: ${failure.message}`)
     await drained()
@@ -446,7 +446,7 @@ const tagged = (told: Tell, machine: string): string => {
 }
 
 async function terminalHere(capture: Capture, session: string): Promise<string | undefined> {
-  const address = runOf(session)?.terminal?.address
+  const address = await runTerminalOf(capture.roots.claudeHome, session)
   if (address !== undefined) return address
   if ((await statusOf(capture.roots.claudeHome, session)) === undefined) return undefined
   throw new Error(`${session.slice(0, 8)} runs on ${capture.device.name} outside herdr-core, so anyhost cannot type into it or read it.`)
@@ -455,11 +455,11 @@ async function terminalHere(capture: Capture, session: string): Promise<string |
 async function terminalOf(capture: Capture, session: string, here: MoveHere): Promise<string> {
   const { db, roots } = capture
   const id = session.slice(0, 8)
-  const ran = runOf(session)?.terminal?.address
+  const ran = await runTerminalOf(roots.claudeHome, session)
   if (ran !== undefined) return ran
   if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost runs Claude Code sessions in herdr-core, and ${id} is a Codex session.`)
   if ((await statusOf(roots.claudeHome, session)) !== undefined) {
-    await whenSessions(roots.claudeHome, (sessions) => (sessions.find((entry) => entry.sessionId === session)?.status === 'busy' ? undefined : true), Infinity, here.onRecordsChange)
+    await whenSessions(roots.claudeHome, (sessions) => (sessions.some((entry) => entry.sessionId === session && entry.status === 'busy') ? undefined : true), Infinity, here.onRecordsChange)
     await stopCopy(roots.claudeHome, session)
   }
   const known = workingFolderOf(db, session)
@@ -515,12 +515,8 @@ export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readon
   )
 
 async function statusesHere(capture: Capture): Promise<Record<string, AgentStatus>> {
-  const sessions = new Set([...(await recordedSessions(capture.roots.claudeHome)).map(({ sessionId }) => sessionId), ...runSessions()])
-  const statuses: Record<string, AgentStatus> = {}
-  for (const session of sessions) {
-    const status = await statusOf(capture.roots.claudeHome, session)
-    if (status !== undefined) statuses[session] = status
-  }
+  const statuses: Record<string, AgentStatus> = Object.fromEntries(runSessions().map((session) => [session, 'idle']))
+  for (const { sessionId, status } of await recordedSessions(capture.roots.claudeHome)) statuses[sessionId] = statusOfRecord(status)
   return statuses
 }
 

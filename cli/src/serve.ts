@@ -570,7 +570,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const failed = (status: number, error: unknown): Response => Response.json({ message: error instanceof Error ? error.message : String(error) }, { status })
   const throughRelay = async (work: () => Promise<unknown>): Promise<Response> => {
     const { state } = relay
-    if (state.is !== 'connected') return failed(503, 'message' in state ? state.message : `anyhost connects to the relay at ${relay.url}.`)
+    if (state.is === 'unjoined' || state.is === 'refused' || state.is === 'outdated') return failed(503, state.message)
     return Response.json((await work()) ?? {})
   }
   const connectRun = (): ConnectRun => {

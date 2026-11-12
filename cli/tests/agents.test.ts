@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { startOf } from '../src/claude.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { anyhostOn, CLI, copiesOn, decoder, killAfterTest, LAPTOP, logOf, machineFor, postTo, runningOn, runsOn, sentOn, serveOn, SESSION, startedOn, stepsOf, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
 
@@ -217,6 +218,56 @@ test('a session Claude Code runs here outside herdr-core, as in tmux, comes into
   expect(sentOn(laptop.folder).join('\n')).toContain('Book the train')
 }, 60_000)
 
+test("a tell never types into a run's terminal while the session's live Claude Code is another copy, as an older runner's whose Claude Code sleeps: it stops both and continues the session in one new terminal", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const runner = Bun.spawn(['sleep', '600'])
+  killAfterTest(runner)
+  mkdirSync(join(laptop.folder, 'terminals'), { recursive: true })
+  writeFileSync(join(laptop.folder, 'terminals', 'told-before'), `${SESSION} ${runner.pid}\n`)
+  const runs = join(laptop.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'runs')
+  mkdirSync(runs, { recursive: true })
+  writeFileSync(join(runs, `${SESSION}.json`), JSON.stringify({ session: SESSION, runner: { process: { id: runner.pid, start: startOf(runner.pid) }, version: '0.6.0', startedAt: '' }, terminal: { address: 'told-before', machine: '' }, claude: { command: ['claude'] } }))
+
+  const told = await postTo(laptop.socket, '/agents/tell', { session: SESSION, text: 'Book the train' })
+
+  expect(told.status).toBe(200)
+  expect(sentOn(laptop.folder).filter((line) => line.startsWith('told-before '))).toEqual([])
+  expect(sentOn(laptop.folder).join('\n')).toContain('Book the train')
+  expect(laptop.claude.signalCode).toBe('SIGTERM')
+  expect(runner.signalCode).not.toBeNull()
+  expect(runsOn(laptop.folder).map(({ session }) => session)).toEqual([SESSION])
+}, 60_000)
+
+test("an open of a session whose live Claude Code is not its run's own, as the Herdr pane's Move it here asks, leaves exactly one copy: the one in the new terminal", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const runner = Bun.spawn(['sleep', '600'])
+  killAfterTest(runner)
+  mkdirSync(join(laptop.folder, 'terminals'), { recursive: true })
+  writeFileSync(join(laptop.folder, 'terminals', 'opened-before'), `${SESSION} ${runner.pid}\n`)
+  const runs = join(laptop.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'runs')
+  mkdirSync(runs, { recursive: true })
+  writeFileSync(join(runs, `${SESSION}.json`), JSON.stringify({ session: SESSION, runner: { process: { id: runner.pid, start: startOf(runner.pid) }, version: '0.6.0', startedAt: '' }, terminal: { address: 'opened-before', machine: '' }, claude: { command: ['claude'] } }))
+
+  const opened = await postTo(laptop.socket, '/agents/open', { session: SESSION })
+
+  expect(opened.status).toBe(200)
+  expect(opened.body['terminal']).not.toBe('opened-before')
+  expect([laptop.claude.signalCode, runner.signalCode === null]).toEqual(['SIGTERM', false])
+  expect(copiesOn(laptop.folder).filter(({ isRunning }) => isRunning)).toHaveLength(1)
+}, 60_000)
+
+test('a tell to a machine that holds the session and does not answer gets its answer after 25 s over the socket, which keeps a request open past 10 s', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+  laptop.child.kill('SIGSTOP')
+  const told = await postTo(worker.socket, '/agents/tell', { session: SESSION, text: 'Book the train' }).finally(() => laptop.child.kill('SIGCONT'))
+
+  expect(told).toEqual({ status: 400, body: { message: `${LAPTOP.name}, which holds 11111111, did not answer within 25 s. An anyhost older than 0.4.0 there does not answer at all.` } })
+}, 60_000)
+
 test('an open continues a session here from R2 while the machine that ran it is gone, and answers its terminal', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
@@ -267,4 +318,19 @@ test('a visit and an archive reach every machine through the shared list, and an
   expect([visited.code, restored.code]).toEqual([0, 0])
   expect(await agentOn(worker.socket)).toMatchObject({ archived: false, visitedAt: '2026-11-11T16:00:00.000Z' })
   expect([shared['settled'], shared['settleAfterDays'], shared['archiveAfterDays']]).toEqual([undefined, undefined, 3])
+}, 60_000)
+
+test('an archive asked while the relay connects again waits for it and archives the session, as the Herdr pane asks one whenever its button is pressed', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const reconnect = relay.disconnect(LAPTOP.id)
+  await until(async () => (await statusOn(laptop.socket)).relay.state !== 'connected', 'the program reading its relay down')
+
+  const archived = postTo(laptop.socket, '/agents/archive', { session: SESSION.slice(0, 8) })
+  await Bun.sleep(500)
+  reconnect()
+  const shared = async (): Promise<Record<string, { archived?: boolean }>> => ((JSON.parse(decoder.decode((await relay.read('shared.json')) ?? new TextEncoder().encode('{}'))) as { archived?: Record<string, { archived?: boolean }> }).archived ?? {})
+
+  expect(await archived).toEqual({ status: 200, body: {} })
+  expect((await shared())[SESSION]?.archived).toBe(true)
 }, 60_000)

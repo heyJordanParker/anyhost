@@ -16,7 +16,7 @@ const upload = (capture: Capture, session: string, ...paths: string[]): Promise<
 
 function machine(device: Device, relay: MemoryRelay, home = join(temporaryFolder(), 'home'), state = join(temporaryFolder(), 'state'), code = noCode) {
   const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') }
-  return { roots, capture: openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(state), code }) }
+  return { roots, capture: openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(state), code, codeEveryMs: 0 }) }
 }
 
 async function captured(relay: MemoryRelay, device: Device, session: string, prompt: string, cwd = '/work'): Promise<Capture> {

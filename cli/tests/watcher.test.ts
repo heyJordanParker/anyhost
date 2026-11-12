@@ -1,7 +1,9 @@
-import { expect, test } from 'bun:test'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { expect, onTestFinished, test } from 'bun:test'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { isAlive } from '../src/claude.ts'
+import { filesUnder } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
 import { HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, problemsOn, ranAnHourAgo, serveOn, SESSION } from './program.ts'
 
@@ -101,3 +103,20 @@ test('a watched folder the watcher cannot watch at its start, as one removed aft
     chmodSync(plans, 0o755)
   }
 }, 60_000)
+
+test('a listing of a folder of 4,000 files lets the program run other work between its reads, so a socket answer never waits for the whole folder', async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'anyhost-listing-'))
+  onTestFinished(() => rmSync(folder, { recursive: true, force: true }))
+  for (let n = 0; n < 4000; n++) writeFileSync(join(folder, `${n}.output`), '')
+  let turns = 0
+  let isListing = true
+  const turn = (): void => {
+    turns += 1
+    if (isListing) setImmediate(turn)
+  }
+  setImmediate(turn)
+  const listed = await filesUnder(folder)
+  isListing = false
+  expect(listed).toHaveLength(4000)
+  expect(turns).toBeGreaterThan(4000 / 256)
+})
