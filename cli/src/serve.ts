@@ -551,6 +551,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (queue.uploadEvery === 0) queue.drain()
     await settle('index', () => writeIndex(capture))
     await settle('t3', () => archiveSettledInT3(relay, capture.db))
+    noteChildren()
     queueFiles(await sealQuiet(capture, problems))
     await settle('herdr machines', () => keepHerdrReaching(relay, device))
   }

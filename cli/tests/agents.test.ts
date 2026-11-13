@@ -239,6 +239,25 @@ test('an agent that starts waiting at a permission prompt on another machine tel
   expect(sentOn(laptop.folder)).toEqual([`t0 <anyhost from="${id} on ${WORKER.name}" reach="tell_agent ${id} when done or stuck">${id} waits at a permission prompt on ${WORKER.name}. read_agent ${id} shows it, and press_keys ${id} answers it.</anyhost>`])
 }, 90_000)
 
+test('an agent that starts waiting while its machine hears no change of Claude Code records still tells the agent that started it, at the next backup pass', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await machineFor(relay, WORKER)
+  const served = await serveOn({ ...worker.env, ANYHOST_WATCHER_DROPS: '1' })
+  await until(() => relay.isConnected(WORKER.id), 'the worker connecting')
+  const started = await postTo(laptop.socket, '/new', { machine: WORKER.name, folder: tripOn(laptop), prompt: 'Book the train', parent: SESSION })
+  const child = String(started.body['session'])
+  await until(() => sentOn(worker.folder).length > 0, 'the first message going in', 30_000)
+  const records = join(worker.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions')
+  const record = readdirSync(records).map((name) => join(records, name)).find((path) => readFileSync(path, 'utf8').includes(child)) ?? ''
+
+  writeFileSync(record, readFileSync(record, 'utf8').replace(/"status":"[a-z]+"/, '"status":"waiting"'))
+  await until(() => sentOn(laptop.folder).length > 0, 'the note reaching the agent that started it', 90_000)
+
+  expect(sentOn(laptop.folder)).toHaveLength(1)
+  expect(served.logged()).not.toContain('could not tell')
+}, 150_000)
+
 test("GET /agents lists what a session another machine runs does now, and an agent's message to it names the agent and the machine that sent it, so the agent it reaches answers it, and keys answer a prompt", async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)

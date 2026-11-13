@@ -581,11 +581,13 @@ export function noteWaiting(capture: Capture, here: MoveHere): () => void {
       void tell(capture, parent, { text: note, keys: [], lines: 0, sender: session }, here).catch((error: unknown) => console.error(`${stamp()} anyhost could not tell ${parent} that ${id} waits at a permission prompt: ${messageOf(error)}`))
     }
   }
-  return () => {
+  const readAgain = (): void => {
     if (isAsked) return
     isAsked = true
     reading = reading.then(read).catch((error: unknown) => console.error(`${stamp()} anyhost could not read which sessions wait at a permission prompt: ${messageOf(error)}`))
   }
+  readAgain()
+  return readAgain
 }
 
 export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readonly t: 'tell' }>, here: MoveHere): Promise<void> =>

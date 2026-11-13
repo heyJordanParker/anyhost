@@ -10,6 +10,7 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 - An archived session whose terminal is still open stays archived.
 - Sessions T3 Code settled or archived are archived in anyhost too, on every machine.
 - A T3 Code session that is not running no longer says it is working in T3 Code.
+- An agent that stops at a permission prompt always tells the agent that started it, even when its machine missed the change, within a minute at most.
 
 ## [0.8.1] - 2026-11-12
 

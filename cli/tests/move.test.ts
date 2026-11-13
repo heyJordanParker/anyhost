@@ -215,7 +215,7 @@ test('a move of a session that keeps writing while its code cannot be read ends 
 test('a program that restarts while a move paused its copy resumes that copy once the relay welcomes it, as this machine still holds the session, and leaves a copy the person suspended suspended', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  const suspended = Bun.spawn(['sleep', '600'])
+  const suspended = Bun.spawn(['sleep', '600'], { detached: true })
   onTestFinished(() => suspended.kill('SIGKILL'))
   writeFileSync(join(laptop.env['HOME'] ?? '', '.claude', 'sessions', `${suspended.pid}.json`), JSON.stringify({ pid: suspended.pid, sessionId: OTHER, kind: 'interactive', cwd: laptop.cwd, status: 'idle' }))
   suspended.kill('SIGSTOP')

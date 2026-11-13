@@ -213,7 +213,7 @@ export async function runningOn(relay: MemoryRelay, device = LAPTOP, person: Rec
   const transcript = join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Plan the trip"}}\n`)
-  const claude = Bun.spawn(argv)
+  const claude = Bun.spawn(argv, { detached: true })
   killAfterTest(claude)
   const status = (value: string): void => writeFileSync(join(home, '.claude', 'sessions', `${claude.pid}.json`), JSON.stringify({ pid: claude.pid, sessionId: SESSION, kind: 'interactive', cwd, status: value }))
   status('idle')
