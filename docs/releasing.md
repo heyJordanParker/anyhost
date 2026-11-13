@@ -25,7 +25,8 @@ CI then:
 
 1. runs `bun run --cwd cli check`, `bun run --cwd relay check`, `bun test ./cli/tests` and `cmod check .` on macOS and on Linux, where it first starts the runner user's systemd, which runs each `hc run` in a scope;
 2. releases only once both passed, and skips the release when the tag `v<version>` exists, so a push that keeps the version releases nothing;
-3. runs `cmod publish .`, which:
+3. installs the mod's and the relay's packages, and runs `cmod publish .`, which:
+   - runs `cmod check .` and releases nothing it fails, so the relay's tests need Miniflare from `relay/node_modules` there too;
    - builds the mod's release from the committed files `package.json` `files` lists, bundles its hooks, and validates it with `claude plugin validate --strict`;
    - runs `bun run build` in `cli/` for every machine `package.json`'s `os` and `cpu` allow, which compiles `anyhost-darwin-arm64`, `anyhost-darwin-x64`, `anyhost-linux-arm64`, and `anyhost-linux-x64` with `bun build --compile`;
    - writes `SHA256SUMS` for the release archive and the program;

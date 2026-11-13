@@ -87,9 +87,12 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install -g @cmodjs/cli
 
-      # The program's build installs its own packages, and the relay's bundle needs none.
-      - name: Install the packages of the mod
-        run: bun install --frozen-lockfile
+      # cmod publish runs cmod check first, which runs relay/relay.test.ts on Miniflare from the relay's packages, and the
+      # program's build installs its own.
+      - name: Install the packages of the mod and the relay
+        run: |
+          bun install --frozen-lockfile
+          bun install --cwd relay --frozen-lockfile
 
       - name: Release the version when it is new
         run: |
