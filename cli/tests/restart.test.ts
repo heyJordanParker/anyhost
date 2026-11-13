@@ -16,6 +16,7 @@ test('a move to a worker whose program restarts before its Claude Code ran the s
   }
   await until(isHanging, 'the worker\'s first herdr-core hanging', 30_000)
   worker.child.kill('SIGKILL')
+  await worker.child.exited
   rmSync(join(worker.folder, 'hang'))
   const killedAt = Date.now()
   await serveOn(worker.env)
@@ -37,6 +38,7 @@ test("a worker program restarted after it opened a terminal for a move stops tha
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
   await until(() => runsOn(worker.folder).some((run) => run.session === SESSION), 'the worker starting the session', 30_000)
   worker.child.kill('SIGKILL')
+  await worker.child.exited
   const job = Bun.spawn(['sleep', '600'])
   killAfterTest(job)
   const workerHome = worker.env['HOME'] ?? ''
@@ -95,6 +97,7 @@ test('a move the worker cannot take after the laptop program restarted takes the
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
   await until(async () => (await relay.claims()).get(SESSION) === WORKER.id, 'the worker taking the claim', 30_000)
   laptop.child.kill('SIGKILL')
+  await laptop.child.exited
   const restarted = await serveOn(laptop.env)
   await until(() => worker.logged().includes(`could not take ${SESSION} from ${LAPTOP.name}`), 'the worker failing the move', 30_000)
   await until(async () => (await relay.claims()).get(SESSION) === LAPTOP.id, 'the laptop taking the session back', 30_000)
