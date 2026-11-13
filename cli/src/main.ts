@@ -9,7 +9,7 @@ import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, mac
 import { doctor } from './doctor.ts'
 import type { Moving, Told } from './move.ts'
 import { connectRelay } from './relay.ts'
-import { openSession, repoSlug, resumeHere } from './resume.ts'
+import { openSession, repoSlug, restoreData, resumeHere } from './resume.ts'
 import { runSession } from './runner.ts'
 import { serve, serveSocket, type JoinedRelay, type Status } from './serve.ts'
 import { agentsOf, type Agents, type ListedSession } from './sessions.ts'
@@ -18,6 +18,8 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
 
   anyhost list [--json]              list every session of every machine
   anyhost resume <session> [--take]  continue a Claude Code or Codex session on this machine, in this terminal
+  anyhost resume --data <mod> --from <machine>
+                                     place a machine's copy of a mod's data folder into this machine's empty one, which this machine keeps from then on
   anyhost open <session> [--json]    run a session on this machine in a terminal of herdr-core, the one it runs in already when it does,
                                      and print that terminal: one in tmux comes in once its turn ends, one another machine holds comes here
   anyhost move <session> <machine>   move a session this machine runs to another machine, which runs it from then on
@@ -185,6 +187,8 @@ async function main(argv: string[]): Promise<number> {
       json: { type: 'boolean' },
       brief: { type: 'boolean' },
       take: { type: 'boolean' },
+      data: { type: 'string' },
+      from: { type: 'string' },
       invite: { type: 'boolean' },
       add: { type: 'string' },
       remove: { type: 'string' },
@@ -279,6 +283,12 @@ async function main(argv: string[]): Promise<number> {
     const deleted = await askProgram<{ readonly session: string }>('/agents/delete', { session: rest[0] })
     if (deleted === undefined) throw noProgram()
     console.log(`Deleted ${deleted.session.slice(0, 8)}. Deleted lists it, and opening it brings it back.`)
+    return 0
+  }
+  if (command === 'resume' && rest.length === 0 && values.data !== undefined && values.from !== undefined) {
+    const { data: mod, from } = values
+    const { folder, files } = await connected(async (capture) => await restoreData(capture, mod, from))
+    console.log(`Placed ${files} files of ${mod}'s data from ${from} into ${folder}, which ${mod}'s history on this machine keeps from now on.`)
     return 0
   }
   if (command === 'resume' && rest.length === 1 && rest[0] !== undefined) {

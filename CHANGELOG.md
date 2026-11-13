@@ -2,6 +2,15 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.8.4] - 2026-11-13
+
+### Added
+- anyhost keeps each mod's data folder in R2 as it keeps your sessions, so a dead machine no longer takes a mod's data with it, such as totalrecall's chat or the inbox's items. It uploads only what each file gained, and leaves out the files cmod says the mod rebuilds by itself, such as totalrecall's indexes. This needs a cmod that answers `cmod data`, and until then anyhost keeps no data folder.
+- `anyhost resume --data <mod> --from <machine>` places that machine's copy of a mod's data folder into this machine's, which must hold no file. This machine keeps that folder as its own from then on.
+
+### Fixed
+- An older anyhost that starts on a machine by accident can no longer change that machine's sessions in R2. Your relay remembers the newest anyhost each machine connected with and refuses an older one, which exits, and `anyhost doctor` names both versions. Run `cmod update anyhost` to fix it, or join the machine again with `anyhost join` to run an older anyhost on purpose. anyhost updates your relay by itself for this.
+
 ## [0.8.3] - 2026-11-13
 
 ### Fixed

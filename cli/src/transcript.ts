@@ -2,9 +2,9 @@ import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, sep } from 'node:path'
 import type { Message } from '../../relay/protocol.ts'
-import type { MachineRoots } from './device.ts'
+import type { DataFolder, MachineRoots } from './device.ts'
 
-export type Tool = 'claude' | 'codex'
+export type Tool = 'claude' | 'codex' | 'mod'
 export type Summary = {
   readonly title: string
   readonly titleRank: number
@@ -19,6 +19,7 @@ export type Owner =
   | { readonly prefix: string }
   | { readonly lines: string; readonly tool: Tool }
   | { readonly named: true }
+  | { readonly mod: string }
 
 const PROMPT_LENGTH = 300
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -45,7 +46,37 @@ export const watchedFolders = (roots: MachineRoots): { readonly folder: string; 
 
 const isTransient = (path: string): boolean => basename(path).startsWith('.') || /\.tmp\.[0-9a-f]+$/.test(path)
 
-export function ownerOf(path: string, roots: MachineRoots): Owner | undefined {
+export const historyOf = (mod: string, device: string): string => `${mod}@${device}`
+
+type Rule = { readonly glob: Bun.Glob; readonly isNegated: boolean; readonly isFolderOnly: boolean }
+const rulesOf = new WeakMap<readonly string[], readonly Rule[]>()
+
+function isRebuildable(data: DataFolder, path: string): boolean {
+  let rules = rulesOf.get(data.rebuildable)
+  if (rules === undefined) {
+    rules = data.rebuildable.flatMap((line) => {
+      if (line.trim() === '' || line.startsWith('#')) return []
+      const isNegated = line.startsWith('!')
+      const pattern = (isNegated ? line.slice(1) : line).replace(/^\\(?=[#!])/, '')
+      const body = pattern.replace(/\/+$/, '')
+      return [{ glob: new Bun.Glob(body.includes('/') ? body.replace(/^\//, '') : `**/${body}`), isNegated, isFolderOnly: body !== pattern }]
+    })
+    rulesOf.set(data.rebuildable, rules)
+  }
+  const parts = path.slice(data.folder.length + 1).split(sep)
+  for (let depth = 1; depth <= parts.length; depth += 1) {
+    const prefix = parts.slice(0, depth).join('/')
+    const isFolder = depth < parts.length
+    let isIgnored = false
+    for (const rule of rules) if ((isFolder || !rule.isFolderOnly) && rule.glob.match(prefix)) isIgnored = !rule.isNegated
+    if (isIgnored) return true
+  }
+  return false
+}
+
+export function ownerOf(path: string, roots: MachineRoots, folders: readonly DataFolder[] = []): Owner | undefined {
+  const data = folders.find(({ folder }) => path.startsWith(folder + sep))
+  if (data !== undefined) return isRebuildable(data, path) ? undefined : { mod: data.mod }
   const lines = linesFiles(roots).get(path)
   if (lines !== undefined) return lines
   if (isTransient(path)) return undefined

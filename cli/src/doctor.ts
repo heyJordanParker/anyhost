@@ -1,9 +1,9 @@
 import plugin from '../../.claude-plugin/plugin.json'
 import { PROTOCOL_VERSION, type Health } from '../../relay/protocol.ts'
 import { jsonOf } from './connect.ts'
-import { cmodDevice, relayLogin } from './device.ts'
+import { cmodDevice, relayLogin, rootsHere, type Device } from './device.ts'
 import { hcPath } from './hc.ts'
-import { DAILY_LIMIT, isDailyLimit } from './relay.ts'
+import { connectRelay, DAILY_LIMIT, isDailyLimit } from './relay.ts'
 import { serveSocket, type Status } from './serve.ts'
 
 type Check = { readonly ok: string } | { readonly wait: string } | { readonly problem: string; readonly fix: string }
@@ -13,12 +13,14 @@ const JOIN = 'Connect your machines in the anyhost mod: Connect Cloudflare on yo
 const UPDATE = 'The program tries the update once a run. Connect Cloudflare in the anyhost mod, or run anyhost connect, which updates the relay with your Cloudflare login.'
 const UPDATE_FROM_TERMINAL = 'The program tries the update once a run. Run anyhost connect, which updates the relay with your Cloudflare login.'
 const OUTDATED = 'Wait 5 minutes first: after an upload of the relay, from this machine or another, Cloudflare runs its older version for up to 5 minutes, and the program connects again within a minute. If this line is still here then, Connect Cloudflare again in the anyhost mod, or run anyhost connect, which updates the relay.'
+const REACH = 'Check this machine reaches the internet. The program keeps every change meanwhile and uploads it once the relay answers.'
 const HEALTH_MS = 10_000
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+const errorOf = (error: unknown): Error => (error instanceof Error ? error : new Error(String(error)))
 
-async function relayChecks(): Promise<Check[]> {
-  const login = await relayLogin().catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
+async function relayChecks(device: Device | Error): Promise<Check[]> {
+  const login = await relayLogin().catch(errorOf)
   if (login instanceof Error) return [{ problem: `anyhost cannot read which relay this machine joined: ${login.message}`, fix: JOIN }]
   if (login === undefined) return [{ problem: 'This machine is not joined to your relay, so anyhost uploads nothing from it.', fix: JOIN }]
   const joined: Check = { ok: `This machine is joined to the relay at ${login.url}.` }
@@ -32,15 +34,21 @@ async function relayChecks(): Promise<Check[]> {
     if (answer.status !== 200) return new Error(`it answered ${answer.status}`)
     return jsonOf<Health>(answer.text) ?? new Error(`it answered 200 with no health: ${answer.text.trim().slice(0, 200)}`)
   })()
-  if (health instanceof Error) return [joined, { problem: `The relay at ${login.url} did not answer: ${health.message}`, fix: 'Check this machine reaches the internet. The program keeps every change meanwhile and uploads it once the relay answers.' }]
+  if (health instanceof Error) return [joined, { problem: `The relay at ${login.url} did not answer: ${health.message}`, fix: REACH }]
   if (health.protocol < PROTOCOL_VERSION) {
     return [joined, { problem: `The relay at ${login.url} answers protocol ${health.protocol}, and anyhost ${plugin.version} needs ${PROTOCOL_VERSION}.`, fix: 'Connect Cloudflare again in the anyhost mod, or run anyhost connect, which updates the relay.' }]
   }
-  return [joined, { ok: `The relay answers protocol ${health.protocol} and keeps every session in the bucket ${health.bucket}.` }]
+  const answers: Check = { ok: `The relay answers protocol ${health.protocol} and keeps every session in the bucket ${health.bucket}.` }
+  if (device instanceof Error) return [joined, answers]
+  const relay = connectRelay({ login: async () => login, forget: async () => undefined, device, roots: rootsHere(), isPatient: false })
+  const refusal = await relay.runOne({ op: 'devices' }).then(() => undefined, messageOf)
+  const { state } = relay
+  relay.close()
+  if (refusal === undefined) return [joined, answers]
+  return [joined, { problem: refusal, fix: state.is === 'refused' ? 'Do what the line says.' : state.is === 'unjoined' ? JOIN : REACH }]
 }
 
-async function deviceCheck(): Promise<Check> {
-  const device = await cmodDevice().catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
+function deviceCheck(device: Device | Error): Check {
   if (device instanceof Error) return { problem: `cmod device cannot name this machine: ${device.message}`, fix: 'Give the machine a machine id with sudo systemd-machine-id-setup, or install cmod with npm install -g @cmodjs/cli.' }
   return { ok: `This machine is ${device.name}, ${device.id}.` }
 }
@@ -98,7 +106,8 @@ export async function doctor(): Promise<number> {
   const status = await fetch('http://localhost/status', { unix: address, signal: AbortSignal.timeout(3000) })
     .then(async (response) => jsonOf<Status>(await response.text()))
     .catch(() => undefined)
-  const checks = [...(status === undefined ? await relayChecks() : []), await deviceCheck(), ...programChecks(address, status), terminalCheck()]
+  const device = await cmodDevice().catch(errorOf)
+  const checks = [...(status === undefined ? await relayChecks(device) : []), deviceCheck(device), ...programChecks(address, status), terminalCheck()]
   for (const check of checks) console.log('ok' in check ? `✔ ${check.ok}` : 'wait' in check ? `… ${check.wait}` : `✘ ${check.problem}\n  ${check.fix}`)
   return checks.some((check) => 'problem' in check) ? 1 : 0
 }

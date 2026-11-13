@@ -8,7 +8,7 @@ const OBJECTS = '/v1/objects/'
 async function putObject(env: Env, pool: DurableObjectStub<Pool>, key: string, request: Request): Promise<Response> {
   if (!request.headers.has('content-length')) return reply(refuse(411, 'length_required', 'A PUT of an object names its Content-Length.'))
   const holder = request.headers.get('x-anyhost-holder') ?? undefined
-  using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')), holder)
+  using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')), request.headers.get('x-anyhost-version'), holder)
   if ('refused' in authorized) return reply(authorized.refused)
   const written = await conditionalPut(env.BUCKET, key, request.body, request.headers)
   if ('stored' in written) return Response.json({ etag: written.stored.etag })
@@ -16,7 +16,7 @@ async function putObject(env: Env, pool: DurableObjectStub<Pool>, key: string, r
 }
 
 async function getObject(env: Env, pool: DurableObjectStub<Pool>, key: string, request: Request): Promise<Response> {
-  using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')))
+  using authorized = await pool.authorize(tokenOf(request.headers.get('authorization')), request.headers.get('x-anyhost-version'))
   if ('refused' in authorized) return reply(authorized.refused)
   const object = await env.BUCKET.get(key, { range: request.headers }).catch((error: unknown) => {
     if (error instanceof Error && error.message.endsWith('(10039)')) return undefined

@@ -1,4 +1,4 @@
-export const RELAY_VERSION = 5
+export const RELAY_VERSION = 6
 export const PROTOCOL_VERSION = 2
 export const COMPATIBILITY_DATE = '2026-11-01'
 
@@ -15,6 +15,7 @@ export const ANSWER = 0x02
 export const CLOSE_UNKNOWN_TOKEN = 4401
 export const CLOSE_REMOVED = 4403
 export const CLOSE_DEVICE_LIVE = 4409
+export const CLOSE_OLDER_PROGRAM = 4426
 
 export const REMOVED_REASON = 'This machine was removed from your machines.'
 export const REMOVED_MESSAGE = `${REMOVED_REASON} Join it again with a link from Add a machine.`
@@ -29,6 +30,7 @@ export type ErrorCode =
   | 'invite_used'
   | 'invite_expired'
   | 'device_live'
+  | 'older_program'
   | 'unknown_device'
   | 'precondition'
   | 'held'

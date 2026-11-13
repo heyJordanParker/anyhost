@@ -466,7 +466,7 @@ async function startIn(capture: Capture, cwd: string, prompt: string, here: Move
 export async function sessionOf(capture: Capture, asked: string): Promise<string> {
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(asked)) return asked
   const local = capture.db.query<{ session: string }, [string]>('select session from journals where session like ?').all(`${asked}%`).map(({ session }) => session)
-  const known = [...new Set([...(await claimsOf(capture.relay, asked)).keys(), ...local])]
+  const known = [...new Set([...(await claimsOf(capture.relay, asked)).keys(), ...local])].filter((id) => !id.includes('@'))
   const [session, ...more] = known
   if (session === undefined) throw new Error(`No session's id begins with ${asked}. anyhost list shows every session.`)
   if (more.length > 0) throw new Error(`${known.length} sessions' ids begin with ${asked}. Give more of it.`)

@@ -2,6 +2,7 @@ import { DurableObject, RpcTarget } from 'cloudflare:workers'
 import {
   ANSWER,
   CLOSE_DEVICE_LIVE,
+  CLOSE_OLDER_PROGRAM,
   CLOSE_REMOVED,
   CLOSE_UNKNOWN_TOKEN,
   INVITE_MS,
@@ -56,13 +57,14 @@ type DeviceRow = {
   joined_at: number
   seen_at: number
   removed_at: number | null
+  program: string
 }
 
 type Fetched = { readonly object: R2ObjectBody }
 
 const SCHEMA = `
 create table if not exists devices (id text primary key, name text not null, os text not null, arch text not null,
-  roots text not null, token_sha256 text unique, joined_at integer not null, seen_at integer not null, removed_at integer);
+  roots text not null, token_sha256 text unique, joined_at integer not null, seen_at integer not null, removed_at integer, program text not null default '');
 create table if not exists invites (code_sha256 text primary key, made_by text, expires_at integer, used_by text, used_at integer);
 create table if not exists claims (session text primary key, device text not null, at integer not null, changed integer not null default 0);
 create table if not exists waiting (id integer primary key, device text not null, session text not null, taker text not null, message text not null, at integer not null);
@@ -90,6 +92,15 @@ function jsonOf(text: string | null): unknown {
     return undefined
   }
 }
+const versionOf = (header: string | null): string | null => (header !== null && /^\d+\.\d+\.\d+$/.test(header) ? header : null)
+function isOlder(version: string, than: string): boolean {
+  const ours = version.split('.').map(Number)
+  const theirs = than.split('.').map(Number)
+  const at = ours.findIndex((part, index) => part !== theirs[index])
+  return at >= 0 && (ours[at] ?? 0) < (theirs[at] ?? 0)
+}
+const olderProgramReason = (version: string | null, kept: string): string =>
+  version === null ? `This anyhost names no version, and this machine connected with anyhost ${kept}.` : `anyhost ${version} is older than anyhost ${kept}, which this machine connected with.`
 export const refuse = (status: number, error: ErrorCode, message: string, more: object = {}): Reply => ({ status, body: { error, message, ...more } satisfies Refusal })
 export const reply = ({ status, body }: Reply): Response => Response.json(body, { status })
 
@@ -182,6 +193,9 @@ export class Pool extends DurableObject<Env> {
       this.#sql.exec('alter table claims add column changed integer not null default 0')
       this.#sql.exec('update claims set changed = rowid')
     }
+    if (this.#sql.exec("select name from pragma_table_info('devices') where name = 'program'").toArray().length === 0) {
+      this.#sql.exec("alter table devices add column program text not null default ''")
+    }
     this.#sql.exec(CHANGES)
     if (this.#sql.exec('select value from meta where key = ?', 'relay').toArray().length > 0) return
     await this.#importBucket()
@@ -235,8 +249,13 @@ export class Pool extends DurableObject<Env> {
     if (imported.length > 0) console.log(`The relay imported ${imported.length} device and claim records from R2 and deleted them there.`)
   }
 
-  #deviceOf(tokenSha256: string): DeviceRow | undefined {
-    return this.#sql.exec<DeviceRow>('select * from devices where token_sha256 = ?', tokenSha256).toArray()[0]
+  #deviceOf(tokenSha256: string, header: string | null): DeviceRow | { readonly olderProgram: string } | undefined {
+    const row = this.#sql.exec<DeviceRow>('select * from devices where token_sha256 = ?', tokenSha256).toArray()[0]
+    if (row === undefined || row.removed_at !== null) return row
+    const version = versionOf(header)
+    if (row.program !== '' && (version === null || isOlder(version, row.program))) return { olderProgram: olderProgramReason(version, row.program) }
+    if (version !== null && (row.program === '' || isOlder(row.program, version))) this.#sql.exec('update devices set program = ? where id = ?', version, row.id)
+    return row
   }
 
   #holderOf(session: string): DeviceRef | undefined {
@@ -327,7 +346,7 @@ export class Pool extends DurableObject<Env> {
       this.#sql.exec(
         `insert into devices (id, name, os, arch, roots, token_sha256, joined_at, seen_at) values (?, ?, ?, ?, ?, ?, ?, ?)
           on conflict (id) do update set name = excluded.name, os = excluded.os, arch = excluded.arch, roots = excluded.roots,
-          token_sha256 = excluded.token_sha256, joined_at = excluded.joined_at, seen_at = excluded.seen_at, removed_at = null`,
+          token_sha256 = excluded.token_sha256, joined_at = excluded.joined_at, seen_at = excluded.seen_at, removed_at = null, program = ''`,
         device.id,
         device.name,
         device.os,
@@ -347,9 +366,10 @@ export class Pool extends DurableObject<Env> {
     return { status: 200, body: { ...healthOf(this.env), token, device: { id: device.id, name: device.name } } satisfies Joined }
   }
 
-  async authorize(token: string, holder?: string): Promise<{ refused: Reply } | { device: DeviceRef; write?: Write }> {
-    const row = this.#deviceOf(await sha256(token))
+  async authorize(token: string, version: string | null, holder?: string): Promise<{ refused: Reply } | { device: DeviceRef; write?: Write }> {
+    const row = this.#deviceOf(await sha256(token), version)
     if (row === undefined) return { refused: refuse(401, 'unknown_token', 'The relay knows no machine with this token. Join it with a link from Add a machine.') }
+    if ('olderProgram' in row) return { refused: refuse(426, 'older_program', row.olderProgram) }
     if (row.removed_at !== null) return { refused: refuse(403, 'removed', REMOVED_MESSAGE) }
     const device = { id: row.id, name: row.name }
     if (holder === undefined) return { device }
@@ -370,8 +390,9 @@ export class Pool extends DurableObject<Env> {
     if (name === '') return reply(refuse(400, 'invalid', 'A connect names its machine in X-Anyhost-Name.'))
     const roots = rootsOf(jsonOf(request.headers.get('x-anyhost-roots')))
     if (roots === undefined) return reply(refuse(400, 'invalid', 'A connect names its machine\'s roots as JSON in X-Anyhost-Roots.'))
-    const row = this.#deviceOf(await sha256(tokenOf(request.headers.get('authorization'))))
+    const row = this.#deviceOf(await sha256(tokenOf(request.headers.get('authorization'))), request.headers.get('x-anyhost-version'))
     if (row === undefined) return closeWith(CLOSE_UNKNOWN_TOKEN, 'The relay knows no machine with this token.')
+    if ('olderProgram' in row) return closeWith(CLOSE_OLDER_PROGRAM, row.olderProgram)
     if (row.removed_at !== null) return closeWith(CLOSE_REMOVED, REMOVED_REASON)
     const live = this.#liveOtherThan(row.id, name)
     if (live !== undefined) return closeWith(CLOSE_DEVICE_LIVE, `${live.slice(0, 64)} is connected with this machine's id.`)

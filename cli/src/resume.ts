@@ -7,11 +7,11 @@ import { checkoutOf, checkoutOfEntry, continueJournal, isCodePart, journalOf, li
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { statusOf } from './claude.ts'
 import { cloneRemote } from './code.ts'
-import { devicesOf, type MachineRoots } from './device.ts'
+import { dataFolders, devicesOf, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
 import { runSession } from './runner.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
-import { codexState, linesFiles, ownerOf, type Tool } from './transcript.ts'
+import { codexState, filesUnder, historyOf, linesFiles, ownerOf, type Tool } from './transcript.ts'
 
 const NOTHING = new Uint8Array()
 
@@ -124,7 +124,7 @@ async function checkFile(file: ReplayedFile, writers: Writers): Promise<void> {
   }
   const found = hasher.digest('hex')
   if (size !== after.size || found !== after.sha256) {
-    throw new Error(`${path} rebuilds to ${size} bytes with sha256 ${found}, and its last record says ${after.size} bytes with sha256 ${after.sha256}, so anyhost places nothing of the session.`)
+    throw new Error(`${path} rebuilds to ${size} bytes with sha256 ${found}, and its last record says ${after.size} bytes with sha256 ${after.sha256}, so anyhost places none of its journal's files.`)
   }
 }
 
@@ -298,4 +298,35 @@ export async function restore(capture: Capture, id: string, options: { take: boo
   await rm(staging, { recursive: true, force: true })
   if (claim.previous !== undefined && !claim.told) markUntold(db, id, claim.previous.name)
   return { session, cwd }
+}
+
+export async function restoreData(capture: Capture, mod: string, from: string): Promise<{ readonly folder: string; readonly files: number }> {
+  const { relay, db, roots, device } = capture
+  const data = (await dataFolders()).find((each) => each.mod === mod)
+  if (data === undefined) throw new Error(`cmod data --json names no data folder of the mod ${mod} on ${device.name}.`)
+  if ((await filesUnder(data.folder)).length > 0) throw new Error(`${data.folder} holds files already, so anyhost places no copy of ${mod}'s data there. Empty that folder, and run this again.`)
+  const devices = await devicesOf(relay)
+  const named = [...devices.values()].filter(({ name }) => name === from)
+  const machine = devices.get(from) ?? (named.length === 1 ? named[0] : undefined)
+  if (machine === undefined) {
+    throw new Error(named.length > 1 ? `${named.length} machines are named ${from}, with the ids ${named.map(({ id }) => id).join(', ')}. Give the id of the one to copy from.` : `No machine of your relay is named ${from} or has that id. anyhost machines lists them.`)
+  }
+  const history = historyOf(mod, machine.id)
+  const here: Roots = { ...roots, checkout: data.folder }
+  const rootsOf = ({ device: writer, checkout }: Writer): Roots => {
+    const writerRoots = devices.get(writer)?.roots
+    if (writerRoots === undefined || checkout === undefined) throw new Error(`The history ${history} holds a record of the machine ${writer}, whose roots or data folder anyhost does not know, so it cannot rewrite its paths.`)
+    return { ...writerRoots, checkout }
+  }
+  const staging = join(dirname(db.filename), 'restore', history)
+  await rm(staging, { recursive: true, force: true })
+  try {
+    const replayed = await downloadJournal(relay, history, staging, (writer) => relocate(NOTHING, writer.path, rootsOf(writer), here).path)
+    const writers: Writers = { rootsOf, tracked: new Map() }
+    for (const file of replayed.files.values()) await checkFile(file, writers)
+    for (const file of replayed.files.values()) await placeFile(historyOf(mod, device.id), file, writers, here)
+    return { folder: data.folder, files: replayed.files.size }
+  } finally {
+    await rm(staging, { recursive: true, force: true })
+  }
 }

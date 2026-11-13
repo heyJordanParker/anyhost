@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { changedFiles, countedRelay, journalOf, openCapture, relistSessions, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
 import { loginEnvironment, pausedSessions, recordedSessions, resumeCopy, runSessions, saveLoginEnvironment, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
-import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
+import { cmod, dataFolders, dataRoot, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { hcPath, machinesReached } from './hc.ts'
 import { installHerdr } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
@@ -233,7 +233,17 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   )
   if (running !== undefined) throw new Error(`The anyhost program of ${running.device.name} already answers at ${socket}, so this one does not start. Two programs on one state folder would both write its database.`)
   const roots = rootsHere()
-  const relay = connectRelay({ login: relayLogin, forget: forgetRelayLogin, device, roots, isPatient: true })
+  const relay = connectRelay({
+    login: relayLogin,
+    forget: forgetRelayLogin,
+    device,
+    roots,
+    isPatient: true,
+    onOlderProgram: (message) => {
+      console.error(`${new Date().toISOString()} ${message} So anyhost exits, and its service starts it again from the anyhost cmod links.`)
+      process.exit(1)
+    },
+  })
   const db = openDatabase()
   let release = (_session: string, _holder: string): void => undefined
   const capture = openCapture(relay, device, roots, {
@@ -326,7 +336,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     noteChildren()
     for (const read of recordsHeard) read()
   }
-  const watchable: readonly { readonly folder: string; readonly depth: number }[] = [...watchedFolders(roots), { folder: records, depth: 1 }]
+  const watchable: readonly { readonly folder: string; readonly depth: number }[] = [...watchedFolders(roots), { folder: records, depth: 1 }, { folder: dataRoot(), depth: Infinity }]
   const heard = (path: string): void => {
     if (watchable.some(({ folder }) => folder === path)) void watchFolders()
     if (dirname(path) === records) return recordsChanged()
@@ -506,6 +516,18 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       for (const path of paths) queue.add(session, tool, path)
     }
   }
+  let dataFailure = ''
+  const readDataFolders = async (): Promise<void> => {
+    try {
+      capture.dataFolders = await dataFolders()
+      dataFailure = ''
+    } catch (error) {
+      capture.dataFolders = []
+      const reason = error instanceof Error ? error.message : String(error)
+      if (reason !== dataFailure) console.error(`${new Date().toISOString()} anyhost keeps no mod's data folder, as cmod data --json, which names each folder and the files its mod rebuilds by itself, failed: ${reason}`)
+      dataFailure = reason
+    }
+  }
   const readOptions = async (): Promise<void> => {
     const options = await personOptions().catch((error: unknown) => void problems.set('options', error))
     if (options !== undefined) {
@@ -538,6 +560,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     const started = Date.now()
     const isAll = started - sweptAllAt >= SWEEP_ALL_MS
     if (isAll) unheardFrom(sweptAllAt > 0 ? sweptAllAt : lastRanAt)
+    await readDataFolders()
     await listWritten()
     await readOptions()
     await settle('herdr', () => installHerdr())
@@ -766,6 +789,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   })
   console.log(`unix:${socket}`)
   const firstOptions = readOptions()
+  await readDataFolders()
   await watchFolders(true)
   await firstOptions
   const loop = async (): Promise<void> => {

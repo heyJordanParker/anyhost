@@ -8,7 +8,8 @@ import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device } from
 import { connectRelay, type Relay, type RelayOptions } from '../src/relay.ts'
 import { listSessions } from '../src/sessions.ts'
 import { failTest, memoryRelay, noCode, temporaryFolder, until, welcomed } from './memory.ts'
-import { DAILY_LIMIT, roots, SESSION } from './program.ts'
+import plugin from '../../.claude-plugin/plugin.json'
+import { anyhostOn, CLI, DAILY_LIMIT, HOST, killAfterTest, machineFor, roots, SESSION } from './program.ts'
 
 const device: Device = { id: 'device-a', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
 const connect = (options: Omit<RelayOptions, 'forget'>): Relay => {
@@ -56,6 +57,23 @@ test('a removed machine is refused, and a command of it fails with the reason', 
   const command = connect({ login: async () => ({ url: relay.url, token }), device, roots: roots('/home/ada'), isPatient: false })
   await expect(Promise.all(command.run([{ op: 'claims' }]))).rejects.toThrow(message)
 })
+
+test('a service older than the anyhost this machine last connected with exits 1 with the reason, a command fails with it, and anyhost doctor prints both versions and the fix', async () => {
+  const relay = await memoryRelay()
+  const { env, token } = await machineFor(relay, HOST)
+  expect((await fetch(`${relay.url}/v1/objects/newer`, { headers: { authorization: `Bearer ${token}`, 'x-anyhost-version': '99.0.0' } })).status).toBe(404)
+  const refusal = `The relay refused ${HOST.name}: anyhost ${plugin.version} is older than anyhost 99.0.0, which this machine connected with. Run cmod update anyhost, or, to run anyhost ${plugin.version} here on purpose, run anyhost join with the link anyhost machines --invite prints on a joined machine.`
+
+  const service = Bun.spawn(['bun', CLI, 'serve'], { env, stdout: 'ignore', stderr: 'pipe' })
+  killAfterTest(service)
+  const [code, logged] = await Promise.all([service.exited, new Response(service.stderr).text()])
+  expect(code).toBe(1)
+  expect(logged).toContain(`${refusal} So anyhost exits, and its service starts it again from the anyhost cmod links.`)
+  expect(await anyhostOn(env, ['machines'])).toEqual({ code: 1, out: '', err: `${refusal}\n` })
+  const doctor = await anyhostOn(env, ['doctor'])
+  expect(doctor.code).toBe(1)
+  expect(doctor.out).toContain(`✘ ${refusal}\n  Do what the line says.\n`)
+}, 30_000)
 
 test('a machine that never joined waits for a join in the service, and connects at once when one comes', async () => {
   const relay = await memoryRelay()

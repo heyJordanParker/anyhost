@@ -102,7 +102,7 @@ export const killCopiesAfterTest = (folder: string): void =>
     for (const pid of readFileSync(join(folder, 'copies'), { encoding: 'utf8', flag: 'a+' }).split('\n').filter((line) => line !== '')) Bun.spawnSync(['kill', '-9', pid])
   })
 
-export async function machineFor(relay: MemoryRelay, device: Device, person: Record<string, unknown> = {}): Promise<{ readonly env: Record<string, string>; readonly socket: string; readonly folder: string }> {
+export async function machineFor(relay: MemoryRelay, device: Device, person: Record<string, unknown> = {}): Promise<{ readonly env: Record<string, string>; readonly socket: string; readonly folder: string; readonly token: string }> {
   const folder = temporaryFolder()
   killCopiesAfterTest(folder)
   const home = join(folder, 'home')
@@ -131,7 +131,7 @@ export async function machineFor(relay: MemoryRelay, device: Device, person: Rec
   )
   mkdirSync(join(env.XDG_STATE_HOME, 'anyhost'), { recursive: true })
   writeFileSync(join(env.XDG_STATE_HOME, 'anyhost', 'relay.json'), JSON.stringify({ url: relay.url }))
-  return { env, socket: join(env.XDG_STATE_HOME, 'anyhost', 'serve.sock'), folder }
+  return { env, socket: join(env.XDG_STATE_HOME, 'anyhost', 'serve.sock'), folder, token }
 }
 
 export async function serveOn(env: Record<string, string>): Promise<{ readonly address: string; readonly child: Subprocess; readonly logged: () => string }> {
@@ -256,3 +256,9 @@ export function tripOn(laptop: { readonly env: Record<string, string> }): string
 }
 export const sentOn = (folder: string): string[] => logOf(folder, 'sent.log')
 export const isWatcherProblem = (problem: string): boolean => problem.includes(' watcher: ')
+export const dataFolderOn = (machine: { readonly env: Record<string, string> }, mod: string, rebuildable: readonly string[]): string => {
+  const folder = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'data', mod)
+  const cmod = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs', 'cmod')
+  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace('  *) exit 1', `  "data --json") printf '%s' '${JSON.stringify([{ mod, folder, rebuildable }])}' ;;\n  *) exit 1`))
+  return folder
+}

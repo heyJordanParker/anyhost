@@ -158,7 +158,7 @@ class Replay {
 
 export async function downloadJournal(relay: Relay, session: string, into: string, identify: (header: RecordHeader) => string): Promise<Replayed> {
   const { frames, sealedEnd } = framesOf(session, await relay.list(journalPrefix(session)))
-  if (frames[0]?.start !== 0) throw new Error(`The bucket holds no journal of the session ${session} from byte 0.`)
+  if (frames[0]?.start !== 0) throw new Error(`The bucket holds no journal of ${session} from byte 0.`)
   mkdirSync(into, { recursive: true })
   const replay = new Replay(into, identify)
   let end = 0

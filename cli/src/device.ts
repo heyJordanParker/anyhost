@@ -11,7 +11,9 @@ export type Device = { readonly id: string; readonly name: string; readonly os: 
 export type MachineRoots = Omit<Roots, 'checkout'>
 
 export const stateFolder = (): string => join(process.env['XDG_STATE_HOME'] || join(homedir(), '.local', 'state'), 'anyhost')
-const cmodProgram = (): string => join(process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share'), 'cmod', 'programs', 'cmod')
+const dataHome = (): string => process.env['XDG_DATA_HOME'] || join(homedir(), '.local', 'share')
+const cmodProgram = (): string => join(dataHome(), 'cmod', 'programs', 'cmod')
+export const dataRoot = (): string => join(dataHome(), 'cmod', 'data')
 
 export const rootsHere = (home = homedir()): MachineRoots => ({
   home,
@@ -47,6 +49,27 @@ export async function personOptions(): Promise<PersonOptions> {
   const options = (JSON.parse(await cmod(['options', 'anyhost', '--json'])) as { person: PersonOptions }).person
   optionsRead = { write, options }
   return options
+}
+
+export type DataFolder = { readonly mod: string; readonly folder: string; readonly rebuildable: readonly string[] }
+
+const isDataFolder = (entry: unknown): entry is DataFolder => {
+  const { mod, folder, rebuildable } = (entry ?? {}) as Partial<Record<keyof DataFolder, unknown>>
+  return typeof mod === 'string' && /^[\w.-]+$/.test(mod) && typeof folder === 'string' && folder.startsWith('/') && !folder.endsWith('/') && Array.isArray(rebuildable) && rebuildable.every((pattern) => typeof pattern === 'string')
+}
+
+let dataRead: { readonly write: string; readonly folders: Promise<readonly DataFolder[]> } | undefined
+export async function dataFolders(): Promise<readonly DataFolder[]> {
+  const write = await lastWriteOf(join(rootsHere().claudeHome, 'settings.json'))
+  if (dataRead?.write !== write) {
+    const folders = cmod(['data', '--json']).then((text) => {
+      const answer = JSON.parse(text) as unknown
+      if (!Array.isArray(answer) || !answer.every(isDataFolder)) throw new Error(`cmod data --json answered ${text.trim().slice(0, 200)}, not a list of { mod, folder, rebuildable }.`)
+      return answer
+    })
+    dataRead = { write, folders }
+  }
+  return await dataRead.folders
 }
 
 const relayFile = (): string => join(stateFolder(), 'relay.json')

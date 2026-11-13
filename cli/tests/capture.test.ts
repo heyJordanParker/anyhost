@@ -11,7 +11,7 @@ import {
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
 import { downloadJournal } from '../src/sessions.ts'
-import { codexState, summarize } from '../src/transcript.ts'
+import { codexState, summarize, type Tool } from '../src/transcript.ts'
 import { MEMORY, failTest, memoryRelay, noCode, temporaryFolder, welcomed, type MemoryRelay } from './memory.ts'
 
 const SESSION = '11111111-2222-3333-4444-555555555555'
@@ -28,7 +28,7 @@ const lines = [
 const decoded = (bytes: Uint8Array): string => new TextDecoder().decode(bytes)
 const rootsUnder = (folder: string): MachineRoots => ({ home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') })
 
-function machine(device: Device, relay: MemoryRelay, folder = temporaryFolder(), code = noCode, onCode?: (session: string, tool: 'claude' | 'codex', folder: string) => void, compactLagMs?: number) {
+function machine(device: Device, relay: MemoryRelay, folder = temporaryFolder(), code = noCode, onCode?: (session: string, tool: Tool, folder: string) => void, compactLagMs?: number) {
   const roots = rootsUnder(folder)
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
@@ -771,7 +771,7 @@ test("a seal of a journal R2 lost a frame of seals up to the lost frame, and the
   const again = await sealQuiet(capture, recording, quiet)
   expect(again).toEqual(new Map([[SESSION, new Set([transcript, toolResult, join(roots.claudeHome, 'history.jsonl')])]]))
   expect(logged.mock.calls.map(([message]) => String(message).slice(25))).toEqual([
-    `The journal of ${SESSION} in R2 reaches byte ${lostAt}, and anyhost-a counted ${end}, so it uploads the session's files whole again from byte ${lostAt}.`,
+    `The journal of ${SESSION} in R2 reaches byte ${lostAt}, and anyhost-a counted ${end}, so it uploads the files of ${SESSION} whole again from byte ${lostAt}.`,
   ])
   logged.mockRestore()
   expect(problems).toEqual([])

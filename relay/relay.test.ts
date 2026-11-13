@@ -7,6 +7,7 @@ import { bundleRelay } from './build.ts'
 import {
   ANSWER,
   CLOSE_DEVICE_LIVE,
+  CLOSE_OLDER_PROGRAM,
   CLOSE_REMOVED,
   CLOSE_UNKNOWN_TOKEN,
   COMPATIBILITY_DATE,
@@ -106,8 +107,8 @@ class Socket {
   #wake = (): void => undefined
   #id = 0
 
-  constructor(url: string, token: string, name: string, roots: Roots) {
-    const headers = { authorization: `Bearer ${token}`, 'x-anyhost-name': name, 'x-anyhost-roots': JSON.stringify(roots) }
+  constructor(url: string, token: string, name: string, roots: Roots, version?: string) {
+    const headers = { authorization: `Bearer ${token}`, 'x-anyhost-name': name, 'x-anyhost-roots': JSON.stringify(roots), ...(version === undefined ? {} : { 'x-anyhost-version': version }) }
     this.ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, { headers } as any)
     this.ws.binaryType = 'arraybuffer'
     this.ws.addEventListener('message', (event) => {
@@ -202,8 +203,8 @@ async function json(response: Response): Promise<Json> {
   }
 }
 
-async function connect(token: string, name: string, roots: Roots): Promise<Socket> {
-  const socket = new Socket(relay.url(), token, name, roots)
+async function connect(token: string, name: string, roots: Roots, version?: string): Promise<Socket> {
+  const socket = new Socket(relay.url(), token, name, roots, version)
   sockets.push(socket)
   await new Promise((resolve, reject) => {
     socket.ws.addEventListener('open', resolve)
@@ -900,6 +901,46 @@ describe('remove', () => {
     await joinWith(await invite(mac), gone.device)
     const [again] = await mac.socket.results({ op: 'devices' })
     expect((again!['devices'] as Json[]).find((device) => device['id'] === gone.device.id)).not.toHaveProperty('removedAt')
+  })
+})
+
+describe('the program version', () => {
+  const older = (version: string, kept: string): string => `anyhost ${version} is older than anyhost ${kept}, which this machine connected with.`
+  const welcomedWith = async (machine: Joined, version: string): Promise<void> => {
+    const socket = await connect(machine.token, machine.device.name, machine.device.roots, version)
+    await socket.message('welcome')
+    socket.close()
+    await socket.closed
+  }
+
+  test('a machine that connected with an anyhost is refused with 4426 by an older one and by one that names no version, and a newer one raises what it keeps', async () => {
+    const machine = await joinNew(mac, 'versioned')
+    const { token, device } = machine
+    await welcomedWith(machine, '0.9.0')
+    expect(await (await connect(token, device.name, device.roots, '0.8.0')).closed).toEqual({ code: CLOSE_OLDER_PROGRAM, reason: older('0.8.0', '0.9.0') })
+    expect(await (await connect(token, device.name, device.roots)).closed).toEqual({ code: CLOSE_OLDER_PROGRAM, reason: 'This anyhost names no version, and this machine connected with anyhost 0.9.0.' })
+    await welcomedWith(machine, '0.9.1')
+    expect(await (await connect(token, device.name, device.roots, '0.9.0')).closed).toEqual({ code: CLOSE_OLDER_PROGRAM, reason: older('0.9.0', '0.9.1') })
+    await welcomedWith(machine, '0.10.0')
+    expect(await (await connect(token, device.name, device.roots, '0.9.1')).closed).toEqual({ code: CLOSE_OLDER_PROGRAM, reason: older('0.9.1', '0.10.0') })
+  })
+
+  test('an object PUT or GET of an older anyhost answers 426, and the PUT writes nothing', async () => {
+    const machine = await joinNew(mac, 'versioned-objects')
+    await welcomedWith(machine, '0.9.0')
+    const key = `${prefix}versioned/frame.zst`
+    expect(await json(await putObject(machine.token, key, 'older', { 'x-anyhost-version': '0.8.0' }))).toEqual({ status: 426, error: 'older_program', message: older('0.8.0', '0.9.0') })
+    expect(await json(await getObject(machine.token, key, { 'x-anyhost-version': '0.8.0' }))).toEqual({ status: 426, error: 'older_program', message: older('0.8.0', '0.9.0') })
+    expect(await json(await getObject(machine.token, key, { 'x-anyhost-version': '0.9.0' }))).toMatchObject({ status: 404, error: 'missing' })
+  })
+
+  test('a join with a new invite forgets the kept version, so an older anyhost connects again', async () => {
+    const machine = await joinNew(mac, 'rolled-back')
+    await welcomedWith(machine, '0.9.0')
+    const rejoined = await json(await post('/v1/join', { invite: await invite(mac), device: machine.device }))
+    expect(rejoined).toMatchObject({ status: 200, device: { id: machine.device.id } })
+    const back = await connect(rejoined['token'], machine.device.name, machine.device.roots, '0.8.0')
+    expect(await back.message('welcome')).toMatchObject({ device: { id: machine.device.id } })
   })
 })
 

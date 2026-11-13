@@ -7,9 +7,9 @@ import zlib from 'node:zlib'
 import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Listed, type Released } from '../../relay/protocol.ts'
 import { claimsOf, followHolders, type Holders } from './claims.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
-import { devicesOf, stateFolder, type Device, type MachineRoots } from './device.ts'
+import { devicesOf, stateFolder, type DataFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Relay } from './relay.ts'
-import { codexNameOf, codexState, filesOf, linesFiles, namedIn, ownerOf, summarize, transcriptsOn, type Summary, type Tool } from './transcript.ts'
+import { codexNameOf, codexState, filesOf, filesUnder, historyOf, linesFiles, namedIn, ownerOf, summarize, transcriptsOn, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
 export const CODE_PIECE_BYTES = 128 * 2 ** 10
@@ -65,6 +65,7 @@ export type Capture = Code & {
   readonly onCode: (session: string, tool: Tool, folder: string) => void
   readonly onReleased: (session: string, holder: string) => void
   readonly holders: Holders
+  dataFolders: readonly DataFolder[]
   lastIndex: string
   keptIndex?: Promise<readonly IndexedSession[]> | undefined
 }
@@ -184,7 +185,7 @@ export function openCapture(
   })
   const capture: Capture = {
     ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, compactLagMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
-    holders: followHolders(relay, db), lastIndex: '',
+    holders: followHolders(relay, db), dataFolders: [], lastIndex: '',
   }
   const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
   relay.on('released', released)
@@ -363,9 +364,10 @@ export async function sessionsOf(capture: Capture, path: string): Promise<{ read
   if (path.startsWith(state)) {
     return capture.db.query<{ session: string; tool: Tool }, [string]>("select session, tool from files join journals using (session) where path = ? and mtime = 0 and stopped = ''").all(state)
   }
-  const owner = ownerOf(path, capture.roots)
+  const owner = ownerOf(path, capture.roots, capture.dataFolders)
   if (owner === undefined) return []
   if ('session' in owner) return [owner]
+  if ('mod' in owner) return [{ session: historyOf(owner.mod, capture.device.id), tool: 'mod' }]
   const { db } = capture
   if ('prefix' in owner) return db.query<{ session: string; tool: Tool }, [string]>('select session, tool from journals where session like ?').all(`${owner.prefix}%`)
   if ('named' in owner) return db.query<{ session: string; tool: Tool }, [string]>('select files.session, journals.tool from files join journals using (session) where path = ?').all(path)
@@ -451,9 +453,11 @@ async function hasherOf(source: Source, size: number): Promise<Bun.CryptoHasher>
 export const checkoutOfEntry = (entry: Pick<IndexedSession, 'cwd' | 'repo' | 'repoFolder'>, home: string): string =>
   (entry.repo !== '' && entry.repoFolder !== '' ? entry.cwd.slice(0, -entry.repoFolder.length - 1) : entry.cwd) || home
 
+const dataOf = (capture: Capture, session: string): DataFolder | undefined => capture.dataFolders.find(({ mod }) => historyOf(mod, capture.device.id) === session)
+
 function writerOf(capture: Capture, session: string): Pick<RecordHeader, 'device' | 'checkout'> {
   const row = capture.db.query<Pick<SessionRow, 'cwd' | 'repo' | 'repo_folder'>, [string]>('select cwd, repo, repo_folder from sessions where id = ?').get(session)
-  const checkout = row === null ? '' : checkoutOfEntry({ cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder }, '')
+  const checkout = dataOf(capture, session)?.folder ?? (row === null ? '' : checkoutOfEntry({ cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder }, ''))
   return { device: capture.device.id, ...(checkout === '' ? {} : { checkout }) }
 }
 
@@ -571,9 +575,11 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
   const { db, roots } = capture
   let journal = journalOf(db, session)
   const work = new Set(paths)
+  const data = dataOf(capture, session)
+  if (tool === 'mod' && data === undefined) return new Set()
   if (journal === undefined) {
-    const files = await filesOf(session, tool, roots)
-    if (![...work, ...files].some((path) => isTranscript(path, roots) && existsSync(path))) return new Set()
+    const files = data === undefined ? await filesOf(session, tool, roots) : (await filesUnder(data.folder)).map(({ path }) => path).filter((path) => ownerOf(path, roots, [data]) !== undefined)
+    if (data === undefined && ![...work, ...files].some((path) => isTranscript(path, roots) && existsSync(path))) return new Set()
     rememberFiles(db, session, files)
     for (const path of files) work.add(path)
     journal = { session, tool, end: 0, sealed: 0, writtenAt: 0, stopped: '', holder: '' }
@@ -597,7 +603,7 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
     changes.push(change)
     budget -= change.bytes.length
     if (change.isPartial) left.add(path)
-    if (path.endsWith('.jsonl')) {
+    if (data === undefined && path.endsWith('.jsonl')) {
       const named = namedIn(new TextDecoder().decode(change.bytes), roots).filter((file) => !work.has(file))
       rememberFiles(db, session, named)
       for (const file of named) work.add(file)
@@ -643,7 +649,7 @@ async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put
   if (failure !== undefined && 'error' in failure) throw failure.error
   const own = changes.filter(({ header }) => !linesFiles(roots).has(header.path) && header.path !== codexState(roots))
   const lastActivity = new Date(own.length === 0 ? Date.now() : Math.max(...own.map((change) => change.state.mtime))).toISOString()
-  if (await recordSummary(capture, session, tool, transcripts.map(({ bytes }) => new TextDecoder().decode(bytes)).join(''), end, lastActivity)) {
+  if (tool !== 'mod' && (await recordSummary(capture, session, tool, transcripts.map(({ bytes }) => new TextDecoder().decode(bytes)).join(''), end, lastActivity))) {
     await writeIndex(capture).then(() => problems.clear('index'), (error: unknown) => problems.set('index', error))
   }
   if (waiting !== undefined && !code.isDone) left.add(`${waiting.folder}/`)
@@ -803,7 +809,7 @@ export async function changedFiles(capture: Capture, writtenSince = 0, session?:
     const found = statOf(path)
     const isGone = found === undefined && sha256 !== ''
     if (!isGone && (found === undefined || !found.isFile() || (found.size === local_size && found.mtimeMs === mtime))) continue
-    if (ownerOf(path, roots) === undefined) continue
+    if (ownerOf(path, roots, capture.dataFolders) === undefined) continue
     changed.set(session, (changed.get(session) ?? new Set()).add(path))
   }
   return changed
@@ -850,11 +856,11 @@ export function captureAgainFrom(capture: Capture, session: string, tool: Tool, 
   rmSync(join(dirname(db.filename), 'code', session), { recursive: true, force: true })
   capture.codeWaiting.delete(session)
   const reached = `The journal of ${session} in R2 reaches byte ${at}, and ${device.name} counted ${end}`
-  const hasTranscript = paths.some((path) => {
+  const hasFiles = tool === 'mod' || paths.some((path) => {
     const owner = ownerOf(path, roots)
     return owner !== undefined && 'isTranscript' in owner && owner.isTranscript && existsSync(path)
   })
-  if (hasTranscript) console.error(`${new Date().toISOString()} ${reached}, so it uploads the session's files whole again from byte ${at}.`)
+  if (hasFiles) console.error(`${new Date().toISOString()} ${reached}, so it uploads the files of ${session} whole again from byte ${at}.`)
   else problems.set(`journal ${session}`, `${reached}, and holds no transcript of the session to upload again, so a restore of the session lacks what the journal held from byte ${at}.`)
   return new Set(paths)
 }

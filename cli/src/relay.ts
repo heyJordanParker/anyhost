@@ -2,6 +2,7 @@ import plugin from '../../.claude-plugin/plugin.json'
 import {
   ANSWER,
   CLOSE_DEVICE_LIVE,
+  CLOSE_OLDER_PROGRAM,
   CLOSE_REMOVED,
   CLOSE_UNKNOWN_TOKEN,
   LIVE_MS,
@@ -78,6 +79,7 @@ export type RelayOptions = {
   readonly device: { readonly name: string; readonly os: string }
   readonly roots: Roots
   readonly isPatient: boolean
+  readonly onOlderProgram?: (message: string) => void
 }
 
 class Refused extends Error {}
@@ -111,10 +113,16 @@ async function failureOf(answer: Response): Promise<never> {
   throw new Refused(message)
 }
 
-function refusedBy(code: number, reason: string, device: RelayOptions['device']): RelayState | undefined {
+function refusedBy(code: number, reason: string, device: RelayOptions['device']): Extract<RelayState, { readonly message: string }> | undefined {
   if (code === CLOSE_REMOVED) return { is: 'unjoined', message: REMOVED_MESSAGE }
   if (code === CLOSE_UNKNOWN_TOKEN) return { is: 'unjoined', message: 'The relay knows no machine with this token. Join it again with a link from Add a machine.' }
   if (code === CLOSE_DEVICE_LIVE) return { is: 'refused', message: `The relay refused ${device.name}: ${reason} A machine cloned from another keeps its id, so anyhost captures nothing here. ${cloneFixFor(device.os)}` }
+  if (code === CLOSE_OLDER_PROGRAM) {
+    return {
+      is: 'refused',
+      message: `The relay refused ${device.name}: ${reason} Run cmod update anyhost, or, to run anyhost ${plugin.version} here on purpose, run anyhost join with the link anyhost machines --invite prints on a joined machine.`,
+    }
+  }
   return undefined
 }
 
@@ -259,7 +267,7 @@ export function connectRelay(options: RelayOptions): Relay {
     const used = login
     const url = login.url
     const ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, {
-      headers: { authorization: `Bearer ${login.token}`, 'x-anyhost-name': options.device.name, 'x-anyhost-roots': rootsHeader(options.roots) },
+      headers: { authorization: `Bearer ${login.token}`, 'x-anyhost-version': plugin.version, 'x-anyhost-name': options.device.name, 'x-anyhost-roots': rootsHeader(options.roots) },
     })
     socket = ws
     ws.binaryType = 'arraybuffer'
@@ -310,6 +318,10 @@ export function connectRelay(options: RelayOptions): Relay {
         forgetting = options.forget(used).catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not forget the relay login the relay refused: ${messageOf(error)}`))
       }
       const offline: RelayState = { is: 'offline', message: `The relay at ${url} closed the connection with ${event.code}${why === '' ? '' : `: ${why}`}.` }
+      if (refusal !== undefined && event.code === CLOSE_OLDER_PROGRAM) {
+        drop(refusal)
+        return options.onOlderProgram?.(refusal.message)
+      }
       if (refusal !== undefined || !failed.endsWith('status code: 429')) return drop(refusal ?? offline)
       void fetch(`${url}/v1/health`, { signal: AbortSignal.timeout(CONNECT_MS) })
         .then(async (answer) => isDailyLimit(answer.status, await answer.text()), () => false)
@@ -348,6 +360,7 @@ export function connectRelay(options: RelayOptions): Relay {
     tryObject(`PUT ${call.key}`, async (from): Promise<Ran | undefined> => {
       const headers = new Headers({
         authorization: `Bearer ${from.token}`,
+        'x-anyhost-version': plugin.version,
         'content-type': 'application/octet-stream',
         ...(call.if === undefined ? {} : conditionHeaders(call.if)),
         ...(call.holder === undefined ? {} : { 'x-anyhost-holder': call.holder }),
@@ -369,7 +382,7 @@ export function connectRelay(options: RelayOptions): Relay {
       const controller = new AbortController()
       let idle = setTimeout(() => controller.abort(new Error(`no byte came for ${IDLE_MS / 1000} seconds`)), IDLE_MS)
       try {
-        const answer = await fetch(objectUrl(from, key), { headers: { authorization: `Bearer ${from.token}`, ...(got > 0 ? { range: `bytes=${got}-` } : {}) }, signal: controller.signal })
+        const answer = await fetch(objectUrl(from, key), { headers: { authorization: `Bearer ${from.token}`, 'x-anyhost-version': plugin.version, ...(got > 0 ? { range: `bytes=${got}-` } : {}) }, signal: controller.signal })
         if (answer.status === 404) return 'missing'
         const isNew = answer.status === 416 || (answer.status === 206 && unquoted(answer.headers.get('etag')) !== etag)
         if (answer.status === 200 || isNew) {
