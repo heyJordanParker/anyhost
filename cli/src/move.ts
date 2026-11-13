@@ -4,7 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { AgentStatus, Delivered, Device, Message, Offline, Routed } from '../../relay/protocol.ts'
 import { captureAgainFrom, chainOf, changedFiles, checkoutOf, framesOf, holdHere, isDeleted, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
-import { commandOf, recordedSessions, run, runOf, runSessions, runTerminalOf, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
+import { commandOf, pauseCopy, recordedSessions, resumeCopy, run, runOf, runSessions, runTerminalOf, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
 import { devicesOf, otherMachine } from './device.ts'
 import { killTerminal, labelledTerminals, openTerminal, pressKeys, readTerminal, sendTo } from './hc.ts'
 import type { Relay } from './relay.ts'
@@ -207,8 +207,10 @@ async function continueHere(capture: Capture, session: string, tool: Tool, here:
   for (const path of captureAgainFrom(capture, session, tool, at, end, here.problems)) here.queue(session, tool, path)
 }
 
+const isIdleIn = (sessions: readonly RunningSession[], session: string): boolean => !sessions.some((entry) => entry.sessionId === session && statusOfRecord(entry.status) !== 'idle')
+
 async function untilSettledIdle(capture: Capture, session: string, here: MoveHere, signal?: AbortSignal): Promise<void> {
-  const isIdle = (sessions: readonly RunningSession[]): boolean => !sessions.some((entry) => entry.sessionId === session && statusOfRecord(entry.status) !== 'idle')
+  const isIdle = (sessions: readonly RunningSession[]): boolean => isIdleIn(sessions, session)
   for (;;) {
     await whenSessions(capture.roots.claudeHome, (sessions) => (isIdle(sessions) ? true : undefined), Infinity, here.onRecordsChange, signal)
     await sleep(IDLE_SETTLES_MS, undefined, signal === undefined ? {} : { signal })
@@ -251,23 +253,29 @@ export async function move(capture: Capture, asked: string, machine: string, her
   }
   if (isBusy) say('waiting', `Waiting for ${id} to finish its turn.`)
   else say('uploading', `Uploading ${id}.`)
-  let isStopped = false
+  const { claudeHome } = capture.roots
+  let isPausing = false
+  let paused = 0
   let isAsked = false
-  const reopened = async (line: string): Promise<string> => {
-    if (!isStopped) return line
+  const resumed = async (line: string): Promise<string> => {
+    if (!isPausing || (await resumeCopy(claudeHome, session)) > 0 || paused === 0) return line
     return await openHere(capture, session, here).then(
       () => line,
       (error: unknown) => `${line} anyhost could not open it here again: ${messageOf(error)}`,
     )
   }
+  const takenOver = async (holder: string): Promise<void> => {
+    if (isPausing) await stopCopy(claudeHome, session).catch((error: unknown) => console.error(`${stamp()} anyhost could not stop the paused copy of ${session}: ${messageOf(error)}`))
+    say('failed', `${holder} took ${id} over during the move, so it continues there.`)
+  }
   const fail = async (line: string): Promise<void> => {
     const holder = journalOf(db, session)?.holder ?? ''
-    if (holder !== '' && !(isAsked && holder === machine)) return say('failed', `${holder} took ${id} over during the move, so it continues there.`)
-    if (!isAsked) return say('failed', await reopened(line))
+    if (holder !== '' && !(isAsked && holder === machine)) return await takenOver(holder)
+    if (!isAsked) return say('failed', await resumed(line))
     try {
       await takeClaim(relay, session, { take: true })
       await continueHere(capture, session, tool, here)
-      say('failed', await reopened(line))
+      say('failed', await resumed(line))
     } catch (error) {
       say('failed', `${line} anyhost could not take it back here: ${messageOf(error)}`)
     }
@@ -287,13 +295,18 @@ export async function move(capture: Capture, asked: string, machine: string, her
     }
     const uploading = (isConnected: boolean): void => say('uploading', isConnected ? `Uploading ${id}.` : `Uploading ${id} once the relay at ${relay.url} connects.`)
     await upload(capture, session, tool, here, signal, uploading)
-    await untilIdle(signal)
-    signal.throwIfAborted()
-    await stopCopy(capture.roots.claudeHome, session)
-    isStopped = true
+    for (;;) {
+      await untilIdle(signal)
+      signal.throwIfAborted()
+      isPausing = true
+      paused = await pauseCopy(claudeHome, session)
+      if (isIdleIn(await recordedSessions(claudeHome), session)) break
+      await resumeCopy(claudeHome, session)
+      isPausing = false
+    }
     await upload(capture, session, tool, here, signal, uploading)
     signal.throwIfAborted()
-    say('moving', `Stopped ${id} here and sealed it. ${machine} restores it.`)
+    say('moving', `Paused ${id} here and sealed it. ${machine} restores it.`)
     const cwd = workingFolderOf(db, session)
     const trusted = cwd !== '' && (await trusts(capture, cwd))
     signal.throwIfAborted()
@@ -305,9 +318,10 @@ export async function move(capture: Capture, asked: string, machine: string, her
     keeping.abort()
     if (answer.t === 'offline') return await fail(`${machine} is offline, so the session keeps running here.`)
     if ('error' in answer) return await fail(`${machine} could not take the session: ${reasonOf(answer.error)}. It keeps running here.`)
-    say('moved', `${machine} restored ${id} in ${((Date.now() - started) / 1000).toFixed(1)} s and runs it.`)
+    const restored = `${machine} restored ${id} in ${((Date.now() - started) / 1000).toFixed(1)} s and runs it.`
+    say('moved', await stopCopy(claudeHome, session).then(() => restored, (error: unknown) => `${restored} anyhost could not end its paused copy here: ${messageOf(error)}`))
   })().catch((error: unknown) => {
-    if (error instanceof HeldElsewhere) return say('failed', `${error.holder.name} took ${id} over during the move, so it continues there.`)
+    if (error instanceof HeldElsewhere) return takenOver(error.holder.name)
     if (error !== kept) return fail(`anyhost could not move the session to ${machine}: ${reasonOf(error)}. It keeps running here.`)
     return fail(isAsked ? `${machine} did not answer, so the session keeps running here.` : kept.message)
   })

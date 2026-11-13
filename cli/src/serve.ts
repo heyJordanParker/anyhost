@@ -3,7 +3,7 @@ import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { changedFiles, countedRelay, journalOf, openCapture, relistSessions, openDatabase, QUIET_MS, sealQuiet, sessionsOf, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
-import { loginEnvironment, recordedSessions, runSessions, saveLoginEnvironment, type OnRecordsChange } from './claude.ts'
+import { loginEnvironment, pausedSessions, recordedSessions, resumeCopy, runSessions, saveLoginEnvironment, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
 import { hcPath, machinesReached } from './hc.ts'
@@ -14,6 +14,7 @@ import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type RelayState } fro
 import { closeStopped } from './runner.ts'
 import { agentsOf } from './sessions.ts'
 import { archive, sharedOf, updateShared, visit } from './shared.ts'
+import { archiveSettledInT3 } from './t3.ts'
 import { codexState, filesUnder, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = 60_000
@@ -549,6 +550,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (relay.state.is !== 'connected') return
     if (queue.uploadEvery === 0) queue.drain()
     await settle('index', () => writeIndex(capture))
+    await settle('t3', () => archiveSettledInT3(relay, capture.db))
     queueFiles(await sealQuiet(capture, problems))
     await settle('herdr machines', () => keepHerdrReaching(relay, device))
   }
@@ -716,7 +718,14 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       if (holder !== '') release(session, holder)
     }
   }
-  relay.on('welcome', releaseHeld)
+  const resumeHeld = async (): Promise<void> => {
+    for (const session of pausedSessions()) {
+      const moving = mover.moves.get(session)
+      const isMoving = moving !== undefined && moving.step !== 'moved' && moving.step !== 'failed'
+      if (!isMoving && (journalOf(db, session)?.holder ?? '') === '') await resumeCopy(roots.claudeHome, session)
+    }
+  }
+  relay.on('welcome', () => void releaseHeld().then(resumeHeld))
   void releaseHeld()
   void settle('herdr', () => installHerdr())
   void settle('environment', () => saveLoginEnvironment())

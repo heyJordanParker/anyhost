@@ -83,20 +83,20 @@ export const isAlive = (pid: number): boolean => {
   }
 }
 
-export function startOf(pid: number): string {
-  if (process.platform === 'linux') {
-    const stat = (() => {
-      try {
-        return readFileSync(`/proc/${pid}/stat`, 'utf8')
-      } catch {
-        return ''
-      }
-    })()
-    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? ''
+function procStat(pid: number): string[] {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+  } catch {
+    return []
   }
-  const ps = Bun.spawnSync(['ps', '-o', 'lstart=', '-p', String(pid)], { env: { ...process.env, TZ: 'UTC' }, stdout: 'pipe', stderr: 'ignore' })
-  return ps.stdout.toString().trim()
 }
+
+const psOf = (pid: number, field: string): string => Bun.spawnSync(['ps', '-o', `${field}=`, '-p', String(pid)], { env: { ...process.env, TZ: 'UTC' }, stdout: 'pipe', stderr: 'ignore' }).stdout.toString().trim()
+
+export const startOf = (pid: number): string => (process.platform === 'linux' ? (procStat(pid)[19] ?? '') : psOf(pid, 'lstart'))
+
+export const isPaused = (pid: number): boolean => (process.platform === 'linux' ? (procStat(pid)[0] ?? '') : psOf(pid, 'stat')).startsWith('T')
 
 const isProcess = (pid: number, procStart: string | undefined): boolean => isAlive(pid) && (procStart === undefined || startOf(pid) === procStart)
 
@@ -232,12 +232,14 @@ export const forgetRun = (session: string): void => rmSync(join(runsFolder(), `$
 
 export const commandOf = (session: string): readonly string[] => runOf(session)?.claude.command ?? ['claude']
 
-async function ends(pid: number): Promise<boolean> {
-  for (const started = Date.now(); isAlive(pid); await Bun.sleep(50)) {
+async function becomes(isDone: () => boolean): Promise<boolean> {
+  for (const started = Date.now(); !isDone(); await Bun.sleep(50)) {
     if (Date.now() - started > EXIT_MS) return false
   }
   return true
 }
+
+const ends = (pid: number): Promise<boolean> => becomes(() => !isAlive(pid))
 
 const signal = (pids: readonly number[], name: NodeJS.Signals): void => {
   for (const pid of pids) {
@@ -256,8 +258,35 @@ export async function stopCopy(claudeHome: string, session: string): Promise<voi
   if (terminal !== undefined) await killTerminal(terminal).catch((error: unknown) => console.error(`anyhost could not close terminal ${terminal} of ${session}: ${error instanceof Error ? error.message : String(error)}`))
   const pids = [...(ran === undefined ? [] : [ran.runner.process.id]), ...copies]
   signal(pids, 'SIGTERM')
+  signal(pids, 'SIGCONT')
   const stuck = (await Promise.all(pids.map(async (pid) => ((await ends(pid)) ? [] : [pid])))).flat()
   signal(stuck, 'SIGKILL')
   for (const pid of stuck) if (!(await ends(pid))) throw new Error(`Claude Code, pid ${pid}, still runs ${EXIT_MS / 1000} s after its SIGKILL.`)
   forgetRun(session)
+  rmSync(pausedFile(session), { force: true })
+}
+
+const pausedFolder = (): string => join(stateFolder(), 'paused')
+const pausedFile = (session: string): string => join(pausedFolder(), `${session}.json`)
+
+export const pausedSessions = (): string[] =>
+  namesIn(pausedFolder())
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => name.slice(0, -'.json'.length))
+
+export async function pauseCopy(claudeHome: string, session: string): Promise<number> {
+  const copies = await copiesOf(claudeHome, session)
+  mkdirSync(pausedFolder(), { recursive: true })
+  writeFileSync(pausedFile(session), JSON.stringify(copies))
+  signal(copies, 'SIGSTOP')
+  for (const pid of copies) if (!(await becomes(() => !isAlive(pid) || isPaused(pid)))) throw new Error(`Claude Code, pid ${pid}, still runs ${EXIT_MS / 1000} s after its SIGSTOP.`)
+  return copies.length
+}
+
+export async function resumeCopy(claudeHome: string, session: string): Promise<number> {
+  const paused = new Set((jsonOf(pausedFile(session)) as number[] | undefined) ?? [])
+  const copies = await copiesOf(claudeHome, session)
+  signal(copies.filter((pid) => paused.has(pid)), 'SIGCONT')
+  rmSync(pausedFile(session), { force: true })
+  return copies.length
 }

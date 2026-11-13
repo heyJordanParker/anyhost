@@ -1,3 +1,4 @@
+import { Database } from 'bun:sqlite'
 import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -7,6 +8,8 @@ import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { restore } from '../src/resume.ts'
 import { agentsOf, downloadJournal, listSessions } from '../src/sessions.ts'
+import { archive } from '../src/shared.ts'
+import { archiveSettledInT3 } from '../src/t3.ts'
 import { failTest, memoryRelay, noCode, temporaryFolder, until, type MemoryRelay } from './memory.ts'
 
 const mac: Device = { id: 'device-mac', name: 'mac', os: 'darwin', arch: 'arm64' }
@@ -680,4 +683,35 @@ test('a machine offline during a takeover learns it in its next welcome, before 
   const back = machine(mac, relay, old.roots.home, state)
   await until(() => back.capture.relay.state.is === 'connected')
   expect(journalOf(back.capture.db, session)).toMatchObject({ holder: 'server', stopped: expect.stringContaining('server took the session') })
+})
+
+test('a session T3 Code settled lists as archived on every machine, and one restored after that settle stays restored', async () => {
+  const relay = await memoryRelay()
+  const settled = 'aaaaaaaa-0000-0000-0000-00000000000a'
+  const open = 'aaaaaaaa-0000-0000-0000-00000000000b'
+  const { roots, capture } = machine(mac, relay)
+  await upload(capture, settled, transcriptOf(roots, settled, 'Plan the trip'))
+  await upload(capture, open, transcriptOf(roots, open, 'Book the train'))
+  await writeIndex(capture)
+  const t3 = join(temporaryFolder(), 'statev2.sqlite')
+  const state = new Database(t3)
+  state.run('create table orchestration_v2_projection_threads (thread_id text primary key, archived_at text, deleted_at text, updated_at text not null, payload_json text not null)')
+  state.run('create table orchestration_v2_projection_provider_threads (provider_thread_id text primary key, thread_id text, payload_json text not null)')
+  const thread = (id: string, session: string, settledOverride: string | null): void => {
+    state.query('insert into orchestration_v2_projection_threads values (?, null, null, ?, ?)').run(id, '2026-11-10T08:00:00.000Z', JSON.stringify({ settledOverride, settledAt: settledOverride === null ? null : '2026-11-10T08:00:00.000Z' }))
+    state.query('insert into orchestration_v2_projection_provider_threads values (?, ?, ?)').run(`provider-${id}`, id, JSON.stringify({ nativeThreadRef: { nativeId: session } }))
+  }
+  thread('thread-settled', settled, 'settled')
+  thread('thread-open', open, null)
+  const archivedOf = async (): Promise<Record<string, boolean>> => Object.fromEntries((await agentsOf(capture)).agents.map(({ id, archived }) => [id, archived]))
+
+  await archiveSettledInT3(capture.relay, capture.db, t3)
+  const synced = await archivedOf()
+  await archive(capture.relay, settled, false)
+  state.run("update orchestration_v2_projection_threads set updated_at = '2026-11-10T09:00:00.000Z' where thread_id = 'thread-open'")
+  state.close()
+  await archiveSettledInT3(capture.relay, capture.db, t3)
+
+  expect(synced).toEqual({ [settled]: true, [open]: false })
+  expect(await archivedOf()).toEqual({ [settled]: false, [open]: false })
 })

@@ -1,18 +1,19 @@
-import { expect, test } from 'bun:test'
-import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { expect, onTestFinished, test } from 'bun:test'
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { decompress, hotKey } from '../src/capture.ts'
+import { isPaused } from '../src/claude.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { claimOn, decoder, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, stepsOf, WORKER, workerOn } from './program.ts'
 
-test("a move waits for the turn to end, stops the laptop's Claude Code, uploads and seals the session, and only then the worker restores it and runs it in a terminal of herdr-core with the same command", async () => {
+const OTHER = '99999999-2222-3333-4444-555555555555'
+
+test("a move waits for the turn to end, pauses the laptop's Claude Code, uploads and seals the session, the worker restores it and runs it in a terminal of herdr-core with the same command, and only then the laptop ends its copy", async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
-  let laptopEndedAt = Infinity
-  void laptop.claude.exited.then(() => (laptopEndedAt = performance.now()))
-  let workerRanAt = Infinity
-  void until(() => runsOn(worker.folder).length > 0, 'the worker running the session', 60_000).then(() => (workerRanAt = performance.now()))
+  let isPausedAsWorkerRan = false
+  void until(() => runsOn(worker.folder).length > 0, 'the worker running the session', 60_000).then(() => (isPausedAsWorkerRan = isPaused(laptop.claude.pid)))
   laptop.status('busy')
 
   const asked = await postTo(laptop.socket, '/move', { session: SESSION.slice(0, 8), machine: WORKER.name })
@@ -36,8 +37,9 @@ test("a move waits for the turn to end, stops the laptop's Claude Code, uploads 
   expect(more).toEqual([])
   expect(started).toMatchObject({ session: SESSION, command: 'claude' })
   expect(realpathSync(started?.cwd ?? '')).toBe(realpathSync(workerCwd))
+  expect(isPausedAsWorkerRan).toBe(true)
+  await laptop.claude.exited
   expect(laptop.claude.signalCode).toBe('SIGTERM')
-  expect(laptopEndedAt).toBeLessThan(workerRanAt)
   expect(await claimOn(laptop.socket)).toMatchObject({ machine: WORKER.name, move: { step: 'moved' } })
 }, 60_000)
 
@@ -59,6 +61,7 @@ test('a move waits out the turn that starts as one ends, as a background command
 
   expect(isRunning).toBe(true)
   expect(last.step).toBe('moved')
+  await laptop.claude.exited
   expect(laptop.claude.signalCode).toBe('SIGTERM')
 }, 60_000)
 
@@ -82,7 +85,7 @@ test('a move of a session whose first frame R2 lost uploads its files whole agai
   expect(readFileSync(join(workerCwd, 'notes.txt'), 'utf8')).toBe('the plan for the trip\n')
 }, 60_000)
 
-test('a move to a machine that is offline keeps the session here, with its claim, and runs it again in a terminal of herdr-core', async () => {
+test('a move to a machine that is offline keeps the session here, with its claim, running on in the Claude Code the move paused', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   await relay.join(WORKER, roots('/home/worker'))
@@ -93,10 +96,12 @@ test('a move to a machine that is offline keeps the session here, with its claim
   expect(last.line).toBe(`${WORKER.name} is offline, so the session keeps running here.`)
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
-  expect(runsOn(laptop.folder).map(({ session }) => session)).toEqual([SESSION])
+  expect(isPaused(laptop.claude.pid)).toBe(false)
+  expect(laptop.claude.exitCode ?? laptop.claude.signalCode).toBeNull()
+  expect(runsOn(laptop.folder)).toEqual([])
 }, 60_000)
 
-test('a move the worker cannot take takes the claim back, and the laptop captures the session again', async () => {
+test('a move the worker cannot take takes the claim back, the paused Claude Code runs on, and the laptop captures the session again', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay, (folder) => writeFileSync(join(folder, 'fail'), 'Claude Code is not logged in.'))
@@ -110,7 +115,9 @@ test('a move the worker cannot take takes the claim back, and the laptop capture
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   await until(async () => (await claimOn(worker.socket)).machine === LAPTOP.name, 'the worker hearing it lost the session')
-  expect(runsOn(laptop.folder).map(({ session }) => session)).toEqual([SESSION])
+  expect(isPaused(laptop.claude.pid)).toBe(false)
+  expect(laptop.claude.exitCode ?? laptop.claude.signalCode).toBeNull()
+  expect(runsOn(laptop.folder)).toEqual([])
   const frames = relay.puts.filter(({ key }) => key.startsWith(`journals/${SESSION}/hot/`)).length
   writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"And the hotel"}}\n`, { flag: 'a' })
   await until(() => relay.puts.filter(({ key }) => key.startsWith(`journals/${SESSION}/hot/`)).length > frames, 'the next line uploading', 15_000)
@@ -205,7 +212,28 @@ test('a move of a session that keeps writing while its code cannot be read ends 
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
 }, 60_000)
 
-test('a move whose copy here ignores its SIGTERM ends it with SIGKILL 10 s later and reaches moved, with no problem in /status', async () => {
+test('a program that restarts while a move paused its copy resumes that copy once the relay welcomes it, as this machine still holds the session, and leaves a copy the person suspended suspended', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const suspended = Bun.spawn(['sleep', '600'])
+  onTestFinished(() => suspended.kill('SIGKILL'))
+  writeFileSync(join(laptop.env['HOME'] ?? '', '.claude', 'sessions', `${suspended.pid}.json`), JSON.stringify({ pid: suspended.pid, sessionId: OTHER, kind: 'interactive', cwd: laptop.cwd, status: 'idle' }))
+  suspended.kill('SIGSTOP')
+  laptop.child.kill('SIGTERM')
+  await laptop.child.exited
+  const paused = join(laptop.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'paused')
+  mkdirSync(paused, { recursive: true })
+  writeFileSync(join(paused, `${SESSION}.json`), JSON.stringify([laptop.claude.pid]))
+  laptop.claude.kill('SIGSTOP')
+
+  await serveOn(laptop.env)
+
+  await until(() => !isPaused(laptop.claude.pid), 'the program resuming the paused copy', 15_000)
+  expect(laptop.claude.exitCode ?? laptop.claude.signalCode).toBeNull()
+  expect(isPaused(suspended.pid)).toBe(true)
+}, 60_000)
+
+test('a moved copy here that ignores its SIGTERM ends with SIGKILL 10 s later, and the move reaches moved, with no problem in /status', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay, LAPTOP, {}, ['bash', '-c', "trap '' TERM; while true; do sleep 1; done"])
   await workerOn(relay)

@@ -188,11 +188,13 @@ export default class Anyhost extends View {
     this.marked = new Set();
     this.opening = new Map();
     this.cards = [];
+    this.pending = new Map();
+    this.refreshes = 0;
+    this.applied = 0;
     this.found = null;
     this.search = InputState.new({ placeholder: "Search" });
     this.search.on("change", (_e, cx) => {
-      const query = this.search.value().trim().toLowerCase();
-      this.found = query === "" ? null : this.cards.filter((card) => card.searched.includes(query)).slice(0, FOUND_MAX);
+      this.find();
       cx.notify();
     });
     this.offsetMs = 0;
@@ -219,10 +221,13 @@ export default class Anyhost extends View {
   }
 
   refresh(cx) {
+    const asked = ++this.refreshes;
     cx.spawn(async (cx) => {
       try {
         const [machines, listed] = await Promise.all([anyhost(["machines", "--json"]), anyhost(["list", "--json", "--brief"])]);
-        this.apply(machines, listed);
+        if (asked < this.applied) return;
+        this.applied = asked;
+        this.apply(machines, listed, asked);
         save("listed", { machines, listed });
         this.error = null;
       } catch (error) {
@@ -233,10 +238,16 @@ export default class Anyhost extends View {
     });
   }
 
-  apply(machines, listed) {
+  apply(machines, listed, asked = 0) {
     const { here, machines: devices, candidates = [] } = JSON.parse(machines);
     const { agents: sessions, archiveAfterDays, lastMachine } = JSON.parse(listed);
     const hereName = devices.find((d) => d.id === here)?.name ?? "";
+    for (const [key, change] of this.pending) if (asked > change.until) this.pending.delete(key);
+    for (const s of sessions) {
+      const change = this.pending.get(s.id);
+      if (change?.visitedAt !== undefined) s.visitedAt = change.visitedAt;
+      if (change?.stage !== undefined) Object.assign(s, { archived: change.stage === "archived", deleted: change.stage === "deleted" });
+    }
     const cards = sessions.map((s) => {
       const machine = s.holder || s.machine;
       const project = projectOf(s, devices.find((d) => d.name === machine)?.roots?.home);
@@ -249,6 +260,12 @@ export default class Anyhost extends View {
     const childrenOf = new Map();
     for (const card of cards.filter((c) => byKey.has(c.session.parent))) childrenOf.set(card.session.parent, [...(childrenOf.get(card.session.parent) ?? []), card]);
     Object.assign(this, { here, devices, candidates, sessions, archiveAfterDays, lastMachine, cards, byKey, childrenOf, error: null });
+    this.find();
+  }
+
+  find() {
+    const query = this.search.value().trim().toLowerCase();
+    this.found = query === "" ? null : this.cards.filter((card) => card.searched.includes(query)).slice(0, FOUND_MAX);
   }
 
   fold(id, cx) {
@@ -340,7 +357,7 @@ export default class Anyhost extends View {
     }
     const space = spaces().find((sp) => sp.folder === s.cwd && (sp.machine ?? null) === on)?.id ?? null;
     if (space) run("space.select", { id: space });
-    run("tab.new", { name, mod: "anyhost", props: { view: "screen", key: s.id, title: item.title, label: this.labelOf(item), app: item.app, place, tool: s.tool, on }, ...(space ? { space } : {}) });
+    run("tab.new", { name, mod: "anyhost", props: { view: "screen", key: s.id, title: item.title, label: this.labelOf(item), app: item.app, place, working: item.status === "working", tool: s.tool, on }, ...(space ? { space } : {}) });
     this.opening.set(s.id, { name, terminal: null, listedAt: null });
   }
 
@@ -403,14 +420,40 @@ export default class Anyhost extends View {
     });
   }
 
-  archive(cx, s, archived) {
+  change(cx, s, changed, work, failed) {
     const card = this.byKey.get(s.id);
-    if (card.stage !== "deleted") card.stage = archived ? "archived" : "active";
+    const was = Object.fromEntries(Object.keys(changed).map((key) => [key, key === "stage" ? card.stage : s.visitedAt]));
+    const entry = { ...this.pending.get(s.id), ...changed, until: Infinity };
+    this.pending.set(s.id, entry);
+    this.show(s.id, changed);
     cx.notify();
     cx.spawn(async (cx) => {
-      await anyhost(["archive", s.id, ...(archived ? [] : ["--undo"])]).catch((error) => notify({ title: archived ? "anyhost could not archive it" : "anyhost could not restore it", body: String(error.message ?? error), level: "error" }));
+      try {
+        await work();
+        if (this.pending.get(s.id) === entry) entry.until = this.refreshes;
+      } catch (error) {
+        const current = this.pending.get(s.id);
+        for (const key of Object.keys(changed)) {
+          if (current?.[key] !== changed[key]) continue;
+          delete current[key];
+          this.show(s.id, { [key]: was[key] });
+        }
+        notify({ title: failed, body: String(error.message ?? error), level: "error" });
+      }
       this.refresh(cx);
     });
+  }
+
+  show(key, { stage, visitedAt }) {
+    const card = this.byKey.get(key);
+    if (!card) return;
+    if (stage !== undefined) card.stage = stage;
+    if (visitedAt !== undefined) card.session.visitedAt = visitedAt;
+  }
+
+  archive(cx, s, archived) {
+    const stage = this.byKey.get(s.id).stage === "deleted" ? "deleted" : archived ? "archived" : "active";
+    this.change(cx, s, { stage }, () => anyhost(["archive", s.id, ...(archived ? [] : ["--undo"])]), archived ? "anyhost could not archive it" : "anyhost could not restore it");
   }
 
   isUnread(i, shown) {
@@ -425,10 +468,7 @@ export default class Anyhost extends View {
   }
 
   visit(cx, s, at) {
-    s.visitedAt = at;
-    cx.spawn(async () => {
-      await anyhost(["visit", s.id, "--at", at]).catch((error) => notify({ title: "anyhost could not mark it read", body: String(error.message ?? error), level: "error" }));
-    });
+    this.change(cx, s, { visitedAt: at }, () => anyhost(["visit", s.id, "--at", at]), "anyhost could not mark it read");
   }
 
   visitShown(cx, l, shown) {
@@ -449,21 +489,11 @@ export default class Anyhost extends View {
     const s = i.session;
     const holder = this.deviceOf(s.holder || s.machine);
     const on = holder && holder.id !== this.here ? holder.herdr || null : null;
-    const card = this.byKey.get(s.id);
-    const was = card.stage;
-    card.stage = "deleted";
-    cx.notify();
-    cx.spawn(async (cx) => {
-      try {
-        if (holder && holder.id !== this.here && !on) throw new Error(`${holder.name} holds it, and the Herdr app does not reach ${holder.name}.`);
-        await anyhost(["delete", s.id], LONG_MS, on);
-        notify({ title: `Deleted ${i.title.slice(0, 40)}`, body: "Archived sessions › Deleted keeps it. Opening it brings it back.", level: "info" });
-      } catch (error) {
-        card.stage = was;
-        notify({ title: "anyhost could not delete it", body: String(error.message ?? error), level: "error" });
-      }
-      this.refresh(cx);
-    });
+    this.change(cx, s, { stage: "deleted" }, async () => {
+      if (holder && holder.id !== this.here && !on) throw new Error(`${holder.name} holds it, and the Herdr app does not reach ${holder.name}.`);
+      await anyhost(["delete", s.id], LONG_MS, on);
+      notify({ title: `Deleted ${i.title.slice(0, 40)}`, body: "Archived sessions › Deleted keeps it. Opening it brings it back.", level: "info" });
+    }, "anyhost could not delete it");
   }
 
   newSession(machine = null, project = null) {
@@ -495,7 +525,7 @@ export default class Anyhost extends View {
       const session = terminal.labels?.["anyhost.session"];
       const agent = statusOf.get(terminal.address);
       const card = session ? this.byKey?.get(session) : undefined;
-      if (agent && card) live.set(session, { ...card, address: terminal.address, status: agent.status, pinned: Boolean(agent.pinned), stage: "active", app: null });
+      if (agent && card) live.set(session, { ...card, address: terminal.address, status: agent.status, pinned: Boolean(agent.pinned), stage: card.stage === "deleted" ? "active" : card.stage, app: null });
     }
     const known = new Set([...live.values()].map((card) => card.address));
     const now = new Date().toISOString();
@@ -1236,7 +1266,7 @@ export default class Anyhost extends View {
         v_flex()
           .gap(4)
           .items_center()
-          .child(div().text_size(14).font_semibold().text_color(t.foreground).child(`This session is working in ${p.place}`))
+          .child(div().text_size(14).font_semibold().text_color(t.foreground).child(p.working ? `This session is working in ${p.place}` : `This session belongs to ${p.place}`))
           .child(div().max_w(280).truncate().text_size(12).text_color(t.dim).child(p.title)),
       )
       .child(
