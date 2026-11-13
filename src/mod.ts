@@ -3,7 +3,7 @@ import { program } from '../node_modules/@cmodjs/core/jobs/program.js'
 import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
 import { option } from '../node_modules/@cmodjs/core/options.js'
 import { agentTools } from './agents.js'
-import { askProgram, connectStep, FOLLOW_MS, initialState, machinesPage, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
+import { askProgram, connectStep, FOLLOW_MS, initialState, machinesPage, NoAnswer, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
 
 type Move = { readonly to: string; readonly step: 'waiting' | 'uploading' | 'moving' | 'moved' | 'failed'; readonly line: string }
 type Holder = { readonly machine?: string; readonly problem?: string; readonly untold?: string; readonly move?: Move }
@@ -68,7 +68,7 @@ export const anyhost = defineMod({
       const session = sessions.current.id
       if ((await capture.ready().catch(() => undefined)) === undefined) return undefined
       const holder = await askProgram<Holder>(mod, `/claims/${session}`).catch((error: unknown) => {
-        showOnce('anyhost could not check which machine holds this session', messageOf(error))
+        if (!(error instanceof NoAnswer)) showOnce('anyhost could not check which machine holds this session', messageOf(error))
         return undefined
       })
       if (holder === undefined) return undefined

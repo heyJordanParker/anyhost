@@ -2,6 +2,15 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.8.3] - 2026-11-13
+
+### Fixed
+- Your sessions take far less space in R2. A copy of a file or of your uncommitted code that a newer copy replaced is dropped once it is a week old, so a long session no longer keeps every old copy. A session restored afterwards has the same files and code. anyhost updates your relay by itself for this.
+- An update of anyhost no longer uploads every active session whole again. anyhost now updates its database in place.
+- A slow request no longer fails after 10 seconds with ECONNRESET. anyhost's program now waits as long as the answer takes.
+- A restart of anyhost's program no longer opens the Connect your machines step, nor shows an error at your next prompt. Both wait for the program to answer again.
+- A session a screen shows is never stopped while anyhost still reads whether it is shown.
+
 ## [0.8.2] - 2026-11-13
 
 ### Fixed
