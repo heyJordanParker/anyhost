@@ -2,6 +2,16 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.8.2] - 2026-11-13
+
+### Fixed
+- A move that fails no longer closes and reopens the session. The move now pauses the session's Claude Code instead of ending it, and ends it only once the other machine runs the session. When the move fails or you press Keep it here, the same Claude Code goes on, with its screen and anything typed meanwhile.
+- Archiving several sessions in the Herdr pane no longer shows them back for a moment. Archive, Restore, Delete and Mark unread take effect at once and stay, and a failed one puts the card back and says why.
+- An archived session whose terminal is still open stays archived.
+- Sessions T3 Code settled or archived are archived in anyhost too, on every machine.
+- A T3 Code session that is not running no longer says it is working in T3 Code.
+- An agent that stops at a permission prompt always tells the agent that started it, even when its machine missed the change, within a minute at most.
+
 ## [0.8.1] - 2026-11-12
 
 ### Fixed
