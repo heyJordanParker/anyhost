@@ -231,6 +231,7 @@ test('an agent that starts waiting at a permission prompt on another machine tel
   await until(() => sentOn(worker.folder).length > 0, 'the first message going in')
   const records = join(worker.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions')
   const record = readdirSync(records).map((name) => join(records, name)).find((path) => readFileSync(path, 'utf8').includes(child)) ?? ''
+  await until(() => readFileSync(record, 'utf8').includes('"status":"busy"'), 'the first message starting its turn')
 
   writeFileSync(record, readFileSync(record, 'utf8').replace(/"status":"[a-z]+"/, '"status":"waiting"'))
   await until(() => sentOn(laptop.folder).length > 0, 'the note reaching the agent that started it', 30_000)
@@ -250,6 +251,7 @@ test('an agent that starts waiting while its machine hears no change of Claude C
   await until(() => sentOn(worker.folder).length > 0, 'the first message going in', 30_000)
   const records = join(worker.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions')
   const record = readdirSync(records).map((name) => join(records, name)).find((path) => readFileSync(path, 'utf8').includes(child)) ?? ''
+  await until(() => readFileSync(record, 'utf8').includes('"status":"busy"'), 'the first message starting its turn')
 
   writeFileSync(record, readFileSync(record, 'utf8').replace(/"status":"[a-z]+"/, '"status":"waiting"'))
   await until(() => sentOn(laptop.folder).length > 0, 'the note reaching the agent that started it', 90_000)
