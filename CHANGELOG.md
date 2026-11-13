@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.8.5] - 2026-11-13
+
+### Fixed
+- A machine whose database says it is up to date but lacks a column backs up again. anyhost now adds every column its database lacks as it starts, so `anyhost doctor`'s `backup: SQLiteError: no such column: replaced` goes away by itself.
+
 ## [0.8.4] - 2026-11-13
 
 ### Added

@@ -1082,7 +1082,7 @@ test('a database of a newer anyhost is refused whole, so an older anyhost drops 
   expect(kept.query<{ count: number }, []>('select count(*) as count from sessions').get()?.count).toBe(1)
 })
 
-test('a database of version 4 opens at version 5 with every row it held, and one older than version 4 starts over', () => {
+test('a database of version 4 opens at version 5 with every row it held, one stamped 5 without its columns gains them, and one older than version 4 starts over', () => {
   const databaseAt = (version: number): string => {
     const folder = join(temporaryFolder(), 'state')
     mkdirSync(folder)
@@ -1110,5 +1110,6 @@ test('a database of version 4 opens at version 5 with every row it held, and one
     [{ session: SESSION, end: 900, sealed: 600, written_at: 1700000000000, compacted_end: 0, compacted_kept: 0, compact_after: 0, replaced: 0 }],
     [{ session: SESSION, path: '/home/ada/.claude/projects/-work-trip/s.jsonl', journal_size: 900 }],
   ])
+  expect(rowsOf(openDatabase(databaseAt(5)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
   expect(rowsOf(openDatabase(databaseAt(3)))).toEqual([{ user_version: 5 }, [], []])
 })

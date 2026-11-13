@@ -22,12 +22,12 @@ const REQUESTS_AHEAD = 16
 const TAIL_BYTES = 32
 const COMPACT_LAG_MS = 7 * 24 * 60 * 60_000
 const OLDEST_SCHEMA = 4
-const MIGRATIONS: readonly (readonly string[])[] = [
+const MIGRATIONS: readonly (readonly (readonly [table: string, column: string, type: string])[])[] = [
   [
-    'alter table journals add column compacted_end integer not null default 0',
-    'alter table journals add column compacted_kept integer not null default 0',
-    'alter table journals add column compact_after integer not null default 0',
-    'alter table journals add column replaced integer not null default 0',
+    ['journals', 'compacted_end', 'integer not null default 0'],
+    ['journals', 'compacted_kept', 'integer not null default 0'],
+    ['journals', 'compact_after', 'integer not null default 0'],
+    ['journals', 'replaced', 'integer not null default 0'],
   ],
 ]
 const SCHEMA = OLDEST_SCHEMA + MIGRATIONS.length
@@ -128,12 +128,12 @@ function makeTables(db: Database): void {
   db.run('create table if not exists holders (session text primary key, device text not null)')
   db.run('create table if not exists holders_changed (changed integer not null)')
   db.run('insert into holders_changed (changed) select 0 where not exists (select 1 from holders_changed)')
-  for (let from = versionOf(db); from < SCHEMA; from += 1) {
-    db.transaction(() => {
-      for (const statement of MIGRATIONS[from - OLDEST_SCHEMA] ?? []) db.run(statement)
-      db.run(`pragma user_version = ${from + 1}`)
-    })()
-  }
+  db.transaction(() => {
+    for (const [table, column, type] of MIGRATIONS.flat()) {
+      if (db.query('select 1 from pragma_table_info(?) where name = ?').get(table, column) === null) db.run(`alter table ${table} add column ${column} ${type}`)
+    }
+    db.run(`pragma user_version = ${SCHEMA}`)
+  }).immediate()
 }
 
 export type CountedRelay = { readonly url: string; readonly bucket: string }
