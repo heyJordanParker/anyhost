@@ -162,9 +162,9 @@ export async function downloadJournal(relay: Relay, session: string, into: strin
   mkdirSync(into, { recursive: true })
   const replay = new Replay(into, identify)
   let end = 0
-  for await (const { frame, bytes } of chainOf(relay, frames, 0)) {
+  for await (const { bytes, end: reached } of chainOf(relay, frames, 0)) {
     replay.push(bytes)
-    end = frame.start + bytes.length
+    end = reached
   }
   replay.close()
   const isDeleted = [...replay.deleted].some((path) => path.endsWith(`${session}.jsonl`) && !path.includes('/subagents/') && !replay.files.has(`${path}.zst`))

@@ -159,16 +159,21 @@ export async function runSession(command: readonly string[], resumed?: string): 
   }
   const stopFollowing = address === undefined || address === '' ? () => undefined : followLabels(address, () => void readShown())
   let isStopping = false
+  let isChecking = false
   const check = setInterval(() => {
+    if (isStopping || isChecking) return
+    isChecking = true
     void readShown()
-    if (isStopping) return
-    const record = recordAt(claudeHome, child.pid)
-    learn(record)
-    if (isOnScreen || (record !== undefined && record.status !== 'idle')) usedAt = Date.now()
-    if (record?.status !== 'idle' || session === undefined || Date.now() - usedAt < STOP_MS) return
-    isStopping = true
-    child.kill('SIGTERM')
-    setTimeout(() => child.kill('SIGKILL'), EXIT_MS).unref()
+      .then(() => {
+        const record = recordAt(claudeHome, child.pid)
+        learn(record)
+        if (isOnScreen || (record !== undefined && record.status !== 'idle')) usedAt = Date.now()
+        if (record?.status !== 'idle' || session === undefined || Date.now() - usedAt < STOP_MS) return
+        isStopping = true
+        child.kill('SIGTERM')
+        setTimeout(() => child.kill('SIGKILL'), EXIT_MS).unref()
+      })
+      .finally(() => (isChecking = false))
   }, Math.min(CHECK_MS, STOP_MS / 4))
   if (session !== undefined) own(session)
   const code = await child.exited

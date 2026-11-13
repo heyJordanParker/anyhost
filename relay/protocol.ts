@@ -1,4 +1,4 @@
-export const RELAY_VERSION = 4
+export const RELAY_VERSION = 5
 export const PROTOCOL_VERSION = 2
 export const COMPATIBILITY_DATE = '2026-11-01'
 
@@ -67,7 +67,7 @@ export type Op =
   | { readonly op: 'invite' }
   | { readonly op: 'remove'; readonly device: string }
 
-export type Listed = { readonly key: string; readonly size: number }
+export type Listed = { readonly key: string; readonly size: number; readonly uploaded?: number }
 
 export type Results = {
   readonly get: { readonly status: 200; readonly etag: string; readonly size: number } | { readonly status: 304; readonly etag: string } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }

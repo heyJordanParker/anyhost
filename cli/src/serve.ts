@@ -734,8 +734,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
 
   await startLineOffsets(capture)
   rmSync(socket, { force: true })
+  // @ts-expect-error bun-types 1.4.4 leaves idleTimeout off a unix socket's options, which Bun 1.4.4 honors
   Bun.serve({
     unix: socket,
+    idleTimeout: 0,
     async fetch(request) {
       const { pathname } = new URL(request.url)
       if (request.method === 'GET' && pathname === '/status') return Response.json(statusOf())

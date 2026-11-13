@@ -98,7 +98,7 @@ test('a session this device holds, or no device claims, takes prompts', async ()
 
 const textOf = (body: string | { readonly base64: string }): string => (typeof body === 'string' ? body : atob(body.base64))
 
-type Answer = { readonly status?: number; readonly body: unknown; readonly delayMs?: number }
+type Answer = { readonly status?: number; readonly body?: unknown; readonly delayMs?: number; readonly fails?: string }
 type Asked = { readonly method: string; readonly path: string; readonly body?: unknown }
 
 function withProgram(answers: Record<string, Answer[]>) {
@@ -136,6 +136,7 @@ function withProgram(answers: Record<string, Answer[]>) {
     const answer = (queue.length > 1 ? queue.shift() : queue[0]) ?? { status: 404, body: { message: `No answer for ${method} ${path}.` } }
     const status = answer.status ?? 200
     await Bun.sleep(answer.delayMs ?? 0)
+    if (answer.fails !== undefined) throw new Error(`anyhost: $.http.fetch(${url}) over ${SOCKET} failed: ${answer.fails}`)
     return { status, ok: status === 200, headers: {}, text: JSON.stringify(answer.body) }
   }
   const mod = async (): Promise<Mod<AnyhostState>> => {
@@ -160,6 +161,21 @@ test('the Step is left to do on a machine not joined or on a relay too old, and 
   const { mod, asked } = withProgram({ 'GET /status': [relayIs('connecting'), relayIs('connecting'), relayIs('connected')] })
   expect(await connectStep.isDone(await mod())).toBe(true)
   expect(asked.filter(({ path }) => path === '/status')).toHaveLength(3)
+})
+
+test('a program restarting as the Step checks is waited for, and the Step stays done once it answers joined', async () => {
+  const restarting = { fails: 'ECONNREFUSED: connect ECONNREFUSED' }
+  const { mod, asked } = withProgram({ 'GET /status': [restarting, { fails: 'ECONNRESET: socket hang up' }, relayIs('connected')] })
+
+  expect(await connectStep.isDone(await mod())).toBe(true)
+  expect(asked.filter(({ path }) => path === '/status')).toHaveLength(3)
+})
+
+test('a program restarting as a prompt is checked lets the prompt through with no toast', async () => {
+  const { tested } = withProgram({ 'GET /claims/test-session': [{ fails: 'ECONNRESET: socket hang up' }] })
+
+  expect(await tested.raise.beforePrompt({ text: 'Keep going' })).toBeUndefined()
+  expect(tested.shown.toasts.filter(({ type }) => type === 'error')).toEqual([])
 })
 
 test('the Step waits while the program joins with the link of the install command, and is done once the join lands', async () => {

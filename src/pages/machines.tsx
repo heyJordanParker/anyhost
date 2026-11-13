@@ -36,14 +36,20 @@ export const FOLLOW_MS = 1000
 const programs = new WeakMap<object, Program>()
 export const reachProgram = (mod: Mod<AnyhostState>, program: Program): void => void programs.set(mod, program)
 
+export class NoAnswer extends Error {}
+
 export async function askProgram<T>(mod: Mod<AnyhostState>, path: string, body?: object): Promise<T> {
   const program = programs.get(mod)
   if (program === undefined) throw new Error('The anyhost mod has not started its program yet.')
   const { url, socketPath } = await program.ready()
-  const answer = await http.fetch(`${url}${path}`, {
-    ...(socketPath === undefined ? {} : { socketPath }),
-    ...(body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-  })
+  const answer = await http
+    .fetch(`${url}${path}`, {
+      ...(socketPath === undefined ? {} : { socketPath }),
+      ...(body === undefined ? {} : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+    })
+    .catch((error: unknown) => {
+      throw new NoAnswer(`The anyhost program did not answer ${path}: ${messageOf(error)}`)
+    })
   const read = ((): unknown => {
     try {
       return JSON.parse(answer.text)
@@ -86,7 +92,15 @@ async function joinWith(mod: Mod<AnyhostState>, link: string): Promise<void> {
 async function needsStep(mod: Mod<AnyhostState>): Promise<boolean> {
   const started = Date.now()
   for (;;) {
-    const { relay, connecting, joining } = await askProgram<Status>(mod, '/status')
+    const status = await askProgram<Status>(mod, '/status').catch((error: unknown) => {
+      if (error instanceof NoAnswer && Date.now() - started < CONNECT_WAIT_MS) return undefined
+      throw error
+    })
+    if (status === undefined) {
+      await pause(mod, 250)
+      continue
+    }
+    const { relay, connecting, joining } = status
     if (connecting?.is === 'running') follow(mod)
     mod.state.memory.joining = joining ?? null
     if (joining?.is === 'running' || (relay.state === 'connecting' && Date.now() - started < CONNECT_WAIT_MS)) {

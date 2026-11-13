@@ -202,7 +202,7 @@ async function continueHere(capture: Capture, session: string, tool: Tool, here:
   const end = journalOf(db, session)?.end ?? 0
   const { frames } = framesOf(session, await relay.list(journalPrefix(session)))
   let at = end
-  for await (const { bytes } of chainOf(relay, frames.filter((frame) => frame.start >= end), end)) at += bytes.length
+  for await (const { end: reached } of chainOf(relay, frames.filter((frame) => frame.start >= end), end)) at = reached
   if (at === end) return holdHere(db, session)
   for (const path of captureAgainFrom(capture, session, tool, at, end, here.problems)) here.queue(session, tool, path)
 }

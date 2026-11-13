@@ -239,6 +239,18 @@ test('a second serve on one state folder refuses to start, naming the one that r
   })
 })
 
+test('a request the relay keeps waiting past 10 s still gets its answer, whatever client asked', async () => {
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST)
+  await serveOn(host.env)
+  await until(async () => (await statusOn(host.socket)).relay.state === 'connected', 'the program connecting')
+  relay.before = (op) => (op.op === 'devices' ? Bun.sleep(12_000) : undefined)
+  const curl = Bun.spawn(['curl', '-sS', '--unix-socket', host.socket, 'http://localhost/agents'], { stdout: 'pipe', stderr: 'pipe' })
+  killAfterTest(curl)
+
+  expect(await new Response(curl.stdout).text()).toStartWith('{"agents":[')
+}, 30_000)
+
 test("a program whose relay Cloudflare refuses for the daily limit names the limit and its reset at 00:00 UTC in /status", async () => {
   const relay = await memoryRelay()
   relay.dailyLimited = Infinity

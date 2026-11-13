@@ -506,7 +506,7 @@ export class Pool extends DurableObject<Env> {
       case 'list': {
         if (typeof op.prefix !== 'string') return invalid('A list names its prefix.')
         const page = await this.env.BUCKET.list({ prefix: op.prefix, limit: MAX_KEYS, ...(isText(op.cursor) ? { cursor: op.cursor } : {}) })
-        const objects = page.objects.map(({ key, size }) => ({ key, size }))
+        const objects = page.objects.map(({ key, size, uploaded }) => ({ key, size, uploaded: uploaded.getTime() }))
         return page.truncated ? { status: 200, objects, cursor: page.cursor } : { status: 200, objects }
       }
       case 'delete': {

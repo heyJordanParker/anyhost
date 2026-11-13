@@ -1,7 +1,7 @@
 import { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, type Stats } from 'node:fs'
-import { stat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { open, stat, type FileHandle } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
 import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Listed, type Released } from '../../relay/protocol.ts'
@@ -20,7 +20,17 @@ const SEAL_WAIT_PASSES = 60
 const SWEEP_BATCH = 1000
 const REQUESTS_AHEAD = 16
 const TAIL_BYTES = 32
-const SCHEMA = 4
+const COMPACT_LAG_MS = 7 * 24 * 60 * 60_000
+const OLDEST_SCHEMA = 4
+const MIGRATIONS: readonly (readonly string[])[] = [
+  [
+    'alter table journals add column compacted_end integer not null default 0',
+    'alter table journals add column compacted_kept integer not null default 0',
+    'alter table journals add column compact_after integer not null default 0',
+    'alter table journals add column replaced integer not null default 0',
+  ],
+]
+const SCHEMA = OLDEST_SCHEMA + MIGRATIONS.length
 
 export type IndexedSession = {
   readonly id: string
@@ -48,6 +58,7 @@ export type Capture = Code & {
   readonly codeReadAt: Map<string, number>
   readonly codeLater: Map<string, ReturnType<typeof setTimeout>>
   readonly codeEveryMs: number
+  readonly compactLagMs: number
   readonly codeSkipped: Set<string>
   readonly sealWaits: Map<string, { readonly failures: number; passes: number }>
   readonly missingFolders: Set<string>
@@ -66,7 +77,7 @@ export type RecordHeader = {
   readonly size: number
   readonly after: { readonly size: number; readonly sha256: string } | null
 }
-export type Frame = { readonly key: string; readonly start: number; readonly end?: number; readonly size: number }
+export type Frame = { readonly key: string; readonly start: number; readonly end?: number; readonly size: number; readonly uploaded?: number }
 export type FileState = { readonly session: string; readonly path: string; readonly journalSize: number; readonly localSize: number; readonly tail: Uint8Array; readonly sha256: string; readonly mtime: number }
 export type Journal = { readonly session: string; readonly tool: Tool; readonly end: number; readonly sealed: number; readonly writtenAt: number; readonly stopped: string; readonly holder: string }
 
@@ -82,20 +93,22 @@ export function openDatabase(folder = stateFolder()): Database {
   db.run('pragma journal_mode = wal')
   db.run('pragma busy_timeout = 5000')
   db.run("create table if not exists bucket (name text not null, url text not null default '')")
-  const version = db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version
-  if (version !== undefined && version > SCHEMA) {
+  const version = versionOf(db)
+  if (version > SCHEMA) {
     db.close()
     throw new Error(`${join(folder, 'anyhost.db')} is a database of a newer anyhost, at version ${version}, and this anyhost reads version ${SCHEMA}, so it changes nothing there. Update anyhost on this machine.`)
   }
-  if (version !== SCHEMA) startOver(db)
+  if (version < OLDEST_SCHEMA) startOver(db)
   makeTables(db)
   return db
 }
 
+const versionOf = (db: Database): number => db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version ?? 0
+
 function startOver(db: Database): void {
   for (const table of ['files', 'sessions', 'journals', 'line_offsets', 'holders', 'holders_changed']) db.run(`drop table if exists ${table}`)
   for (const folder of ['code', 'spool']) rmSync(join(dirname(db.filename), folder), { recursive: true, force: true })
-  db.run(`pragma user_version = ${SCHEMA}`)
+  db.run(`pragma user_version = ${OLDEST_SCHEMA}`)
 }
 
 function makeTables(db: Database): void {
@@ -114,6 +127,12 @@ function makeTables(db: Database): void {
   db.run('create table if not exists holders (session text primary key, device text not null)')
   db.run('create table if not exists holders_changed (changed integer not null)')
   db.run('insert into holders_changed (changed) select 0 where not exists (select 1 from holders_changed)')
+  for (let from = versionOf(db); from < SCHEMA; from += 1) {
+    db.transaction(() => {
+      for (const statement of MIGRATIONS[from - OLDEST_SCHEMA] ?? []) db.run(statement)
+      db.run(`pragma user_version = ${from + 1}`)
+    })()
+  }
 }
 
 export type CountedRelay = { readonly url: string; readonly bucket: string }
@@ -147,7 +166,16 @@ export function openCapture(
     onReleased = () => undefined,
     onOtherRelay = () => undefined,
     codeEveryMs = CODE_EVERY_MS,
-  }: { readonly db?: Database; readonly code?: Code; readonly onCode?: Capture['onCode']; readonly onReleased?: Capture['onReleased']; readonly onOtherRelay?: (url: string, bucket: string) => void; readonly codeEveryMs?: number } = {},
+    compactLagMs = COMPACT_LAG_MS,
+  }: {
+    readonly db?: Database
+    readonly code?: Code
+    readonly onCode?: Capture['onCode']
+    readonly onReleased?: Capture['onReleased']
+    readonly onOtherRelay?: (url: string, bucket: string) => void
+    readonly codeEveryMs?: number
+    readonly compactLagMs?: number
+  } = {},
 ): Capture {
   relay.on('welcome', ({ bucket, waiting }) => {
     const isOther = useRelay(db, relay.url, bucket)
@@ -155,7 +183,7 @@ export function openCapture(
     if (isOther) onOtherRelay(relay.url, bucket)
   })
   const capture: Capture = {
-    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
+    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, compactLagMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
     holders: followHolders(relay, db), lastIndex: '',
   }
   const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
@@ -180,6 +208,8 @@ const position = (at: number): string => String(at).padStart(16, '0')
 export const journalPrefix = (session: string): string => `journals/${session}/`
 export const hotKey = (session: string, start: number): string => `${journalPrefix(session)}hot/${position(start)}.zst`
 const sealedKey = (session: string, start: number, end: number): string => `${journalPrefix(session)}sealed/${position(start)}-${position(end)}.zst`
+const compactedKey = (session: string, start: number, end: number): string => `${journalPrefix(session)}compacted/${position(start)}-${position(end)}.zst`
+const isCompacted = (frame: Frame): boolean => frame.key.includes('/compacted/')
 
 const C = zlib.constants
 export const compressHot = (body: Uint8Array): Uint8Array => zlib.zstdCompressSync(body, { params: { [C.ZSTD_c_compressionLevel]: 3, [C.ZSTD_c_checksumFlag]: 1 } })
@@ -191,30 +221,31 @@ export const decompress = (frame: Uint8Array): Uint8Array => zlib.zstdDecompress
 export const encodeRecord = (header: RecordHeader, bytes: Uint8Array): Uint8Array[] => [new TextEncoder().encode(`${JSON.stringify(header)}\n`), bytes]
 
 export function framesOf(session: string, listed: readonly Listed[]): { readonly frames: Frame[]; readonly sealedEnd: number; readonly stale: string[] } {
-  const sealed: Required<Frame>[] = []
+  const sealed: (Frame & { readonly end: number })[] = []
   const hot: Frame[] = []
-  for (const { key, size } of listed) {
+  for (const { key, size, uploaded } of listed) {
     const rest = key.slice(journalPrefix(session).length)
-    const range = /^sealed\/(\d+)-(\d+)\.zst$/.exec(rest)
-    if (range !== null) sealed.push({ key, start: Number(range[1]), end: Number(range[2]), size })
+    const range = /^(?:sealed|compacted)\/(\d+)-(\d+)\.zst$/.exec(rest)
+    if (range !== null) sealed.push({ key, start: Number(range[1]), end: Number(range[2]), size, ...(uploaded === undefined ? {} : { uploaded }) })
     const start = /^hot\/(\d+)\.zst$/.exec(rest)?.[1]
     if (start !== undefined) hot.push({ key, start: Number(start), size })
   }
   const frames: Frame[] = []
   let sealedEnd = 0
   for (;;) {
-    const next = sealed.filter((frame) => frame.start === sealedEnd).sort((a, b) => b.end - a.end)[0]
+    const next = sealed.filter((frame) => frame.start === sealedEnd).sort((a, b) => b.end - a.end || Number(isCompacted(b)) - Number(isCompacted(a)))[0]
     if (next === undefined) break
     frames.push(next)
     sealedEnd = next.end
   }
+  const covered = sealed.filter((frame) => !frames.includes(frame) && frame.end <= sealedEnd)
   frames.push(...hot.filter((frame) => frame.start >= sealedEnd).sort((a, b) => a.start - b.start))
-  return { frames, sealedEnd, stale: hot.filter((frame) => frame.start < sealedEnd).map(({ key }) => key) }
+  return { frames, sealedEnd, stale: [...hot.filter((frame) => frame.start < sealedEnd), ...covered].map(({ key }) => key) }
 }
 
 export const spoolOf = (db: Database, session: string): string => join(dirname(db.filename), 'spool', session)
 
-export async function* chainOf(relay: Relay, frames: readonly Frame[], from: number, spool?: string): AsyncGenerator<{ readonly frame: Frame; readonly bytes: Uint8Array }> {
+export async function* chainOf(relay: Relay, frames: readonly Frame[], from: number, spool?: string): AsyncGenerator<{ readonly frame: Frame; readonly bytes: Uint8Array; readonly end: number }> {
   const spooled = new Map(spool === undefined ? [] : frames.flatMap((frame) => (frame.end === undefined && existsSync(join(spool, String(frame.start))) ? [[frame.key, join(spool, String(frame.start))] as const] : [])))
   const requests: Frame[][] = []
   const requestOf: number[] = []
@@ -260,9 +291,10 @@ export async function* chainOf(relay: Relay, frames: readonly Frame[], from: num
     const nextRequest = request >= 0 ? request : (requestOf.slice(index).find((each) => each >= 0) ?? requests.length)
     for (let ahead = nextRequest; ahead < Math.min(requests.length, nextRequest + REQUESTS_AHEAD); ahead += 1) void fetchRequest(ahead).catch(() => undefined)
     const bytes = local === undefined ? await fetchedBytes(await fetchRequest(request), frame.key) : new Uint8Array(readFileSync(local))
-    if (frame.end !== undefined && frame.start + bytes.length !== frame.end) throw new Error(`${frame.key} holds ${bytes.length} bytes, not the ${frame.end - frame.start} its name says.`)
-    yield { frame, bytes }
-    end = frame.start + bytes.length
+    const compactedEnd = isCompacted(frame) ? frame.end : undefined
+    if (compactedEnd === undefined && frame.end !== undefined && frame.start + bytes.length !== frame.end) throw new Error(`${frame.key} holds ${bytes.length} bytes, not the ${frame.end - frame.start} its name says.`)
+    end = compactedEnd ?? frame.start + bytes.length
+    yield { frame, bytes, end }
   }
 }
 
@@ -831,36 +863,201 @@ export async function sealJournal(capture: Capture, session: string, tool: Tool,
   const end = journalOf(capture.db, session)?.end ?? 0
   const at = await seal(capture, session)
   if (at !== end) return captureAgainFrom(capture, session, tool, at, end, problems)
-  capture.db.query('update journals set sealed = ? where session = ?').run(at, session)
+  capture.db.query('update journals set sealed = ?, replaced = 0 where session = ?').run(at, session)
   return new Set()
 }
 
 export async function sealQuiet(capture: Capture, problems: Problems, now = Date.now()): Promise<Map<string, Set<string>>> {
   const { db, relay, device, sealWaits } = capture
-  const quiet = db.query<{ session: string; tool: Tool }, [number]>("select session, tool from journals where stopped = '' and end > sealed and written_at < ?").all(now - QUIET_MS)
-  const again = new Map<string, Set<string>>()
-  for (const { session, tool } of quiet) {
+  type Sealing = { readonly session: string; readonly tool: Tool }
+  const quiet = db.query<Sealing, [number]>("select session, tool from journals where stopped = '' and end > sealed and written_at < ?").all(now - QUIET_MS)
+  const compactable = db
+    .query<Sealing, [number]>(
+      `select session, tool from journals where stopped = '' and end > 0 and end = sealed
+       and (replaced = 1 or (compact_after <= ? and sealed - compacted_end > compacted_kept)) order by replaced desc, written_at`,
+    )
+    .all(now)
+  const isTried = ({ session }: Sealing): boolean => {
     const wait = sealWaits.get(session)
-    if (wait !== undefined && wait.passes > 1) {
-      wait.passes -= 1
-      continue
-    }
+    if (wait === undefined || wait.passes <= 1) return true
+    wait.passes -= 1
+    return false
+  }
+  const again = new Map<string, Set<string>>()
+  const compacting = compactable.find(isTried)
+  for (const { session, tool } of [...quiet.filter(isTried), ...(compacting === undefined ? [] : [compacting])]) {
     try {
       const claim = await relay.runOne({ op: 'claim', session, take: false })
       if (claim.status === 409) releasedTo(capture, session, claim.holder, `${new Date().toISOString()} ${claim.holder.name} holds the session ${session}, so ${device.name} stops capturing it.`, tool)
       else {
         const files = await sealJournal(capture, session, tool, problems)
         if (files.size > 0) again.set(session, files)
+        else await compactJournal(capture, session, tool, now)
       }
       sealWaits.delete(session)
       problems.clear(`seal ${session}`)
     } catch (error) {
-      const failures = (wait?.failures ?? 0) + 1
+      const failures = (sealWaits.get(session)?.failures ?? 0) + 1
       sealWaits.set(session, { failures, passes: Math.min(2 ** (failures - 1), SEAL_WAIT_PASSES) })
       problems.set(`seal ${session}`, error)
     }
   }
   return again
+}
+
+type Span = { readonly start: number; readonly end: number; readonly from: number; readonly to: number }
+type Staged = { readonly header: RecordHeader; readonly from: number; readonly body: number; readonly to: number }
+
+async function compactJournal(capture: Capture, session: string, tool: Tool, now: number): Promise<void> {
+  const { db, relay, device, compactLagMs } = capture
+  const journal = db
+    .query<{ sealed: number; compacted_end: number; compacted_kept: number; compact_after: number }, [string]>('select sealed, compacted_end, compacted_kept, compact_after from journals where session = ?')
+    .get(session)
+  if (journal === null || journal.compact_after > now || journal.sealed - journal.compacted_end <= journal.compacted_kept) return
+  if (capture.codeRuns.has(session) || capture.codeWaiting.has(session)) return
+  const chain = framesOf(session, await relay.list(journalPrefix(session))).frames.filter((frame) => frame.end !== undefined)
+  if (chain.some((frame) => frame.uploaded === undefined)) return
+  const young = chain.find((frame) => !isCompacted(frame) && (frame.uploaded ?? now) > now - compactLagMs)
+  db.query('update journals set compact_after = ? where session = ?').run(young === undefined ? 0 : (young.uploaded ?? now) + compactLagMs, session)
+  const old = young === undefined ? chain : chain.slice(0, chain.indexOf(young))
+  const oldEnd = old.at(-1)?.end ?? 0
+  if (oldEnd - journal.compacted_end <= journal.compacted_kept) return
+  const staging = join(dirname(db.filename), 'compact', session)
+  mkdirSync(dirname(staging), { recursive: true })
+  const handle = await open(staging, 'w+')
+  try {
+    const spans: Span[] = []
+    for await (const { frame, bytes, end } of chainOf(relay, chain, 0)) {
+      const from = spans.at(-1)?.to ?? 0
+      for (let at = 0; at < bytes.length; ) at += (await handle.write(bytes, at, bytes.length - at, from + at)).bytesWritten
+      spans.push({ start: frame.start, end, from, to: from + bytes.length })
+    }
+    const records = await stagedRecordsOf(handle, spans.at(-1)?.to ?? 0, session)
+    const dropped = await droppedOf(handle, records)
+    const ends = new Set([0, ...records.map(({ to }) => to)])
+    const oldSpans = spans.slice(0, old.length)
+    let reach = oldSpans.length
+    while (reach > 0 && !ends.has(oldSpans[reach - 1]?.to ?? 0)) reach -= 1
+    let kept = oldSpans.at(-1)?.to ?? 0
+    let isReplaced = false
+    const gone = new Set<number>()
+    for (const group of groupsOf(oldSpans.slice(0, reach), records, dropped, ends)) {
+      const [first] = group.spans
+      const last = group.spans.at(-1)
+      if (first === undefined || last === undefined || group.kept === last.to - first.from) continue
+      const body = await stagedBytes(handle, group.records.flatMap((index) => (dropped.has(index) ? [] : (records[index] ?? []))))
+      const answer = await relay.runOne({ op: 'put', key: compactedKey(session, first.start, last.end), bytes: await compressSealed(body), if: { none: '*' }, holder: session })
+      if (answer.status === 409) return releasedTo(capture, session, answer.holder, `${new Date().toISOString()} ${answer.holder.name} took the session ${session} over, so ${device.name} stops capturing it.`, tool)
+      kept -= last.to - first.from - group.kept
+      isReplaced = true
+      for (const index of group.records) if (dropped.has(index)) gone.add(index)
+    }
+    const left = new Set(records.flatMap(({ header }, index) => (gone.has(index) ? [] : [header.path])))
+    const goneParts = new Set([...gone].flatMap((index) => records[index]?.header.path ?? []).filter((path) => isCodePart(path) && !left.has(path)))
+    if (goneParts.size > 0) rmSync(join(dirname(db.filename), 'code', session), { recursive: true, force: true })
+    db.transaction(() => {
+      for (const path of goneParts) db.query('delete from files where session = ? and path = ?').run(session, path)
+      db.query('update journals set compacted_end = ?, compacted_kept = ?, replaced = max(replaced, ?) where session = ?').run(oldEnd, kept, Number(isReplaced), session)
+    })()
+  } finally {
+    await handle.close()
+    rmSync(staging, { force: true })
+  }
+}
+
+type Group = { readonly spans: Span[]; readonly records: number[]; kept: number }
+
+function groupsOf(spans: readonly Span[], records: readonly Staged[], dropped: ReadonlySet<number>, ends: ReadonlySet<number>): Group[] {
+  const groups: Group[] = []
+  let next = 0
+  for (const span of spans) {
+    const inSpan: number[] = []
+    let kept = 0
+    for (let record = records[next]; record !== undefined && record.from < span.to; record = records[next]) {
+      inSpan.push(next)
+      if (!dropped.has(next)) kept += record.to - record.from
+      next += 1
+    }
+    const group = groups.at(-1)
+    const last = group?.spans.at(-1)
+    if (group === undefined || last === undefined || (ends.has(last.to) && group.kept + kept > FRAME_BYTES)) groups.push({ spans: [span], records: inSpan, kept })
+    else {
+      group.spans.push(span)
+      for (const index of inSpan) group.records.push(index)
+      group.kept += kept
+    }
+  }
+  return groups
+}
+
+async function readAt(handle: FileHandle, at: number, length: number): Promise<Uint8Array> {
+  const { bytesRead, buffer } = await handle.read(new Uint8Array(length), 0, length, at)
+  if (bytesRead !== length) throw new Error(`anyhost read ${bytesRead} of ${length} bytes at byte ${at} of the journal it compacts.`)
+  return buffer
+}
+
+async function lineAt(handle: FileHandle, at: number, end: number): Promise<Uint8Array> {
+  for (let length = Math.min(4096, end - at); ; length = Math.min(2 * length, end - at)) {
+    const read = await readAt(handle, at, length)
+    const newline = read.indexOf(10)
+    if (newline >= 0) return read.subarray(0, newline)
+    if (at + length === end) throw new Error(`The record at byte ${at} of the journal anyhost compacts has no header line.`)
+  }
+}
+
+async function stagedRecordsOf(handle: FileHandle, size: number, session: string): Promise<Staged[]> {
+  const records: Staged[] = []
+  let at = 0
+  while (at < size) {
+    const line = await lineAt(handle, at, size)
+    const header = JSON.parse(new TextDecoder().decode(line)) as RecordHeader
+    const body = at + line.length + 1
+    records.push({ header, from: at, body, to: body + header.size })
+    at = body + header.size
+  }
+  if (at !== size) throw new Error(`The journal of ${session} ends inside a record of ${records.at(-1)?.header.path ?? 'a header'}, so anyhost compacts none of it.`)
+  return records
+}
+
+async function stagedBytes(handle: FileHandle, records: readonly Staged[]): Promise<Uint8Array> {
+  const runs: { from: number; to: number }[] = []
+  for (const { from, to } of records) {
+    const last = runs.at(-1)
+    if (last?.to === from) last.to = to
+    else runs.push({ from, to })
+  }
+  const parts: Uint8Array[] = []
+  for (const { from, to } of runs) parts.push(await readAt(handle, from, to - from))
+  return Buffer.concat(parts)
+}
+
+async function droppedOf(handle: FileHandle, records: readonly Staged[]): Promise<Set<number>> {
+  const dropped = new Set<number>()
+  const laterCode = new Set<string>()
+  const laterWhole = new Map<string, Set<string>>()
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const header = records[index]?.header
+    if (header === undefined) continue
+    const writer = `${header.device}\0${header.checkout ?? ''}\0${header.path}`
+    if (header.path.endsWith('/')) {
+      if (laterCode.has(writer)) dropped.add(index)
+      laterCode.add(writer)
+    } else if (header.after !== null) {
+      const whole = laterWhole.get(basename(header.path)) ?? new Set<string>()
+      if (whole.has(writer)) dropped.add(index)
+      if (header.at === 0) whole.add(writer)
+      else for (const other of whole) if (other !== writer) whole.delete(other)
+      laterWhole.set(basename(header.path), whole)
+    }
+  }
+  const named = new Set<string>()
+  for (const [index, { header, body, to }] of records.entries()) {
+    if (!header.path.endsWith('/') || dropped.has(index) || body === to) continue
+    const code = JSON.parse(new TextDecoder().decode(await lineAt(handle, body, to))) as { readonly parts: readonly (readonly [string, number, string])[] }
+    for (const [hash, , where] of code.parts) if (where === 'record') named.add(hash)
+  }
+  for (const [index, { header }] of records.entries()) if (isCodePart(header.path) && !named.has(basename(header.path))) dropped.add(index)
+  return dropped
 }
 
 export async function checkoutOf(cwd: string): Promise<{ repo: string; folder: string }> {

@@ -1,8 +1,8 @@
 import { Database } from 'bun:sqlite'
 import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { journalOf, openCapture, openDatabase, recordSummary, relistSessions, seal, untoldOf, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
+import { dirname, join, relative } from 'node:path'
+import { journalOf, openCapture, openDatabase, QUIET_MS, recordSummary, relistSessions, seal, sealQuiet, untoldOf, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
 import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
@@ -17,9 +17,9 @@ const server: Device = { id: 'device-server', name: 'server', os: 'linux', arch:
 const upload = (capture: Capture, session: string, ...paths: string[]): Promise<Set<string>[]> =>
   Promise.all(uploadSessions(capture, [{ session, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
 
-function machine(device: Device, relay: MemoryRelay, home = join(temporaryFolder(), 'home'), state = join(temporaryFolder(), 'state'), code = noCode) {
+function machine(device: Device, relay: MemoryRelay, home = join(temporaryFolder(), 'home'), state = join(temporaryFolder(), 'state'), code = noCode, compactLagMs?: number) {
   const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') }
-  return { roots, capture: openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(state), code, codeEveryMs: 0 }) }
+  return { roots, capture: openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(state), code, codeEveryMs: 0, ...(compactLagMs === undefined ? {} : { compactLagMs }) }) }
 }
 
 async function captured(relay: MemoryRelay, device: Device, session: string, prompt: string, cwd = '/work'): Promise<Capture> {
@@ -305,6 +305,73 @@ test('restore gives restoreCode the last code header and its parts, places no pa
   expect(continued).toBe(worktree)
   expect(existsSync(join(cwd, 'anyhost:code'))).toBe(false)
   expect(existsSync(join(home, 'anyhost:code'))).toBe(false)
+})
+
+test('a journal compacted after its transcript went up whole twice and its code changed restores the same files and code from fewer bytes, once the next seal deleted what it replaced', async () => {
+  const relay = await memoryRelay()
+  const session = 'abababab-0000-4000-8000-00000000000c'
+  const home = join(temporaryFolder(), 'home')
+  const cwd = join(home, 'work', 'shop')
+  const transcript = join(home, '.claude', 'projects', '-work-shop', `${session}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  mkdirSync(cwd, { recursive: true })
+  const sha256 = (bytes: Uint8Array): string => new Bun.CryptoHasher('sha256').update(bytes).digest('hex')
+  const partOf = (hash: string): string => `anyhost:code/${session}/parts/${hash}`
+  const codeOf = (bytes: Uint8Array): { header: Uint8Array; parts: { path: string; bytes: Uint8Array }[] } => ({
+    header: new TextEncoder().encode(`${JSON.stringify({ session, parts: [[sha256(bytes), bytes.length, 'record']] })}\n`),
+    parts: [{ path: partOf(sha256(bytes)), bytes }],
+  })
+  const uncommitted = 256 * 1024
+  let code = codeOf(crypto.getRandomValues(new Uint8Array(uncommitted)))
+  const writer = machine(mac, relay, home, undefined, { captureCode: async () => code, restoreCode: async () => '' }).capture
+  const line = (text: string): string => `{"type":"user","message":{"role":"user","content":${JSON.stringify(text)}},"cwd":${JSON.stringify(cwd)},"sessionId":"${session}"}\n`
+  const uploaded = async (): Promise<void> => {
+    await upload(writer, session, transcript)
+    await writer.codeRuns.get(session)
+    await upload(writer, session, `${cwd}/`)
+  }
+  writeFileSync(transcript, line('Ship it'))
+  await uploaded()
+  writeFileSync(transcript, `${line('Ship it, with its tests')}${line('Again')}`)
+  await uploaded()
+  appendFileSync(transcript, line('Once more'))
+  code = codeOf(crypto.getRandomValues(new Uint8Array(uncommitted)))
+  await uploaded()
+  writeFileSync(transcript, `${line('Ship it, with its tests and docs')}${line('Again')}${line('Once more')}`)
+  await uploaded()
+  await writeIndex(writer)
+
+  const journalBytes = async (): Promise<number> => (await relay.objects.list({ prefix: `journals/${session}/` })).objects.reduce((total, { size }) => total + size, 0)
+  const restoredHome = join(temporaryFolder(), 'home')
+  const restoredBy = async (device: Device): Promise<{ capture: Capture; files: Record<string, string>; code: string[] }> => {
+    rmSync(restoredHome, { recursive: true, force: true })
+    const given: string[] = []
+    const restoreCode = async (header: Uint8Array, readPart: (path: string) => Promise<Uint8Array>, folder: string): Promise<string> => {
+      const { parts } = JSON.parse(new TextDecoder().decode(header)) as { parts: [string, number, string][] }
+      given.push(new TextDecoder().decode(header), folder)
+      for (const [hash] of parts) given.push(sha256(await readPart(partOf(hash))))
+      return folder
+    }
+    const { capture } = machine(device, relay, restoredHome, undefined, { captureCode: async () => undefined, restoreCode }, 0)
+    await restore(capture, session, { take: true })
+    const files = readdirSync(restoredHome, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile())
+    return { capture, files: Object.fromEntries(files.map((entry) => [relative(restoredHome, join(entry.parentPath, entry.name)), readFileSync(join(entry.parentPath, entry.name), 'utf8')])), code: given }
+  }
+  const before = await restoredBy(server)
+  const bytesBefore = await journalBytes()
+
+  await sealQuiet(before.capture, failTest, Date.now() + QUIET_MS + 1)
+  await sealQuiet(before.capture, failTest, Date.now() + QUIET_MS + 2)
+  const keys = await relay.keys(`journals/${session}/`)
+  expect(keys.map((key) => key.split('/')[2])).toEqual(['compacted'])
+  const after = await restoredBy({ id: 'device-c', name: 'laptop', os: 'linux', arch: 'arm64' })
+
+  expect(after.files).toEqual(before.files)
+  expect(Object.values(after.files)).toContain(`${line('Ship it, with its tests and docs').replaceAll(home, restoredHome)}${line('Again').replaceAll(home, restoredHome)}${line('Once more').replaceAll(home, restoredHome)}`)
+  expect(after.code).toEqual(before.code)
+  expect(after.code).toEqual([new TextDecoder().decode(code.header), join(restoredHome, 'work', 'shop'), sha256(code.parts[0]?.bytes ?? new Uint8Array())])
+  expect(journalOf(after.capture.db, session)?.end).toBe(journalOf(before.capture.db, session)?.end)
+  expect(await journalBytes()).toBeLessThan(bytesBefore - uncommitted)
 })
 
 test('a new session is listed with its working folder by its first upload, so a takeover right after restores its code there', async () => {

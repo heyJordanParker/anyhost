@@ -167,7 +167,7 @@ test('anyhost run never stops a session a screen shows, and stops it once that m
     join(bin, 'hc'),
     `#!/bin/bash
 case "$1" in
-  get) printf '{"state":"live","cwd":"/","labels":{"anyhost.shown.mac":"%s"}}' "$(cat "${shownAt}")" ;;
+  get) sleep 1; printf '{"state":"live","cwd":"/","labels":{"anyhost.shown.mac":"%s"}}' "$(cat "${shownAt}")" ;;
   events) sleep 1; echo '{"type":"labels","terminal":"t9"}'; sleep 600 ;;
 esac
 `,

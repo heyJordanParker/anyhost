@@ -490,7 +490,8 @@ describe('ops', () => {
     expect(gets[0]).toEqual(big)
   })
 
-  test('list answers keys and sizes up to 1,000 at a time, with a cursor while more remain', async () => {
+  test('list answers keys, sizes and upload times up to 1,000 at a time, with a cursor while more remain', async () => {
+    const before = Date.now()
     const folder = `${prefix}ops/list/`
     for (let at = 0; at < 1001; at += MAX_OPS) {
       const ops = Array.from({ length: Math.min(MAX_OPS, 1001 - at) }, (_, index) => ({ op: 'put', key: `${folder}${String(at + index).padStart(4, '0')}`, size: 1 }) as const)
@@ -507,7 +508,8 @@ describe('ops', () => {
     } while (cursor !== undefined)
     expect(pages.length).toBeGreaterThan(1)
     const objects = pages.flatMap((page) => page['objects'] as Json[])
-    expect(objects[0]).toEqual({ key: `${folder}0000`, size: 1 })
+    expect(objects[0]).toEqual({ key: `${folder}0000`, size: 1, uploaded: expect.any(Number) })
+    expect(objects.every((object) => Math.abs((object['uploaded'] as number) - before) < 5 * 60_000)).toBe(true)
     const keys = objects.map((object) => object['key'] as string)
     expect(keys).toEqual(Array.from({ length: 1001 }, (_, index) => `${folder}${String(index).padStart(4, '0')}`))
     const [tooMany] = await mac.socket.results({ op: 'delete', keys })

@@ -2,11 +2,11 @@ import { Database } from 'bun:sqlite'
 import { expect, spyOn, test } from 'bun:test'
 import * as fs from 'node:fs'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import {
-  changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, hotKey, isCodePart, isDeleted, journalOf, markUntold, openCapture, openDatabase, QUIET_MS, seal, sealQuiet, sessionsOf,
-  spoolOf, startLineOffsets, untoldOf, uploadSessions, type Problems, type RecordHeader,
+  chainOf, changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, framesOf, hotKey, isCodePart, isDeleted, journalOf, markUntold, openCapture, openDatabase, QUIET_MS, seal,
+  sealJournal, sealQuiet, sessionsOf, spoolOf, startLineOffsets, untoldOf, uploadSessions, type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
@@ -28,11 +28,17 @@ const lines = [
 const decoded = (bytes: Uint8Array): string => new TextDecoder().decode(bytes)
 const rootsUnder = (folder: string): MachineRoots => ({ home: join(folder, 'home'), claudeHome: join(folder, 'home', '.claude'), claudeTmp: join(folder, 'tmp', 'claude-1000'), codexHome: join(folder, 'home', '.codex') })
 
-function machine(device: Device, relay: MemoryRelay, folder = temporaryFolder(), code = noCode, onCode?: (session: string, tool: 'claude' | 'codex', folder: string) => void) {
+function machine(device: Device, relay: MemoryRelay, folder = temporaryFolder(), code = noCode, onCode?: (session: string, tool: 'claude' | 'codex', folder: string) => void, compactLagMs?: number) {
   const roots = rootsUnder(folder)
   const transcript = join(roots.home, '.claude', 'projects', '-work-trip', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
-  const capture = openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(join(folder, 'state')), code, codeEveryMs: 0, ...(onCode === undefined ? {} : { onCode }) })
+  const capture = openCapture(relay.connect(device, roots), device, roots, {
+    db: openDatabase(join(folder, 'state')),
+    code,
+    codeEveryMs: 0,
+    ...(onCode === undefined ? {} : { onCode }),
+    ...(compactLagMs === undefined ? {} : { compactLagMs }),
+  })
   const upload = (...paths: string[]): Promise<Set<string>[]> => Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
   return { roots, transcript, capture, upload }
 }
@@ -577,6 +583,91 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
   expect(Buffer.from(await frameOf(relay, sealed[0] ?? '')).equals(before)).toBe(true)
 }, 60_000)
 
+const position = (at: number): string => String(at).padStart(16, '0')
+
+const rewritten = lines.join('').replace('Plan the trip', 'Plan the long trip')
+
+async function rewrittenAndSealed(relay: MemoryRelay, { transcript, upload, capture }: ReturnType<typeof machine>): Promise<number> {
+  writeFileSync(transcript, lines[1] ?? '')
+  await upload(transcript)
+  writeFileSync(transcript, `${lines[2]}${lines[1]}`)
+  await upload(transcript)
+  appendFileSync(transcript, lines[0] ?? '')
+  await upload(transcript)
+  writeFileSync(transcript, rewritten)
+  await upload(transcript)
+  const records = recordsOf(await journalBytes(relay)).map(({ header }) => [header.at, header.checkout ?? ''])
+  expect(records).toEqual([[0, ''], [0, TRIP], [Buffer.byteLength(`${lines[2]}${lines[1]}`), TRIP], [0, TRIP]])
+  await sealJournal(capture, SESSION, 'claude', failTest)
+  return journalOf(capture.db, SESSION)?.end ?? 0
+}
+
+test('a restore that listed the journal before a compaction reads it whole after it, and the next seal deletes the sealed frame the compaction replaced', async () => {
+  const relay = await memoryRelay()
+  const writer = machine(deviceA, relay, temporaryFolder(), noCode, undefined, 0)
+  const end = await rewrittenAndSealed(relay, writer)
+  const sealedKey = `journals/${SESSION}/sealed/${position(0)}-${position(end)}.zst`
+  const compactedKey = `journals/${SESSION}/compacted/${position(0)}-${position(end)}.zst`
+  const listed = framesOf(SESSION, await writer.capture.relay.list(`journals/${SESSION}/`)).frames
+  const journal = await frameOf(relay, sealedKey)
+
+  await sealQuiet(writer.capture, failTest, Date.now() + 1)
+  expect(await relay.keys(`journals/${SESSION}/`)).toEqual([compactedKey, sealedKey])
+  expect(recordsOf(await frameOf(relay, compactedKey)).map(({ header, text }) => [header.at, text])).toEqual([
+    [0, lines[1] ?? ''],
+    [0, rewritten],
+  ])
+  const read: Uint8Array[] = []
+  for await (const { bytes } of chainOf(writer.capture.relay, listed, 0)) read.push(bytes)
+  expect(Buffer.concat(read).equals(Buffer.from(journal))).toBe(true)
+
+  await sealQuiet(writer.capture, failTest, Date.now() + 2)
+  expect(await relay.keys(`journals/${SESSION}/`)).toEqual([compactedKey])
+  const replayed = await downloadJournal(writer.capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
+  expect([readFileSync(replayed.files.get(writer.transcript)?.staged ?? '', 'utf8'), replayed.end, replayed.sealedEnd]).toEqual([rewritten, end, end])
+})
+
+test("a compaction keeps a whole copy that another machine's append to the same file builds on, so the journal still replays", async () => {
+  const relay = await memoryRelay()
+  const { capture } = machine(deviceA, relay, temporaryFolder(), noCode, undefined, 0)
+  const record = (device: string, path: string, at: number, text: string): Uint8Array[] =>
+    encodeRecord({ device, path, at, size: Buffer.byteLength(text), after: { size: at + Buffer.byteLength(text), sha256: '' } }, new TextEncoder().encode(text))
+  const journal = Buffer.concat([
+    ...record('mac', '/Users/ada/log.jsonl', 0, 'one\n'),
+    ...record('devbox', '/home/ada/log.jsonl', 4, 'two\n'),
+    ...record('mac', '/Users/ada/state.json', 0, '{"step":1}'),
+    ...record('mac', '/Users/ada/log.jsonl', 0, 'three\n'),
+    ...record('mac', '/Users/ada/state.json', 0, '{"step":2}'),
+  ])
+  await relay.objects.put(`journals/${SESSION}/sealed/${position(0)}-${position(journal.length)}.zst`, compressHot(journal))
+  continueJournal(capture.db, { session: SESSION, tool: 'claude', end: journal.length, sealed: journal.length }, [])
+  await welcomed(capture.relay)
+
+  await sealQuiet(capture, failTest, Date.now() + 1)
+  const compacted = await frameOf(relay, `journals/${SESSION}/compacted/${position(0)}-${position(journal.length)}.zst`)
+  expect(recordsOf(compacted).map(({ header, text }) => `${header.path} ${text}`)).toEqual(['/Users/ada/log.jsonl one\n', '/home/ada/log.jsonl two\n', '/Users/ada/log.jsonl three\n', '/Users/ada/state.json {"step":2}'])
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => `/here/${basename(path)}`)
+  expect([...replayed.files].map(([path, { staged }]) => `${path} ${readFileSync(staged, 'utf8')}`)).toEqual(['/here/log.jsonl three\n', '/here/state.json {"step":2}'])
+})
+
+test('a sealed frame younger than the lag is never compacted, and its journal is not listed again until it ages past the lag', async () => {
+  const relay = await memoryRelay()
+  const writer = machine(deviceA, relay)
+  const end = await rewrittenAndSealed(relay, writer)
+  const sealedKey = `journals/${SESSION}/sealed/${position(0)}-${position(end)}.zst`
+  const asked = relay.requests.length
+
+  await sealQuiet(writer.capture, failTest, Date.now() + 1)
+  const checked = relay.requests.length
+  await sealQuiet(writer.capture, failTest, Date.now() + 2)
+  expect(await relay.keys(`journals/${SESSION}/`)).toEqual([sealedKey])
+  expect(relay.requests.slice(asked, checked).flat().map(({ op }) => op)).toEqual(['claim', 'list', 'list'])
+  expect(relay.requests.slice(checked)).toEqual([])
+
+  await sealQuiet(writer.capture, failTest, Date.now() + 7 * 24 * 60 * 60_000 + 1)
+  expect(await relay.keys(`journals/${SESSION}/`)).toEqual([`journals/${SESSION}/compacted/${position(0)}-${position(end)}.zst`, sealedKey])
+})
+
 test('a Codex rollout that Codex compresses starts no session when anyhost never captured it, and stays the transcript of one it did', async () => {
   const relay = await memoryRelay()
   const { roots, capture } = machine(deviceA, relay)
@@ -712,8 +803,11 @@ test('a journal R2 lost a frame of, whose transcript is gone here, names the los
     `journal ${SESSION}: The journal of ${SESSION} in R2 reaches byte ${lostAt}, and anyhost-a counted ${end}, and holds no transcript of the session to upload again, so a restore of the session lacks what the journal held from byte ${lostAt}.`,
   ])
   const asked = relay.requests.length
-  for (const minute of [1, 2, 3]) expect(await sealQuiet(capture, recording, quiet + minute * 60_000)).toEqual(new Map())
-  expect([relay.requests.length, problems.length]).toEqual([asked, 1])
+  expect(await sealQuiet(capture, recording, quiet + 60_000)).toEqual(new Map())
+  const checked = relay.requests.length
+  for (const minute of [2, 3]) expect(await sealQuiet(capture, recording, quiet + minute * 60_000)).toEqual(new Map())
+  expect(relay.requests.slice(asked).flat().filter(({ op }) => op === 'get')).toEqual([])
+  expect([relay.requests.length, problems.length]).toEqual([checked, 1])
 })
 
 test('the repair of a journal R2 lost a frame of keeps the warning a takeover left for the next prompt', async () => {
@@ -983,7 +1077,38 @@ test('a database of a newer anyhost is refused whole, so an older anyhost drops 
   capture.db.run('pragma user_version = 99')
   capture.db.close()
 
-  expect(() => openDatabase(join(folder, 'state'))).toThrow(`${join(folder, 'state', 'anyhost.db')} is a database of a newer anyhost, at version 99, and this anyhost reads version 4, so it changes nothing there. Update anyhost on this machine.`)
+  expect(() => openDatabase(join(folder, 'state'))).toThrow(`${join(folder, 'state', 'anyhost.db')} is a database of a newer anyhost, at version 99, and this anyhost reads version 5, so it changes nothing there. Update anyhost on this machine.`)
   const kept = new Database(join(folder, 'state', 'anyhost.db'))
   expect(kept.query<{ count: number }, []>('select count(*) as count from sessions').get()?.count).toBe(1)
+})
+
+test('a database of version 4 opens at version 5 with every row it held, and one older than version 4 starts over', () => {
+  const databaseAt = (version: number): string => {
+    const folder = join(temporaryFolder(), 'state')
+    mkdirSync(folder)
+    const db = new Database(join(folder, 'anyhost.db'))
+    db.run(`create table journals (
+      session text primary key, tool text not null, end integer not null default 0, sealed integer not null default 0,
+      written_at integer not null default 0, stopped text not null default '', holder text not null default '', untold text not null default '')`)
+    db.run(`create table files (
+      session text not null, path text not null, journal_size integer not null default 0, local_size integer not null default 0,
+      tail blob not null default x'', sha256 text not null default '', mtime integer not null default 0, primary key (session, path))`)
+    db.query("insert into journals (session, tool, end, sealed, written_at) values (?, 'claude', 900, 600, 1700000000000)").run(SESSION)
+    db.query('insert into files (session, path, journal_size, local_size) values (?, ?, 900, 900)').run(SESSION, '/home/ada/.claude/projects/-work-trip/s.jsonl')
+    db.run(`pragma user_version = ${version}`)
+    db.close()
+    return folder
+  }
+  const rowsOf = (db: Database): unknown[] => [
+    db.query('pragma user_version').get(),
+    db.query('select session, end, sealed, written_at, compacted_end, compacted_kept, compact_after, replaced from journals').all(),
+    db.query('select session, path, journal_size from files').all(),
+  ]
+
+  expect(rowsOf(openDatabase(databaseAt(4)))).toEqual([
+    { user_version: 5 },
+    [{ session: SESSION, end: 900, sealed: 600, written_at: 1700000000000, compacted_end: 0, compacted_kept: 0, compact_after: 0, replaced: 0 }],
+    [{ session: SESSION, path: '/home/ada/.claude/projects/-work-trip/s.jsonl', journal_size: 900 }],
+  ])
+  expect(rowsOf(openDatabase(databaseAt(3)))).toEqual([{ user_version: 5 }, [], []])
 })
