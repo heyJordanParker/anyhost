@@ -1,17 +1,16 @@
 import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { changedFiles, countedRelay, indexForkStarts, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
-import { liveRuns, loginEnvironment, pausedSessions, recordedSessions, resumeCopy, runOf, saveLoginEnvironment, statusOf as sessionStatusOf, stopCopy, type OnRecordsChange } from './claude.ts'
+import { loginEnvironment, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, statusOf as sessionStatusOf, statusOfRecord, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
-import { execInShell, followTerminals, hcPath, isKeptShell, label, machinesReached, self, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, VIEW_LABEL, type Terminal, type TerminalChange } from './hc.ts'
+import { followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { installHerdr, PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, placeSession, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
+import { deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type RelayState } from './relay.ts'
-import { forgetStopped } from './runner.ts'
 import { agentsOf } from './sessions.ts'
 import { archive, isArchived, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, sharedOf, snooze, updateShared, visit, type Organize } from './shared.ts'
 import { copyT3Marks } from './t3.ts'
@@ -59,9 +58,10 @@ const RUNNING_MS = 2000
 const STATUSES_FRESH_MS = 10_000
 const STATUSES_KEPT_MS = 120_000
 const LIST_WAIT_MS = 25_000
-const SHELL_SETTLES_MS = 2000
+const STOP_MS = Number(process.env['ANYHOST_STOP_MS'] ?? 8 * 60 * 60_000)
+const DISCARD_EVERY_MS = Math.min(30_000, STOP_MS / 4)
 const SHOWN_EVERY_MS = 30_000
-const ROUTES = 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/place, /agents/archive, /agents/settle, /agents/snooze, /agents/visit, /agents/pin, /agents/delete, /agents/fork, /agents/show, /organize, /projects/name, /settings, /sessions/changed and /shown'
+const ROUTES = 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/archive, /agents/settle, /agents/snooze, /agents/visit, /agents/pin, /agents/delete, /agents/fork, /agents/show, /organize, /projects/name, /settings, /sessions/changed and /shown'
 
 export const serveSocket = (): string => join(stateFolder(), 'serve.sock')
 
@@ -388,7 +388,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     flush: (session, signal, onRelay) => queue.flush(session, signal, onRelay),
     onRecordsChange,
     opening: new Map(),
-    placing: new Map(),
   }
   const noteChildren = noteWaiting(capture, mover)
   const archivedBusy = new Set<string>()
@@ -413,41 +412,49 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     const isBusy = status === 'working' || status === 'waiting'
     if (archived && isBusy) archivedBusy.add(id)
     else archivedBusy.delete(id)
-    if (archived && !isBusy && (runOf(id) !== undefined || status !== undefined)) await stopCopy(capture.roots.claudeHome, id)
+    if (archived && !isBusy) await stopCopy(capture.roots.claudeHome, id)
     await archive(relay, id, archived)
   }
 
   let terminals: ReadonlyMap<string, Terminal> = new Map()
   const isHere = (address: string): boolean => !address.includes('/')
   const sessionIn = (address: string): string => terminals.get(address)?.labels[SESSION_LABEL] ?? ''
-  const shells = new Map<string, 'settling' | 'typed'>()
-  const repairShell = async (address: string): Promise<void> => {
-    const terminal = terminals.get(address)
-    const session = sessionIn(address)
-    if (shells.get(address) !== 'settling' || terminal === undefined || session === '' || !isKeptShell(terminal)) return
-    shells.set(address, 'typed')
-    const argv = journalOf(capture.db, session)?.tool === 'codex' ? [...self(), 'resume', session] : [...self(), 'run', '--asleep', '--session', session]
-    try {
-      await execInShell(address, argv)
-      problems.clear('repair')
-    } catch (error) {
-      shells.delete(address)
-      problems.set('repair', new Error(`anyhost could not run ${session} again in the shell herdr-core gave its terminal ${address}: ${error instanceof Error ? error.message : String(error)}`))
-    }
+  const sessionTerminals = (): Map<string, string> => {
+    const running = new Map<string, string>()
+    for (const [address, terminal] of terminals) if (isHere(address) && terminal.state === 'live' && sessionIn(address) !== '') running.set(sessionIn(address), address)
+    return running
   }
-  const repairShells = (): void => {
-    for (const address of shells.keys()) if (!terminals.has(address)) shells.delete(address)
+  const isRunner = (terminal: Terminal): boolean => {
+    const [program = '', command] = terminal.foreground?.argv ?? []
+    return basename(program) === 'anyhost' && command === 'run'
+  }
+  const discardIdle = async (): Promise<void> => {
+    const records = new Map((await recordedSessions(roots.claudeHome)).map((record) => [record.sessionId, record]))
+    const now = Date.now()
     for (const [address, terminal] of terminals) {
-      if (!isHere(address) || sessionIn(address) === '' || !isKeptShell(terminal)) shells.delete(address)
-      else if (!shells.has(address)) {
-        shells.set(address, 'settling')
-        setTimeout(() => void repairShell(address), SHELL_SETTLES_MS)
+      const session = sessionIn(address)
+      if (!isHere(address) || session === '' || terminal.state !== 'live') continue
+      const record = records.get(session)
+      if (isKeptShell(terminal) || (isRunner(terminal) && record === undefined)) {
+        await killTerminal(address)
+        continue
       }
+      if (record === undefined || statusOfRecord(record.status) !== 'idle') continue
+      const since = record.statusSince ?? now
+      const isAsked = Number(terminal.labels[SLEEP_LABEL] ?? 0) > since
+      if (isAsked || (!isShown(terminal.labels, now) && now - since >= STOP_MS)) await stopCopy(roots.claudeHome, session)
     }
   }
+  let isDiscarding = false
+  const discardNow = (): void => {
+    if (isDiscarding) return
+    isDiscarding = true
+    void settle('discard', discardIdle).finally(() => (isDiscarding = false))
+  }
+  setInterval(discardNow, DISCARD_EVERY_MS)
   const archiveClosed = (change: TerminalChange): void => {
     const session = sessionIn(change.address)
-    if (change.type !== 'finished' || !isHere(change.address) || session === '' || (terminals.get(change.address)?.labels[VIEW_LABEL] ?? '') !== '') return
+    if (change.type !== 'finished' || !isHere(change.address) || session === '' || terminals.get(change.address)?.reason !== 'killed') return
     void settle('closed', async () => {
       await archiveSession(session, true)
       sessionsChanged()
@@ -460,15 +467,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const unvisited = new Set<string>()
   let shownSessions = new Set<string>()
   const sessionTerminalsOf = (addresses: ReadonlySet<string>): Map<string, string> => {
-    const running = new Map<string, string>()
-    for (const [address, terminal] of terminals) if (terminal.state === 'live' && sessionIn(address) !== '') running.set(sessionIn(address), address)
     const shown = new Map<string, string>()
-    for (const address of addresses) {
-      const own = terminals.get(address)?.state === 'live' ? sessionIn(address) : ''
-      const viewed = running.get(terminals.get(address)?.labels[VIEW_LABEL] ?? '')
-      if (own !== '') shown.set(address, own)
-      else if (viewed !== undefined) shown.set(viewed, sessionIn(viewed))
-    }
+    for (const address of addresses) if (terminals.get(address)?.state === 'live' && sessionIn(address) !== '') shown.set(address, sessionIn(address))
     return shown
   }
   const visitedAt = (session: string): string => {
@@ -515,7 +515,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const SHOWN_CHANGES = new Set(['created', 'restarted', 'labels', 'finished', 'removed'])
   const stopFollowing = followTerminals((now, change) => {
     terminals = now
-    repairShells()
+    if (change === undefined || (change.type === 'labels' && (now.get(change.address)?.labels[SLEEP_LABEL] ?? '') !== '')) discardNow()
     if (change !== undefined) archiveClosed(change)
     if (change?.type === 'turn' && labelledShown.has(change.address) && sessionIn(change.address) !== '') unvisited.add(sessionIn(change.address))
     if (change === undefined || change.type === 'turn' || SHOWN_CHANGES.has(change.type)) void showNow()
@@ -741,7 +741,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   const closeArchived = async (): Promise<void> => {
     const settled = []
-    for (const session of liveRuns().keys()) {
+    for (const session of sessionTerminals().keys()) {
       const status = await sessionStatusOf(capture.roots.claudeHome, session)
       if (status !== 'working' && status !== 'waiting') settled.push(session)
     }
@@ -863,11 +863,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     readonly name?: string | null
     readonly at?: string
     readonly changes?: readonly Organize[]
-    readonly take?: boolean
     readonly window?: string
     readonly terminals?: readonly string[]
   }
-  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, skip = 0, sleep = false, place = 'focus', sender = '', apiToken, target = '', archived = true, settled = true, until, pinned = true, settleAfterDays, project = '', name, at = '', changes = [], take = false, window = '', terminals: onScreen = [] }: Asked): Promise<Response> => {
+  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, skip = 0, sleep = false, place = 'focus', sender = '', apiToken, target = '', archived = true, settled = true, until, pinned = true, settleAfterDays, project = '', name, at = '', changes = [], window = '', terminals: onScreen = [] }: Asked): Promise<Response> => {
     switch (pathname) {
       case '/connect': {
         if (connecting?.view.is === 'running') return Response.json(connecting.view)
@@ -976,11 +975,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           (told) => Response.json(told),
           (error: unknown) => failed(400, error),
         )
-      case '/agents/place':
-        return await placeSession(capture, session, take, mover).then(
-          (placed) => Response.json(placed),
-          (error: unknown) => failed(400, error),
-        )
       case '/agents/open':
         return await openHere(capture, session, mover).then(
           (opened) => Response.json({ ...opened, machine: device.name }),
@@ -1017,7 +1011,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     void receiveReleased(capture, session, holder, mover).finally(() => releasing.delete(session))
   }
   const releaseHeld = async (): Promise<void> => {
-    for (const session of new Set([...(await recordedSessions(roots.claudeHome)).map(({ sessionId }) => sessionId), ...liveRuns().keys()])) {
+    for (const session of new Set([...(await recordedSessions(roots.claudeHome)).map(({ sessionId }) => sessionId), ...sessionTerminals().keys()])) {
       const holder = journalOf(db, session)?.holder ?? ''
       if (holder !== '') release(session, holder)
     }
@@ -1033,7 +1027,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   void releaseHeld()
   void settle('herdr', () => installHerdr())
   void settle('environment', () => saveLoginEnvironment())
-  void settle('stopped', () => forgetStopped())
   void settle('fork starts', () => indexForkStarts(capture))
 
   await startLineOffsets(capture)
@@ -1062,9 +1055,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         await changedAfter(after)
         return await throughRelay(async () => {
           const version = sessionsVersion
-          const runs = liveRuns()
-          const [elsewhere, here, { machines }] = await Promise.all([statusesOfOthers(), statusesHere(capture, runs), machinesForList()])
-          return { ...(await agentsOf(capture, { ...elsewhere, ...here }, runs)), here: device.id, machines, version }
+          const [elsewhere, here, { machines }] = await Promise.all([statusesOfOthers(), statusesHere(capture), machinesForList()])
+          return { ...(await agentsOf(capture, { ...elsewhere, ...here }, sessionTerminals())), here: device.id, machines, version }
         })
       }
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]

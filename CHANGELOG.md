@@ -4,6 +4,11 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 
 ## [0.9.1] - Unreleased
 
+### Changed
+- A session that sleeps holds no process. anyhost ran a process for every session a workspace listed, up to 300 on one Mac, which took 6.6 GB and every terminal macOS can open. Claude Code now runs directly in its terminal, and a session that sleeps closes it until you open it again, as Chrome discards a tab.
+- Opening a session shows Claude Code's own screen at once, never an anyhost screen in front of it.
+- `anyhost run` is gone.
+
 ### Fixed
 - Every session anyhost starts saves its transcript again. A program started from inside a Claude Code session passed that session's markers to herdr-core, and Claude Code saves no transcript for a session that carries them.
 

@@ -35,7 +35,7 @@ test("a move waits for the turn to end, pauses the laptop's Claude Code, uploads
   expect(readFileSync(join(workerHome, '.claude', 'projects', workerCwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`), 'utf8')).toContain(`"cwd":"${workerCwd}"`)
   const [started, ...more] = runsOn(worker.folder)
   expect(more).toEqual([])
-  expect(started).toMatchObject({ session: SESSION, command: 'claude' })
+  expect(started).toMatchObject({ session: SESSION, command: `claude --resume ${SESSION}` })
   expect(realpathSync(started?.cwd ?? '')).toBe(realpathSync(workerCwd))
   expect(isPausedAsWorkerRan).toBe(true)
   await laptop.claude.exited

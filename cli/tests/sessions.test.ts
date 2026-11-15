@@ -11,7 +11,6 @@ import { agentsOf, downloadJournal, listSessions } from '../src/sessions.ts'
 import type { AgentStatus } from '../../relay/protocol.ts'
 import { pin, settle, snooze, type Shared } from '../src/shared.ts'
 import { copyT3Marks } from '../src/t3.ts'
-import { liveRuns, startOf } from '../src/claude.ts'
 import { statusesHere } from '../src/move.ts'
 import { eventLoopDuring, failTest, memoryRelay, noCode, until, type MemoryRelay } from './memory.ts'
 import { captureOn, temporaryFolder, uploadFiles } from './program.ts'
@@ -255,29 +254,17 @@ async function listedWith(sessions: readonly { readonly lastActivity: string; re
   return { capture, relay, listed, byId }
 }
 
-test('the list of 50 sessions with 50 live runs never holds the thread for 100 ms', async () => {
+test('the list of 50 sessions with 50 live terminals never holds the thread for 100 ms, and names each terminal', async () => {
   const relay = await memoryRelay()
   const { capture } = captureOn(mac, relay)
-  const state = temporaryFolder()
-  const stateHome = process.env['XDG_STATE_HOME']
-  process.env['XDG_STATE_HOME'] = state
-  onTestFinished(() => {
-    if (stateHome === undefined) delete process.env['XDG_STATE_HOME']
-    else process.env['XDG_STATE_HOME'] = stateHome
-  })
-  const runs = join(state, 'anyhost', 'runs')
-  mkdirSync(runs, { recursive: true })
   const sessions = Array.from({ length: 50 }, (_, at) => `aaaaaaaa-0000-0000-0000-${String(at).padStart(12, '0')}`)
-  for (const [at, session] of sessions.entries()) writeFileSync(join(runs, `${session}.json`), JSON.stringify({ session, runner: { process: { id: process.pid, start: startOf(process.pid) }, version: '', startedAt: '' }, terminal: { address: `t${at}`, machine: '' }, claude: { command: ['claude'] } }))
   const entry = { tool: 'claude', title: '', firstPrompt: 'Plan the trip', cwd: '/work', repo: '', repoFolder: '', entrypoint: 'cli', size: 10, lastActivity: new Date().toISOString(), lastPromptAt: '' }
   await relay.objects.put(`sessions/${mac.id}/index.json`, new TextEncoder().encode(JSON.stringify(sessions.map((id) => ({ ...entry, id })))))
+  const terminals = new Map(sessions.map((session, at) => [session, `t${at}`]))
 
-  const loop = await eventLoopDuring(async () => {
-    const runs = liveRuns()
-    return await agentsOf(capture, await statusesHere(capture, runs), runs)
-  })
+  const loop = await eventLoopDuring(async () => await agentsOf(capture, await statusesHere(capture), terminals))
 
-  expect(loop.value.agents.map(({ terminal, status }) => `${terminal} ${status}`).sort()).toEqual(sessions.map((_, at) => `t${at} idle`).sort())
+  expect(loop.value.agents.map(({ terminal }) => terminal).sort()).toEqual(sessions.map((_, at) => `t${at}`).sort())
   expect(loop.longestStallMs).toBeLessThan(100)
 })
 

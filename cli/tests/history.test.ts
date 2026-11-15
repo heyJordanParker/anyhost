@@ -24,7 +24,6 @@ function moverOf(capture: Capture): MoveHere {
     problems: failTest,
     checkouts: '',
     opening: new Map(),
-    placing: new Map(),
     onRecordsChange: () => () => undefined,
     queue: (session, _tool, path) => void queued.set(session, (queued.get(session) ?? new Set()).add(path)),
     flush: async (session) => {

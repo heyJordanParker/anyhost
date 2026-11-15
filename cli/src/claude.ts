@@ -1,10 +1,10 @@
 import { dlopen, FFIType } from 'bun:ffi'
 import { readdirSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
-import { homedir, hostname } from 'node:os'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentStatus } from '../../relay/protocol.ts'
 import { stateFolder } from './device.ts'
-import { killTerminal } from './hc.ts'
+import { hcPath, killTerminal, labelledTerminals } from './hc.ts'
 
 const EXIT_MS = 10_000
 
@@ -13,19 +13,12 @@ export type RunningSession = {
   readonly sessionId: string
   readonly cwd: string
   readonly status?: string
+  readonly statusSince?: number
 }
 
 export type OnRecordsChange = (heard: () => void) => () => void
 
-type SessionRecord = { readonly pid?: number; readonly sessionId?: string; readonly cwd?: string; readonly status?: string; readonly parkedJobId?: string; readonly procStart?: string }
-export type RunProcess = { readonly id: number; readonly start: string }
-export type Run = {
-  readonly session: string
-  readonly runner: { readonly process: RunProcess; readonly version: string; readonly startedAt: string }
-  readonly terminal?: { readonly address: string; readonly machine: string }
-  readonly claude: { readonly command: readonly string[]; readonly process?: RunProcess; readonly startedAt?: string }
-  readonly asleepSince?: string
-}
+type SessionRecord = { readonly pid?: number; readonly sessionId?: string; readonly cwd?: string; readonly status?: string; readonly statusUpdatedAt?: number; readonly parkedJobId?: string; readonly procStart?: string }
 
 const CLAUDE_MARKERS = ['CLAUDECODE', 'CLAUDE_PID', 'AI_AGENT', 'CLAUDE_EFFORT', 'TRACEPARENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN']
 
@@ -159,7 +152,7 @@ export async function recordedSessions(claudeHome: string): Promise<RunningSessi
       const found = jsonOf(join(folder, name)) as SessionRecord | undefined
       if (found?.pid === undefined || found.sessionId === undefined || !isAlive(found.pid)) return []
       const record = withCurrentStatus(found)
-      return [{ pid: found.pid, sessionId: found.sessionId, cwd: record.cwd ?? '', ...(record.status === undefined ? {} : { status: record.status }) } as const]
+      return [{ pid: found.pid, sessionId: found.sessionId, cwd: record.cwd ?? '', ...(record.status === undefined ? {} : { status: record.status }), ...(found.statusUpdatedAt === undefined ? {} : { statusSince: found.statusUpdatedAt }) } as const]
     })
 }
 
@@ -220,78 +213,51 @@ export function whenSessions<T>(claudeHome: string, found: (sessions: readonly R
   })
 }
 
-const runsFolder = (): string => join(stateFolder(), 'runs')
-
-export const runOf = (session: string): Run | undefined => {
-  const run = jsonOf(join(runsFolder(), `${session}.json`)) as Run | undefined
-  return run?.runner !== undefined && isProcess(run.runner.process.id, run.runner.process.start) ? run : undefined
-}
-
-export const liveRuns = (): Map<string, Run> =>
-  new Map(
-    namesIn(runsFolder())
-      .filter((name) => name.endsWith('.json'))
-      .flatMap((name) => {
-        const session = name.slice(0, -'.json'.length)
-        const run = runOf(session)
-        return run === undefined ? [] : [[session, run] as const]
-      }),
-  )
-
-export const stoppedRuns = (): { readonly session: string; readonly run: Run }[] =>
-  namesIn(runsFolder())
-    .filter((name) => name.endsWith('.json'))
-    .flatMap((name) => {
-      const session = name.slice(0, -'.json'.length)
-      const run = jsonOf(join(runsFolder(), name)) as Run | undefined
-      return run?.runner === undefined || isProcess(run.runner.process.id, run.runner.process.start) ? [] : [{ session, run }]
-    })
-
 const STATUS: Record<string, AgentStatus> = { busy: 'working', shell: 'working', idle: 'idle', waiting: 'waiting' }
 export const statusOfRecord = (status: string | undefined): AgentStatus => STATUS[status ?? 'idle'] ?? 'working'
 
 const copiesOf = async (claudeHome: string, session: string): Promise<number[]> =>
   (await recordedSessions(claudeHome)).filter((entry) => entry.sessionId === session && isProcess(entry.pid, recordAt(claudeHome, entry.pid)?.procStart)).map(({ pid }) => pid)
 
-export const copiesOutside = async (claudeHome: string, session: string, own: ReadonlySet<number | undefined>): Promise<number[]> => (await copiesOf(claudeHome, session)).filter((pid) => !own.has(pid))
-
-const processesOf = (run: Run | undefined): ReadonlySet<number | undefined> => new Set([run?.runner.process.id, run?.claude.process?.id])
-
-export async function runTerminalOf(claudeHome: string, session: string): Promise<string | undefined> {
-  const run = runOf(session)
-  const address = run?.terminal?.address
-  if (address === undefined) return undefined
-  return (await copiesOutside(claudeHome, session, processesOf(run))).length === 0 ? address : undefined
-}
-
 export async function statusOf(claudeHome: string, session: string): Promise<AgentStatus | undefined> {
   const record = (await recordedSessions(claudeHome)).find((entry) => entry.sessionId === session)
-  if (record !== undefined) return statusOfRecord(record.status)
-  const run = runOf(session)
-  return run === undefined || run.asleepSince !== undefined ? undefined : 'idle'
+  return record === undefined ? undefined : statusOfRecord(record.status)
 }
 
-export function writeRun(session: string, run: Run): void {
-  mkdirSync(runsFolder(), { recursive: true })
-  writeFileSync(join(runsFolder(), `${session}.json`), JSON.stringify(run))
+const CLAUDE_START = [
+  'my ($environment, $trustsHome) = splice(@ARGV, 0, 2);',
+  'if (open(my $file, "<", $environment)) { local $/; require JSON::PP; my $saved = eval { JSON::PP::decode_json(<$file>) }; @ENV{keys %{$saved->{environment}}} = values %{$saved->{environment}} if ref $saved eq "HASH" && ref $saved->{environment} eq "HASH" }',
+  `delete @ENV{qw(${CLAUDE_MARKERS.join(' ')})};`,
+  'if ($trustsHome) {',
+  '  my $start;',
+  '  if ($^O eq "linux") { if (open(my $stat, "<", "/proc/$$/stat")) { my $line = <$stat>; $start = (split / /, substr($line, rindex($line, ")") + 2))[19] } }',
+  '  else { local $ENV{TZ} = "UTC"; $start = `ps -o lstart= -p $$` }',
+  '  $start =~ s/^\\s+|\\s+$//g if defined $start;',
+  '  $ENV{CLAUDE_CODE_RELAUNCH_HOME_TRUST} = "$$:$start" if defined $start && $start ne "";',
+  '}',
+  'exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n";',
+].join('\n')
+
+export const claudeStart = (argv: readonly string[], trustsHome: boolean): string[] => ['perl', '-e', CLAUDE_START, '--', environmentFile(), trustsHome ? '1' : '', ...argv]
+
+export type Resumed = { readonly model?: string; readonly effort?: string }
+const EDGE_BYTES = 1 << 20
+
+export async function resumedOf(transcript: string): Promise<Resumed> {
+  const file = Bun.file(transcript)
+  const last = (await file.slice(Math.max(0, file.size - EDGE_BYTES)).text()).split('\n').findLast((line) => line.startsWith('{') && line.includes('"type":"assistant"'))
+  const turn = last === undefined ? undefined : (JSON.parse(last) as { message?: { model?: string }; effort?: string })
+  const model = turn?.message?.model?.startsWith('<') === false ? turn.message.model : undefined
+  return { ...(model === undefined ? {} : { model }), ...(turn?.effort === undefined ? {} : { effort: turn.effort }) }
 }
 
-export function ownRun(session: string, runner: Run['runner'], agent: { readonly command: readonly string[]; readonly pid?: number; readonly startedAt?: string }, asleepSince?: string): void {
-  const address = process.env['HC_TERMINAL_ID']
-  writeRun(session, {
-    session,
-    runner,
-    ...(address ? { terminal: { address, machine: hostname() } } : {}),
-    claude: { command: agent.command, ...(agent.pid === undefined ? {} : { process: { id: agent.pid, start: startOf(agent.pid) }, startedAt: agent.startedAt }) },
-    ...(asleepSince === undefined ? {} : { asleepSince }),
-  })
-}
-
-export const forgetRun = (session: string): void => rmSync(join(runsFolder(), `${session}.json`), { force: true })
-
-export const commandOf = (session: string): readonly string[] => runOf(session)?.claude.command ?? ['claude']
-
-export const lastCommandOf = (session: string): readonly string[] | undefined => (jsonOf(join(runsFolder(), `${session}.json`)) as Run | undefined)?.claude.command
+export const resumeArgv = (session: string, resumed: Resumed): string[] => [
+  'claude',
+  ...(resumed.model === undefined ? [] : ['--model', resumed.model]),
+  ...(resumed.effort === undefined ? [] : ['--effort', resumed.effort]),
+  '--resume',
+  session,
+]
 
 async function becomes(isDone: () => boolean): Promise<boolean> {
   for (const started = Date.now(); !isDone(); await Bun.sleep(50)) {
@@ -322,16 +288,10 @@ async function ended(pids: readonly number[]): Promise<void> {
 
 export async function stopCopy(claudeHome: string, session: string): Promise<void> {
   const copies = await copiesOf(claudeHome, session)
-  const ran = runOf(session)
-  const terminal = ran?.terminal?.address
-  if (terminal !== undefined) await killTerminal(terminal).catch((error: unknown) => console.error(`anyhost could not close terminal ${terminal} of ${session}: ${error instanceof Error ? error.message : String(error)}`))
-  await ended([...(ran === undefined ? [] : [ran.runner.process.id]), ...copies])
-  forgetRun(session)
+  const terminals = hcPath() === undefined ? [] : await labelledTerminals(session)
+  for (const terminal of terminals) await killTerminal(terminal).catch((error: unknown) => console.error(`anyhost could not close terminal ${terminal} of ${session}: ${error instanceof Error ? error.message : String(error)}`))
+  await ended(copies)
   rmSync(pausedFile(session), { force: true })
-}
-
-export async function stopOutside(claudeHome: string, session: string): Promise<void> {
-  await ended(await copiesOutside(claudeHome, session, processesOf(runOf(session))))
 }
 
 const pausedFolder = (): string => join(stateFolder(), 'paused')

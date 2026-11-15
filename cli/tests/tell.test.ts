@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, CLI, copiesOn, CTO, LAPTOP, logOf, machineFor, postTo, runnerOn, runningOn, runsOn, script, sentOn, serveOn, SESSION, startedOn, stepsOf, tripOn, WORKER, workerOn } from './program.ts'
+import { anyhostOn, copiesOn, CTO, LAPTOP, logOf, machineFor, postTo, runningOn, runsOn, script, sentOn, serveOn, SESSION, startedOn, stepsOf, tripOn, WORKER, workerOn } from './program.ts'
 
 test('anyhost tell types into a session another machine runs and prints its screen, and with no text only reads it', async () => {
   const relay = await memoryRelay()
@@ -66,7 +66,7 @@ test("anyhost show puts a session's terminal on this machine's Herdr app with He
     ['terminal.keep', { terminal: 't0', place: 'tab' }],
     ['terminal.peek', { terminal: 't0' }],
     ['agent.focus', { terminal: 't0' }],
-    ['pane.split', { direction: 'right', argv: [process.execPath, CLI, 'run', '--session', session] }],
+    ['pane.split', { direction: 'right', argv: [join(laptop.folder, 'bin', 'hc'), 'attach', 't0'] }],
     ['terminal.park', { terminal: 't0' }],
   ])
 }, 60_000)
@@ -85,9 +85,9 @@ test('anyhost tell to a session its machine holds in no live terminal opens one 
 
   expect(read).toMatchObject({ code: 1, err: `${WORKER.name}: ${SESSION.slice(0, 8)} runs in no terminal of herdr-core on ${WORKER.name}. Tell it something to start it again.\n` })
   expect(told).toMatchObject({ code: 0, out: `screen of ${SESSION}\nAnd the hotel\n` })
-  expect(runsOn(worker.folder).map(({ session, command }) => ({ session, command }))).toEqual([
-    { session: SESSION, command: 'claude' },
-    { session: SESSION, command: 'claude' },
+  expect(runsOn(worker.folder).map(({ session, command }) => ({ session, command: command.split(' ').slice(-3).join(' ') }))).toEqual([
+    { session: SESSION, command: `claude --resume ${SESSION}` },
+    { session: SESSION, command: `claude --resume ${SESSION}` },
   ])
   expect(sentOn(worker.folder)).toEqual(['t1 And the hotel'])
 }, 90_000)
@@ -124,20 +124,6 @@ test('a tell to a session the person runs here outside herdr-core, as in tmux, s
   expect(laptop.claude.signalCode).toBeNull()
   expect(runsOn(laptop.folder)).toEqual([])
   expect(sentOn(laptop.folder)).toEqual([])
-}, 60_000)
-
-test("a tell never types into a run's terminal while the session's live Claude Code is another copy the person runs outside herdr-core, and never stops that copy", async () => {
-  const relay = await memoryRelay()
-  const laptop = await runningOn(relay)
-  const runner = runnerOn(laptop, 'told-before', '0.6.0')
-  mkdirSync(join(laptop.folder, 'terminals'), { recursive: true })
-  writeFileSync(join(laptop.folder, 'terminals', 'told-before'), `${SESSION} ${runner.pid}\n`)
-
-  const told = await postTo(laptop.socket, '/agents/tell', { session: SESSION, text: 'Book the train' })
-
-  expect(told.status).toBe(400)
-  expect(sentOn(laptop.folder)).toEqual([])
-  expect(laptop.claude.signalCode).toBeNull()
 }, 60_000)
 
 test('a tell to a machine that holds the session and does not answer gets its answer after 25 s over the socket, which keeps a request open past 10 s', async () => {

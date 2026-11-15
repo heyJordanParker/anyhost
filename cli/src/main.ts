@@ -12,7 +12,6 @@ import { doctor } from './doctor.ts'
 import type { Moving, Told } from './move.ts'
 import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, restoreData, resumeHere } from './resume.ts'
-import { runSession } from './runner.ts'
 import { askProgram, PROGRAM_RESTART_MS, serve, serveSocket, type JoinedRelay, type Status } from './serve.ts'
 import { agentsOf, type Agents, type ListedSession } from './sessions.ts'
 import { SETTLE_MOST_DAYS } from './shared.ts'
@@ -33,15 +32,12 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost tell <session> --messages <count> [--skip <count>]
                                      print the last messages of a session's conversation, wherever it is held, running or not;
                                      --skip leaves out that many of the newest, to page back through its history
-  anyhost sleep <session>            stop a session's Claude Code once its turn ends, keeping its terminal; a message wakes it
+  anyhost sleep <session>            stop a session's Claude Code and close its terminal once its turn ends; a message or an open starts it again
   anyhost show <session> [focus|peek|tab|right|down|hide]
                                      show a session's terminal on this machine's Herdr app: focus it, peek at it, in a tab,
                                      beside or below the focused pane, or take its pane away while it runs on
   anyhost tell <session> --keys <key>
                                      press a named key in a session wherever it runs, such as 1, enter, esc or down, and print its screen
-  anyhost run [--session <id>] [--asleep] [-- <claude command>]
-                                     run Claude Code with your login environment, end it after 8 hours unused off screen
-                                     and keep its terminal until a key starts it again; --asleep starts that way
   anyhost connect                    set your relay up in your Cloudflare account and join this machine to it
   anyhost join <link>                join this machine with an invite link from another machine
   anyhost archive <session> [--undo] move a session out of the sidebar into the Archived list on every machine, or bring it back
@@ -189,12 +185,6 @@ const TERMINAL: Progress = {
 }
 
 async function main(argv: string[]): Promise<number> {
-  if (argv[0] === 'run') {
-    const split = argv.indexOf('--')
-    const { values: run } = parseArgs({ args: argv.slice(1, split < 0 ? undefined : split), options: { session: { type: 'string' }, asleep: { type: 'boolean' } } })
-    const command = split < 0 ? [] : argv.slice(split + 1)
-    process.exit(await runSession(command, run.session, run.asleep === true))
-  }
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,

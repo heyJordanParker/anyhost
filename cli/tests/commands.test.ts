@@ -1,9 +1,29 @@
-import { expect, test } from 'bun:test'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { expect, onTestFinished, test } from 'bun:test'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { join } from 'node:path'
-import type { Status } from '../src/serve.ts'
+import { askProgram, serveSocket, type Status } from '../src/serve.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
-import { anyhostOn, DAILY_LIMIT, HOST, machineFor, script, serveOn, spawnForTest } from './program.ts'
+import { anyhostOn, DAILY_LIMIT, HOST, machineFor, script, serveOn, SESSION, spawnForTest, temporaryFolder } from './program.ts'
+
+test('the program counts as absent only while no socket file exists or nothing listens on it, and an answer lost on the way is an error', async () => {
+  const state = temporaryFolder()
+  const before = process.env['XDG_STATE_HOME']
+  process.env['XDG_STATE_HOME'] = state
+  onTestFinished(() => {
+    if (before === undefined) delete process.env['XDG_STATE_HOME']
+    else process.env['XDG_STATE_HOME'] = before
+  })
+  mkdirSync(join(state, 'anyhost'))
+
+  const absent = await askProgram('/agents/open', { session: SESSION })
+  const dropping = createServer((socket) => socket.destroy())
+  await new Promise<void>((resolve) => dropping.listen(serveSocket(), resolve))
+  onTestFinished(() => void dropping.close())
+
+  expect(absent).toBeUndefined()
+  await expect(askProgram('/agents/open', { session: SESSION })).rejects.toThrow(`The anyhost program at ${serveSocket()} gave no answer to /agents/open: ECONNRESET`)
+})
 
 test('anyhost join asks the program that answers on this machine, which joins in turn with its forgets', async () => {
   const { env, socket } = await machineFor(await memoryRelay(), HOST)
@@ -234,7 +254,7 @@ test('a second serve on one state folder refuses to start, naming the one that r
   const unknown = await fetch('http://localhost/machines/rename', { unix: host.socket, method: 'POST', body: '{}' })
   expect(unknown.status).toBe(404)
   expect(await unknown.json()).toEqual({
-    message: 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/place, /agents/archive, /agents/settle, /agents/snooze, /agents/visit, /agents/pin, /agents/delete, /agents/fork, /agents/show, /organize, /projects/name, /settings, /sessions/changed and /shown, not POST /machines/rename.',
+    message: 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/archive, /agents/settle, /agents/snooze, /agents/visit, /agents/pin, /agents/delete, /agents/fork, /agents/show, /organize, /projects/name, /settings, /sessions/changed and /shown, not POST /machines/rename.',
   })
 })
 
