@@ -2,7 +2,7 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, statusOf as sessionStatusOf, statusOfRecord, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
@@ -263,14 +263,36 @@ export class UploadQueue {
   }
 }
 
-type Job = { readonly login: Login; readonly dataFolders: readonly DataFolder[]; readonly isEveryWrite: boolean; readonly session: string; readonly tool: Tool; readonly paths: readonly string[] }
+type Upkeep = {
+  readonly sealWaits: readonly (readonly [string, { readonly failures: number; readonly passes: number }])[]
+  readonly fleet: Omit<Fleet, 'removed'> & { readonly removed: readonly string[] }
+  readonly journalsInR2: { readonly readAt: number; readonly isRewritten: readonly (readonly [string, boolean])[] }
+}
+type Work = { readonly upload: { readonly session: string; readonly tool: Tool; readonly paths: readonly string[] } } | { readonly upkeep: Upkeep & { readonly codeBusy: readonly string[] } }
+type Job = { readonly login: Login; readonly dataFolders: readonly DataFolder[]; readonly isEveryWrite: boolean } & Work
 type JobLine = {
   readonly problem?: string
   readonly message?: string
   readonly clear?: string
   readonly released?: readonly [string, string]
   readonly left?: readonly string[]
+  readonly again?: readonly (readonly [string, readonly string[]])[]
+  readonly upkeep?: Upkeep
+  readonly rewrote?: boolean
   readonly error?: string
+}
+
+const upkeepOf = (capture: Capture): Upkeep => ({
+  sealWaits: [...capture.sealWaits],
+  fleet: { ...capture.fleet, removed: [...capture.fleet.removed] },
+  journalsInR2: { readAt: capture.journalsInR2.readAt, isRewritten: [...capture.journalsInR2.isRewritten] },
+})
+
+function keepUpkeep(capture: Capture, upkeep: Upkeep): void {
+  capture.sealWaits.clear()
+  for (const [session, wait] of upkeep.sealWaits) capture.sealWaits.set(session, { ...wait })
+  capture.fleet = { ...upkeep.fleet, removed: new Set(upkeep.fleet.removed) }
+  capture.journalsInR2 = { readAt: upkeep.journalsInR2.readAt, isRewritten: new Map(upkeep.journalsInR2.isRewritten) }
 }
 
 const ownCommand = (): string[] => (import.meta.dir.startsWith('/$bunfs/') ? [process.execPath] : [process.execPath, join(import.meta.dir, 'main.ts')])
@@ -284,8 +306,17 @@ export async function work(device: Device): Promise<void> {
   capture.dataFolders = job.dataFolders
   const problems: Problems = { set: (key, error) => say({ problem: key, message: error instanceof Error ? error.message : String(error) }), clear: (key) => say({ clear: key }) }
   try {
-    const left = await uploadSessions(capture, [{ session: job.session, tool: job.tool, paths: new Set(job.paths) }], problems, job.isEveryWrite)[0]?.[1]
-    say({ left: [...(left ?? [])] })
+    if ('upload' in job) {
+      const { session, tool, paths } = job.upload
+      const left = await uploadSessions(capture, [{ session, tool, paths: new Set(paths) }], problems, job.isEveryWrite)[0]?.[1]
+      say({ left: [...(left ?? [])] })
+      return
+    }
+    keepUpkeep(capture, job.upkeep)
+    for (const session of job.upkeep.codeBusy) capture.codeRuns.set(session, new Promise(() => undefined))
+    const again = await sealQuiet(capture, problems)
+    const rewrote = (await rewriteNext(capture, problems)) !== undefined
+    say({ again: [...again].map(([session, files]) => [session, [...files]] as const), upkeep: upkeepOf(capture), rewrote })
   } catch (error) {
     say({ error: error instanceof Error ? error.message : String(error) })
   } finally {
@@ -368,19 +399,19 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           const timer = setTimeout(wake, LIST_WAIT_MS)
           versionWaits.add(wake)
         })
-  const runJob = async (changed: Changed): Promise<Set<string>> => {
+  const runJob = async (work: Work, what: string): Promise<JobLine> => {
     const login = await relayLogin()
     if (login === undefined) throw new Error('This machine is not joined to your relay, so anyhost uploads nothing.')
-    const job: Job = { login, dataFolders: capture.dataFolders, isEveryWrite: queue.uploadEvery === 0, session: changed.session, tool: changed.tool, paths: [...changed.paths] }
+    const job: Job = { login, dataFolders: capture.dataFolders, isEveryWrite: queue.uploadEvery === 0, ...work }
     const child = Bun.spawn([...ownCommand(), 'work'], { env: process.env, stdin: new TextEncoder().encode(JSON.stringify(job)), stdout: 'pipe', stderr: 'inherit' })
-    let left: Set<string> | undefined
+    let answer: JobLine | undefined
     let failure = ''
     const heard = (line: string): void => {
       const said = JSON.parse(line) as JobLine
       if (said.problem !== undefined) problems.set(said.problem, said.message)
       if (said.clear !== undefined) problems.clear(said.clear)
       if (said.released !== undefined) capture.onReleased(...said.released)
-      if (said.left !== undefined) left = new Set(said.left)
+      if (said.left !== undefined || said.upkeep !== undefined) answer = said
       if (said.error !== undefined) failure = said.error
     }
     const decoder = new TextDecoder()
@@ -391,16 +422,31 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       for (const line of lines) if (line.startsWith('{')) heard(line)
     }
     await child.exited
-    if (left === undefined) throw new Error(failure || `anyhost work for ${changed.session} exited with ${child.exitCode} and answered nothing.`)
-    startCode(capture, changed.session, changed.tool, problems)
-    return left
+    if (answer === undefined) throw new Error(failure || `anyhost work for ${what} exited with ${child.exitCode} and answered nothing.`)
+    return answer
   }
   let jobs: Promise<unknown> = Promise.resolve()
-  const uploadInJob = (changed: Changed): Promise<Set<string>> => {
-    const ran = jobs.then(() => runJob(changed))
+  const inTurn = <T>(run: () => Promise<T>): Promise<T> => {
+    const ran = jobs.then(run)
     jobs = ran.catch(() => undefined)
     return ran
   }
+  const uploadInJob = (changed: Changed): Promise<Set<string>> =>
+    inTurn(async () => {
+      const { left = [] } = await runJob({ upload: { session: changed.session, tool: changed.tool, paths: [...changed.paths] } }, changed.session)
+      startCode(capture, changed.session, changed.tool, problems)
+      return new Set(left)
+    })
+  let isRewriting = true
+  const upkeepInJob = (): Promise<void> =>
+    inTurn(async () => {
+      if (!isRewriting && !isUpkeepDue(capture)) return
+      const codeBusy = [...new Set([...capture.codeRuns.keys(), ...capture.codeWaiting.keys()])]
+      const { again = [], upkeep, rewrote = false } = await runJob({ upkeep: { ...upkeepOf(capture), codeBusy } }, 'the seals and rewrites')
+      if (upkeep !== undefined) keepUpkeep(capture, upkeep)
+      isRewriting = rewrote
+      queueFiles(new Map(again.map(([session, files]) => [session, new Set(files)])))
+    })
   const uploaded = (changed: Changed, upload: Promise<Set<string>>): readonly [Changed, Promise<Set<string>>] => [
     changed,
     upload.then((left) => {
@@ -858,8 +904,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     await settle('asleep', () => closeArchived())
     await settle('t3', () => copyT3Marks(relay, capture.db))
     noteChildren()
-    queueFiles(await sealQuiet(capture, problems))
-    await rewriteNext(capture, problems)
+    await settle('upkeep', upkeepInJob)
     await settle('herdr machines', () => keepHerdrReaching(relay, device))
   }
   const shownMove = ({ to, step, line }: Moving): Pick<Moving, 'to' | 'step' | 'line'> => ({ to, step, line })

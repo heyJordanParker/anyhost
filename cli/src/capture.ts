@@ -1408,16 +1408,17 @@ export async function sealJournal(capture: Capture, session: string, tool: Tool,
   return new Set()
 }
 
+const QUIET = "stopped = '' and end > sealed and written_at < ?"
+const COMPACTABLE = "stopped = '' and end > 0 and end = sealed and (replaced = 1 or (compact_after <= ? and sealed - compacted_end > compacted_kept))"
+
+export const isUpkeepDue = (capture: Pick<Capture, 'db' | 'journalsInR2'>, now = Date.now()): boolean =>
+  now - capture.journalsInR2.readAt >= JOURNALS_EVERY_MS || capture.db.query(`select 1 from journals where (${QUIET}) or (${COMPACTABLE}) limit 1`).get(now - QUIET_MS, now) !== null
+
 export async function sealQuiet(capture: Capture, problems: Problems, now = Date.now()): Promise<Map<string, Set<string>>> {
   const { db, relay, device, sealWaits } = capture
   type Sealing = { readonly session: string; readonly tool: Tool }
-  const quiet = db.query<Sealing, [number]>("select session, tool from journals where stopped = '' and end > sealed and written_at < ?").all(now - QUIET_MS)
-  const compactable = db
-    .query<Sealing, [number]>(
-      `select session, tool from journals where stopped = '' and end > 0 and end = sealed
-       and (replaced = 1 or (compact_after <= ? and sealed - compacted_end > compacted_kept)) order by replaced desc, written_at`,
-    )
-    .all(now)
+  const quiet = db.query<Sealing, [number]>(`select session, tool from journals where ${QUIET}`).all(now - QUIET_MS)
+  const compactable = db.query<Sealing, [number]>(`select session, tool from journals where ${COMPACTABLE} order by replaced desc, written_at`).all(now)
   const isTried = ({ session }: Sealing): boolean => {
     const wait = sealWaits.get(session)
     if (wait === undefined || wait.passes <= 1) return true

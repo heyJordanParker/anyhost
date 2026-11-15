@@ -62,6 +62,7 @@ test("a frame the relay refuses with 409, as after a released that never reached
   const laptop = await runningOn(relay, LAPTOP)
   const desktop = relay.connect(DESKTOP, roots('/home/desktop'))
   await welcomed(desktop)
+  await until(() => relay.socketsOf(LAPTOP.id) === 1, "the start's upkeep job ending, as a job's socket hears a released too")
   const dropped = relay.dropNext(LAPTOP.id, 'released')
   expect(await desktop.runOne({ op: 'claim', session: SESSION, take: true })).toEqual({ status: 200, previous: { id: LAPTOP.id, name: LAPTOP.name }, told: false, at: expect.any(String) })
   await dropped

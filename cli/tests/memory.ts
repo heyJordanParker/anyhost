@@ -53,6 +53,7 @@ export type MemoryRelay = {
   waiting(): Promise<{ readonly device: string; readonly released: Released }[]>
   join(device: Device, roots: MachineRoots): Promise<string>
   isConnected(device: string): boolean
+  socketsOf(device: string): number
   remove(device: string): void
   holdNext(t: string): Promise<() => void>
   loseNext(device: string, t: string): Promise<void>
@@ -345,6 +346,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       return token
     },
     isConnected: (device) => [...fronts].some((front) => front.data.device === device),
+    socketsOf: (device) => [...fronts].filter((front) => front.data.device === device).length,
     remove(device) {
       const socket = [...fronts].find((front) => front.data.device === device)?.data.pool
       if (socket?.readyState !== WebSocket.OPEN) throw new Error(`No socket of ${device} is open to remove it on.`)
