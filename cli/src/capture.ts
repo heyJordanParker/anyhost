@@ -15,6 +15,7 @@ import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, fork
 
 export const FRAME_BYTES = 64 * 2 ** 20
 const SCAN_READ_BYTES = 2 ** 20
+const HEAVY_UPLOAD_BYTES = 2 ** 20
 const FORK_BYTES = 512 * 2 ** 20
 export const CODE_PIECE_BYTES = 128 * 2 ** 10
 export const CODE_PIECES = 4
@@ -542,6 +543,18 @@ export async function* chainOf(relay: Relay, frames: readonly Frame[], from: num
 const journalRow = (db: Database, session: string): JournalRow | null => db.query<JournalRow, [string]>('select * from journals where session = ?').get(session)
 const fileRow = (db: Database, session: string, path: string): FileRow | null => db.query<FileRow, [string, string]>('select * from files where session = ? and path = ?').get(session, path)
 
+export function isHeavyUpload(capture: Capture, { session, paths }: Changed): boolean {
+  if (journalOf(capture.db, session) === undefined) return true
+  let gained = 0
+  for (const path of paths) {
+    if (path.endsWith('/')) continue
+    const size = statSync(path, { throwIfNoEntry: false })?.size ?? 0
+    gained += Math.max(0, size - (fileRow(capture.db, session, path)?.local_size ?? 0))
+    if (gained > HEAVY_UPLOAD_BYTES) return true
+  }
+  return false
+}
+
 function rememberFiles(db: Database, session: string, paths: Iterable<string>): void {
   for (const path of paths) db.query('insert or ignore into files (session, path) values (?, ?)').run(session, path)
 }
@@ -754,7 +767,7 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
       let hasher = known.localSize === 0 ? new Bun.CryptoHasher('sha256') : capture.hashers.get(key)
       if (hasher !== undefined && known.localSize > 0 && hasher.copy().digest('hex') !== known.sha256) hasher = undefined
       if (hasher === undefined && known.localSize > 0) {
-        hasher = await hasherOf(source, known.localSize)
+        hasher = linesFiles(capture.roots).has(path) ? await hasherOf(source, known.localSize) : await hashedPrefix(path, known.localSize)
         if (hasher.copy().digest('hex') !== known.sha256) hasher = undefined
       }
       if (hasher !== undefined) {
@@ -793,6 +806,23 @@ export async function indexForkStarts(capture: Pick<Capture, 'db' | 'roots'>): P
     }
   }
   return indexed
+}
+
+async function hashedPrefix(path: string, size: number): Promise<Bun.CryptoHasher> {
+  const hasher = new Bun.CryptoHasher('sha256')
+  const handle = await open(path, 'r')
+  try {
+    const buffer = Buffer.allocUnsafe(SCAN_READ_BYTES)
+    for (let at = 0; at < size; ) {
+      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, size - at), at)
+      if (bytesRead === 0) break
+      hasher.update(buffer.subarray(0, bytesRead))
+      at += bytesRead
+    }
+  } finally {
+    await handle.close()
+  }
+  return hasher
 }
 
 export async function* wholeLinesIn(path: string): AsyncGenerator<Uint8Array> {
