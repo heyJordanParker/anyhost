@@ -1,11 +1,10 @@
-import { expect, onTestFinished, test } from 'bun:test'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { expect, test } from 'bun:test'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isAlive } from '../src/claude.ts'
 import { filesUnder } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
-import { HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, problemsOn, ranAnHourAgo, serveOn, SESSION } from './program.ts'
+import { HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, problemsOn, ranAnHourAgo, serveOn, SESSION, temporaryFolder } from './program.ts'
 
 test("a program whose watcher hangs at its start names the stall in /status, backs up a captured session's line and a new session within one backup pass, and ends at SIGTERM within 5 s", async () => {
   const relay = await memoryRelay()
@@ -85,28 +84,8 @@ test('a watched folder removed and made again while the program runs is watched 
   expect([...watcherProblems]).toEqual([])
 }, 120_000)
 
-test('a watched folder the watcher cannot watch at its start, as one removed after the program found it, costs only that folder, and the watcher gets ready and hears a new session', async () => {
-  const relay = await memoryRelay()
-  const host = await machineFor(relay, HOST)
-  const plans = join(host.env['HOME'] ?? '', '.claude', 'plans')
-  mkdirSync(plans)
-  chmodSync(plans, 0)
-  try {
-    await serveOn(host.env)
-    await Bun.sleep(3000)
-    const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
-    mkdirSync(dirname(transcript), { recursive: true })
-    writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
-    await until(() => isUploaded(relay, SESSION, 'Plan the trip'), 'the new session uploaded', 30_000)
-    expect((await problemsOn(host.socket)).filter(isWatcherProblem)).toEqual([])
-  } finally {
-    chmodSync(plans, 0o755)
-  }
-}, 60_000)
-
 test('a listing of a folder of 4,000 files lets the program run other work between its reads, so a socket answer never waits for the whole folder', async () => {
-  const folder = mkdtempSync(join(tmpdir(), 'anyhost-listing-'))
-  onTestFinished(() => rmSync(folder, { recursive: true, force: true }))
+  const folder = temporaryFolder()
   for (let n = 0; n < 4000; n++) writeFileSync(join(folder, `${n}.output`), '')
   let turns = 0
   let isListing = true

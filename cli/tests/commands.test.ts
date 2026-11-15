@@ -3,7 +3,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Status } from '../src/serve.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
-import { anyhostOn, CLI, DAILY_LIMIT, HOST, killAfterTest, machineFor, script, serveOn } from './program.ts'
+import { anyhostOn, DAILY_LIMIT, HOST, machineFor, script, serveOn, spawnForTest } from './program.ts'
 
 test('anyhost join asks the program that answers on this machine, which joins in turn with its forgets', async () => {
   const { env, socket } = await machineFor(await memoryRelay(), HOST)
@@ -225,17 +225,16 @@ test('a second serve on one state folder refuses to start, naming the one that r
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST)
   await serveOn(host.env)
-  const second = Bun.spawn(['bun', CLI, 'serve'], { env: host.env, stdout: 'pipe', stderr: 'pipe' })
-  killAfterTest(second)
-  expect(await second.exited).toBe(1)
-  expect(await new Response(second.stderr).text()).toContain(`The anyhost program of ${HOST.name} already answers at ${host.socket}, so this one does not start.`)
+  const second = await anyhostOn(host.env, ['serve'])
+  expect(second.code).toBe(1)
+  expect(second.err).toContain(`The anyhost program of ${HOST.name} already answers at ${host.socket}, so this one does not start.`)
   const answer = await fetch('http://localhost/machines/invite', { unix: host.socket, method: 'POST', body: 'not json' })
   expect(answer.status).toBe(400)
   expect(((await answer.json()) as { message: string }).message).toStartWith('anyhost takes a JSON object at POST /machines/invite, and this body is none:')
   const unknown = await fetch('http://localhost/machines/rename', { unix: host.socket, method: 'POST', body: '{}' })
   expect(unknown.status).toBe(404)
   expect(await unknown.json()).toEqual({
-    message: 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/archive, /agents/visit, /agents/delete and /settings, not POST /machines/rename.',
+    message: 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/place, /agents/archive, /agents/settle, /agents/snooze, /agents/visit, /agents/pin, /agents/delete, /agents/fork, /agents/show, /organize, /projects/name, /settings, /sessions/changed and /shown, not POST /machines/rename.',
   })
 })
 
@@ -245,8 +244,7 @@ test('a request the relay keeps waiting past 10 s still gets its answer, whateve
   await serveOn(host.env)
   await until(async () => (await statusOn(host.socket)).relay.state === 'connected', 'the program connecting')
   relay.before = (op) => (op.op === 'devices' ? Bun.sleep(12_000) : undefined)
-  const curl = Bun.spawn(['curl', '-sS', '--unix-socket', host.socket, 'http://localhost/agents'], { stdout: 'pipe', stderr: 'pipe' })
-  killAfterTest(curl)
+  const curl = spawnForTest(['curl', '-sS', '--unix-socket', host.socket, 'http://localhost/agents'], { stdout: 'pipe', stderr: 'pipe' })
 
   expect(await new Response(curl.stdout).text()).toStartWith('{"agents":[')
 }, 30_000)

@@ -1,7 +1,4 @@
 import { onTestFinished } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import type { ServerWebSocket } from 'bun'
 import { Miniflare, convertV4MiniflareOptions } from '../../relay/node_modules/miniflare'
 import { bundleRelay } from '../../relay/build.ts'
@@ -76,6 +73,28 @@ export async function welcomed(relay: Relay): Promise<void> {
 export async function until(isTrue: () => boolean | Promise<boolean>, what = 'It', ms = 15_000): Promise<void> {
   for (const started = performance.now(); !(await isTrue()); await Bun.sleep(10)) {
     if (performance.now() - started > ms) throw new Error(`${what} did not happen within ${ms} ms.`)
+  }
+}
+
+export async function eventLoopDuring<T>(work: () => Promise<T>): Promise<{ readonly value: T; readonly ticks: number; readonly longestStallMs: number }> {
+  let ticks = 0
+  let last = performance.now()
+  let longestStallMs = 0
+  const passed = (): void => {
+    const now = performance.now()
+    longestStallMs = Math.max(longestStallMs, now - last)
+    last = now
+  }
+  const timer = setInterval(() => {
+    ticks += 1
+    passed()
+  }, 1)
+  try {
+    const value = await work()
+    passed()
+    return { value, ticks, longestStallMs }
+  } finally {
+    clearInterval(timer)
   }
 }
 
@@ -365,5 +384,3 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
   onTestFinished(() => relay.stop())
   return relay
 }
-
-export const temporaryFolder = (): string => mkdtempSync(join(tmpdir(), 'anyhost-test-'))

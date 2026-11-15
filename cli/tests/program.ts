@@ -1,23 +1,118 @@
-import { onTestFinished } from 'bun:test'
-import type { Subprocess } from 'bun'
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, utimesSync, writeFileSync } from 'node:fs'
+import { afterAll, onTestFinished } from 'bun:test'
+import type { SpawnOptions, Subprocess } from 'bun'
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { decompress } from '../src/capture.ts'
+import { zstdDecompressSync } from 'node:zlib'
+import { openCapture, openDatabase, uploadSessions, type Capture } from '../src/capture.ts'
+import { startOf } from '../src/claude.ts'
 import { machinesOf, type Device, type MachineRoots } from '../src/device.ts'
 import type { Relay } from '../src/relay.ts'
-import { statusOn, temporaryFolder, until, type MemoryRelay } from './memory.ts'
+import { failTest, noCode, statusOn, until, type MemoryRelay } from './memory.ts'
+
+const RUN = crypto.randomUUID()
+process.env['ANYHOST_TEST_RUN'] = RUN
+const folders: string[] = []
+
+export const temporaryFolder = (): string => {
+  const folder = mkdtempSync(join(tmpdir(), 'anyhost-test-'))
+  folders.push(folder, realpathSync(folder))
+  return folder
+}
+
+const isGone = (error: unknown): boolean => ['ESRCH', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')
+const kill = (pid: number): void => {
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch (error) {
+    if (!isGone(error)) throw error
+  }
+}
+
+export function spawnForTest<const In extends SpawnOptions.Writable = 'ignore', const Out extends SpawnOptions.Readable = 'pipe', const Err extends SpawnOptions.Readable = 'inherit'>(
+  argv: string[],
+  options: SpawnOptions.SpawnOptions<In, Out, Err> = {},
+): Subprocess<In, Out, Err> {
+  const child = Bun.spawn(argv, { ...options, env: { ...(options.env ?? process.env), ANYHOST_TEST_RUN: RUN }, detached: true })
+  onTestFinished(async () => {
+    kill(-child.pid)
+    await child.exited
+    kill(-child.pid)
+  })
+  return child
+}
+
+type Running = { readonly pid: number; readonly ppid: number; readonly command: string; readonly cwd: string; readonly isMarked: boolean }
+const isUnreadable = (error: unknown): boolean => ['ENOENT', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')
+
+function runningOnLinux(): Running[] {
+  return readdirSync('/proc')
+    .filter((name) => /^\d+$/.test(name))
+    .flatMap((name) => {
+      try {
+        const stat = readFileSync(`/proc/${name}/stat`, 'utf8')
+        const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1])
+        const command = readFileSync(`/proc/${name}/cmdline`, 'utf8').replaceAll('\0', ' ').trim()
+        return [{ pid: Number(name), ppid, command, cwd: readlinkSync(`/proc/${name}/cwd`), isMarked: readFileSync(`/proc/${name}/environ`, 'utf8').split('\0').includes(`ANYHOST_TEST_RUN=${RUN}`) }]
+      } catch (error) {
+        if (isUnreadable(error)) return []
+        throw error
+      }
+    })
+}
+
+function runningOnMac(): Running[] {
+  const cwds = Bun.spawnSync(['lsof', '-a', '-d', 'cwd', '-u', String(process.getuid?.() ?? 0), '-F', 'pn'])
+  const cwdOf = new Map<number, string>()
+  let pid = 0
+  for (const line of cwds.stdout.toString().split('\n')) {
+    if (line.startsWith('p')) pid = Number(line.slice(1))
+    if (line.startsWith('n')) cwdOf.set(pid, line.slice(1))
+  }
+  const listed = Bun.spawnSync(['ps', '-axww', '-o', 'pid=,ppid=,command='])
+  return listed.stdout
+    .toString()
+    .split('\n')
+    .flatMap((line) => {
+      const [, id = '', parent = '', command = ''] = /^\s*(\d+)\s+(\d+)\s(.*)$/.exec(line) ?? []
+      const each = Number(id)
+      return id === '' || each === listed.pid || each === cwds.pid ? [] : [{ pid: each, ppid: Number(parent), command, cwd: cwdOf.get(each) ?? '', isMarked: false }]
+    })
+}
+
+function processesLeftBehind(): Running[] {
+  const running = process.platform === 'linux' ? runningOnLinux() : runningOnMac()
+  const parentOf = new Map(running.map(({ pid, ppid }) => [pid, ppid]))
+  const isDescendant = (pid: number): boolean => {
+    for (let at = parentOf.get(pid); at !== undefined && at > 1; at = parentOf.get(at)) if (at === process.pid) return true
+    return false
+  }
+  const isInFolder = (path: string): boolean => folders.some((folder) => path === folder || path.startsWith(`${folder}/`))
+  const namesFolder = (command: string): boolean => folders.some((folder) => command.includes(`${folder}/`))
+  return running.filter(({ pid, command, cwd, isMarked }) => pid !== process.pid && (isMarked || isDescendant(pid) || isInFolder(cwd) || namesFolder(command)))
+}
+
+afterAll(() => {
+  const left = processesLeftBehind()
+  for (const { pid } of left) kill(pid)
+  for (const folder of folders) rmSync(folder, { recursive: true, force: true })
+  if (left.length > 0) throw new Error(`The tests of this file left ${left.length} processes running, which are killed now: ${left.map(({ pid, command }) => `${pid} ${command}`).join('; ')}`)
+})
 
 export const SESSION = '11111111-2222-3333-4444-555555555555'
 export const roots = (home: string): MachineRoots => ({ home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp'), codexHome: join(home, '.codex') })
 export const DAILY_LIMIT = "Cloudflare refuses the relay with its error 1027: the relay's Worker reached the Free plan's limit of 100,000 requests a day, which resets at 00:00 UTC."
 export const decoder = new TextDecoder()
+export const textOfFrame = (frame: Uint8Array): string => decoder.decode(zstdDecompressSync(frame))
 export const HOST: Device = { id: 'device-host', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
 export const CLI = join(import.meta.dir, '..', 'src', 'main.ts')
-export const killAfterTest = (child: Subprocess): void =>
-  onTestFinished(async () => {
-    child.kill()
-    await child.exited
-  })
+
+export function captureOn(device: Device, relay: MemoryRelay, home = join(temporaryFolder(), 'home'), state = join(temporaryFolder(), 'state'), code = noCode, compactLagMs?: number) {
+  const roots: MachineRoots = { home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') }
+  return { roots, capture: openCapture(relay.connect(device, roots), device, roots, { db: openDatabase(state), code, codeEveryMs: 0, ...(compactLagMs === undefined ? {} : { compactLagMs }) }) }
+}
+export const uploadFiles = (capture: Capture, session: string, ...paths: string[]): Promise<Set<string>[]> =>
+  Promise.all(uploadSessions(capture, [{ session, tool: 'claude', paths: new Set(paths) }], failTest).map(([, left]) => left))
 
 export const script = (path: string, text: string): string => {
   mkdirSync(dirname(path), { recursive: true })
@@ -57,13 +152,22 @@ case "$1" in
   kill) read -r owner pid < "$F/terminals/$2"; kill -9 "$pid"; exit 0 ;;
   read) read -r owner pid < "$F/terminals/$2"; printf 'screen of %s\\n\\n\\n%s\\n' "$owner" "$(tail -n 1 "$F/sent.log" 2>/dev/null | cut -d ' ' -f 2-)"; exit 0 ;;
   get)
-    read -r owner pid < "$F/terminals/$2" || exit 3
+    if [ -e "$F/unanswered" ]; then echo '{"error":{"kind":"unavailable","message":"herdr-core is starting"}}' >&2; exit 5; fi
+    if [ ! -e "$F/terminals/$2" ]; then echo "{\\"error\\":{\\"kind\\":\\"not_found\\",\\"message\\":\\"no terminal $2\\"}}" >&2; exit 3; fi
+    read -r owner pid < "$F/terminals/$2"
     state=finished
     if kill -0 "$pid" 2>/dev/null; then state=live; fi
     printf '{"state":"%s","cwd":"/","labels":{"anyhost.session":"%s"}}' "$state" "$owner"
     exit 0 ;;
   machine) printf '{"machines":[]}'; exit 0 ;;
-  label) exit 0 ;;
+  label) shift; echo "$*" >> "$F/labels.log"; exit 0 ;;
+  events)
+    touch "$F/events.jsonl"
+    tail -n +1 -f "$F/events.jsonl" &
+    trap 'kill $! 2>/dev/null' EXIT
+    trap 'exit 0' TERM INT HUP
+    while kill -0 "$PPID" 2>/dev/null; do sleep 1; done
+    exit 0 ;;
   run) ;;
   *) exit 2 ;;
 esac
@@ -75,10 +179,12 @@ for ((i = 0; i < \${#args[@]}; i++)); do
   case "\${args[i]}" in
     --cwd) cwd="\${args[i + 1]}" ;;
     --session|--session-id) session="\${args[i + 1]}" ;;
+    --label) case "\${args[i + 1]}" in herdr.space=*) space="\${args[i + 1]#herdr.space=}" ;; esac ;;
     --) last=$i ;;
   esac
 done
 command="\${args[*]:last+1}"
+echo "$session $space" >> "$F/spaces.log"
 echo "$(date +%s%N) $cwd $session $command" >> "$F/hc.log"
 if [ -e "$F/hang" ]; then sleep "$(cat "$F/hang")"; fi
 if [ -e "$F/fail" ]; then cat "$F/fail" >&2; exit 1; fi
@@ -97,14 +203,8 @@ else running; fi
 printf '{"address":"%s","state":"live"}' "$address"
 `
 
-export const killCopiesAfterTest = (folder: string): void =>
-  onTestFinished(() => {
-    for (const pid of readFileSync(join(folder, 'copies'), { encoding: 'utf8', flag: 'a+' }).split('\n').filter((line) => line !== '')) Bun.spawnSync(['kill', '-9', pid])
-  })
-
 export async function machineFor(relay: MemoryRelay, device: Device, person: Record<string, unknown> = {}): Promise<{ readonly env: Record<string, string>; readonly socket: string; readonly folder: string; readonly token: string }> {
   const folder = temporaryFolder()
-  killCopiesAfterTest(folder)
   const home = join(folder, 'home')
   mkdirSync(join(folder, 'tmp'), { recursive: true })
   mkdirSync(join(home, '.claude', 'sessions'), { recursive: true })
@@ -135,8 +235,7 @@ export async function machineFor(relay: MemoryRelay, device: Device, person: Rec
 }
 
 export async function serveOn(env: Record<string, string>): Promise<{ readonly address: string; readonly child: Subprocess; readonly logged: () => string }> {
-  const child = Bun.spawn(['bun', CLI, 'serve'], { env, stdout: 'pipe', stderr: 'pipe' })
-  killAfterTest(child)
+  const child = spawnForTest(['bun', CLI, 'serve'], { env, stdout: 'pipe', stderr: 'pipe' })
   let logged = ''
   void (async () => {
     const text = new TextDecoder()
@@ -157,14 +256,16 @@ export async function serveOn(env: Record<string, string>): Promise<{ readonly a
 }
 
 export async function anyhostOn(env: Record<string, string>, args: readonly string[], input = ''): Promise<{ readonly code: number; readonly out: string; readonly err: string }> {
-  const child = Bun.spawn(['bun', CLI, ...args], { env, stdin: new TextEncoder().encode(input), stdout: 'pipe', stderr: 'pipe' })
-  killAfterTest(child)
+  const child = spawnForTest(['bun', CLI, ...args], { env, stdin: new TextEncoder().encode(input), stdout: 'pipe', stderr: 'pipe' })
   const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   return { code, out, err }
 }
 export const OTHER_SESSION = '22222222-3333-4444-5555-666666666666'
+export const CTO = 'c7000000-0000-4000-8000-000000000000'
 export const isUploaded = (relay: MemoryRelay, session: string, text: string): boolean =>
-  relay.puts.some(({ key, body }) => key.startsWith(`journals/${session}/hot/`) && decoder.decode(decompress(body)).includes(text))
+  relay.puts.some(({ key, body }) => key.startsWith(`journals/${session}/hot/`) && textOfFrame(body).includes(text))
+export const isIndexed = async (relay: MemoryRelay, device: Device, session: string): Promise<boolean> =>
+  decoder.decode((await relay.read(`sessions/${device.id}/index.json`)) ?? new Uint8Array()).includes(session)
 export const problemsOn = async (socket: string): Promise<readonly string[]> => (await statusOn(socket)).problems
 export const ranAnHourAgo = (machine: { readonly env: Record<string, string> }): void => {
   const heartbeat = join(machine.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'heartbeat')
@@ -183,6 +284,13 @@ export const runsOn = (folder: string): { readonly at: number; readonly cwd: str
 export const startedOn = (machine: { readonly folder: string }): string => runsOn(machine.folder)[0]?.session ?? ''
 export const copiesOn = (folder: string): { readonly pid: number; readonly isRunning: boolean }[] =>
   logOf(folder, 'copies').map((line) => ({ pid: Number(line), isRunning: Bun.spawnSync(['kill', '-0', line]).exitCode === 0 }))
+export const runnerOn = (machine: { readonly env: Record<string, string> }, terminal: string, version: string): Subprocess => {
+  const runner = spawnForTest(['sleep', '600'])
+  const runs = join(machine.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'runs')
+  mkdirSync(runs, { recursive: true })
+  writeFileSync(join(runs, `${SESSION}.json`), JSON.stringify({ session: SESSION, runner: { process: { id: runner.pid, start: startOf(runner.pid) }, version, startedAt: '' }, terminal: { address: terminal, machine: '' }, claude: { command: ['claude'] } }))
+  return runner
+}
 
 export type Moved = { readonly to: string; readonly step: string; readonly line: string }
 export type Claimed = { readonly machine?: string; readonly move?: Moved }
@@ -213,11 +321,12 @@ export async function runningOn(relay: MemoryRelay, device = LAPTOP, person: Rec
   const transcript = join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Plan the trip"}}\n`)
-  const claude = Bun.spawn(argv, { detached: true })
-  killAfterTest(claude)
+  const claude = spawnForTest(argv)
   const status = (value: string): void => writeFileSync(join(home, '.claude', 'sessions', `${claude.pid}.json`), JSON.stringify({ pid: claude.pid, sessionId: SESSION, kind: 'interactive', cwd, status: value }))
   status('idle')
+  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: cwd, event: 'sessionStart' })
   await until(async () => (await relay.claims()).get(SESSION) === device.id, 'the machine claiming the session', 15_000)
+  await until(() => isIndexed(relay, device, SESSION), "the machine's index listing the session", 15_000)
   return { ...laptop, cwd, transcript, claude, status, child, logged }
 }
 
@@ -255,6 +364,11 @@ export function tripOn(laptop: { readonly env: Record<string, string> }): string
   return checkout
 }
 export const sentOn = (folder: string): string[] => logOf(folder, 'sent.log')
+export const terminalIn = (address: string, argv: readonly string[], labels: Readonly<Record<string, string>>, running: readonly string[] = argv) => ({ address, argv, state: 'live', pid: 4000, labels, foreground: { argv: running, pid: 4000 } })
+export const coreEvent = (type: string, terminal: string, data: object) => ({ jsonrpc: '2.0', method: 'event', params: { type, terminal, data, seq: 0 } })
+export const coreSays = (folder: string, ...lines: readonly object[]): void => appendFileSync(join(folder, 'events.jsonl'), lines.map((line) => `${JSON.stringify(line)}\n`).join(''))
+export const sharedIn = async (relay: MemoryRelay): Promise<{ readonly archived?: Record<string, { readonly archived: boolean; readonly at: string }>; readonly visited?: Record<string, string> }> =>
+  JSON.parse(decoder.decode((await relay.read('shared.json')) ?? new TextEncoder().encode('{}'))) as { archived?: Record<string, { archived: boolean; at: string }>; visited?: Record<string, string> }
 export const isWatcherProblem = (problem: string): boolean => problem.includes(' watcher: ')
 export const dataFolderOn = (machine: { readonly env: Record<string, string> }, mod: string, rebuildable: readonly string[]): string => {
   const folder = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'data', mod)

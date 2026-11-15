@@ -1,4 +1,4 @@
-import { expect, setSystemTime, test } from 'bun:test'
+import { expect, onTestFinished, setSystemTime, test } from 'bun:test'
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSessions } from '../src/capture.ts'
@@ -27,10 +27,10 @@ test("the program's start stats every captured file, and uploads a line a quiet 
   await serveOn(host.env)
   await until(() => relay.puts.some(({ key }) => key === hotKey(SESSION, end)), 'the line uploaded')
   const frame = relay.puts.find(({ key }) => key === hotKey(SESSION, end))?.body ?? new Uint8Array()
-  expect(decoder.decode(decompress(frame))).toEndWith(line('Book the train'))
+  expect(decoder.decode(await decompress(frame))).toEndWith(line('Book the train'))
 }, 20_000)
 
-test('a watched folder the watcher lost at its start is listed by the next backup pass, which uploads a session written there', async () => {
+test('a watched folder the watcher cannot watch at its start, as one removed after the program found it, costs only that folder: the watcher gets ready and hears a new session, and the next backup pass lists that folder and uploads a session written there', async () => {
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST)
   const sessionEnv = join(host.env['HOME'] ?? '', '.claude', 'session-env')
@@ -39,13 +39,14 @@ test('a watched folder the watcher lost at its start is listed by the next backu
   try {
     const served = await serveOn(host.env)
     await until(() => served.logged().includes(`anyhost hears no change in a folder under ${sessionEnv}`), 'the watch failing')
-    await Bun.sleep(3000)
+    const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+    mkdirSync(dirname(transcript), { recursive: true })
+    writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
+    await until(() => isUploaded(relay, SESSION, 'Plan the trip'), 'the new session uploaded', 30_000)
+    expect((await problemsOn(host.socket)).filter(isWatcherProblem)).toEqual([])
   } finally {
     chmodSync(sessionEnv, 0o755)
   }
-  const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
-  mkdirSync(dirname(transcript), { recursive: true })
-  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
   const hook = join(sessionEnv, SESSION, 'sessionstart-hook-0.sh')
   mkdirSync(dirname(hook))
   writeFileSync(hook, 'export TRIP=train\n')
@@ -81,6 +82,7 @@ test('a listing of the watched folders and of a session\'s files follows no syml
   const locked = join(sessionFolder, 'locked')
   mkdirSync(locked)
   chmodSync(locked, 0)
+  onTestFinished(() => chmodSync(locked, 0o755))
   const subagents = join(home, '.claude', 'projects', '-work', SESSION, 'subagents')
   mkdirSync(subagents, { recursive: true })
   symlinkSync('loop', join(subagents, 'loop'))
@@ -94,17 +96,13 @@ test('a listing of the watched folders and of a session\'s files follows no syml
   mkdirSync(join(home, '.codex'), { recursive: true })
   ranAnHourAgo(host)
   writeFileSync(join(sessionFolder, 'tasks', 'trip.output'), 'Booked the train\n')
-  try {
-    const served = await serveOn(host.env)
-    await until(() => isUploaded(relay, SESSION, 'Booked the train'), 'the output the start listed uploaded', 30_000)
-    await until(() => isUploaded(relay, SESSION, 'Find the trains'), "the subagent's transcript the session's first capture found uploaded", 30_000)
-    const rollout = join(home, '.codex', 'sessions', '2026', '11', '07', `rollout-2026-11-07T09-00-00-${OTHER_SESSION}.jsonl`)
-    mkdirSync(dirname(rollout), { recursive: true })
-    writeFileSync(rollout, `{"type":"session_meta","payload":{"id":"${OTHER_SESSION}","cwd":"/work"}}\n`)
-    await until(() => isUploaded(relay, OTHER_SESSION, 'session_meta'), 'the rollout in the new folder uploaded', 30_000)
+  const served = await serveOn(host.env)
+  await until(() => isUploaded(relay, SESSION, 'Booked the train'), 'the output the start listed uploaded', 30_000)
+  await until(() => isUploaded(relay, SESSION, 'Find the trains'), "the subagent's transcript the session's first capture found uploaded", 30_000)
+  const rollout = join(home, '.codex', 'sessions', '2026', '11', '07', `rollout-2026-11-07T09-00-00-${OTHER_SESSION}.jsonl`)
+  mkdirSync(dirname(rollout), { recursive: true })
+  writeFileSync(rollout, `{"type":"session_meta","payload":{"id":"${OTHER_SESSION}","cwd":"/work"}}\n`)
+  await until(() => isUploaded(relay, OTHER_SESSION, 'session_meta'), 'the rollout in the new folder uploaded', 30_000)
 
-    expect(served.logged().split('\n').filter((logged) => logged.includes(`anyhost lists no file in ${locked}: EACCES`))).toHaveLength(1)
-  } finally {
-    chmodSync(locked, 0o755)
-  }
+  expect(served.logged().split('\n').filter((logged) => logged.includes(`anyhost lists no file in ${locked}: EACCES`))).toHaveLength(1)
 }, 60_000)

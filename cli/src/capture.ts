@@ -1,17 +1,20 @@
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, type Stats } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, type Stats } from 'node:fs'
 import { open, stat, type FileHandle } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { Readable } from 'node:stream'
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
-import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Listed, type Released } from '../../relay/protocol.ts'
+import { isOlder, MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Listed, type Released } from '../../relay/protocol.ts'
 import { claimsOf, followHolders, type Holders } from './claims.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type DataFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Relay } from './relay.ts'
-import { codexNameOf, codexState, filesOf, filesUnder, historyOf, linesFiles, namedIn, ownerOf, summarize, transcriptsOn, type Summary, type Tool } from './transcript.ts'
+import { Replay } from './sessions.ts'
+import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, namedIn, ownerOf, parentOf, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
+const FORK_BYTES = 512 * 2 ** 20
 export const CODE_PIECE_BYTES = 128 * 2 ** 10
 export const CODE_PIECES = 4
 const CODE_EVERY_MS = 60_000
@@ -22,13 +25,19 @@ const REQUESTS_AHEAD = 16
 const TAIL_BYTES = 32
 const COMPACT_LAG_MS = 7 * 24 * 60 * 60_000
 const OLDEST_SCHEMA = 4
-const MIGRATIONS: readonly (readonly (readonly [table: string, column: string, type: string])[])[] = [
+type Migration = readonly [table: string, column: string, type: string] | { readonly droppedTable: string }
+const MIGRATIONS: readonly (readonly Migration[])[] = [
   [
     ['journals', 'compacted_end', 'integer not null default 0'],
     ['journals', 'compacted_kept', 'integer not null default 0'],
     ['journals', 'compact_after', 'integer not null default 0'],
     ['journals', 'replaced', 'integer not null default 0'],
   ],
+  [['sessions', 'last_said', "text not null default ''"]],
+  [['sessions', 'titled', 'integer not null default 0']],
+  [['sessions', 'last_prompt_at', "text not null default ''"]],
+  [['sessions', 'source', "text not null default ''"]],
+  [{ droppedTable: 'hook_states' }, { droppedTable: 'borrowed' }],
 ]
 const SCHEMA = OLDEST_SCHEMA + MIGRATIONS.length
 
@@ -41,7 +50,10 @@ export type IndexedSession = {
   readonly repo: string
   readonly repoFolder: string
   readonly entrypoint: string
+  readonly lastSaid: string
   readonly lastActivity: string
+  readonly lastPromptAt: string
+  readonly source: string
   readonly size: number
   readonly deleted: boolean
 }
@@ -65,10 +77,13 @@ export type Capture = Code & {
   readonly onCode: (session: string, tool: Tool, folder: string) => void
   readonly onReleased: (session: string, holder: string) => void
   readonly holders: Holders
+  fleet: Fleet
+  journalsInR2: { readonly readAt: number; readonly isRewritten: Map<string, boolean> }
   dataFolders: readonly DataFolder[]
   lastIndex: string
   keptIndex?: Promise<readonly IndexedSession[]> | undefined
 }
+export type Fleet = { readonly readsChunks: boolean; readonly readAt: number; readonly older: readonly string[]; readonly removed: ReadonlySet<string> }
 export type Problems = { set(key: string, error: unknown): void; clear(key: string): void }
 export type RecordHeader = {
   readonly device: string
@@ -77,22 +92,26 @@ export type RecordHeader = {
   readonly at: number
   readonly size: number
   readonly after: { readonly size: number; readonly sha256: string } | null
+  readonly base?: string
+  readonly chunks?: ChunkList
+  readonly fork?: Fork
 }
-export type Frame = { readonly key: string; readonly start: number; readonly end?: number; readonly size: number; readonly uploaded?: number }
+export type ChunkList = readonly (readonly [sha256: string, size: number])[]
+export type Frame = { readonly key: string; readonly start: number; readonly end?: number; readonly size: number; readonly uploaded?: number; readonly written?: number }
 export type FileState = { readonly session: string; readonly path: string; readonly journalSize: number; readonly localSize: number; readonly tail: Uint8Array; readonly sha256: string; readonly mtime: number }
 export type Journal = { readonly session: string; readonly tool: Tool; readonly end: number; readonly sealed: number; readonly writtenAt: number; readonly stopped: string; readonly holder: string }
 
 type FileRow = { session: string; path: string; journal_size: number; local_size: number; tail: Uint8Array; sha256: string; mtime: number }
 type JournalRow = { session: string; tool: Tool; end: number; sealed: number; written_at: number; stopped: string; holder: string }
-type SessionRow = { id: string; tool: Tool; title: string; title_rank: number; first_prompt: string; cwd: string; repo: string; repo_folder: string; entrypoint: string; last_activity: string; size: number }
+type SessionRow = { id: string; tool: Tool; title: string; title_rank: number; first_prompt: string; cwd: string; repo: string; repo_folder: string; entrypoint: string; last_said: string; last_activity: string; last_prompt_at: string; source: string; size: number }
 type Source = { readonly size: number; readonly mtime: number; read(from: number, to: number): Promise<Uint8Array> }
-type Change = { readonly header: RecordHeader; readonly bytes: Uint8Array; readonly state: FileState; readonly hasher: Bun.CryptoHasher; readonly isPartial: boolean }
+type Change = { readonly header: RecordHeader; readonly bytes: Uint8Array; readonly fileBytes?: Uint8Array; readonly state: FileState; readonly hasher: Bun.CryptoHasher; readonly isPartial: boolean }
 
 export function openDatabase(folder = stateFolder()): Database {
   mkdirSync(folder, { recursive: true })
   const db = new Database(join(folder, 'anyhost.db'))
-  db.run('pragma journal_mode = wal')
   db.run('pragma busy_timeout = 5000')
+  db.run('pragma journal_mode = wal')
   db.run("create table if not exists bucket (name text not null, url text not null default '')")
   const version = versionOf(db)
   if (version > SCHEMA) {
@@ -107,8 +126,8 @@ export function openDatabase(folder = stateFolder()): Database {
 const versionOf = (db: Database): number => db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version ?? 0
 
 function startOver(db: Database): void {
-  for (const table of ['files', 'sessions', 'journals', 'line_offsets', 'holders', 'holders_changed']) db.run(`drop table if exists ${table}`)
-  for (const folder of ['code', 'spool']) rmSync(join(dirname(db.filename), folder), { recursive: true, force: true })
+  for (const table of ['files', 'sessions', 'journals', 'line_offsets', 'holders', 'holders_changed', 'chunks', 'rewrites', 'borrowed_claims']) db.run(`drop table if exists ${table}`)
+  for (const folder of ['code', 'spool', 'bases']) rmSync(join(dirname(db.filename), folder), { recursive: true, force: true })
   db.run(`pragma user_version = ${OLDEST_SCHEMA}`)
 }
 
@@ -127,9 +146,18 @@ function makeTables(db: Database): void {
     last_activity text not null default '', size integer not null default 0)`)
   db.run('create table if not exists holders (session text primary key, device text not null)')
   db.run('create table if not exists holders_changed (changed integer not null)')
+  db.run('create table if not exists fork_starts (uuid text not null, path text not null, primary key (uuid, path))')
+  db.run('create table if not exists chunks (name text primary key)')
+  db.run("create table if not exists rewrites (session text primary key, done integer not null default 0, at integer not null default 0, ops integer not null default 0, failure text not null default '')")
+  db.run('create table if not exists borrowed_claims (session text primary key)')
   db.run('insert into holders_changed (changed) select 0 where not exists (select 1 from holders_changed)')
   db.transaction(() => {
-    for (const [table, column, type] of MIGRATIONS.flat()) {
+    for (const migration of MIGRATIONS.flat()) {
+      if ('droppedTable' in migration) {
+        db.run(`drop table if exists ${migration.droppedTable}`)
+        continue
+      }
+      const [table, column, type] = migration
       if (db.query('select 1 from pragma_table_info(?) where name = ?').get(table, column) === null) db.run(`alter table ${table} add column ${column} ${type}`)
     }
     db.run(`pragma user_version = ${SCHEMA}`)
@@ -185,10 +213,13 @@ export function openCapture(
   })
   const capture: Capture = {
     ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, compactLagMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
-    holders: followHolders(relay, db), dataFolders: [], lastIndex: '',
+    holders: followHolders(relay, db), fleet: UNREAD_FLEET, journalsInR2: { readAt: 0, isRewritten: new Map() }, dataFolders: [], lastIndex: '',
   }
   const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
   relay.on('released', released)
+  relay.on('claiming', ({ session, call }) => {
+    if (call.op === 'claim' || (call.op === 'put' && call.key.startsWith(`${journalPrefix(session)}hot/`))) db.query('delete from borrowed_claims where session = ?').run(session)
+  })
   return capture
 }
 
@@ -196,6 +227,21 @@ function releasedTo(capture: Capture, session: string, holder: DeviceRef, reason
   holdElsewhere(capture.db, session, holder.name, reason, tool)
   capture.relay.send({ t: 'heard', session, to: holder.id })
   capture.onReleased(session, holder.name)
+}
+
+const FIRST_CHUNKED_PROGRAM = '0.9.0'
+const FLEET_EVERY_MS = 10 * 60_000
+export const UNREAD_FLEET: Fleet = { readsChunks: false, readAt: 0, older: [], removed: new Set() }
+
+async function everyMachineReadsChunks(capture: Capture, now = Date.now()): Promise<boolean> {
+  if (now - capture.fleet.readAt < FLEET_EVERY_MS) return capture.fleet.readsChunks
+  const devices = await devicesOf(capture.relay).catch(() => undefined)
+  if (devices === undefined) return false
+  const joined = [...devices.values()].filter(({ removedAt }) => removedAt === undefined)
+  const older = joined.filter(({ program }) => program === undefined || program === '' || isOlder(program, FIRST_CHUNKED_PROGRAM)).map(({ name }) => name)
+  const removed = new Set([...devices.values()].flatMap(({ id, removedAt }) => (removedAt === undefined ? [] : [id])))
+  capture.fleet = { readsChunks: older.length === 0, readAt: now, older, removed }
+  return capture.fleet.readsChunks
 }
 
 export const isCodePart = (path: string): boolean => path.startsWith('anyhost:code/')
@@ -209,15 +255,206 @@ const position = (at: number): string => String(at).padStart(16, '0')
 export const journalPrefix = (session: string): string => `journals/${session}/`
 export const hotKey = (session: string, start: number): string => `${journalPrefix(session)}hot/${position(start)}.zst`
 const sealedKey = (session: string, start: number, end: number): string => `${journalPrefix(session)}sealed/${position(start)}-${position(end)}.zst`
-const compactedKey = (session: string, start: number, end: number): string => `${journalPrefix(session)}compacted/${position(start)}-${position(end)}.zst`
+const rewrittenName = (start: number, end: number, written: number): string => `${position(start)}-${position(end)}-${position(written)}.zst`
 const isCompacted = (frame: Frame): boolean => frame.key.includes('/compacted/')
+const rewrittenKey = (session: string): string => `${journalPrefix(session)}rewritten`
 
 const C = zlib.constants
-export const compressHot = (body: Uint8Array): Uint8Array => zlib.zstdCompressSync(body, { params: { [C.ZSTD_c_compressionLevel]: 3, [C.ZSTD_c_checksumFlag]: 1 } })
 const zstdCompress = promisify(zlib.zstdCompress)
+const zstdDecompress = (bytes: Uint8Array, options: zlib.ZstdOptions): Promise<Buffer> => promisify(zlib.zstdDecompress)(bytes, options)
+export const compressHot = (body: Uint8Array): Promise<Uint8Array> => zstdCompress(body, { params: { [C.ZSTD_c_compressionLevel]: 3, [C.ZSTD_c_checksumFlag]: 1 } })
 const compressSealed = (body: Uint8Array): Promise<Uint8Array> =>
   zstdCompress(body, { params: { [C.ZSTD_c_compressionLevel]: 9, [C.ZSTD_c_windowLog]: 27, [C.ZSTD_c_enableLongDistanceMatching]: 1, [C.ZSTD_c_checksumFlag]: 1 } })
-export const decompress = (frame: Uint8Array): Uint8Array => zlib.zstdDecompressSync(frame, { params: { [C.ZSTD_d_windowLogMax]: 27 } })
+export const decompress = (frame: Uint8Array): Promise<Uint8Array> => zstdDecompress(frame, { params: { [C.ZSTD_d_windowLogMax]: 27 } })
+const DELTA_WINDOW_LOG = 24
+type DeltaChunk = { readonly size: number; readonly from?: number; readonly to?: number }
+
+async function* deltaChunksOf(delta: Uint8Array, base: Uint8Array): AsyncGenerator<Uint8Array> {
+  for (let at = 0; at < delta.length; ) {
+    const newline = delta.indexOf(10, at)
+    if (newline < 0) throw new Error(`The delta ends inside a chunk's header at byte ${at}.`)
+    const { size, from, to } = JSON.parse(new TextDecoder().decode(delta.subarray(at, newline))) as DeltaChunk
+    const compressed = delta.subarray(newline + 1, newline + 1 + size)
+    yield await zstdDecompress(compressed, { params: { [C.ZSTD_d_windowLogMax]: DELTA_WINDOW_LOG }, ...(from === undefined ? {} : { dictionary: base.subarray(from, to) }) })
+    at = newline + 1 + size
+  }
+}
+
+export const decompressDelta = async (delta: Uint8Array, base: Uint8Array): Promise<Uint8Array> => Buffer.concat(await Array.fromAsync(deltaChunksOf(delta, base)))
+
+const baseKey = (name: string): string => `bases/${name}`
+export const basesOf = (db: Database): string => join(dirname(db.filename), 'bases')
+
+export async function downloadBase(relay: Relay, folder: string, name: string): Promise<Uint8Array> {
+  const kept = join(folder, name)
+  const isKept = existsSync(kept)
+  const got = isKept ? undefined : await relay.runOne({ op: 'get', key: baseKey(name) })
+  if (got !== undefined && got.status !== 200) throw new Error(`A record of the journal names the base ${name}, and the bucket holds no ${baseKey(name)}.`)
+  const bytes = got === undefined ? new Uint8Array(readFileSync(kept)) : got.bytes
+  const base = await decompress(bytes)
+  const found = sha256(base)
+  if (found !== name) {
+    rmSync(kept, { force: true })
+    throw new Error(`${isKept ? kept : baseKey(name)} decompresses to bytes of sha256 ${found}, not the ${name} its name says.`)
+  }
+  if (!isKept) await Bun.write(kept, bytes)
+  return base
+}
+
+const CHUNKS_AHEAD = 4
+export const chunkKey = (name: string): string => `chunks/${name}`
+type ChunkHead = { readonly base?: string }
+export type ChunkReader = (name: string) => Promise<Uint8Array>
+
+export function chunkReader(relay: Relay): ChunkReader {
+  const bases = new Map<string, Promise<Uint8Array>>()
+  const asBase = (name: string): Promise<Uint8Array> => {
+    const known = bases.get(name) ?? read(name)
+    bases.set(name, known)
+    return known
+  }
+  const read = async (name: string): Promise<Uint8Array> => {
+    const got = await relay.runOne({ op: 'get', key: chunkKey(name) })
+    if (got.status !== 200) throw new Error(`A record names the chunk ${name}, and the bucket holds no ${chunkKey(name)}.`)
+    const newline = got.bytes.indexOf(10)
+    if (newline < 0) throw new Error(`${chunkKey(name)} has no header line.`)
+    const { base } = JSON.parse(new TextDecoder().decode(got.bytes.subarray(0, newline))) as ChunkHead
+    const body = got.bytes.subarray(newline + 1)
+    const bytes = base === undefined ? await decompress(body) : await zstdDecompress(body, { params: { [C.ZSTD_d_windowLogMax]: DELTA_WINDOW_LOG }, dictionary: await asBase(base) })
+    const found = sha256(bytes)
+    if (found !== name) throw new Error(`${chunkKey(name)} decompresses to bytes of sha256 ${found}, not the ${name} its name says.`)
+    return bytes
+  }
+  return read
+}
+
+export async function* chunksIn(read: ChunkReader, chunks: ChunkList): AsyncGenerator<Uint8Array> {
+  const ahead: Promise<Uint8Array>[] = []
+  let next = 0
+  const fill = (): void => {
+    for (; next < chunks.length && ahead.length < CHUNKS_AHEAD; next += 1) {
+      const [name, size] = chunks[next] ?? ['', 0]
+      const bytes = read(name).then((found) => {
+        if (found.length !== size) throw new Error(`The chunk ${name} holds ${found.length} bytes, and its record says ${size}.`)
+        return found
+      })
+      void bytes.catch(() => undefined)
+      ahead.push(bytes)
+    }
+  }
+  fill()
+  for (let first = ahead.shift(); first !== undefined; first = ahead.shift()) {
+    fill()
+    yield await first
+  }
+}
+
+export async function bytesOfChunks(read: ChunkReader, header: Pick<RecordHeader, 'chunks' | 'fork'>): Promise<Uint8Array> {
+  const bytes = Buffer.concat(await Array.fromAsync(chunksIn(read, header.chunks ?? [])))
+  return header.fork === undefined ? bytes : (await forkedTranscript(bytes, header.fork)).bytes
+}
+
+export const CHUNKED_FROM = 2 ** 20
+const CHUNK_PUTS_AT_ONCE = 4
+const WHOLE_CHUNK = new TextEncoder().encode('{}\n')
+type Piece = { readonly bytes: Uint8Array; readonly against?: Uint8Array }
+
+const compressChunk = (bytes: Uint8Array): Promise<Uint8Array> =>
+  zstdCompress(bytes, { params: { [C.ZSTD_c_compressionLevel]: 9, [C.ZSTD_c_windowLog]: DELTA_WINDOW_LOG, [C.ZSTD_c_enableLongDistanceMatching]: 1, [C.ZSTD_c_checksumFlag]: 1 } })
+const compressAgainst = (bytes: Uint8Array, base: Uint8Array): Promise<Uint8Array> =>
+  zstdCompress(bytes, { params: { [C.ZSTD_c_compressionLevel]: 9, [C.ZSTD_c_windowLog]: DELTA_WINDOW_LOG, [C.ZSTD_c_hashLog]: 22, [C.ZSTD_c_checksumFlag]: 1 }, dictionary: base } as zlib.ZstdOptions)
+
+export function piecesOf(bytes: Uint8Array): Uint8Array[] {
+  let at = 0
+  return cutsOf(bytes).map((end) => {
+    const piece = bytes.subarray(at, end)
+    at = end
+    return piece
+  })
+}
+
+const knowsChunk = (db: Database, name: string): boolean => db.query('select 1 from chunks where name = ?').get(name) !== null
+
+async function storedChunk(piece: Piece, name: string): Promise<Uint8Array> {
+  const whole = async (): Promise<Uint8Array> => Buffer.concat([WHOLE_CHUNK, await compressChunk(piece.bytes)])
+  if (piece.against === undefined) return await whole()
+  const base = sha256(piece.against)
+  try {
+    const delta = await compressAgainst(piece.bytes, piece.against)
+    const back = await zstdDecompress(delta, { params: { [C.ZSTD_d_windowLogMax]: DELTA_WINDOW_LOG }, dictionary: piece.against })
+    if (sameBytes(back, piece.bytes)) {
+      const stored = Buffer.concat([new TextEncoder().encode(`${JSON.stringify({ base } satisfies ChunkHead)}\n`), delta])
+      if (4 * delta.length < piece.bytes.length) return stored
+      const plain = await whole()
+      return stored.length < plain.length ? stored : plain
+    }
+    console.error(`${new Date().toISOString()} The chunk ${name} does not come back from its delta against ${base}, so anyhost uploads it whole.`)
+  } catch (error) {
+    console.error(`${new Date().toISOString()} The chunk ${name} does not come back from its delta against ${base}, so anyhost uploads it whole: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  return await whole()
+}
+
+async function keepChunk(relay: Relay, name: string, etag: string | undefined, body: Uint8Array): Promise<void> {
+  const found = await chunkReader(relay)(name).then(
+    () => undefined,
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  )
+  if (found === undefined) return
+  if (etag === undefined) throw new Error(`${chunkKey(name)} holds other bytes (${found}), and the relay named no etag to write over it with.`)
+  console.error(`${new Date().toISOString()} ${chunkKey(name)} holds other bytes (${found}), so anyhost writes the chunk over it.`)
+  const put = await relay.runOne({ op: 'put', key: chunkKey(name), bytes: body, if: { match: etag } })
+  if (put.status !== 200) throw new Error(`The relay answered ${put.status} to the put over ${chunkKey(name)}, so anyhost uploads no record that names it.`)
+}
+
+export async function storeChunks(capture: Pick<Capture, 'relay' | 'db'>, pieces: readonly Piece[]): Promise<ChunkList> {
+  const { relay, db } = capture
+  const chunks = pieces.map(({ bytes }) => [sha256(bytes), bytes.length] as const)
+  const fresh = new Map<string, Piece>()
+  for (const [index, [name]] of chunks.entries()) {
+    const piece = pieces[index]
+    if (piece !== undefined && !fresh.has(name) && !knowsChunk(db, name)) fresh.set(name, piece)
+  }
+  const names = [...fresh.keys()]
+  for (let from = 0; from < names.length; from += CHUNK_PUTS_AT_ONCE) {
+    const batch = names.slice(from, from + CHUNK_PUTS_AT_ONCE)
+    const bodies = await Promise.all(batch.map((name) => storedChunk(fresh.get(name) ?? { bytes: new Uint8Array() }, name)))
+    const answers = await Promise.all(relay.run(batch.map((name, at): Call => ({ op: 'put', key: chunkKey(name), bytes: bodies[at] ?? new Uint8Array(), if: { none: '*' } }))))
+    for (const [at, answer] of answers.entries()) {
+      const name = batch[at] ?? ''
+      if (answer.status !== 200 && answer.status !== 412) throw new Error(`The relay answered ${answer.status} to the put of ${chunkKey(name)}, so anyhost uploads no record that names it.`)
+      if (answer.status === 412) await keepChunk(relay, name, answer.etag, bodies[at] ?? new Uint8Array())
+      db.query('insert or ignore into chunks (name) values (?)').run(name)
+    }
+  }
+  return chunks
+}
+
+export async function chunkListOf(capture: Pick<Capture, 'relay' | 'db'>, bytes: Uint8Array, parent?: Uint8Array): Promise<ChunkList> {
+  const pieces = piecesOf(bytes)
+  if (parent === undefined) return await storeChunks(capture, pieces.map((piece) => ({ bytes: piece })))
+  const parents = piecesOf(parent)
+  const holders = new Map<string, number>()
+  for (const [index, piece] of parents.entries()) for (const { uuid } of uuidsIn(piece)) if (!holders.has(uuid)) holders.set(uuid, index)
+  const against = pieces.map((piece) => {
+    const counts = new Map<number, number>()
+    for (const { uuid } of uuidsIn(piece)) {
+      const index = holders.get(uuid)
+      if (index !== undefined) counts.set(index, (counts.get(index) ?? 0) + 1)
+    }
+    return [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0]
+  })
+  const used = [...new Set(against.filter((index) => index !== undefined))]
+  await storeChunks(capture, used.map((index) => ({ bytes: parents[index] ?? new Uint8Array() })))
+  return await storeChunks(
+    capture,
+    pieces.map((piece, at) => {
+      const index = against[at]
+      const base = index === undefined ? undefined : parents[index]
+      return base === undefined ? { bytes: piece } : { bytes: piece, against: base }
+    }),
+  )
+}
 
 export const encodeRecord = (header: RecordHeader, bytes: Uint8Array): Uint8Array[] => [new TextEncoder().encode(`${JSON.stringify(header)}\n`), bytes]
 
@@ -226,15 +463,17 @@ export function framesOf(session: string, listed: readonly Listed[]): { readonly
   const hot: Frame[] = []
   for (const { key, size, uploaded } of listed) {
     const rest = key.slice(journalPrefix(session).length)
-    const range = /^(?:sealed|compacted)\/(\d+)-(\d+)\.zst$/.exec(rest)
-    if (range !== null) sealed.push({ key, start: Number(range[1]), end: Number(range[2]), size, ...(uploaded === undefined ? {} : { uploaded }) })
-    const start = /^hot\/(\d+)\.zst$/.exec(rest)?.[1]
-    if (start !== undefined) hot.push({ key, start: Number(start), size })
+    const range = /^(?:sealed\/(\d+)-(\d+)|compacted\/(\d+)-(\d+)(?:-(\d+))?)\.zst$/.exec(rest)
+    const start = Number(range?.[1] ?? range?.[3])
+    const end = Number(range?.[2] ?? range?.[4])
+    if (range !== null) sealed.push({ key, start, end, size, written: Number(range[5] ?? 0), ...(uploaded === undefined ? {} : { uploaded }) })
+    const hotStart = /^hot\/(\d+)\.zst$/.exec(rest)?.[1]
+    if (hotStart !== undefined) hot.push({ key, start: Number(hotStart), size })
   }
   const frames: Frame[] = []
   let sealedEnd = 0
   for (;;) {
-    const next = sealed.filter((frame) => frame.start === sealedEnd).sort((a, b) => b.end - a.end || Number(isCompacted(b)) - Number(isCompacted(a)))[0]
+    const next = sealed.filter((frame) => frame.start === sealedEnd).sort((a, b) => b.end - a.end || Number(isCompacted(b)) - Number(isCompacted(a)) || (b.written ?? 0) - (a.written ?? 0))[0]
     if (next === undefined) break
     frames.push(next)
     sealedEnd = next.end
@@ -277,11 +516,11 @@ export async function* chainOf(relay: Relay, frames: readonly Frame[], from: num
         }),
       )
     })())
-  const fetchedBytes = (fetched: Map<string, Uint8Array>, key: string): Uint8Array => {
+  const fetchedBytes = async (fetched: Map<string, Uint8Array>, key: string): Promise<Uint8Array> => {
     const frameBytes = fetched.get(key)
     if (frameBytes === undefined) throw new Error(`The journal's chain holds ${key} twice.`)
     fetched.delete(key)
-    return decompress(frameBytes)
+    return await decompress(frameBytes)
   }
   let end = from
   for (const [index, frame] of frames.entries()) {
@@ -494,6 +733,11 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
     const empty = new Bun.CryptoHasher('sha256')
     return row !== null && known.sha256 === empty.copy().digest('hex') ? touched() : record(0, new Uint8Array(), 0, 0, empty, new Uint8Array(), false)
   }
+  const owner = ownerOf(path, capture.roots)
+  if (known.localSize === 0 && owner !== undefined && 'isTranscript' in owner && owner.isTranscript && owner.tool === 'claude') {
+    const fork = await forkChange(capture, session, path, source)
+    if (fork !== undefined) return fork
+  }
   if (isLog(path, capture.roots) && source.size >= known.localSize) {
     if (source.size === known.localSize) return touched()
     const from = Math.max(0, known.localSize - known.tail.length)
@@ -528,10 +772,97 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
   return record(0, whole, end, end, end === bytes.length ? hasher : new Bun.CryptoHasher('sha256').update(whole), tailOf(whole), false)
 }
 
+export function recordForkStarts(db: Database, path: string, bytes: Uint8Array): void {
+  const starts = forkStartsIn(bytes)
+  if (starts.length === 0) return
+  db.transaction(() => {
+    for (const uuid of starts) db.query('insert or ignore into fork_starts (uuid, path) values (?, ?)').run(uuid, path)
+  })()
+}
+
+export async function indexForkStarts(capture: Pick<Capture, 'db' | 'roots'>): Promise<number> {
+  const { db, roots } = capture
+  if (db.query('select 1 from fork_starts limit 1').get() !== null) return 0
+  let indexed = 0
+  for (const [, { tool, paths }] of await transcriptsOn(roots)) {
+    if (tool !== 'claude') continue
+    for (const path of paths.filter((each) => each.endsWith('.jsonl'))) {
+      const file = Bun.file(path)
+      for (let at = 0; at < file.size; ) {
+        const read = await file.slice(at, at + FRAME_BYTES).bytes()
+        const whole = read.subarray(0, read.lastIndexOf(10) + 1)
+        recordForkStarts(db, path, whole)
+        at += whole.length === 0 ? read.length : whole.length
+      }
+      indexed += 1
+    }
+  }
+  return indexed
+}
+
+function chunkedChange(capture: Capture, session: string, path: string, written: Uint8Array, mtime: number, kind: Pick<RecordHeader, 'chunks' | 'fork'>, isPartial: boolean): Change {
+  const hasher = new Bun.CryptoHasher('sha256').update(written)
+  const sha256 = hasher.copy().digest('hex')
+  return {
+    header: { ...writerOf(capture, session), path, at: 0, size: 0, after: { size: written.length, sha256 }, ...kind },
+    bytes: new Uint8Array(),
+    fileBytes: written,
+    state: { session, path, journalSize: written.length, localSize: written.length, tail: tailOf(written), sha256, mtime },
+    hasher,
+    isPartial,
+  }
+}
+
+async function forkedChange(capture: Capture, session: string, path: string, whole: Uint8Array, mtime: number): Promise<Change | undefined> {
+  const fork = forkIn(whole, session)
+  const sourcePath = fork === undefined ? undefined : transcriptOf(capture.roots.claudeHome, fork.source)
+  if (fork === undefined || sourcePath === undefined || Bun.file(sourcePath).size > FORK_BYTES) return undefined
+  const read = await Bun.file(sourcePath).bytes()
+  const source = read.subarray(0, read.lastIndexOf(10) + 1)
+  const derived = await forkedTranscript(source, fork).catch(() => undefined)
+  if (derived === undefined || derived.bytes.length > whole.length || !sameBytes(whole.subarray(0, derived.bytes.length), derived.bytes)) return undefined
+  const pieces: Uint8Array[] = []
+  let covered = 0
+  for (const piece of piecesOf(source)) {
+    if (covered >= derived.read) break
+    pieces.push(piece)
+    covered += piece.length
+  }
+  if (!sameBytes((await forkedTranscript(source.subarray(0, covered), fork)).bytes, derived.bytes) || !(await everyMachineReadsChunks(capture))) return undefined
+  const chunks = await storeChunks(capture, pieces.map((bytes) => ({ bytes })))
+  return chunkedChange(capture, session, path, derived.bytes, mtime, { chunks, fork }, derived.bytes.length < whole.length)
+}
+
+async function forkChange(capture: Capture, session: string, path: string, source: Source): Promise<Change | undefined> {
+  if (source.size > FORK_BYTES) return undefined
+  const read = await source.read(0, source.size)
+  const whole = read.subarray(0, read.lastIndexOf(10) + 1)
+  if (whole.length === 0) return undefined
+  const forked = await forkedChange(capture, session, path, whole, source.mtime)
+  if (forked !== undefined) return forked
+  const first = firstUuidIn(whole)
+  if (first === undefined) return undefined
+  const candidates = capture.db.query<{ path: string }, [string, string]>('select path from fork_starts where uuid = ? and path != ?').all(first, path).map((start) => start.path)
+  const parent = await parentOf(path, candidates, FORK_BYTES)
+  if (parent === undefined || !(await everyMachineReadsChunks(capture))) return undefined
+  const history = await Bun.file(parent).bytes()
+  const chunks = await chunkListOf(capture, whole, history.subarray(0, history.lastIndexOf(10) + 1))
+  return chunkedChange(capture, session, path, whole, source.mtime, { chunks }, false)
+}
+
+async function asChunks(capture: Capture, change: Change): Promise<Change> {
+  const { header, bytes } = change
+  const isView = linesFiles(capture.roots).has(header.path) || header.path === codexState(capture.roots)
+  const isAppended = isLog(header.path, capture.roots) || isTranscript(header.path, capture.roots)
+  if (header.chunks !== undefined || bytes.length < CHUNKED_FROM || isView || !isAppended || !(await everyMachineReadsChunks(capture))) return change
+  return { ...change, header: { ...header, size: 0, chunks: await chunkListOf(capture, bytes) }, bytes: new Uint8Array(), fileBytes: change.fileBytes ?? bytes }
+}
+
 type Upload = {
   readonly session: string
   readonly tool: Tool
   readonly end: number
+  readonly isFirst: boolean
   readonly changes: readonly Change[]
   readonly frames: readonly (readonly Change[])[]
   readonly code: { readonly isDone: boolean }
@@ -548,21 +879,22 @@ export function uploadSessions(capture: Capture, sessions: readonly Changed[], p
     upload: readUpload(capture, changed.session, changed.tool, changed.paths, problems, isEveryWrite),
     answered: Promise.withResolvers<readonly Put[]>(),
   }))
-  void Promise.allSettled(drains.map(async ({ upload, answered }) => ({ upload: await upload, answered }))).then((all) => {
+  void Promise.allSettled(drains.map(async ({ upload, answered }) => ({ upload: await upload, answered }))).then(async (all) => {
     const sending = all.flatMap((done) => (done.status === 'rejected' || done.value.upload instanceof Set ? [] : [{ upload: done.value.upload, answered: done.value.answered }]))
     try {
-      const calls: Call[] = []
+      const calls: Promise<Call>[] = []
       const asked = sending.map(({ upload: { session, end, frames }, answered }) => {
         let start = end
         const framed = frames.map((records) => {
           const body = Buffer.concat(records.flatMap((record) => encodeRecord(record.header, record.bytes)))
-          const frame = { start, body, records, call: calls.push({ op: 'put', key: hotKey(session, start), bytes: compressHot(body), if: { none: '*' }, holder: session }) - 1 }
+          const key = hotKey(session, start)
+          const frame = { start, body, records, call: calls.push(compressHot(body).then((bytes): Call => ({ op: 'put', key, bytes, if: { none: '*' }, holder: session }))) - 1 }
           start += body.length
           return frame
         })
         return { answered, frames: framed }
       })
-      const answers = capture.relay.run(calls)
+      const answers = capture.relay.run(await Promise.all(calls))
       for (const { answered, frames } of asked) answered.resolve(frames.map(({ call, ...frame }): Put => ({ ...frame, put: answers[call] as Promise<RanOf<'put'>> })))
     } catch (error) {
       for (const { answered } of sending) answered.reject(error)
@@ -574,15 +906,21 @@ export function uploadSessions(capture: Capture, sessions: readonly Changed[], p
 async function readUpload(capture: Capture, session: string, tool: Tool, paths: ReadonlySet<string>, problems: Problems, isEveryWrite: boolean): Promise<Upload | Set<string>> {
   const { db, roots } = capture
   let journal = journalOf(db, session)
+  let isFirst = false
   const work = new Set(paths)
   const data = dataOf(capture, session)
   if (tool === 'mod' && data === undefined) return new Set()
   if (journal === undefined) {
     const files = data === undefined ? await filesOf(session, tool, roots) : (await filesUnder(data.folder)).map(({ path }) => path).filter((path) => ownerOf(path, roots, [data]) !== undefined)
-    if (data === undefined && ![...work, ...files].some((path) => isTranscript(path, roots) && existsSync(path))) return new Set()
-    rememberFiles(db, session, files)
+    const isWritten = [...work].some((path) => existsSync(path)) && [...work, ...files].some((path) => isTranscript(path, roots) && existsSync(path))
+    if (data === undefined && !isWritten) return new Set()
+    db.transaction(() => {
+      db.query('insert or ignore into journals (session, tool, written_at) values (?, ?, ?)').run(session, tool, Date.now())
+      rememberFiles(db, session, files)
+    })()
     for (const path of files) work.add(path)
     journal = { session, tool, end: 0, sealed: 0, writtenAt: 0, stopped: '', holder: '' }
+    isFirst = true
   }
   if (journal.stopped !== '') return new Set()
   if (tool === 'codex') work.add(codexState(roots))
@@ -595,16 +933,18 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
       left.add(path)
       continue
     }
-    const change = await changeOf(capture, session, path, budget).then(
-      (found) => (problems.clear(path), found),
-      (error: unknown) => void problems.set(path, error),
-    )
+    const change = await changeOf(capture, session, path, budget)
+      .then((found) => (found === undefined ? undefined : asChunks(capture, found)))
+      .then(
+        (found) => (problems.clear(path), found),
+        (error: unknown) => void problems.set(path, error),
+      )
     if (change === undefined) continue
     changes.push(change)
-    budget -= change.bytes.length
+    budget -= change.header.chunks === undefined ? change.bytes.length : (change.fileBytes ?? change.bytes).length
     if (change.isPartial) left.add(path)
     if (data === undefined && path.endsWith('.jsonl')) {
-      const named = namedIn(new TextDecoder().decode(change.bytes), roots).filter((file) => !work.has(file))
+      const named = namedIn(new TextDecoder().decode(change.fileBytes ?? change.bytes), roots).filter((file) => !work.has(file))
       rememberFiles(db, session, named)
       for (const file of named) work.add(file)
     }
@@ -615,29 +955,45 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
   else capture.codeSkipped.delete(session)
   const code = waiting === undefined || isFilesAlone ? { frames: [], isDone: false } : codeFrames(capture, session, waiting, isEveryWrite)
   const frames = (isFilesAlone ? [changes] : isEveryWrite ? [changes, ...code.frames] : [[...changes, ...code.frames.flat()]]).filter((records) => records.length > 0)
-  if (frames.length === 0) return left
-  return { session, tool, end: journal.end, changes, frames, code, waiting, left }
+  const unplaced = (): void => void db.query('delete from journals where session = ? and end = 0').run(session)
+  if (frames.length === 0) {
+    if (isFirst) unplaced()
+    return left
+  }
+  const end = isFirst
+    ? await chainEndAtFirstCapture(capture, session).catch((error: unknown) => {
+        unplaced()
+        throw error
+      })
+    : journal.end
+  return { session, tool, end, isFirst, changes, frames, code, waiting, left }
 }
 
 async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put[], problems: Problems): Promise<Set<string>> {
   const { db, roots } = capture
-  const { session, tool, changes, code, waiting, left } = upload
-  type Outcome = { readonly frame: Put; readonly isHere: boolean } | { readonly frame: Put; readonly error: unknown }
+  const { session, tool, isFirst, changes, code, waiting, left } = upload
+  type Outcome = { readonly frame: Put; readonly landed: Landed } | { readonly frame: Put; readonly error: unknown }
   const outcomes = await Promise.all(
     puts.map((frame) =>
-      frame.put.then((put) => frameWritten(capture, session, tool, frame.start, frame.body, put)).then(
-        (isHere): Outcome => ({ frame, isHere }),
+      frame.put.then((put) => frameWritten(capture, session, tool, frame.start, frame.body, put, isFirst)).then(
+        (landed): Outcome => ({ frame, landed }),
         (error: unknown): Outcome => ({ frame, error }),
       ),
     ),
   )
-  if (outcomes.some((outcome) => 'isHere' in outcome && !outcome.isHere)) return new Set()
+  const landed = new Set(outcomes.flatMap((outcome) => ('landed' in outcome ? [outcome.landed] : [])))
+  if (landed.has('refused')) return new Set()
+  if (landed.has('behind')) {
+    db.query('delete from journals where session = ? and end = ?').run(session, upload.end)
+    rmSync(spoolOf(db, session), { recursive: true, force: true })
+    return new Set([...changes.map(({ header }) => header.path), ...left])
+  }
   const failure = outcomes.find((outcome) => 'error' in outcome)
   const counted = failure === undefined ? outcomes : outcomes.slice(0, outcomes.indexOf(failure))
   const records = counted.flatMap(({ frame }) => frame.records)
   const last = counted.at(-1)?.frame
   const end = last === undefined ? upload.end : last.start + last.body.length
-  const transcripts = changes.filter(({ header }) => isTranscript(header.path, roots) && header.path.endsWith('.jsonl'))
+  const transcripts = changes.filter(({ header }) => isTranscript(header.path, roots) && (header.size > 0 || header.chunks !== undefined))
   if (counted.length > 0) {
     db.transaction(() => {
       db.query(`insert into journals (session, tool, end, written_at) values (?, ?, ?, ?)
@@ -645,11 +1001,13 @@ async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put
       for (const record of records) saveFile(db, record.state)
     })()
     for (const record of records) capture.hashers.set(`${session}\0${record.header.path}`, record.hasher)
+    for (const { header, bytes, fileBytes = bytes } of records) if (tool === 'claude' && header.path.endsWith('.jsonl') && isTranscript(header.path, roots)) recordForkStarts(db, header.path, fileBytes)
   }
   if (failure !== undefined && 'error' in failure) throw failure.error
   const own = changes.filter(({ header }) => !linesFiles(roots).has(header.path) && header.path !== codexState(roots))
   const lastActivity = new Date(own.length === 0 ? Date.now() : Math.max(...own.map((change) => change.state.mtime))).toISOString()
-  if (tool !== 'mod' && (await recordSummary(capture, session, tool, transcripts.map(({ bytes }) => new TextDecoder().decode(bytes)).join(''), end, lastActivity))) {
+  const texts = await Promise.all(transcripts.map(({ header, bytes, fileBytes = bytes }) => (header.path.endsWith('.zst') ? zstdSummaryTextOf(Readable.from([fileBytes]), header.path) : new TextDecoder().decode(fileBytes))))
+  if (tool !== 'mod' && (await recordSummary(capture, session, tool, texts.join(''), end, lastActivity))) {
     await writeIndex(capture).then(() => problems.clear('index'), (error: unknown) => problems.set('index', error))
   }
   if (waiting !== undefined && !code.isDone) left.add(`${waiting.folder}/`)
@@ -658,18 +1016,24 @@ async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put
   return left
 }
 
-async function frameWritten(capture: Capture, session: string, tool: Tool, start: number, body: Uint8Array, put: RanOf<'put'>): Promise<boolean> {
+type Landed = 'written' | 'refused' | 'behind'
+
+async function frameWritten(capture: Capture, session: string, tool: Tool, start: number, body: Uint8Array, put: RanOf<'put'>, isFirst: boolean): Promise<Landed> {
   const { relay, db, device } = capture
   const key = hotKey(session, start)
   let answer = put
   if (answer.status === 412) {
     const there = await relay.runOne({ op: 'get', key })
-    const written = there.status === 200 ? decompress(there.bytes) : undefined
+    const written = there.status === 200 ? await decompress(there.bytes) : undefined
     const writer = written === undefined ? undefined : (JSON.parse(new TextDecoder().decode(written.subarray(0, written.indexOf(10)))) as RecordHeader).device
-    const isStale = start > 0 && writer !== undefined && writer !== device.id && (await claimsOf(relay, session)).get(session)?.id === device.id
+    const isStale = !isFirst && start > 0 && writer !== undefined && writer !== device.id && (await claimsOf(relay, session)).get(session)?.id === device.id
     if (writer === device.id || writer === undefined || isStale) {
       if (isStale) console.error(`${new Date().toISOString()} ${device.name} holds the session ${session}, and a frame another machine wrote after it took the session sits at byte ${start} of its journal, so ${device.name} writes its own frame over it.`)
-      answer = await relay.runOne({ op: 'put', key, bytes: compressHot(body), if: there.status === 200 ? { match: there.etag } : { none: '*' }, holder: session })
+      answer = await relay.runOne({ op: 'put', key, bytes: await compressHot(body), if: there.status === 200 ? { match: there.etag } : { none: '*' }, holder: session })
+    }
+    if (answer.status === 412 && isFirst) {
+      console.error(`${new Date().toISOString()} Another machine wrote byte ${start} of the session ${session}'s journal as ${device.name} started capturing it, so ${device.name} starts again from the end of the journal in R2.`)
+      return 'behind'
     }
     if (answer.status === 412) {
       const fork = `${new Date().toISOString()} Another machine wrote byte ${start} of the session ${session}'s journal first, so ${device.name} stops capturing it, and its lines from here are a fork of the session.`
@@ -677,15 +1041,15 @@ async function frameWritten(capture: Capture, session: string, tool: Tool, start
       const machine = writer === undefined || writer === device.id ? undefined : (await devicesOf(relay)).get(writer)?.name
       if (machine === undefined) stopJournal(db, session, tool, fork)
       else holdElsewhere(db, session, machine, fork, tool)
-      return false
+      return 'refused'
     }
   }
   if (answer.status === 409) {
     releasedTo(capture, session, answer.holder, `${new Date().toISOString()} ${answer.holder.name} took the session ${session} over, so ${device.name} stops capturing it.`, tool)
-    return false
+    return 'refused'
   }
   await Bun.write(join(spoolOf(db, session), String(start)), body)
-  return true
+  return 'written'
 }
 
 function codeFrames(capture: Capture, session: string, waiting: { readonly folder: string; readonly code: CodeCapture }, isEveryWrite: boolean): { frames: Change[][]; isDone: boolean } {
@@ -818,7 +1182,9 @@ export async function changedFiles(capture: Capture, writtenSince = 0, session?:
 export async function seal(capture: Capture, session: string): Promise<number> {
   const { relay, db } = capture
   const end = journalOf(db, session)?.end ?? 0
-  const { frames, sealedEnd, stale } = framesOf(session, await relay.list(journalPrefix(session)))
+  const listed = await relay.list(journalPrefix(session))
+  const { frames, sealedEnd, stale } = framesOf(session, listed)
+  const leftover = listed.flatMap(({ key }) => (key.startsWith(nextPrefix(session)) ? [key] : []))
   const hot = frames.filter((frame) => frame.key.includes('/hot/') && frame.start < end)
   let at = sealedEnd
   let run: Uint8Array[] = []
@@ -837,12 +1203,39 @@ export async function seal(capture: Capture, session: string): Promise<number> {
     runBytes += bytes.length
   }
   await flush()
-  const sealed = [...stale, ...hot.map(({ key }) => key)]
-  const deletes: Call[] = []
-  for (let from = 0; from < sealed.length; from += MAX_KEYS) deletes.push({ op: 'delete', keys: sealed.slice(from, from + MAX_KEYS) })
-  await Promise.all(relay.run(deletes))
+  await deleteFrames(relay, session, [...stale, ...hot.map(({ key }) => key), ...leftover])
   for (const frame of hot) rmSync(join(spool, String(frame.start)), { force: true })
   return at
+}
+
+async function deleteFrames(relay: Relay, session: string, keys: readonly string[]): Promise<void> {
+  const deletes: Call[] = []
+  for (let from = 0; from < keys.length; from += MAX_KEYS) deletes.push({ op: 'delete', keys: keys.slice(from, from + MAX_KEYS), holder: session })
+  await Promise.all(relay.run(deletes))
+}
+
+async function deleteReplacedWhileBorrowed(capture: Capture, session: string): Promise<void> {
+  const { relay, db } = capture
+  const listed = await relay.list(journalPrefix(session))
+  const leftover = listed.flatMap(({ key }) => (key.startsWith(nextPrefix(session)) ? [key] : []))
+  if (db.query('select 1 from borrowed_claims where session = ?').get(session) === null) return
+  await deleteFrames(relay, session, [...framesOf(session, listed).stale, ...leftover])
+}
+
+async function chainEndIn(relay: Relay, session: string): Promise<{ readonly end: number; readonly sealedEnd: number }> {
+  const { frames, sealedEnd } = framesOf(session, await relay.list(journalPrefix(session)))
+  let end = sealedEnd
+  for await (const { end: reached } of chainOf(relay, frames.filter((frame) => frame.start >= sealedEnd), sealedEnd)) end = reached
+  return { end, sealedEnd }
+}
+
+async function chainEndAtFirstCapture(capture: Capture, session: string): Promise<number> {
+  const { relay, db, device } = capture
+  const { end, sealedEnd } = await chainEndIn(relay, session)
+  if (end === 0) return 0
+  db.query('update journals set end = ?, sealed = ? where session = ? and end = 0').run(end, sealedEnd, session)
+  console.error(`${new Date().toISOString()} The journal of ${session} in R2 reaches byte ${end}, and ${device.name} held no row of it, so it uploads the files of ${session} whole from byte ${end}.`)
+  return end
 }
 
 export function captureAgainFrom(capture: Capture, session: string, tool: Tool, at: number, end: number, problems: Problems): Set<string> {
@@ -898,7 +1291,7 @@ export async function sealQuiet(capture: Capture, problems: Problems, now = Date
       else {
         const files = await sealJournal(capture, session, tool, problems)
         if (files.size > 0) again.set(session, files)
-        else await compactJournal(capture, session, tool, now)
+        else await rewriteJournal(capture, session, tool, now, { lagMs: capture.compactLagMs, isForced: false })
       }
       sealWaits.delete(session)
       problems.clear(`seal ${session}`)
@@ -911,65 +1304,8 @@ export async function sealQuiet(capture: Capture, problems: Problems, now = Date
   return again
 }
 
-type Span = { readonly start: number; readonly end: number; readonly from: number; readonly to: number }
+type Span = { readonly start: number; readonly end: number; readonly from: number; readonly to: number; readonly written: number }
 type Staged = { readonly header: RecordHeader; readonly from: number; readonly body: number; readonly to: number }
-
-async function compactJournal(capture: Capture, session: string, tool: Tool, now: number): Promise<void> {
-  const { db, relay, device, compactLagMs } = capture
-  const journal = db
-    .query<{ sealed: number; compacted_end: number; compacted_kept: number; compact_after: number }, [string]>('select sealed, compacted_end, compacted_kept, compact_after from journals where session = ?')
-    .get(session)
-  if (journal === null || journal.compact_after > now || journal.sealed - journal.compacted_end <= journal.compacted_kept) return
-  if (capture.codeRuns.has(session) || capture.codeWaiting.has(session)) return
-  const chain = framesOf(session, await relay.list(journalPrefix(session))).frames.filter((frame) => frame.end !== undefined)
-  if (chain.some((frame) => frame.uploaded === undefined)) return
-  const young = chain.find((frame) => !isCompacted(frame) && (frame.uploaded ?? now) > now - compactLagMs)
-  db.query('update journals set compact_after = ? where session = ?').run(young === undefined ? 0 : (young.uploaded ?? now) + compactLagMs, session)
-  const old = young === undefined ? chain : chain.slice(0, chain.indexOf(young))
-  const oldEnd = old.at(-1)?.end ?? 0
-  if (oldEnd - journal.compacted_end <= journal.compacted_kept) return
-  const staging = join(dirname(db.filename), 'compact', session)
-  mkdirSync(dirname(staging), { recursive: true })
-  const handle = await open(staging, 'w+')
-  try {
-    const spans: Span[] = []
-    for await (const { frame, bytes, end } of chainOf(relay, chain, 0)) {
-      const from = spans.at(-1)?.to ?? 0
-      for (let at = 0; at < bytes.length; ) at += (await handle.write(bytes, at, bytes.length - at, from + at)).bytesWritten
-      spans.push({ start: frame.start, end, from, to: from + bytes.length })
-    }
-    const records = await stagedRecordsOf(handle, spans.at(-1)?.to ?? 0, session)
-    const dropped = await droppedOf(handle, records)
-    const ends = new Set([0, ...records.map(({ to }) => to)])
-    const oldSpans = spans.slice(0, old.length)
-    let reach = oldSpans.length
-    while (reach > 0 && !ends.has(oldSpans[reach - 1]?.to ?? 0)) reach -= 1
-    let kept = oldSpans.at(-1)?.to ?? 0
-    let isReplaced = false
-    const gone = new Set<number>()
-    for (const group of groupsOf(oldSpans.slice(0, reach), records, dropped, ends)) {
-      const [first] = group.spans
-      const last = group.spans.at(-1)
-      if (first === undefined || last === undefined || group.kept === last.to - first.from) continue
-      const body = await stagedBytes(handle, group.records.flatMap((index) => (dropped.has(index) ? [] : (records[index] ?? []))))
-      const answer = await relay.runOne({ op: 'put', key: compactedKey(session, first.start, last.end), bytes: await compressSealed(body), if: { none: '*' }, holder: session })
-      if (answer.status === 409) return releasedTo(capture, session, answer.holder, `${new Date().toISOString()} ${answer.holder.name} took the session ${session} over, so ${device.name} stops capturing it.`, tool)
-      kept -= last.to - first.from - group.kept
-      isReplaced = true
-      for (const index of group.records) if (dropped.has(index)) gone.add(index)
-    }
-    const left = new Set(records.flatMap(({ header }, index) => (gone.has(index) ? [] : [header.path])))
-    const goneParts = new Set([...gone].flatMap((index) => records[index]?.header.path ?? []).filter((path) => isCodePart(path) && !left.has(path)))
-    if (goneParts.size > 0) rmSync(join(dirname(db.filename), 'code', session), { recursive: true, force: true })
-    db.transaction(() => {
-      for (const path of goneParts) db.query('delete from files where session = ? and path = ?').run(session, path)
-      db.query('update journals set compacted_end = ?, compacted_kept = ?, replaced = max(replaced, ?) where session = ?').run(oldEnd, kept, Number(isReplaced), session)
-    })()
-  } finally {
-    await handle.close()
-    rmSync(staging, { force: true })
-  }
-}
 
 type Group = { readonly spans: Span[]; readonly records: number[]; kept: number }
 
@@ -1066,6 +1402,365 @@ async function droppedOf(handle: FileHandle, records: readonly Staged[]): Promis
   return dropped
 }
 
+type Replacement = { readonly header: RecordHeader; readonly body: Uint8Array }
+export type Rewritten = { readonly isCurrent: boolean; readonly ops: number }
+
+const representedOf = (header: RecordHeader): number => header.chunks?.reduce((total, [, size]) => total + size, 0) ?? 0
+
+async function contentOf(capture: Capture, handle: FileHandle, record: Staged, read: ChunkReader): Promise<Uint8Array> {
+  const { header } = record
+  if (header.chunks !== undefined) return await bytesOfChunks(read, header)
+  const body = await readAt(handle, record.body, record.to - record.body)
+  return header.base === undefined ? body : await decompressDelta(body, await downloadBase(capture.relay, basesOf(capture.db), header.base))
+}
+
+async function foldOf(capture: Capture, handle: FileHandle, records: readonly Staged[], run: readonly number[], read: ChunkReader, checkout: string | undefined): Promise<Replacement | undefined> {
+  const anchor = records[run[0] ?? -1]?.header
+  const last = records[run.at(-1) ?? -1]?.header
+  if (anchor === undefined || last === undefined || last.after === null || anchor.at !== 0 || anchor.fork !== undefined) return undefined
+  const isOld = anchor.base !== undefined
+  if (!isOld && (last.after.size > FORK_BYTES || (run.length < 2 && (anchor.chunks !== undefined || anchor.size < CHUNKED_FROM)))) return undefined
+  const parts: Uint8Array[] = []
+  let length = 0
+  for (const index of run) {
+    const record = records[index]
+    if (record === undefined || record.header.at > length) return undefined
+    while (length > record.header.at) {
+      const tail = parts.pop() ?? new Uint8Array()
+      const keep = Math.max(0, tail.length - (length - record.header.at))
+      if (keep > 0) parts.push(tail.subarray(0, keep))
+      length -= tail.length - keep
+    }
+    const content = await contentOf(capture, handle, record, read)
+    parts.push(content)
+    length += content.length
+  }
+  const bytes = Buffer.concat(parts)
+  if (bytes.length !== last.after.size || sha256(bytes) !== last.after.sha256) {
+    console.error(`${new Date().toISOString()} ${anchor.path} replays to ${bytes.length} bytes from its records, not the ${last.after.size} with the sha256 its last record says, so anyhost leaves its records as they are.`)
+    return undefined
+  }
+  const header = { device: anchor.device, ...(checkout === undefined ? {} : { checkout }), path: anchor.path, at: 0, after: last.after }
+  if (bytes.length < CHUNKED_FROM) return { header: { ...header, size: bytes.length }, body: bytes }
+  const base = anchor.base === undefined ? undefined : await downloadBase(capture.relay, basesOf(capture.db), anchor.base)
+  return { header: { ...header, size: 0, chunks: await chunkListOf(capture, bytes, base) }, body: new Uint8Array() }
+}
+
+async function foldsOf(capture: Capture, handle: FileHandle, records: readonly Staged[], dropped: ReadonlySet<number>, count: number, read: ChunkReader): Promise<{ readonly replaced: Map<number, Replacement>; readonly folded: Set<number> }> {
+  const runs = new Map<string, { readonly name: string; checkout?: string; readonly indices: number[] }>()
+  const replaced = new Map<number, Replacement>()
+  const folded = new Set<number>()
+  const close = async (key: string): Promise<void> => {
+    const run = runs.get(key)
+    runs.delete(key)
+    const last = run?.indices.at(-1)
+    if (run === undefined || last === undefined) return
+    const replacement = await foldOf(capture, handle, records, run.indices, read, run.checkout)
+    if (replacement === undefined) return
+    for (const index of run.indices.slice(0, -1)) folded.add(index)
+    replaced.set(last, replacement)
+  }
+  for (let index = 0; index < count; index += 1) {
+    const header = records[index]?.header
+    if (header === undefined || dropped.has(index) || header.path.endsWith('/') || isCodePart(header.path)) continue
+    const key = `${header.device}\0${header.path}`
+    const name = basename(header.path)
+    for (const [other, run] of [...runs]) if (other !== key && run.name === name) await close(other)
+    const run = runs.get(key)
+    if (header.after === null || header.at === 0 || (run?.checkout !== undefined && header.checkout !== run.checkout)) await close(key)
+    if (header.after !== null && header.at === 0) runs.set(key, { name, ...(header.checkout === undefined ? {} : { checkout: header.checkout }), indices: [index] })
+    else if (header.after !== null && run !== undefined && runs.has(key)) {
+      run.indices.push(index)
+      if (header.checkout !== undefined) run.checkout = header.checkout
+    }
+  }
+  for (const key of [...runs.keys()]) await close(key)
+  return { replaced, folded }
+}
+
+const nextPrefix = (session: string): string => `${journalPrefix(session)}next/`
+const compactedName = (start: number, end: number, written: number | undefined): string => (written === undefined ? `${position(start)}-${position(end)}.zst` : rewrittenName(start, end, written))
+const RECHECK_BYTES = 8 * 2 ** 20
+
+const fileKeyOf = (session: string, path: string): string => (path.includes(session) ? path.slice(path.indexOf(session)) : basename(path))
+
+async function fileStatesOf(capture: Capture, session: string, folder: string, parts: AsyncIterable<Uint8Array>): Promise<Map<string, string>> {
+  mkdirSync(folder, { recursive: true })
+  const replay = new Replay(folder, ({ path }) => fileKeyOf(session, path), (base) => downloadBase(capture.relay, basesOf(capture.db), base), chunkReader(capture.relay))
+  for await (const bytes of parts) await replay.push(bytes)
+  replay.close()
+  const states = new Map<string, string>()
+  const stateOf = async (staged: string): Promise<string> => {
+    const hasher = new Bun.CryptoHasher('sha256')
+    for await (const piece of Bun.file(staged).stream()) hasher.update(piece)
+    return `${Bun.file(staged).size} ${hasher.digest('hex')}`
+  }
+  for (const [path, { staged, last }] of replay.files) if (!isCodePart(last.path)) states.set(path, await stateOf(staged))
+  for (const [path, { staged }] of replay.removed) states.set(`removed ${path}`, await stateOf(staged))
+  for (const path of replay.deleted) states.set(`deleted ${path}`, '')
+  return states
+}
+
+async function* stagedRange(handle: FileHandle, from: number, to: number): AsyncGenerator<Uint8Array> {
+  for (let at = from; at < to; at += RECHECK_BYTES) yield await readAt(handle, at, Math.min(RECHECK_BYTES, to - at))
+}
+
+export async function rewriteJournal(capture: Capture, session: string, tool: Tool | undefined, now: number, { lagMs, isForced }: { readonly lagMs: number; readonly isForced: boolean }): Promise<Rewritten | undefined> {
+  const { db, relay, device } = capture
+  const row = db
+    .query<{ sealed: number; compacted_end: number; compacted_kept: number; compact_after: number }, [string]>('select sealed, compacted_end, compacted_kept, compact_after from journals where session = ?')
+    .get(session)
+  if (!isForced && (row === null || row.compact_after > now || row.sealed - row.compacted_end <= row.compacted_kept)) return undefined
+  const journal = row ?? { sealed: 0, compacted_end: 0, compacted_kept: 0, compact_after: 0 }
+  if (capture.codeRuns.has(session) || capture.codeWaiting.has(session)) return undefined
+  const listed = await relay.list(journalPrefix(session))
+  if (isForced && listed.some(({ key }) => key === rewrittenKey(session))) return { isCurrent: true, ops: 1 }
+  const leftover = listed.flatMap(({ key }) => (key.startsWith(nextPrefix(session)) ? [key] : []))
+  if (leftover.length > 0) await Promise.all(relay.run([{ op: 'delete', keys: leftover, holder: session }]))
+  const { frames, stale } = framesOf(session, listed)
+  const chain = frames.filter((frame) => frame.end !== undefined)
+  if (lagMs > 0 && chain.some((frame) => frame.uploaded === undefined)) return undefined
+  const young = lagMs === 0 ? undefined : chain.find((frame) => !isCompacted(frame) && (frame.uploaded ?? now) > now - lagMs)
+  if (!isForced) db.query('update journals set compact_after = ? where session = ?').run(young === undefined ? 0 : (young.uploaded ?? now) + lagMs, session)
+  const old = young === undefined ? chain : chain.slice(0, chain.indexOf(young))
+  const oldEnd = old.at(-1)?.end ?? 0
+  if (!isForced && oldEnd - journal.compacted_end <= journal.compacted_kept) return undefined
+  const staging = join(dirname(db.filename), 'compact', session)
+  mkdirSync(dirname(staging), { recursive: true })
+  const handle = await open(staging, 'w+')
+  const chunksBefore = db.query<{ count: number }, []>('select count(*) as count from chunks').get()?.count ?? 0
+  let reads = 0
+  const reader = chunkReader(relay)
+  const read: ChunkReader = (name) => ((reads += 1), reader(name))
+  const checking = `${staging}.check`
+  try {
+    const spans: Span[] = []
+    for await (const { frame, bytes, end } of chainOf(relay, chain, 0)) {
+      const from = spans.at(-1)?.to ?? 0
+      for (let at = 0; at < bytes.length; ) at += (await handle.write(bytes, at, bytes.length - at, from + at)).bytesWritten
+      spans.push({ start: frame.start, end, from, to: from + bytes.length, written: frame.written ?? 0 })
+    }
+    const records = await stagedRecordsOf(handle, spans.at(-1)?.to ?? 0, session)
+    const dropped = await droppedOf(handle, records)
+    const ends = new Set([0, ...records.map(({ to }) => to)])
+    const oldSpans = spans.slice(0, old.length)
+    let reach = oldSpans.length
+    while (reach > 0 && !ends.has(oldSpans[reach - 1]?.to ?? 0)) reach -= 1
+    const prefixEnd = oldSpans[reach - 1]?.to ?? 0
+    const inPrefix = records.findIndex(({ to }) => to > prefixEnd)
+    const count = inPrefix < 0 ? records.length : inPrefix
+    const readsChunks = await everyMachineReadsChunks(capture)
+    const { replaced, folded } = readsChunks ? await foldsOf(capture, handle, records, dropped, count, read) : { replaced: new Map<number, Replacement>(), folded: new Set<number>() }
+    const gone = new Set([...[...dropped].filter((index) => index < count), ...folded])
+    const keptOf = (index: number): number => {
+      const record = records[index]
+      const replacement = replaced.get(index)
+      if (record === undefined || gone.has(index)) return 0
+      return replacement === undefined ? record.to - record.from + representedOf(record.header) : replacement.body.length + representedOf(replacement.header)
+    }
+    const written: { readonly name: string; readonly body: Uint8Array; readonly changed: readonly Replacement[] }[] = []
+    let kept = 0
+    const groups = groupsOf(oldSpans.slice(0, reach), records, gone, ends)
+    async function* newPrefix(): AsyncGenerator<Uint8Array> {
+      for (const group of groups) {
+        const [first] = group.spans
+        const last = group.spans.at(-1)
+        kept += group.records.reduce((total, index) => total + keptOf(index), 0)
+        if (first === undefined || last === undefined) continue
+        if (!group.records.some((index) => gone.has(index) || replaced.has(index))) {
+          yield* stagedRange(handle, first.from, last.to)
+          continue
+        }
+        const parts: Uint8Array[] = []
+        for (const index of group.records) {
+          const record = records[index]
+          const replacement = replaced.get(index)
+          if (record === undefined || gone.has(index)) continue
+          parts.push(...(replacement === undefined ? [await stagedBytes(handle, [record])] : encodeRecord(replacement.header, replacement.body)))
+        }
+        const body = Buffer.concat(parts)
+        yield body
+        const after = readsChunks ? 1 + Math.max(...group.spans.map(({ written: was }) => was)) : undefined
+        written.push({ name: compactedName(first.start, last.end, after), body: await compressSealed(body), changed: group.records.flatMap((index) => replaced.get(index) ?? []) })
+      }
+    }
+    const before = await fileStatesOf(capture, session, join(checking, 'before'), stagedRange(handle, 0, prefixEnd))
+    const after = await fileStatesOf(capture, session, join(checking, 'after'), newPrefix())
+    for (const path of new Set([...before.keys(), ...after.keys()])) {
+      if (before.get(path) !== after.get(path)) throw new Error(`The rewrite of ${session}'s journal replays ${path} as ${after.get(path) ?? 'nothing'}, not the ${before.get(path) ?? 'nothing'} its frames give, so anyhost keeps every frame as it was.`)
+    }
+    const put = async (key: string, bytes: Uint8Array): Promise<'written' | 'held' | 'other'> => {
+      const answer = await relay.runOne({ op: 'put', key, bytes, if: { none: '*' }, holder: session })
+      if (answer.status === 200) return 'written'
+      if (answer.status === 409) {
+        releasedTo(capture, session, answer.holder, `${new Date().toISOString()} ${answer.holder.name} took the session ${session} over, so ${device.name} stops capturing it.`, tool)
+        return 'held'
+      }
+      const there = await relay.runOne({ op: 'get', key })
+      return there.status === 200 && sameBytes(there.bytes, bytes) ? 'written' : 'other'
+    }
+    for (const { name, body } of written) if ((await put(`${nextPrefix(session)}${name}`, body)) !== 'written') return undefined
+    const check = chunkReader(relay)
+    for (const { name, body, changed } of written) {
+      const key = `${nextPrefix(session)}${name}`
+      const got = await relay.runOne({ op: 'get', key })
+      if (got.status !== 200 || !sameBytes(got.bytes, body)) throw new Error(`${key} does not read back as the frame anyhost wrote, so anyhost keeps every frame of ${session} as it was.`)
+      for (const { header } of changed) {
+        if (header.chunks === undefined || header.after === null) continue
+        const bytes = await bytesOfChunks(check, header)
+        if (bytes.length !== header.after.size || sha256(bytes) !== header.after.sha256) throw new Error(`The chunks of ${header.path} in ${key} read back as ${bytes.length} bytes, not the ${header.after.size} its record says, so anyhost keeps every frame of ${session} as it was.`)
+      }
+    }
+    const published: string[] = []
+    for (const { name, body } of [...written].reverse()) {
+      const outcome = await put(`${journalPrefix(session)}compacted/${name}`, body)
+      if (outcome === 'held' || (outcome === 'other' && readsChunks)) break
+      if (outcome === 'written') published.push(`${journalPrefix(session)}compacted/${name}`)
+    }
+    if (written.length > 0) await Promise.all(relay.run([{ op: 'delete', keys: written.map(({ name }) => `${nextPrefix(session)}${name}`), holder: session }]))
+    const isWhole = published.length === written.length
+    const left = new Set(records.flatMap(({ header }, index) => (gone.has(index) ? [] : [header.path])))
+    const goneParts = new Set([...gone].flatMap((index) => records[index]?.header.path ?? []).filter((path) => isCodePart(path) && !left.has(path)))
+    if (isWhole && goneParts.size > 0) rmSync(join(dirname(db.filename), 'code', session), { recursive: true, force: true })
+    db.transaction(() => {
+      if (isWhole) for (const path of goneParts) db.query('delete from files where session = ? and path = ?').run(session, path)
+      if (isWhole) db.query('update journals set compacted_end = ?, compacted_kept = ? where session = ?').run(oldEnd, kept, session)
+      db.query('update journals set replaced = max(replaced, ?) where session = ?').run(Number(published.length > 0 || stale.length > 0), session)
+    })()
+    const picked = new Set(framesOf(session, await relay.list(journalPrefix(session))).frames.map(({ key }) => key))
+    const stored = (db.query<{ count: number }, []>('select count(*) as count from chunks').get()?.count ?? 0) - chunksBefore
+    const isCurrent =
+      readsChunks &&
+      isWhole &&
+      published.every((key) => picked.has(key)) &&
+      count === records.length &&
+      !records.some((record, index) => record.header.base !== undefined && !gone.has(index) && !replaced.has(index))
+    return { isCurrent, ops: 2 + chain.length + reads + stored + 3 * written.length + written.reduce((total, { changed }) => total + changed.reduce((sum, { header }) => sum + (header.chunks?.length ?? 0), 0), 0) }
+  } finally {
+    await handle.close()
+    rmSync(staging, { force: true })
+    rmSync(checking, { recursive: true, force: true })
+  }
+}
+
+export const REWRITE_OPS_PER_DAY = 20_000
+const DAY_MS = 86_400_000
+const JOURNALS_EVERY_MS = 60 * 60_000
+const HELD = "stopped = '' and holder = '' and end > 0"
+
+export async function journalsIn(relay: Relay): Promise<Map<string, boolean>> {
+  const isRewritten = new Map<string, boolean>()
+  let cursor: string | undefined
+  do {
+    const answer = await relay.runOne({ op: 'list', prefix: 'journals/', ...(cursor === undefined ? {} : { cursor }) })
+    for (const { key } of answer.objects) {
+      const session = key.split('/')[1] ?? ''
+      isRewritten.set(session, isRewritten.get(session) === true || key === rewrittenKey(session))
+    }
+    cursor = answer.cursor
+  } while (cursor !== undefined)
+  return isRewritten
+}
+
+async function markRewritten(capture: Capture, session: string): Promise<void> {
+  await capture.relay.runOne({ op: 'put', key: rewrittenKey(session), bytes: new Uint8Array(), if: { none: '*' } })
+  capture.journalsInR2.isRewritten.set(session, true)
+}
+
+async function readJournalsInR2(capture: Capture, now: number): Promise<void> {
+  if (now - capture.journalsInR2.readAt < JOURNALS_EVERY_MS) return
+  capture.journalsInR2 = { readAt: now, isRewritten: await journalsIn(capture.relay) }
+  for (const { session } of capture.db.query<{ session: string }, []>('select session from rewrites where done = 1').all()) {
+    if (capture.journalsInR2.isRewritten.get(session) === false) await markRewritten(capture, session)
+  }
+}
+
+async function giveBack(capture: Capture): Promise<void> {
+  const { db, relay } = capture
+  for (const { session } of db.query<{ session: string }, []>('select session from borrowed_claims').all()) {
+    if (db.query('select 1 from borrowed_claims where session = ?').get(session) === null) continue
+    await relay.runOne({ op: 'forget', session })
+    db.query('delete from borrowed_claims where session = ?').run(session)
+  }
+}
+
+type NextRewrite = { readonly session: string; readonly tool: Tool | undefined; readonly claim?: Extract<Call, { readonly op: 'claim' }> }
+
+async function unheldNext(capture: Capture, now: number): Promise<NextRewrite | undefined> {
+  const { db, device, fleet } = capture
+  const captured = new Set(db.query<{ session: string }, []>("select session from journals where stopped = ''").all().map(({ session }) => session))
+  const tried = new Set(db.query<{ session: string }, [number]>('select session from rewrites where done = 1 or at > ?').all(now - DAY_MS).map(({ session }) => session))
+  const holders = await capture.holders.current()
+  for (const [session, isRewritten] of capture.journalsInR2.isRewritten) {
+    if (isRewritten || captured.has(session) || tried.has(session)) continue
+    const holder = holders.get(session)
+    const tool = db.query<{ tool: Tool }, [string]>('select tool from sessions where id = ?').get(session)?.tool
+    if (holder === device.id) return { session, tool }
+    if (holder === undefined) return { session, tool, claim: { op: 'claim', session, take: false } }
+    if (fleet.removed.has(holder)) return { session, tool, claim: { op: 'claim', session, take: true, if: { gone: true } } }
+  }
+  return undefined
+}
+
+export async function rewriteNext(capture: Capture, problems: Problems, now = Date.now()): Promise<string | undefined> {
+  const { db, relay } = capture
+  await readJournalsInR2(capture, now).then(
+    () => problems.clear('rewrite list'),
+    (error: unknown) => problems.set('rewrite list', error),
+  )
+  const spent = db.query<{ ops: number }, [number]>('select coalesce(sum(ops), 0) as ops from rewrites where at > ?').get(now - DAY_MS)?.ops ?? 0
+  if (spent >= REWRITE_OPS_PER_DAY || !(await everyMachineReadsChunks(capture, now))) return undefined
+  const isGivenBack = await giveBack(capture).then(
+    () => (problems.clear('borrowed claims'), true),
+    (error: unknown) => (problems.set('borrowed claims', error), false),
+  )
+  if (!isGivenBack) return undefined
+  const held = db
+    .query<{ session: string; tool: Tool }, [number]>(`select session, tool from journals where ${HELD} and end = sealed and session not in (select session from rewrites where done = 1 or at > ?) order by written_at limit 1`)
+    .get(now - DAY_MS)
+  const next: NextRewrite | undefined = held ?? (await unheldNext(capture, now))
+  if (next === undefined) return undefined
+  const { session, tool, claim } = next
+  const record = (done: boolean, ops: number, failure: string): void =>
+    void db.query('insert or replace into rewrites (session, done, at, ops, failure) values (?, ?, ?, ?, ?)').run(session, Number(done), now, ops, failure)
+  record(false, 1, `The rewrite of ${session}'s journal that started at ${new Date(now).toISOString()} never finished, as the program stopped during it.`)
+  try {
+    if (claim !== undefined) {
+      const claiming = relay.runOne(claim)
+      db.query('insert or replace into borrowed_claims (session) values (?)').run(session)
+      const claimed = await claiming
+      if (claimed.status === 409) {
+        db.query('delete from borrowed_claims where session = ?').run(session)
+        record(false, 1, `${claimed.holder.name} holds the session ${session}, so it rewrites the journal itself.`)
+        return session
+      }
+    }
+    const rewritten = await rewriteJournal(capture, session, tool, now, { lagMs: 0, isForced: true })
+    if (rewritten === undefined) {
+      db.query('delete from rewrites where session = ?').run(session)
+      return undefined
+    }
+    if (claim !== undefined) await deleteReplacedWhileBorrowed(capture, session)
+    if (rewritten.isCurrent) await markRewritten(capture, session)
+    const failure = rewritten.isCurrent ? '' : `A record of ${session}'s journal still names a base whose file does not replay to its record's sha256, so anyhost keeps it as it is.`
+    record(rewritten.isCurrent, rewritten.ops + 1 + (claim === undefined ? 0 : 4), failure)
+    if (failure === '') problems.clear(`rewrite ${session}`)
+    else problems.set(`rewrite ${session}`, failure)
+  } catch (error) {
+    record(false, 1, error instanceof Error ? error.message : String(error))
+    problems.set(`rewrite ${session}`, error)
+  } finally {
+    if (claim !== undefined) await giveBack(capture).catch((error: unknown) => problems.set('borrowed claims', error))
+  }
+  return session
+}
+
+export function rewriteProgress(capture: Capture): { readonly done: number; readonly journals: number; readonly olderMachines: readonly string[] } | undefined {
+  const { readAt, isRewritten } = capture.journalsInR2
+  if (readAt === 0) return undefined
+  return { done: [...isRewritten.values()].filter(Boolean).length, journals: isRewritten.size, olderMachines: capture.fleet.older }
+}
+
 export async function checkoutOf(cwd: string): Promise<{ repo: string; folder: string }> {
   const git = async (...args: string[]): Promise<string> => {
     const child = Bun.spawn(['git', '-C', cwd, ...args], { stdout: 'pipe', stderr: 'ignore' })
@@ -1080,25 +1775,35 @@ export async function checkoutOf(cwd: string): Promise<{ repo: string; folder: s
 function sessionRow(db: Database, id: string, tool: Tool): SessionRow {
   return (
     db.query<SessionRow, [string]>('select * from sessions where id = ?').get(id) ?? {
-      id, tool, title: '', title_rank: 0, first_prompt: '', cwd: '', repo: '', repo_folder: '', entrypoint: '', last_activity: '', size: 0,
+      id, tool, title: '', title_rank: 0, first_prompt: '', cwd: '', repo: '', repo_folder: '', entrypoint: '', last_said: '', last_activity: '', last_prompt_at: '', source: '', size: 0,
     }
   )
 }
 
-export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: string, tool: Tool, text: string, size: number, lastActivity: string): Promise<boolean> {
+export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: string, tool: Tool, text: string, size: number, writtenAt: string): Promise<boolean> {
   const { db } = capture
   const row = sessionRow(db, id, tool)
-  const before: Summary = { title: row.title, titleRank: row.title_rank, firstPrompt: row.first_prompt, cwd: row.cwd, repo: tool === 'codex' ? row.repo : '', entrypoint: row.entrypoint }
+  const before: Summary = { title: row.title, titleRank: row.title_rank, firstPrompt: row.first_prompt, cwd: row.cwd, repo: tool === 'codex' ? row.repo : '', entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source }
   const after = summarize(before, text, tool)
+  const lastActivity = after.lastActivity || writtenAt
   const checkout = after.cwd === row.cwd && row.last_activity !== '' ? { repo: row.repo, folder: row.repo_folder } : await checkoutOf(after.cwd)
   const title = (tool === 'codex' ? await codexNameOf(id, capture.roots.codexHome) : undefined) ?? after.title
   const repo = checkout.repo || after.repo
   db.query(
-    `insert into sessions (id, tool, title, title_rank, first_prompt, cwd, repo, repo_folder, entrypoint, last_activity, size) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `insert into sessions (id, tool, title, title_rank, first_prompt, cwd, repo, repo_folder, entrypoint, last_said, last_activity, last_prompt_at, source, size) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      on conflict (id) do update set title = excluded.title, title_rank = excluded.title_rank, first_prompt = excluded.first_prompt, cwd = excluded.cwd,
-     repo = excluded.repo, repo_folder = excluded.repo_folder, entrypoint = excluded.entrypoint, last_activity = excluded.last_activity, size = excluded.size`,
-  ).run(id, tool, title, after.titleRank, after.firstPrompt, after.cwd, repo, checkout.folder, after.entrypoint, lastActivity, size)
+     repo = excluded.repo, repo_folder = excluded.repo_folder, entrypoint = excluded.entrypoint, last_said = excluded.last_said, last_activity = excluded.last_activity,
+     last_prompt_at = excluded.last_prompt_at, source = excluded.source, size = excluded.size`,
+  ).run(id, tool, title, after.titleRank, after.firstPrompt, after.cwd, repo, checkout.folder, after.entrypoint, after.lastSaid, lastActivity, after.lastPromptAt, after.source, size)
   return row.last_activity === '' || after.cwd !== row.cwd || repo !== row.repo || checkout.folder !== row.repo_folder
+}
+
+export async function recordFolder(db: Database, id: string, cwd: string): Promise<boolean> {
+  const row = db.query<Pick<SessionRow, 'cwd'>, [string]>('select cwd from sessions where id = ?').get(id)
+  if (row === null || cwd === '' || row.cwd === cwd) return false
+  const checkout = await checkoutOf(cwd)
+  db.query('update sessions set cwd = ?, repo = ?, repo_folder = ? where id = ?').run(cwd, checkout.repo, checkout.folder, id)
+  return true
 }
 
 const IS_TRANSCRIPT = "files.session = sessions.id and (files.path like '%' || sessions.id || '.jsonl' or files.path like '%' || sessions.id || '.jsonl.zst')"
@@ -1113,7 +1818,7 @@ function indexOf(db: Database): IndexedSession[] {
     .all()
     .map((row) => ({
       id: row.id, tool: row.tool, title: row.title, firstPrompt: row.first_prompt, cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder,
-      entrypoint: row.entrypoint, lastActivity: row.last_activity, size: row.size, deleted: row.deleted === 1,
+      entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source, size: row.size, deleted: row.deleted === 1,
     }))
 }
 
@@ -1132,31 +1837,73 @@ function keptIndexOf(capture: Capture): Promise<readonly IndexedSession[]> {
 
 export async function relistSessions(capture: Capture): Promise<number> {
   const { relay, db } = capture
-  const journaled = new Set<string>()
-  let cursor: string | undefined
-  do {
-    const answer = await relay.runOne({ op: 'list', prefix: 'journals/', ...(cursor === undefined ? {} : { cursor }) })
-    for (const { key } of answer.objects) journaled.add(key.split('/')[1] ?? '')
-    cursor = answer.cursor
-  } while (cursor !== undefined)
-  const listed = new Set([...db.query<{ id: string }, []>('select id from sessions').all().map(({ id }) => id), ...(await keptIndexOf(capture)).map(({ id }) => id)])
+  const journaled = await journalsIn(relay)
+  const rows = new Map(db.query<Pick<SessionRow, 'id' | 'cwd' | 'last_said'> & { readonly titled: number }, []>('select id, cwd, last_said, titled from sessions').all().map((row) => [row.id, row]))
+  const kept = new Map((await keptIndexOf(capture)).map((entry) => [entry.id, entry]))
   let relisted = 0
   for (const [id, { tool, paths }] of await transcriptsOn(capture.roots)) {
-    if (!journaled.has(id) || listed.has(id)) continue
+    const row = rows.get(id)
+    const entry = kept.get(id)
+    if (!journaled.has(id) || (row !== undefined && row.last_said !== '' && row.titled >= TITLE_RULES) || (row ?? entry)?.cwd === '') continue
+    if (row === undefined && entry !== undefined) {
+      db.query('insert into sessions (id, tool, title, first_prompt, cwd, repo, repo_folder, entrypoint, last_said, last_activity, last_prompt_at, source, size) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+        id, tool, entry.title, entry.firstPrompt, entry.cwd, entry.repo, entry.repoFolder, entry.entrypoint ?? '', entry.lastSaid ?? '', entry.lastActivity, entry.lastPromptAt ?? '', entry.source ?? '', entry.size,
+      )
+    }
     const files = paths.map((path) => ({ path, info: statSync(path) })).sort((a, b) => a.info.mtimeMs - b.info.mtimeMs)
-    const text = files.map(({ path }) => (path.endsWith('.zst') ? new TextDecoder().decode(decompress(readFileSync(path))) : readFileSync(path, 'utf8'))).join('')
+    const text = (await Promise.all(files.map(({ path }) => summaryTextOf(path)))).join('')
     const size = files.reduce((total, { info }) => total + info.size, 0)
     await recordSummary(capture, id, tool, text, size, new Date(Math.max(...files.map(({ info }) => info.mtimeMs))).toISOString())
-    relisted += 1
+    db.query('update sessions set titled = ? where id = ?').run(TITLE_RULES, id)
+    if (row === undefined || db.query<Pick<SessionRow, 'last_said'>, [string]>('select last_said from sessions where id = ?').get(id)?.last_said !== '') relisted += 1
   }
   return relisted
 }
 
-export async function writeIndex(capture: Capture): Promise<void> {
+const SUMMARY_END_BYTES = 1 << 20
+
+const wholeLinesOf = (bytes: Uint8Array): string => new TextDecoder().decode(bytes.subarray(0, bytes.lastIndexOf(10) + 1))
+
+const endsTextOf = (head: Uint8Array, tail: Uint8Array): string => `${wholeLinesOf(head)}${wholeLinesOf(tail.subarray(tail.indexOf(10) + 1))}`
+
+async function summaryTextOf(path: string): Promise<string> {
+  if (path.endsWith('.zst')) return await zstdSummaryTextOf(createReadStream(path), path)
+  const file = Bun.file(path)
+  if (file.size <= SUMMARY_END_BYTES) return wholeLinesOf(await file.bytes())
+  return endsTextOf(await file.slice(0, SUMMARY_END_BYTES).bytes(), await file.slice(file.size - SUMMARY_END_BYTES).bytes())
+}
+
+async function zstdSummaryTextOf(compressed: Readable, path: string): Promise<string> {
+  let head = new Uint8Array()
+  const tail: Uint8Array[] = []
+  let [tailBytes, size] = [0, 0]
+  try {
+    for await (const chunk of compressed.pipe(zlib.createZstdDecompress({ params: { [C.ZSTD_d_windowLogMax]: 27 } })) as AsyncIterable<Uint8Array>) {
+      if (head.length < SUMMARY_END_BYTES) head = Buffer.concat([head, chunk.subarray(0, SUMMARY_END_BYTES - head.length)])
+      tail.push(chunk)
+      ;[tailBytes, size] = [tailBytes + chunk.length, size + chunk.length]
+      for (let first = tail[0]; first !== undefined && tailBytes - first.length >= SUMMARY_END_BYTES; first = tail[0]) tailBytes -= tail.shift()?.length ?? 0
+    }
+  } catch (error) {
+    console.error(`${new Date().toISOString()} anyhost summarizes nothing of ${path}, as its zstd frame does not decompress: ${error instanceof Error ? error.message : String(error)}`)
+    return ''
+  } finally {
+    compressed.destroy()
+  }
+  if (size <= SUMMARY_END_BYTES) return wholeLinesOf(head)
+  const last = Buffer.concat(tail)
+  return endsTextOf(head, last.subarray(last.length - SUMMARY_END_BYTES))
+}
+
+export async function ownIndex(capture: Capture): Promise<IndexedSession[]> {
   const here = indexOf(capture.db)
   const ids = new Set(here.map(({ id }) => id))
   const kept = (await keptIndexOf(capture)).filter(({ id }) => !ids.has(id))
-  const index = JSON.stringify([...here, ...kept].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)))
+  return [...here, ...kept].sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
+}
+
+export async function writeIndex(capture: Capture): Promise<void> {
+  const index = JSON.stringify(await ownIndex(capture))
   if (index === capture.lastIndex) return
   await capture.relay.runOne({ op: 'put', key: indexKey(capture.device), bytes: new TextEncoder().encode(index) })
   capture.lastIndex = index

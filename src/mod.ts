@@ -1,4 +1,4 @@
-import { defineMod, device, messageOf, sessions } from '../node_modules/@cmodjs/core/mod.js'
+import { commands, defineMod, device, messageOf, sessions } from '../node_modules/@cmodjs/core/mod.js'
 import { program } from '../node_modules/@cmodjs/core/jobs/program.js'
 import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
 import { option } from '../node_modules/@cmodjs/core/options.js'
@@ -85,7 +85,21 @@ export const anyhost = defineMod({
       if (holder.move !== undefined && MOVING.has(holder.move.step)) follow()
       return holder
     }
-    sessions.current.onSessionStart(async () => void (await check()))
+    const changed = (): Promise<void> =>
+      askProgram(mod, '/sessions/changed', { session: sessions.current.id, folder: sessions.current.cwd }).then(
+        () => undefined,
+        (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: 'warning' })),
+      )
+    sessions.current.onSessionStart(async () => {
+      await check()
+      await changed()
+    })
+    sessions.current.onSessionEnd(changed)
+    sessions.current.onTurnStart(changed)
+    sessions.current.onTurnEnd(changed)
+    sessions.current.onCwdChange(changed)
+    sessions.current.onNotification(changed)
+    commands.onRun({ name: 'rename' }, changed)
     const continuesOn = (machine: string): string => `This session continues on ${machine}, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.`
     sessions.current.beforePrompt(
       async () => {

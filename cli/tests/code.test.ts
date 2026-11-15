@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import { captureCode, cloneRemote, httpsRemoteOf, restoreCode } from '../src/code.ts'
-import { temporaryFolder } from './memory.ts'
+import { temporaryFolder } from './program.ts'
 
 const SESSION = '0a1b2c3d-1111-2222-3333-444455556666'
 const kept: Record<string, string | undefined> = {}
@@ -89,8 +89,8 @@ function journalOf() {
       for (const part of captured.parts) records.set(part.path, part.bytes)
       return captured.header
     },
-    restore: (header: Uint8Array, folder: string): Promise<string> =>
-      restoreCode(header, async (path) => records.get(path) ?? Promise.reject(new Error(`The journal holds no ${path}.`)), folder),
+    restore: (header: Uint8Array, folder: string, isMove = true): Promise<string> =>
+      restoreCode(header, async (path) => records.get(path) ?? Promise.reject(new Error(`The journal holds no ${path}.`)), folder, isMove),
   }
 }
 
@@ -395,20 +395,61 @@ test('the shared temp folder gives no record, since it holds every program’s s
   expect(await captureCode(tmpdir(), SESSION)).toBeUndefined()
 })
 
-test('a checkout with work of its own keeps it, and the session continues in a worktree beside it', async () => {
+const stateOf = (folder: string): string[] => [...filesOf(folder), sh(folder, ['rev-parse', 'HEAD']), sh(folder, ['status', '--porcelain=v2', '--branch']), sh(folder, ['worktree', 'list', '--porcelain'])]
+
+test('a move onto a checkout with work of its own changes nothing there, makes no worktree, and the session continues in it', async () => {
   const { base, remote, work } = repository()
   write(join(work, 'a.txt'), 'the session edits a\n')
   write(join(work, 'session.txt'), 'new in the session\n')
   const target = join(base, 'target')
   sh(base, ['clone', '-q', remote, target])
   write(join(target, 'b.txt'), "the person's own edit\n")
-  const ownState = filesOf(target)
+  const before = stateOf(target)
 
   const journal = journalOf()
   const restored = await journal.restore(await journal.capture(work), target)
 
-  expect(restored).toBe(`${target}-${SESSION.slice(0, 8)}`)
-  expect(filesOf(target)).toEqual(ownState)
-  expect(filesOf(restored)).toEqual(filesOf(work))
-  expect(sh(restored, ['status', '--porcelain=v2'])).toBe(sh(work, ['status', '--porcelain=v2']))
+  expect(restored).toBe(target)
+  expect(stateOf(target)).toEqual(before)
+  expect(readdirSync(base).filter((name) => name.startsWith('target'))).toEqual(['target'])
+})
+
+test('an open onto a checkout of the repository leaves it exactly as it is, whatever commit and changes it holds', async () => {
+  const { base, remote, work } = repository()
+  write(join(work, 'a.txt'), 'the session edits a\n')
+  const journal = journalOf()
+  const header = await journal.capture(work)
+  const target = join(base, 'target')
+  sh(base, ['clone', '-q', remote, target])
+  write(join(target, 'c.txt'), 'committed after the session\n')
+  sh(target, ['add', 'c.txt'])
+  sh(target, ['commit', '-qm', 'later work'])
+  write(join(target, 'b.txt'), 'another agent is editing b\n')
+  const before = stateOf(target)
+
+  const restored = await journal.restore(header, target, false)
+
+  expect(restored).toBe(target)
+  expect(stateOf(target)).toEqual(before)
+  expect(existsSync(join(target, '.git', 'FETCH_HEAD'))).toBe(false)
+})
+
+test('an open of a repository this machine lacks clones it at its branch as the remote has it now, with none of the session’s old changes', async () => {
+  const { base, remote, work } = repository()
+  write(join(work, 'a.txt'), 'the session edits a\n')
+  const journal = journalOf()
+  const header = await journal.capture(work)
+  const later = join(base, 'later')
+  sh(base, ['clone', '-q', remote, later])
+  write(join(later, 'c.txt'), 'pushed after the session\n')
+  sh(later, ['add', 'c.txt'])
+  sh(later, ['commit', '-qm', 'later work'])
+  sh(later, ['push', '-q'])
+  const target = join(base, 'fresh')
+
+  const restored = await journal.restore(header, target, false)
+
+  expect(restored).toBe(target)
+  expect(sh(target, ['rev-parse', 'HEAD'])).toBe(sh(later, ['rev-parse', 'HEAD']))
+  expect(sh(target, ['status', '--porcelain'])).toBe('')
 })

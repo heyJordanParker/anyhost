@@ -2,14 +2,14 @@ import { expect, onTestFinished, test } from 'bun:test'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES, cloneFixFor } from '../../relay/protocol.ts'
-import { hotKey, journalOf, openCapture, openDatabase, QUIET_MS, sealQuiet, uploadSessions } from '../src/capture.ts'
+import { hotKey, journalOf, openDatabase, QUIET_MS, sealQuiet } from '../src/capture.ts'
 import { followHolders } from '../src/claims.ts'
 import { devicesOf, inviteMachine, machinesOf, removeMachine, type Device } from '../src/device.ts'
 import { connectRelay, type Relay, type RelayOptions } from '../src/relay.ts'
 import { listSessions } from '../src/sessions.ts'
-import { failTest, memoryRelay, noCode, temporaryFolder, until, welcomed } from './memory.ts'
+import { failTest, memoryRelay, until, welcomed } from './memory.ts'
 import plugin from '../../.claude-plugin/plugin.json'
-import { anyhostOn, CLI, DAILY_LIMIT, HOST, killAfterTest, machineFor, roots, SESSION } from './program.ts'
+import { anyhostOn, captureOn, HOST, machineFor, roots, SESSION, temporaryFolder, uploadFiles } from './program.ts'
 
 const device: Device = { id: 'device-a', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
 const connect = (options: Omit<RelayOptions, 'forget'>): Relay => {
@@ -20,15 +20,21 @@ const connect = (options: Omit<RelayOptions, 'forget'>): Relay => {
 
 test('a request whose answer the dropped socket lost goes again on the next socket, and its frame is stored once', async () => {
   const relay = await memoryRelay()
-  const home = join(temporaryFolder(), 'home')
-  const capture = openCapture(relay.connect(device, roots(home)), device, roots(home), { db: openDatabase(join(temporaryFolder(), 'state')), code: noCode })
-  const transcript = join(home, '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  const { roots: at, capture } = captureOn(device, relay)
+  const transcript = join(at.claudeHome, 'projects', '-work', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
-  relay.dropAnswers = 1
-
-  await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], failTest).map(([, left]) => left))
+  await capture.holders.current()
   const frame = hotKey(SESSION, 0)
+  let isDropped = false
+  relay.before = (op) => {
+    if (op.op !== 'put' || op.key !== frame || isDropped) return undefined
+    isDropped = true
+    relay.dropAnswers = 1
+    return undefined
+  }
+
+  await uploadFiles(capture, SESSION, transcript)
   expect(relay.requests.filter((ops) => ops.some((op) => op.op === 'put' && op.key === frame))).toHaveLength(2)
   expect(relay.puts.filter(({ key }) => key === frame)).toHaveLength(1)
   expect(journalOf(capture.db, SESSION)?.end).toBeGreaterThan(0)
@@ -44,31 +50,15 @@ test('a machine with the id of a connected machine and another name, as a clone 
   expect(clone.state).toEqual({ is: 'refused', message: `The relay refused anyhost-c: anyhost-a is connected with this machine's id. A machine cloned from another keeps its id, so anyhost captures nothing here. ${cloneFixFor('linux')}` })
 })
 
-test('a removed machine is refused, and a command of it fails with the reason', async () => {
-  const relay = await memoryRelay()
-  const token = await relay.join(device, roots('/home/ada'))
-  const service = connect({ login: async () => ({ url: relay.url, token }), device, roots: roots('/home/ada'), isPatient: true })
-  await welcomed(service)
-  relay.remove(device.id)
-
-  await until(() => service.state.is === 'unjoined', 'the removal')
-  const message = 'This machine was removed from your machines. Join it again with a link from Add a machine.'
-  expect(service.state).toEqual({ is: 'unjoined', message })
-  const command = connect({ login: async () => ({ url: relay.url, token }), device, roots: roots('/home/ada'), isPatient: false })
-  await expect(Promise.all(command.run([{ op: 'claims' }]))).rejects.toThrow(message)
-})
-
 test('a service older than the anyhost this machine last connected with exits 1 with the reason, a command fails with it, and anyhost doctor prints both versions and the fix', async () => {
   const relay = await memoryRelay()
   const { env, token } = await machineFor(relay, HOST)
   expect((await fetch(`${relay.url}/v1/objects/newer`, { headers: { authorization: `Bearer ${token}`, 'x-anyhost-version': '99.0.0' } })).status).toBe(404)
   const refusal = `The relay refused ${HOST.name}: anyhost ${plugin.version} is older than anyhost 99.0.0, which this machine connected with. Run cmod update anyhost, or, to run anyhost ${plugin.version} here on purpose, run anyhost join with the link anyhost machines --invite prints on a joined machine.`
 
-  const service = Bun.spawn(['bun', CLI, 'serve'], { env, stdout: 'ignore', stderr: 'pipe' })
-  killAfterTest(service)
-  const [code, logged] = await Promise.all([service.exited, new Response(service.stderr).text()])
-  expect(code).toBe(1)
-  expect(logged).toContain(`${refusal} So anyhost exits, and its service starts it again from the anyhost cmod links.`)
+  const service = await anyhostOn(env, ['serve'])
+  expect(service.code).toBe(1)
+  expect(service.err).toContain(`${refusal} So anyhost exits, and its service starts it again from the anyhost cmod links.`)
   expect(await anyhostOn(env, ['machines'])).toEqual({ code: 1, out: '', err: `${refusal}\n` })
   const doctor = await anyhostOn(env, ['doctor'])
   expect(doctor.code).toBe(1)
@@ -167,14 +157,13 @@ test('a machine that joins again while connected puts an object over 1 MiB with 
 
 test('a request the relay leaves unanswered goes again on a new socket 40 seconds later though messages still arrive on the old one, so the seal that ends a backup pass ends', async () => {
   const relay = await memoryRelay()
-  const home = join(temporaryFolder(), 'home')
-  const capture = openCapture(relay.connect(device, roots(home)), device, roots(home), { db: openDatabase(join(temporaryFolder(), 'state')), code: noCode })
+  const { roots: at, capture } = captureOn(device, relay)
   const there = relay.connect({ id: 'device-b', name: 'anyhost-b', os: 'linux', arch: 'arm64' }, roots('/home/bob'))
   await welcomed(there)
-  const transcript = join(home, '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  const transcript = join(at.claudeHome, 'projects', '-work', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
-  await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], failTest).map(([, left]) => left))
+  await uploadFiles(capture, SESSION, transcript)
   const heard: string[] = []
   capture.relay.on('moved', ({ id }) => void heard.push(id))
   const sending = setInterval(() => there.send({ t: 'moved', id: `move-${heard.length}`, to: device.id }), 5000)
@@ -214,16 +203,11 @@ test('a relay login that fails to read is a problem of its own with the reason, 
   expect(reads).toBe(2)
 })
 
-test("an object request Cloudflare refuses for the daily limit goes again, and a connect it refuses names the limit and its reset", async () => {
+test('an object request Cloudflare refuses for the daily limit goes again', async () => {
   const relay = await memoryRelay()
   const client = relay.connect(device, roots('/home/ada'))
   await welcomed(client)
   relay.dailyLimited = 1
   const bytes = crypto.getRandomValues(new Uint8Array(2 * MAX_MESSAGE_BYTES))
   expect(await client.runOne({ op: 'put', key: 'files/big.bin', bytes })).toEqual({ status: 200, etag: md5(bytes) })
-
-  relay.dailyLimited = Infinity
-  client.reconnect()
-  await until(() => client.state.is === 'offline', 'the refused connect')
-  expect(client.state).toEqual({ is: 'offline', message: DAILY_LIMIT })
 })

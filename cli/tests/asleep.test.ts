@@ -3,8 +3,8 @@ import { appendFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { LIVE_MS, PING_MS } from '../../relay/protocol.ts'
 import { journalOf, openCapture, openDatabase } from '../src/capture.ts'
-import { memoryRelay, noCode, statusOn, temporaryFolder, until, welcomed } from './memory.ts'
-import { claimOn, DESKTOP, LAPTOP, listedConnected, roots, runningOn, SESSION } from './program.ts'
+import { memoryRelay, noCode, statusOn, until, welcomed } from './memory.ts'
+import { claimOn, DESKTOP, LAPTOP, listedConnected, roots, runningOn, SESSION, temporaryFolder } from './program.ts'
 
 test('a laptop gone silent with a drain in flight while the desktop takes its session refuses that session\'s next prompt once it connects again, and the Pool stores no frame of it after the take', async () => {
   const relay = await memoryRelay()

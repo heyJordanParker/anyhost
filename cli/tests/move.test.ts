@@ -1,10 +1,10 @@
-import { expect, onTestFinished, test } from 'bun:test'
+import { expect, test } from 'bun:test'
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { decompress, hotKey } from '../src/capture.ts'
+import { hotKey } from '../src/capture.ts'
 import { isPaused } from '../src/claude.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
-import { claimOn, decoder, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, stepsOf, WORKER, workerOn } from './program.ts'
+import { claimOn, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
 
 const OTHER = '99999999-2222-3333-4444-555555555555'
 
@@ -65,11 +65,43 @@ test('a move waits out the turn that starts as one ends, as a background command
   expect(laptop.claude.signalCode).toBe('SIGTERM')
 }, 60_000)
 
+test('a move of a session whose record still says busy after its turn ended, as while its background agents run, waits until the record says idle', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  await workerOn(relay)
+  const record = join(laptop.env['HOME'] ?? '', '.claude', 'sessions', `${laptop.claude.pid}.json`)
+  writeFileSync(record, JSON.stringify({ pid: laptop.claude.pid, sessionId: SESSION, kind: 'interactive', cwd: laptop.cwd, status: 'busy', statusUpdatedAt: Date.now() - 60_000 }))
+  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: laptop.cwd })
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  await stepsOf(laptop.socket, new Set(['waiting']))
+  await Bun.sleep(3000)
+  const whileBusy = (await claimOn(laptop.socket)).move?.step
+  laptop.status('idle')
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(whileBusy).toBe('waiting')
+  expect(last.step).toBe('moved')
+}, 60_000)
+
+test("a move of a session Claude Code handed to the background, whose record still says busy, moves at once", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  await workerOn(relay)
+  const record = join(laptop.env['HOME'] ?? '', '.claude', 'sessions', `${laptop.claude.pid}.json`)
+  writeFileSync(record, JSON.stringify({ pid: laptop.claude.pid, sessionId: SESSION, kind: 'interactive', cwd: laptop.cwd, status: 'busy', statusUpdatedAt: Date.now(), parkedJobId: 'a1b2c3d4' }))
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  const { last } = await stepsOf(laptop.socket)
+
+  expect(last.step).toBe('moved')
+}, 60_000)
+
 test('a move of a session whose first frame R2 lost uploads its files whole again, and the worker restores every byte', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   writeFileSync(laptop.transcript, `{"type":"user","cwd":"${laptop.cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Book the train"}}\n`, { flag: 'a' })
-  await until(() => relay.puts.some(({ key, body }) => key.includes('/hot/') && decoder.decode(decompress(body)).includes('Book the train')), 'the second line uploading', 15_000)
+  await until(() => relay.puts.some(({ key, body }) => key.includes('/hot/') && textOfFrame(body).includes('Book the train')), 'the second line uploading', 15_000)
   await relay.objects.delete(hotKey(SESSION, 0))
   const worker = await workerOn(relay)
 
@@ -215,8 +247,7 @@ test('a move of a session that keeps writing while its code cannot be read ends 
 test('a program that restarts while a move paused its copy resumes that copy once the relay welcomes it, as this machine still holds the session, and leaves a copy the person suspended suspended', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  const suspended = Bun.spawn(['sleep', '600'], { detached: true })
-  onTestFinished(() => suspended.kill('SIGKILL'))
+  const suspended = spawnForTest(['sleep', '600'])
   writeFileSync(join(laptop.env['HOME'] ?? '', '.claude', 'sessions', `${suspended.pid}.json`), JSON.stringify({ pid: suspended.pid, sessionId: OTHER, kind: 'interactive', cwd: laptop.cwd, status: 'idle' }))
   suspended.kill('SIGSTOP')
   laptop.child.kill('SIGTERM')
@@ -233,9 +264,11 @@ test('a program that restarts while a move paused its copy resumes that copy onc
   expect(isPaused(suspended.pid)).toBe(true)
 }, 60_000)
 
+const IGNORES_SIGTERM = ['bash', '-c', "trap '' TERM; while true; do sleep 1; done"]
+
 test('a moved copy here that ignores its SIGTERM ends with SIGKILL 10 s later, and the move reaches moved, with no problem in /status', async () => {
   const relay = await memoryRelay()
-  const laptop = await runningOn(relay, LAPTOP, {}, ['bash', '-c', "trap '' TERM; while true; do sleep 1; done"])
+  const laptop = await runningOn(relay, LAPTOP, {}, IGNORES_SIGTERM)
   await workerOn(relay)
 
   const askedAt = Date.now()
@@ -252,3 +285,20 @@ test('a moved copy here that ignores its SIGTERM ends with SIGKILL 10 s later, a
   const { problems } = await statusOn(laptop.socket)
   expect(problems.filter((problem) => problem.includes(`move ${SESSION}`))).toEqual([])
 }, 60_000)
+
+let stubborn: readonly number[] = []
+
+test('a test machine whose Claude Code stand-in ignores SIGTERM runs it, its program and every child they start in process groups its test owns', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay, LAPTOP, {}, IGNORES_SIGTERM)
+  await until(() => Bun.spawnSync(['pgrep', '-P', String(laptop.claude.pid)]).stdout.toString().trim() !== '', 'the stand-in starting its sleep')
+
+  stubborn = [laptop.claude.pid, laptop.child.pid, ...Bun.spawnSync(['pgrep', '-P', String(laptop.claude.pid)]).stdout.toString().trim().split('\n').map(Number)]
+
+  expect(laptop.claude.signalCode).toBeNull()
+}, 60_000)
+
+test('the test before it leaves no process once it ends', () => {
+  expect(stubborn.length).toBeGreaterThan(2)
+  expect(stubborn.filter((pid) => Bun.spawnSync(['kill', '-0', String(pid)]).exitCode === 0)).toEqual([])
+})

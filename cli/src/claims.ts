@@ -22,7 +22,7 @@ export async function takeClaim(relay: Relay, session: string, options: { readon
   return answer
 }
 
-export type Holders = { current(): Promise<ReadonlyMap<string, string>> }
+export type Holders = { current(): Promise<ReadonlyMap<string, string>>; known(): ReadonlyMap<string, string> }
 
 export function followHolders(relay: Relay, db: Database): Holders {
   const changedHere = (): number => db.query<{ changed: number }, []>('select changed from holders_changed').get()?.changed ?? 0
@@ -75,11 +75,13 @@ export function followHolders(relay: Relay, db: Database): Holders {
     if (claimed.changed === since + 1 && reading === undefined) apply([claimed])
     else void catchUp().catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not read which machine holds each session: ${String(error)}`))
   })
+  const known = (): ReadonlyMap<string, string> => new Map(db.query<{ session: string; device: string }, []>('select session, device from holders').all().map(({ session, device }) => [session, device]))
   return {
     async current() {
       if (!isCaughtUp) await catchUp()
       else if (reading !== undefined) await reading
-      return new Map(db.query<{ session: string; device: string }, []>('select session, device from holders').all().map(({ session, device }) => [session, device]))
+      return known()
     },
+    known,
   }
 }

@@ -92,7 +92,16 @@ function programChecks(address: string, status: Status | undefined): Check[] {
           ]
   const update: Check[] = updateProblem === undefined || isOutdatedUpdate ? [] : [{ problem: updateProblem, fix: state === 'unjoined' ? UPDATE : UPDATE_FROM_TERMINAL }]
   const retried = status.problems.map((problem): Check => ({ problem, fix: 'The program tries this again by itself, and this line goes once it works.' }))
-  return [connection, ...join, ...update, ...retried, ...gaps]
+  const { rewritten } = status
+  const history: Check[] =
+    rewritten === undefined || rewritten.journals === 0
+      ? []
+      : rewritten.done >= rewritten.journals
+        ? [{ ok: `All ${rewritten.journals} journals in R2 keep their history as shared chunks.` }]
+        : rewritten.olderMachines.length > 0
+          ? [{ wait: `${rewritten.done} of the ${rewritten.journals} journals in R2 keep their history as shared chunks, and no machine rewrites the rest while ${rewritten.olderMachines.join(', ')} has not connected with anyhost 0.9.0 or newer.` }]
+          : [{ wait: `Your machines rewrite the journals in R2 into shared chunks, each one a minute up to a daily budget: ${rewritten.done} of ${rewritten.journals} so far.` }]
+  return [connection, ...history, ...join, ...update, ...retried, ...gaps]
 }
 
 function terminalCheck(): Check {

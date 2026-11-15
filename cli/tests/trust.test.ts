@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { memoryRelay, temporaryFolder, until } from './memory.ts'
-import { CLI, configOf, killAfterTest, LAPTOP, machineFor, postTo, runningOn, serveOn, SESSION, startedOn, stepsOf, tripOn, trust, trustedIn, WORKER, workerOn } from './program.ts'
+import { memoryRelay, until } from './memory.ts'
+import { CLI, configOf, LAPTOP, machineFor, postTo, runningOn, serveOn, SESSION, spawnForTest, startedOn, stepsOf, temporaryFolder, tripOn, trust, trustedIn, WORKER, workerOn } from './program.ts'
 
 test('a move carries the trust of the session\'s folder: the worker trusts the folder it continues in, keeping the rest of its config and its config\'s symlink', async () => {
   const relay = await memoryRelay()
@@ -114,8 +114,7 @@ test('anyhost new trusts nothing on the worker when the laptop trusts only a fol
   const checkout = tripOn(laptop)
   trust(laptop, laptop.env['HOME'] ?? '')
 
-  const started = Bun.spawn(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
-  killAfterTest(started)
+  spawnForTest(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
   await until(async () => (await relay.claims()).get(startedOn(worker)) === WORKER.id, 'the session starting on the worker', 30_000)
 
   expect(trustedIn(worker)).toEqual([])

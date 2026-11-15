@@ -1,4 +1,4 @@
-export const RELAY_VERSION = 6
+export const RELAY_VERSION = 7
 export const PROTOCOL_VERSION = 2
 export const COMPATIBILITY_DATE = '2026-11-01'
 
@@ -44,9 +44,16 @@ export type Refusal = { readonly error: ErrorCode; readonly message: string }
 export type Roots = { readonly home: string; readonly claudeHome: string; readonly claudeTmp: string; readonly codexHome: string }
 export type DeviceRef = { readonly id: string; readonly name: string }
 export type JoiningDevice = DeviceRef & { readonly os: string; readonly arch: string; readonly roots: Roots }
-export type Device = JoiningDevice & { readonly connected: boolean; readonly seenAt: string; readonly removedAt?: string }
+export type Device = JoiningDevice & { readonly connected: boolean; readonly seenAt: string; readonly removedAt?: string; readonly program?: string }
 
 export type Health = { readonly relay: number; readonly protocol: number; readonly bucket: string }
+
+export function isOlder(version: string, than: string): boolean {
+  const ours = version.split('.').map(Number)
+  const theirs = than.split('.').map(Number)
+  const at = ours.findIndex((part, index) => part !== theirs[index])
+  return at >= 0 && (ours[at] ?? 0) < (theirs[at] ?? 0)
+}
 export type JoinRequest = { readonly invite: string; readonly device: JoiningDevice }
 export type Joined = Health & { readonly token: string; readonly device: DeviceRef }
 
@@ -60,7 +67,7 @@ export type Op =
   | { readonly op: 'get'; readonly key: string; readonly if?: { readonly noneMatch: string } }
   | { readonly op: 'put'; readonly key: string; readonly size: number; readonly if?: Condition; readonly holder?: string }
   | { readonly op: 'list'; readonly prefix: string; readonly cursor?: string }
-  | { readonly op: 'delete'; readonly keys: readonly string[] }
+  | { readonly op: 'delete'; readonly keys: readonly string[]; readonly holder?: string }
   | { readonly op: 'claim'; readonly session: string; readonly take: boolean; readonly if?: TakeCondition }
   | { readonly op: 'claims'; readonly prefix?: string }
   | { readonly op: 'changes'; readonly since: number }
@@ -75,7 +82,7 @@ export type Results = {
   readonly get: { readonly status: 200; readonly etag: string; readonly size: number } | { readonly status: 304; readonly etag: string } | { readonly status: 404 } | { readonly status: 413; readonly size: number; readonly etag: string }
   readonly put: { readonly status: 200; readonly etag: string } | { readonly status: 412; readonly etag?: string } | { readonly status: 409; readonly holder: DeviceRef }
   readonly list: { readonly status: 200; readonly objects: readonly Listed[]; readonly cursor?: string }
-  readonly delete: { readonly status: 200 }
+  readonly delete: { readonly status: 200 } | { readonly status: 409; readonly holder: DeviceRef }
   readonly claim:
     | { readonly status: 200; readonly told: true; readonly at: string }
     | { readonly status: 200; readonly previous: DeviceRef; readonly told: false; readonly at: string }
@@ -104,12 +111,15 @@ export type Routed =
   | { readonly t: 'start'; readonly id: string; readonly to: string; readonly repo: string; readonly branch: string; readonly folder: string; readonly trusted: boolean; readonly prompt: string; readonly sender?: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly session: string }
   | { readonly t: 'started'; readonly id: string; readonly to: string; readonly error: string }
-  | { readonly t: 'tell'; readonly id: string; readonly to: string; readonly session: string; readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string; readonly messages?: number }
-  | { readonly t: 'told'; readonly id: string; readonly to: string; readonly status: AgentStatus; readonly screen: string; readonly messages?: readonly Message[] }
+  | { readonly t: 'tell'; readonly id: string; readonly to: string; readonly session: string; readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string; readonly messages?: number; readonly skip?: number; readonly sleep?: boolean }
+  | { readonly t: 'told'; readonly id: string; readonly to: string; readonly status: AgentStatus; readonly screen: string; readonly messages?: readonly Message[]; readonly terminal?: string }
   | { readonly t: 'told'; readonly id: string; readonly to: string; readonly error: string }
   | { readonly t: 'delete'; readonly id: string; readonly to: string; readonly session: string }
   | { readonly t: 'deleted'; readonly id: string; readonly to: string; readonly session: string }
   | { readonly t: 'deleted'; readonly id: string; readonly to: string; readonly error: string }
+  | { readonly t: 'fork'; readonly id: string; readonly to: string; readonly session: string; readonly message: string }
+  | { readonly t: 'forked'; readonly id: string; readonly to: string; readonly session: string }
+  | { readonly t: 'forked'; readonly id: string; readonly to: string; readonly error: string }
   | { readonly t: 'list'; readonly id: string; readonly to: string }
   | { readonly t: 'listed'; readonly id: string; readonly to: string; readonly statuses: Readonly<Record<string, AgentStatus>> }
 export type AgentStatus = 'working' | 'idle' | 'waiting'

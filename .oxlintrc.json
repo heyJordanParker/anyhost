@@ -4,8 +4,17 @@
     "cli/dist/**",
     "relay/dist/**"
   ],
-  "jsPlugins": ["./lint/comments.js"],
+  "jsPlugins": ["./lint/anyhost.js"],
   "rules": {
     "anyhost/no-comments": "error"
-  }
+  },
+  "overrides": [
+    {
+      "files": ["herdr/**/*.js"],
+      "rules": {
+        "anyhost/ui-tokens": "error",
+        "anyhost/ui-primitives": "error"
+      }
+    }
+  ]
 }
