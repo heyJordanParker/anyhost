@@ -15,6 +15,7 @@ type Agent = {
   readonly cwd: string
   readonly archived: boolean
   readonly parent: string
+  readonly source: string
 }
 type Message = { readonly role: 'user' | 'assistant'; readonly at: string; readonly text: string }
 type Machines = { readonly here: string; readonly machines: readonly { readonly id: string; readonly name: string; readonly connected: boolean; readonly seenAt: string }[] }
@@ -24,7 +25,7 @@ const AGENT = { type: 'string', description: 'The agent id, or its first 8 chara
 const WAKES = 'An idle agent takes the message at once, works, and rests again on its own.'
 
 export function agentTools(mod: Mod<AnyhostState>) {
-  const tell = (agent: string, told: { readonly text?: string; readonly keys?: readonly string[]; readonly lines?: number; readonly messages?: number; readonly sender?: string }): Promise<Told> =>
+  const tell = (agent: string, told: { readonly text?: string; readonly keys?: readonly string[]; readonly lines?: number; readonly messages?: number; readonly skip?: number; readonly sleep?: boolean; readonly sender?: string }): Promise<Told> =>
     askProgram<Told>(mod, '/agents/tell', { session: agent, ...told })
   const agentsNow = async (): Promise<readonly Agent[]> => (await askProgram<{ readonly agents: readonly Agent[] }>(mod, '/agents')).agents
   const found = (agents: readonly Agent[], agent: string): Agent => {
@@ -64,7 +65,7 @@ export function agentTools(mod: Mod<AnyhostState>) {
     tool({
       name: 'list_agents',
       description:
-        "List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder, whether it is archived, and its parent: the agent that started it with start_agent, with that agent's title and the machine that holds it, or null. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. tell_agent, read_agent, press_keys, move_agent and open_agent reach Claude Code agents alone, so a Codex agent is listed and archived but not prompted. Archived agents are left out unless archived is true. children_of lists only the agents one agent started, `me` the ones this agent started.",
+        "List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder, whether it is archived, its parent: the agent that started it with start_agent and manages it, and its source: the agent whose conversation it was forked from, each with that agent's title and the machine that holds it, or null. A fork has a source and no parent. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. tell_agent, read_agent's screen, press_keys and show_agent reach a Codex agent only while it runs in a terminal of herdr-core, and sleep_agent, read_agent's messages, move_agent and open_agent reach Claude Code agents alone. Archived agents are left out unless archived is true. children_of lists only the agents one agent started, `me` the ones this agent started.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -77,26 +78,28 @@ export function agentTools(mod: Mod<AnyhostState>) {
         const agents = await agentsNow()
         const parent = childrenOf === undefined ? undefined : childrenOf === 'me' ? sessions.current.id : found(agents, childrenOf).id
         const byId = new Map(agents.map((agent) => [agent.id, agent]))
+        const named = (agent: string): { readonly id: string; readonly title: string; readonly machine: string } | null => {
+          const known = byId.get(agent)
+          return agent === '' ? null : { id: agent, title: known?.title ?? '', machine: known === undefined ? '' : known.holder || known.machine }
+        }
         return agents
           .filter((agent) => (archived || !agent.archived) && (parent === undefined || agent.parent === parent))
           .slice(0, limit)
-          .map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd, archived: isArchived, parent: startedBy }) => {
-            const starter = byId.get(startedBy)
-            return {
-              id,
-              tool: kind,
-              title,
-              firstPrompt: firstPrompt.slice(0, 200),
-              machine,
-              holder,
-              status,
-              lastActivity,
-              repo,
-              cwd,
-              archived: isArchived,
-              parent: startedBy === '' ? null : { id: startedBy, title: starter?.title || starter?.firstPrompt.slice(0, 80) || '', machine: starter === undefined ? '' : starter.holder || starter.machine },
-            }
-          })
+          .map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd, archived: isArchived, parent: startedBy, source }) => ({
+            id,
+            tool: kind,
+            title,
+            firstPrompt: firstPrompt.slice(0, 200),
+            machine,
+            holder,
+            status,
+            lastActivity,
+            repo,
+            cwd,
+            archived: isArchived,
+            parent: named(startedBy),
+            source: named(source),
+          }))
       },
     }),
     tool({
@@ -122,17 +125,39 @@ export function agentTools(mod: Mod<AnyhostState>) {
     tool({
       name: 'read_agent',
       description:
-        "Read an agent wherever it runs, without waking it: its status and screen, or with messages its last messages, what it was told and what it answered, from its conversation on the machine that holds it, running or not. An agent's answer to the task start_agent gave it is its last assistant message.",
+        "Read an agent wherever it runs, without waking it: its status and screen, or with messages its conversation, what it was told and what it answered, from the machine that holds it, running or not. An agent's answer to the task start_agent gave it is its last assistant message, messages 1. skip pages back through its whole history.",
       inputSchema: {
         type: 'object',
         properties: {
           agent: AGENT,
-          lines: { type: 'integer', minimum: 0, description: 'Lines of history above the screen, 0 by default. herdr-core reads history only while the agent is not working.' },
-          messages: { type: 'integer', minimum: 1, description: 'Read this many of its last messages instead of its screen.' },
+          lines: { type: 'integer', minimum: 0, description: 'Lines of the terminal above the screen, 0 by default. herdr-core reads them only while the agent is not working.' },
+          messages: { type: 'integer', minimum: 1, description: 'Read this many of its messages instead of its screen, the newest last.' },
+          skip: { type: 'integer', minimum: 0, description: 'With messages: leave out this many of the newest first, 0 by default, so messages 20 skip 20 reads the 20 before the last 20.' },
         },
         required: ['agent'],
       },
-      execute: ({ agent, lines = 0, messages }) => tell(agent, messages === undefined ? { lines } : { messages }),
+      execute: ({ agent, lines = 0, messages, skip = 0 }) => tell(agent, messages === undefined ? { lines } : { messages, skip }),
+    }),
+    tool({
+      name: 'sleep_agent',
+      description:
+        "Stop an agent wherever it runs: its Claude Code ends once its turn ends, and its terminal stays with its last reply, so its tab and place on screen stay. tell_agent wakes it with its whole conversation. press_keys esc stops a turn without stopping the agent.",
+      inputSchema: { type: 'object', properties: { agent: AGENT }, required: ['agent'] },
+      execute: async ({ agent }) => {
+        const told = await tell(agent, { sleep: true })
+        return `${told.session.slice(0, 8)} on ${told.machine} goes to sleep once its turn ends. It is ${told.status} now.`
+      },
+    }),
+    tool({
+      name: 'show_agent',
+      description:
+        "Show an agent's terminal on this machine's Herdr app, as a terminal multiplexer shows a pane: focus brings it on screen in its tab, peek shows it over the screen with Keep and Close, tab gives it a tab of its own, right and down show it live beside or below the person's focused pane, and hide takes its pane away while the agent runs on. An agent another machine runs shows from there; one that runs nowhere starts here.",
+      inputSchema: {
+        type: 'object',
+        properties: { agent: AGENT, place: { type: 'string', enum: ['focus', 'peek', 'tab', 'right', 'down', 'hide'], description: 'focus by default.' } },
+        required: ['agent'],
+      },
+      execute: ({ agent, place = 'focus' }) => askProgram<{ readonly session: string; readonly machine: string; readonly terminal: string }>(mod, '/agents/show', { session: agent, place }),
     }),
     tool({
       name: 'press_keys',
@@ -164,6 +189,30 @@ export function agentTools(mod: Mod<AnyhostState>) {
       },
     }),
     tool({
+      name: 'settle_agent',
+      description:
+        'Settle an agent whose work rests, which moves it to the Settled shelf on every machine until its next message, and clears its pin and snooze, or with settled false keep it out of Settled until its next message, as an agent settles by itself once it sits idle the days the person chose.',
+      inputSchema: { type: 'object', properties: { agent: AGENT, settled: { type: 'boolean', description: 'true by default.' } }, required: ['agent'] },
+      execute: async ({ agent, settled = true }) => {
+        await askProgram(mod, '/agents/settle', { session: agent, settled })
+        return `${settled ? 'Settled' : 'Unsettled'} ${agent.slice(0, 8)}.`
+      },
+    }),
+    tool({
+      name: 'snooze_agent',
+      description:
+        'Snooze an agent on every machine until a time, which hides it on the Snoozed shelf until then, until a prompt reaches it, or until it waits for the person at a permission prompt. A finished turn never wakes it. until null wakes it now.',
+      inputSchema: {
+        type: 'object',
+        properties: { agent: AGENT, until: { type: ['string', 'null'], description: 'The ISO time it wakes, such as 2026-11-16T09:00:00.000Z, or null to wake it now.' } },
+        required: ['agent', 'until'],
+      },
+      execute: async ({ agent, until }) => {
+        await askProgram(mod, '/agents/snooze', { session: agent, until })
+        return until === null ? `Woke ${agent.slice(0, 8)}.` : `Snoozed ${agent.slice(0, 8)} until ${until}.`
+      },
+    }),
+    tool({
       name: 'delete_agent',
       description:
         'Delete an agent wherever it is held: the machine that holds it stops it, working or not, and deletes its conversation and files there and in R2, so every machine lists it under Deleted. Opening a deleted agent with open_agent brings it back. An agent cannot delete itself.',
@@ -174,6 +223,17 @@ export function agentTools(mod: Mod<AnyhostState>) {
         await askProgram(mod, '/agents/delete', { session: id })
         return `Deleted ${id.slice(0, 8)}.`
       },
+    }),
+    tool({
+      name: 'fork_agent',
+      description:
+        "Fork a Claude Code agent into a new agent that holds its conversation up to a message, by default its end, on the machine that holds it, titled after it with (fork), with the agent forked as its source in list_agents. A fork is an agent of its own, never a child of the agent forked. A fork at the end that nobody opens is a duplicate, and one at an earlier message a split. Its history refers to the source's and uploads only what it adds. open_agent or tell_agent then runs it.",
+      inputSchema: {
+        type: 'object',
+        properties: { agent: AGENT, at: { type: 'string', description: "The uuid of the message the fork ends with, from the agent's transcript. Leave it out to fork at the end." } },
+        required: ['agent'],
+      },
+      execute: ({ agent, at = '' }) => askProgram<{ readonly session: string; readonly machine: string }>(mod, '/agents/fork', { session: agent, at }),
     }),
     tool({
       name: 'open_agent',
