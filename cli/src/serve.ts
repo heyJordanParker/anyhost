@@ -418,9 +418,12 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const queue = new UploadQueue(
     uploadEveryOf(undefined),
     (sessions) => {
-      const heavy = new Set(sessions.filter((changed) => isHeavyUpload(capture, changed)))
-      const light = sessions.filter((changed) => !heavy.has(changed))
-      return [...(light.length === 0 ? [] : uploadSessions(capture, light, problems, queue.uploadEvery === 0)), ...[...heavy].map((changed) => [changed, uploadInJob(changed)] as const)].map(([changed, upload]) => uploaded(changed, upload))
+      const heavy = Promise.all(sessions.map((changed) => isHeavyUpload(capture, changed)))
+      const light = heavy.then((isHeavy) => {
+        const each = sessions.filter((_, at) => isHeavy[at] !== true)
+        return new Map(each.length === 0 ? [] : uploadSessions(capture, each, problems, queue.uploadEvery === 0))
+      })
+      return sessions.map((changed, at) => uploaded(changed, heavy.then(async (isHeavy) => (isHeavy[at] === true ? await uploadInJob(changed) : await ((await light).get(changed) ?? Promise.resolve(new Set<string>()))))))
     },
     (session, error) => problems.set(`upload ${session}`, error),
     () => relay.state.is === 'connected',

@@ -420,7 +420,8 @@ export async function storeChunks(capture: Pick<Capture, 'relay' | 'db'>, pieces
   const names = [...fresh.keys()]
   for (let from = 0; from < names.length; from += CHUNK_PUTS_AT_ONCE) {
     const batch = names.slice(from, from + CHUNK_PUTS_AT_ONCE)
-    const bodies = await Promise.all(batch.map((name) => storedChunk(fresh.get(name) ?? { bytes: new Uint8Array() }, name)))
+    const bodies: Uint8Array[] = []
+    for (const name of batch) bodies.push(await storedChunk(fresh.get(name) ?? { bytes: new Uint8Array() }, name))
     const answers = await Promise.all(relay.run(batch.map((name, at): Call => ({ op: 'put', key: chunkKey(name), bytes: bodies[at] ?? new Uint8Array(), if: { none: '*' } }))))
     for (const [at, answer] of answers.entries()) {
       const name = batch[at] ?? ''
@@ -543,10 +544,11 @@ export async function* chainOf(relay: Relay, frames: readonly Frame[], from: num
 const journalRow = (db: Database, session: string): JournalRow | null => db.query<JournalRow, [string]>('select * from journals where session = ?').get(session)
 const fileRow = (db: Database, session: string, path: string): FileRow | null => db.query<FileRow, [string, string]>('select * from files where session = ? and path = ?').get(session, path)
 
-export function isHeavyUpload(capture: Capture, { session, paths }: Changed): boolean {
-  if (journalOf(capture.db, session) === undefined) return true
+export async function isHeavyUpload(capture: Capture, { session, tool, paths }: Changed): Promise<boolean> {
+  const isFirst = journalOf(capture.db, session) === undefined
+  if (isFirst && tool === 'mod') return true
   let gained = 0
-  for (const path of paths) {
+  for (const path of isFirst ? new Set([...paths, ...(await filesOf(session, tool, capture.roots))]) : paths) {
     if (path.endsWith('/')) continue
     const size = statSync(path, { throwIfNoEntry: false })?.size ?? 0
     gained += Math.max(0, size - (fileRow(capture.db, session, path)?.local_size ?? 0))
@@ -1001,7 +1003,7 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
     budget -= change.header.chunks === undefined ? change.bytes.length : (change.fileBytes ?? change.bytes).length
     if (change.isPartial) left.add(path)
     if (data === undefined && path.endsWith('.jsonl')) {
-      const named = namedIn(new TextDecoder().decode(change.fileBytes ?? change.bytes), roots).filter((file) => !work.has(file))
+      const named = [...new Set(namedIn(change.fileBytes ?? change.bytes, roots))].filter((file) => !work.has(file))
       rememberFiles(db, session, named)
       for (const file of named) work.add(file)
     }
@@ -1063,8 +1065,8 @@ async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put
   if (failure !== undefined && 'error' in failure) throw failure.error
   const own = changes.filter(({ header }) => !linesFiles(roots).has(header.path) && header.path !== codexState(roots))
   const lastActivity = new Date(own.length === 0 ? Date.now() : Math.max(...own.map((change) => change.state.mtime))).toISOString()
-  const texts = await Promise.all(transcripts.map(({ header, bytes, fileBytes = bytes }) => (header.path.endsWith('.zst') ? zstdSummaryTextOf(Readable.from([fileBytes]), header.path) : new TextDecoder().decode(fileBytes))))
-  if (tool !== 'mod' && (await recordSummary(capture, session, tool, texts.join(''), end, lastActivity))) {
+  const texts = await Promise.all(transcripts.map(({ header, bytes, fileBytes = bytes }) => (header.path.endsWith('.zst') ? zstdSummaryTextOf(Readable.from([fileBytes]), header.path) : fileBytes)))
+  if (tool !== 'mod' && (await recordSummary(capture, session, tool, texts, end, lastActivity))) {
     await writeIndex(capture).then(() => problems.clear('index'), (error: unknown) => problems.set('index', error))
   }
   if (waiting !== undefined && !code.isDone) left.add(`${waiting.folder}/`)
@@ -1837,11 +1839,11 @@ function sessionRow(db: Database, id: string, tool: Tool): SessionRow {
   )
 }
 
-export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: string, tool: Tool, text: string, size: number, writtenAt: string): Promise<boolean> {
+export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: string, tool: Tool, texts: Iterable<Uint8Array | string>, size: number, writtenAt: string): Promise<boolean> {
   const { db } = capture
   const row = sessionRow(db, id, tool)
-  const before: Summary = { title: row.title, titleRank: row.title_rank, firstPrompt: row.first_prompt, cwd: row.cwd, repo: tool === 'codex' ? row.repo : '', entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source }
-  const after = summarize(before, text, tool)
+  let after: Summary = { title: row.title, titleRank: row.title_rank, firstPrompt: row.first_prompt, cwd: row.cwd, repo: tool === 'codex' ? row.repo : '', entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source }
+  for (const text of texts) after = summarize(after, text, tool)
   const lastActivity = after.lastActivity || writtenAt
   const checkout = after.cwd === row.cwd && row.last_activity !== '' ? { repo: row.repo, folder: row.repo_folder } : await checkoutOf(after.cwd)
   const title = (tool === 'codex' ? await codexNameOf(id, capture.roots.codexHome) : undefined) ?? after.title
@@ -1910,7 +1912,7 @@ export async function relistSessions(capture: Capture): Promise<number> {
     const files = paths.map((path) => ({ path, info: statSync(path) })).sort((a, b) => a.info.mtimeMs - b.info.mtimeMs)
     const text = (await Promise.all(files.map(({ path }) => summaryTextOf(path)))).join('')
     const size = files.reduce((total, { info }) => total + info.size, 0)
-    await recordSummary(capture, id, tool, text, size, new Date(Math.max(...files.map(({ info }) => info.mtimeMs))).toISOString())
+    await recordSummary(capture, id, tool, [text], size, new Date(Math.max(...files.map(({ info }) => info.mtimeMs))).toISOString())
     db.query('update sessions set titled = ? where id = ?').run(TITLE_RULES, id)
     if (row === undefined || db.query<Pick<SessionRow, 'last_said'>, [string]>('select last_said from sessions where id = ?').get(id)?.last_said !== '') relisted += 1
   }

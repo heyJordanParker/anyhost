@@ -769,7 +769,7 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
       mkdirSync(repo, { recursive: true })
       Bun.spawnSync(['git', 'init', '-q', repo])
       Bun.spawnSync(['git', '-C', repo, 'remote', 'add', 'origin', `git@github.com:bob/${name}.git`])
-      await recordSummary(capture, crypto.randomUUID(), 'claude', `{"type":"user","cwd":${JSON.stringify(repo)}}\n`, 1, new Date().toISOString())
+      await recordSummary(capture, crypto.randomUUID(), 'claude', [`{"type":"user","cwd":${JSON.stringify(repo)}}\n`], 1, new Date().toISOString())
     }
   }
   const ranInElsewhere = async (folder: string, capture: Capture): Promise<void> => {
@@ -778,7 +778,7 @@ test('resume puts a repository this machine lacks beside the checkouts it has, o
       mkdirSync(repo, { recursive: true })
       Bun.spawnSync(['git', 'init', '-q', repo])
       Bun.spawnSync(['git', '-C', repo, 'remote', 'add', 'origin', 'git@github.com:alice/shop.git'])
-      await recordSummary(capture, id, 'claude', `{"type":"user","cwd":${JSON.stringify(repo)}}\n`, 1, new Date().toISOString())
+      await recordSummary(capture, id, 'claude', [`{"type":"user","cwd":${JSON.stringify(repo)}}\n`], 1, new Date().toISOString())
     }
   }
   expect(await restoredInto(withCheckouts)).toBe('<home>/code/shop')
