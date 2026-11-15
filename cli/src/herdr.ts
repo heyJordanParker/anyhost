@@ -33,7 +33,6 @@ import undo from '../../herdr/anyhost/icons/undo-2.svg' with { type: 'text' }
 import pane from '../../herdr/anyhost/main.js' with { type: 'text' }
 import placement from '../../herdr/anyhost/mod.json'
 import { claudeStart, run } from './claude.ts'
-import { hcPath } from './hc.ts'
 
 const ICONS: Record<string, string> = {
   'alarm-clock-off.svg': alarmClockOff,
@@ -189,7 +188,9 @@ export const PLACES = ['focus', 'peek', 'tab', 'right', 'down', 'hide'] as const
 export type Place = (typeof PLACES)[number]
 type Shown = { readonly spaces: readonly { readonly tabs: readonly { readonly terminals: readonly { readonly terminal: string; readonly pane: string | null }[] }[] }[] }
 
-export async function showTerminal(terminal: string, place: Place): Promise<void> {
+const VIEW = 'export PATH="$HOME/.local/bin:$PATH"; hc label "$HC_TERMINAL_ID" "anyhost.view=$1"; exec hc attach "$2"'
+
+export async function showTerminal(session: string, terminal: string, place: Place): Promise<void> {
   const app = herdrApp()
   if (app === undefined) throw new Error('The Herdr app is not installed on this machine, so no screen here shows the session.')
   const say = async (command: string, args: Record<string, unknown>): Promise<void> => void (await run([app, 'do', command, JSON.stringify(args)]))
@@ -199,5 +200,5 @@ export async function showTerminal(terminal: string, place: Place): Promise<void
   if (place === 'hide') return pane === null ? undefined : await say('terminal.park', { terminal })
   if (pane === null) return await say('terminal.keep', { terminal, place: place === 'focus' ? 'tab' : place })
   if (place === 'focus' || place === 'tab') return await say('agent.focus', { terminal })
-  await say('pane.split', { direction: place, argv: [hcPath() ?? 'hc', 'attach', terminal] })
+  await say('pane.split', { direction: place, argv: ['sh', '-c', VIEW, 'view', session, terminal] })
 }

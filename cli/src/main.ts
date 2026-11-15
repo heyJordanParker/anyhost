@@ -26,7 +26,7 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost open <session> [--json]    run a session on this machine in a terminal of herdr-core, the one it runs in already when it does,
                                      and print that terminal: one in tmux comes in once its turn ends, one another machine holds comes here
   anyhost move <session> <machine>   move a session this machine runs to another machine, which runs it from then on
-  anyhost new <machine> <folder> [prompt]
+  anyhost new <machine> <folder> [prompt] [--json]
                                      start a session on a machine, this one too, in the same repository, and type prompt into it
   anyhost tell <session> [text]      type text into a session wherever it runs, waking it, and print its screen; no text only prints it
   anyhost tell <session> --messages <count> [--skip <count>]
@@ -342,7 +342,7 @@ async function main(argv: string[]): Promise<number> {
   if (command === 'new' && (rest.length === 2 || rest.length === 3) && rest[0] !== undefined && rest[1] !== undefined) {
     const [machine, folder, prompt = ''] = rest
     const session = await startThroughProgram(machine, folder, prompt)
-    console.log(`${machine} started ${session.slice(0, 8)} in a terminal of herdr-core there.`)
+    console.log(values.json === true ? JSON.stringify({ session, machine }) : `${machine} started ${session.slice(0, 8)} in a terminal of herdr-core there.`)
     return 0
   }
   if (command === 'open' && rest.length === 1 && rest[0] !== undefined) {

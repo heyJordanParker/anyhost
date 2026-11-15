@@ -597,7 +597,7 @@ export async function showAgent(capture: Capture, asked: string, place: Place, h
   const holder = (await claimsOf(capture.relay, session)).get(session)
   if (holder === undefined || holder.id === capture.device.id) {
     const terminal = await terminalOf(capture, session, here)
-    await showTerminal(terminal, place)
+    await showTerminal(session, terminal, place)
     return { session, machine: capture.device.name, terminal }
   }
   const reach = await reachOf(holder.id)
@@ -605,7 +605,7 @@ export async function showAgent(capture: Capture, asked: string, place: Place, h
   const told = await tell(capture, session, { text: '', keys: [], lines: 0, sender: '' }, here)
   if (told.terminal === undefined) throw new Error(`${holder.name} answered no terminal of ${session.slice(0, 8)}: it runs there in none, or its anyhost is older than this one.`)
   const terminal = `${reach}/${told.terminal}`
-  await showTerminal(terminal, place)
+  await showTerminal(session, terminal, place)
   return { session, machine: holder.name, terminal }
 }
 
