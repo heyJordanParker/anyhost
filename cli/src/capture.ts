@@ -1763,7 +1763,7 @@ export function rewriteProgress(capture: Capture): { readonly done: number; read
 
 export async function checkoutOf(cwd: string): Promise<{ repo: string; folder: string }> {
   const git = async (...args: string[]): Promise<string> => {
-    const child = Bun.spawn(['git', '-C', cwd, ...args], { stdout: 'pipe', stderr: 'ignore' })
+    const child = Bun.spawn(['git', '-C', cwd, ...args], { env: process.env, stdout: 'pipe', stderr: 'ignore' })
     const output = await new Response(child.stdout).text()
     return (await child.exited) === 0 ? output.trim() : ''
   }
@@ -1866,7 +1866,7 @@ const wholeLinesOf = (bytes: Uint8Array): string => new TextDecoder().decode(byt
 
 const endsTextOf = (head: Uint8Array, tail: Uint8Array): string => `${wholeLinesOf(head)}${wholeLinesOf(tail.subarray(tail.indexOf(10) + 1))}`
 
-async function summaryTextOf(path: string): Promise<string> {
+export async function summaryTextOf(path: string): Promise<string> {
   if (path.endsWith('.zst')) return await zstdSummaryTextOf(createReadStream(path), path)
   const file = Bun.file(path)
   if (file.size <= SUMMARY_END_BYTES) return wholeLinesOf(await file.bytes())

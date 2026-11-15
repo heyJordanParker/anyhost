@@ -27,6 +27,17 @@ test('a session terminal that herdr-core kept through its restart runs anyhost a
   expect(runsOn(laptop.folder)).toEqual([])
 }, 60_000)
 
+test("a program started from inside a Claude Code session runs herdr-core without that session's markers, so no terminal it reaches saves no transcript", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  coreSays(laptop.folder, { seq: 1, terminals: [terminalIn('t0', SHELL, { 'anyhost.session': SESSION })] })
+
+  await serveOn({ ...laptop.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_SESSION_ID: OTHER_SESSION })
+  await until(() => sentOn(laptop.folder).length > 0, 'the program typing into the kept shell', 15_000)
+
+  expect(logOf(laptop.folder, 'marked.log')).toEqual([])
+}, 60_000)
+
 test("closing a session's pane archives the session once, and a runner that ends by itself or a view of a session that ends archives nothing", async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)

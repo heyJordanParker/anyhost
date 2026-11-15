@@ -5,6 +5,7 @@ import { parseArgs } from 'node:util'
 import plugin from '../../.claude-plugin/plugin.json'
 import type * as Protocol from '../../relay/protocol.ts'
 import { openCapture, type Capture } from './capture.ts'
+import { forgetClaudeMarkers } from './claude.ts'
 import { connectCloudflare, join, type Connecting, type Progress } from './connect.ts'
 import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, otherMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder } from './device.ts'
 import { doctor } from './doctor.ts'
@@ -396,7 +397,8 @@ async function main(argv: string[]): Promise<number> {
 }
 
 try {
-  process.exitCode = await main(process.argv.slice(2))
+  forgetClaudeMarkers()
+process.exitCode = await main(process.argv.slice(2))
 } catch (error) {
   const isBusy = error instanceof Error && 'code' in error && error.code === 'SQLITE_BUSY'
   console.error(isBusy ? `The anyhost program is not answering at ${serveSocket()}, so this command read ${resolve(stateFolder(), 'anyhost.db')} itself, and the program kept it busy for over 5 s. anyhost doctor says why the program does not answer.` : error instanceof Error ? error.message : String(error))

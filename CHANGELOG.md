@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.1] - Unreleased
+
+### Fixed
+- Every session anyhost starts saves its transcript again. A program started from inside a Claude Code session passed that session's markers to herdr-core, and Claude Code saves no transcript for a session that carries them.
+
 ## [0.9.0] - 2026-11-15
 
 ### New

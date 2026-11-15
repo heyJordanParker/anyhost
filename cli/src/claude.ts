@@ -27,8 +27,14 @@ export type Run = {
   readonly asleepSince?: string
 }
 
+const CLAUDE_MARKERS = ['CLAUDECODE', 'CLAUDE_PID', 'AI_AGENT', 'CLAUDE_EFFORT', 'TRACEPARENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN']
+
+export const forgetClaudeMarkers = (): void => {
+  for (const name of CLAUDE_MARKERS) delete process.env[name]
+}
+
 export async function run(argv: readonly string[], options: { readonly cwd?: string; readonly env?: Record<string, string> } = {}): Promise<string> {
-  const child = Bun.spawn([...argv], { ...options, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+  const child = Bun.spawn([...argv], { env: process.env, ...options, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
   const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   if (code !== 0) throw new Error(`${argv.join(' ')} exited with ${code}: ${error.trim() || output.trim()}`)
   return output
@@ -60,7 +66,7 @@ export const startupChangedAt = (): number =>
   }))
 
 export async function saveLoginEnvironment(): Promise<Record<string, string>> {
-  const child = Bun.spawn(['env', 'DISABLE_AUTO_UPDATE=true', await loginShell(), '-i', '-l', '-c', `printf '${ENVIRONMENT_MARK.replaceAll('\0', '\\000')}'; env -0`], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', cwd: homedir(), timeout: ENVIRONMENT_MS, detached: true })
+  const child = Bun.spawn(['env', 'DISABLE_AUTO_UPDATE=true', await loginShell(), '-i', '-l', '-c', `printf '${ENVIRONMENT_MARK.replaceAll('\0', '\\000')}'; env -0`], { env: process.env, stdin: 'ignore', stdout: 'pipe', stderr: 'ignore', cwd: homedir(), timeout: ENVIRONMENT_MS, detached: true })
   const output = await new Response(child.stdout).text()
   if ((await child.exited) !== 0 || !output.includes(ENVIRONMENT_MARK)) throw new Error(`the login shell gave no environment within ${ENVIRONMENT_MS / 1000} s`)
   const pairs = output.slice(output.indexOf(ENVIRONMENT_MARK) + ENVIRONMENT_MARK.length).split('\0').filter((pair) => pair.includes('='))
