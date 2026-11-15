@@ -614,11 +614,15 @@ export default class Anyhost extends View {
     this.branchesVersion = 0;
     this.branchesReading = false;
     const cached = saved("listed", null);
-    if (cached?.listed) {
-      this.apply(cached.listed, 0, cached.readAt ?? null);
-      this.rebuild();
-      this.placeParts(cx);
-    }
+    this.isRestoring = Boolean(cached?.listed);
+    if (this.isRestoring)
+      cx.timer.after(0, (cx) => {
+        this.isRestoring = false;
+        if (this.data === null) this.apply(cached.listed, 0, cached.readAt ?? null);
+        this.rebuild();
+        this.placeParts(cx);
+        cx.notify();
+      });
     cx.spawn(async (cx) => {
       for (;;) {
         if (this.acts.length === 0) await new Promise((resolve) => (this.wake = resolve));
@@ -1908,7 +1912,7 @@ export default class Anyhost extends View {
 
   renderInbox(t, cx) {
     const shown = this.shown;
-    if (shown === null) return this.frameOf(t, [this.searchBar(t, filterOf(), null)], [this.empty(t, this.error === null ? "Reading your sessions…" : "anyhost could not read your sessions yet. It tries again every 30 seconds.")]);
+    if (shown === null) return this.frameOf(t, [this.searchBar(t, filterOf(), null)], this.isRestoring ? [] : [this.empty(t, this.error === null ? "Reading your sessions…" : "anyhost could not read your sessions yet. It tries again every 30 seconds.")]);
     const { model, filter } = shown;
     if (shown.isNarrow) return this.rail(t, shown.railed);
     const isHolding = this.isPointerIn || this.keys.is_focused();
@@ -2980,7 +2984,7 @@ export default class Anyhost extends View {
 
   renderBoard(t) {
     const board = this.board;
-    if (board === null) return v_flex().size_full().bg(t.background).child(this.empty(t, "Reading your sessions…"));
+    if (board === null) return v_flex().size_full().bg(t.background).when(!this.isRestoring, (el) => el.child(this.empty(t, "Reading your sessions…")));
     const { model, cards } = board;
     const columns = board[this.groupBy];
     const projectName = board.name;
