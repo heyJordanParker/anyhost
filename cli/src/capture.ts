@@ -72,6 +72,7 @@ export type Capture = Code & {
   readonly codeReadAt: Map<string, number>
   readonly codeLater: Map<string, ReturnType<typeof setTimeout>>
   readonly codeEveryMs: number
+  readonly readsCode: boolean
   readonly compactLagMs: number
   readonly codeSkipped: Set<string>
   readonly sealWaits: Map<string, { readonly failures: number; passes: number }>
@@ -199,6 +200,7 @@ export function openCapture(
     onReleased = () => undefined,
     onOtherRelay = () => undefined,
     codeEveryMs = CODE_EVERY_MS,
+    readsCode = true,
     compactLagMs = COMPACT_LAG_MS,
   }: {
     readonly db?: Database
@@ -207,6 +209,7 @@ export function openCapture(
     readonly onReleased?: Capture['onReleased']
     readonly onOtherRelay?: (url: string, bucket: string) => void
     readonly codeEveryMs?: number
+    readonly readsCode?: boolean
     readonly compactLagMs?: number
   } = {},
 ): Capture {
@@ -216,7 +219,7 @@ export function openCapture(
     if (isOther) onOtherRelay(relay.url, bucket)
   })
   const capture: Capture = {
-    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, compactLagMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
+    ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, readsCode, compactLagMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
     holders: followHolders(relay, db), fleet: UNREAD_FLEET, journalsInR2: { readAt: 0, isRewritten: new Map() }, dataFolders: [], lastIndex: '',
   }
   const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
@@ -1151,7 +1154,7 @@ async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put
   }
   if (waiting !== undefined && !code.isDone) left.add(`${waiting.folder}/`)
   if (code.isDone) capture.codeWaiting.delete(session)
-  if (changes.length > 0 || capture.codeStale.has(session)) startCode(capture, session, tool, problems)
+  if (capture.readsCode && (changes.length > 0 || capture.codeStale.has(session))) startCode(capture, session, tool, problems)
   return left
 }
 

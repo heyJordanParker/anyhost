@@ -3,7 +3,40 @@ import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, symli
 import { dirname, join } from 'node:path'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSessions } from '../src/capture.ts'
 import { failTest, memoryRelay, noCode, until, welcomed } from './memory.ts'
-import { decoder, HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, problemsOn, ranAnHourAgo, roots, serveOn, SESSION } from './program.ts'
+import { decoder, HOST, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, postTo, problemsOn, ranAnHourAgo, roots, serveOn, SESSION } from './program.ts'
+
+test("a session whose first capture is over 1 MiB uploads in a job, and its working folder's code goes up after it with no later change", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const home = laptop.env['HOME'] ?? ''
+  const cwd = join(home, 'work')
+  mkdirSync(cwd, { recursive: true })
+  writeFileSync(join(cwd, 'notes.txt'), 'the plan for the trip\n')
+  await serveOn(laptop.env)
+  await until(() => relay.isConnected(LAPTOP.id), 'the machine connecting')
+  const transcript = join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  const progress = Array.from({ length: 2000 }, (_, at) => `{"type":"progress","cwd":"${cwd}","sessionId":"${SESSION}","line":${at},"text":"${'x'.repeat(1100)}"}\n`).join('')
+  writeFileSync(transcript, `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Plan the trip"}}\n${progress}`)
+  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: cwd, event: 'sessionStart' })
+  const paths = async (): Promise<string[]> => {
+    const found: string[] = []
+    for (const key of await relay.keys(`journals/${SESSION}/hot/`)) {
+      const body = await decompress((await relay.read(key)) ?? new Uint8Array())
+      for (let at = 0; at < body.length; ) {
+        const newline = body.indexOf(10, at)
+        const header = JSON.parse(decoder.decode(body.subarray(at, newline))) as { path: string; size: number }
+        found.push(header.path)
+        at = newline + 1 + header.size
+      }
+    }
+    return found
+  }
+
+  await until(async () => (await paths()).includes(transcript), 'the transcript going up', 30_000)
+  expect(Buffer.byteLength(progress)).toBeGreaterThan(2 * 2 ** 20)
+  await until(async () => (await paths()).includes(`${cwd}/`), "the working folder's code going up", 30_000)
+}, 60_000)
 
 test("the program's start stats every captured file, and uploads a line a quiet session gained while the program did not run", async () => {
   const relay = await memoryRelay()

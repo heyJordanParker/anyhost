@@ -2,7 +2,7 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
 import { loginEnvironment, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, statusOf as sessionStatusOf, statusOfRecord, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
@@ -269,7 +269,6 @@ type JobLine = {
   readonly message?: string
   readonly clear?: string
   readonly released?: readonly [string, string]
-  readonly code?: readonly [string, Tool, string]
   readonly left?: readonly string[]
   readonly error?: string
 }
@@ -281,10 +280,7 @@ export async function work(device: Device): Promise<void> {
   const say = (line: JobLine): void => void process.stdout.write(`${JSON.stringify(line)}\n`)
   const roots = rootsHere()
   const relay = connectRelay({ login: async () => job.login, forget: async () => undefined, device, roots, isPatient: true })
-  const capture = openCapture(relay, device, roots, {
-    onCode: (session, tool, folder) => say({ code: [session, tool, folder] }),
-    onReleased: (session, holder) => say({ released: [session, holder] }),
-  })
+  const capture = openCapture(relay, device, roots, { readsCode: false, onReleased: (session, holder) => say({ released: [session, holder] }) })
   capture.dataFolders = job.dataFolders
   const problems: Problems = { set: (key, error) => say({ problem: key, message: error instanceof Error ? error.message : String(error) }), clear: (key) => say({ clear: key }) }
   try {
@@ -384,7 +380,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       if (said.problem !== undefined) problems.set(said.problem, said.message)
       if (said.clear !== undefined) problems.clear(said.clear)
       if (said.released !== undefined) capture.onReleased(...said.released)
-      if (said.code !== undefined) capture.onCode(...said.code)
       if (said.left !== undefined) left = new Set(said.left)
       if (said.error !== undefined) failure = said.error
     }
@@ -396,8 +391,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       for (const line of lines) if (line.startsWith('{')) heard(line)
     }
     await child.exited
-    if (left !== undefined) return left
-    throw new Error(failure || `anyhost work for ${changed.session} exited with ${child.exitCode} and answered nothing.`)
+    if (left === undefined) throw new Error(failure || `anyhost work for ${changed.session} exited with ${child.exitCode} and answered nothing.`)
+    startCode(capture, changed.session, changed.tool, problems)
+    return left
   }
   let jobs: Promise<unknown> = Promise.resolve()
   const uploadInJob = (changed: Changed): Promise<Set<string>> => {
