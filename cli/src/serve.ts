@@ -402,6 +402,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   const recordsChanged = (): void => {
     noteChildren()
+    labelNow()
     if (archivedBusy.size > 0) closingSettled = closingSettled.then(() => settle('archived', () => closeSettled()))
     sessionsChanged()
     for (const read of recordsHeard) read()
@@ -424,6 +425,18 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     for (const [address, terminal] of terminals) if (isHere(address) && terminal.state === 'live' && sessionIn(address) !== '') running.set(sessionIn(address), address)
     return running
   }
+  const labelledAs = new Map<string, string>()
+  const labelOwnRuns = async (): Promise<void> => {
+    const sessionOfPid = new Map((await recordedSessions(roots.claudeHome)).map(({ pid, sessionId }) => [pid, sessionId]))
+    for (const [address, terminal] of terminals) {
+      const session = terminal.pid === null ? undefined : sessionOfPid.get(terminal.pid)
+      if (!isHere(address) || terminal.state !== 'live' || session === undefined || sessionIn(address) === session || labelledAs.get(address) === session) continue
+      await label(address, SESSION_LABEL, session)
+      labelledAs.set(address, session)
+    }
+  }
+  let labelling = Promise.resolve()
+  const labelNow = (): void => void (labelling = labelling.then(() => settle('labelled', labelOwnRuns)))
   const isRunner = (terminal: Terminal): boolean => {
     const [program = '', command] = terminal.foreground?.argv ?? []
     return basename(program) === 'anyhost' && command === 'run'
@@ -515,6 +528,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const SHOWN_CHANGES = new Set(['created', 'restarted', 'labels', 'finished', 'removed'])
   const stopFollowing = followTerminals((now, change) => {
     terminals = now
+    if (change === undefined || change.type === 'created' || change.type === 'restarted') labelNow()
     if (change === undefined || (change.type === 'labels' && (now.get(change.address)?.labels[SLEEP_LABEL] ?? '') !== '')) discardNow()
     if (change !== undefined) archiveClosed(change)
     if (change?.type === 'turn' && labelledShown.has(change.address) && sessionIn(change.address) !== '') unvisited.add(sessionIn(change.address))

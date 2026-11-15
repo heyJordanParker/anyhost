@@ -107,6 +107,27 @@ test("a 0.9.0 terminal that holds no Claude Code, a kept shell or an asleep runn
   expect(Object.keys((await sharedIn(relay)).archived ?? {})).toEqual([])
 }, 60_000)
 
+test("a Claude Code the Herdr app runs as its terminal's own program gets its session's label, a /clear moves the label to the new session, and a claude a person typed into a shell stays unlabelled", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const recorded = (copy: Subprocess, session: string): void =>
+    writeFileSync(join(laptop.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions', `${copy.pid}.json`), JSON.stringify({ pid: copy.pid, sessionId: session, procStart: startOf(copy.pid), kind: 'interactive', status: 'idle', statusUpdatedAt: Date.now() }))
+  const own = spawnForTest(['sleep', '600'])
+  const typed = spawnForTest(['sleep', '600'])
+  recorded(own, SESSION)
+  recorded(typed, THIRD_SESSION)
+  coreSays(laptop.folder, { seq: 1, terminals: [{ ...terminalIn('t0', CLAUDE, {}), pid: own.pid, foreground: { argv: CLAUDE, pid: own.pid } }, { ...terminalIn('t1', SHELL, {}), foreground: { argv: CLAUDE, pid: typed.pid } }] })
+
+  await serveOn(laptop.env)
+  await until(() => logOf(laptop.folder, 'labels.log').length > 0, 'the program labelling the Claude Code terminal', 15_000)
+  coreSays(laptop.folder, coreEvent('labels', 't0', { labels: { 'anyhost.session': SESSION } }))
+  recorded(own, OTHER_SESSION)
+  await until(() => logOf(laptop.folder, 'labels.log').length > 1, 'the program moving the label at a /clear', 15_000)
+  await Bun.sleep(1000)
+
+  expect(logOf(laptop.folder, 'labels.log')).toEqual([`t0 anyhost.session=${SESSION}`, `t0 anyhost.session=${OTHER_SESSION}`])
+}, 60_000)
+
 test("closing a session's pane archives the session once, and a Claude Code that exits by itself or a terminal the program closes archives nothing", async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
