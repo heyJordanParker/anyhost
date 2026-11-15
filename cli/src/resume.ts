@@ -294,7 +294,7 @@ export async function restore(capture: Capture, id: string, options: { take: boo
   const restoredText = transcript === undefined ? '' : await Bun.file(transcript.path).text()
   if (transcript !== undefined && session.tool === 'claude') recordForkStarts(db, transcript.path, new TextEncoder().encode(restoredText))
   for (const kept of before) await keepConflictedCopy(capture, id, kept, restoredText)
-  await recordSummary(capture, id, session.tool, restoredText, replayed.end, session.lastActivity)
+  await recordSummary(capture, id, session.tool, [restoredText], replayed.end, session.lastActivity)
   await writeIndex(capture)
   await rm(staging, { recursive: true, force: true })
   if (claim.previous !== undefined && !claim.told) markUntold(db, id, claim.previous.name)

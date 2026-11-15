@@ -183,10 +183,53 @@ export async function filesOf(session: string, tool: Tool, roots: MachineRoots):
   return [...found.flat(), ...lines]
 }
 
-export function namedIn(text: string, roots: MachineRoots): string[] {
-  const plans = [...text.matchAll(/"planFilePath":("(?:[^"\\]|\\.)*")/g)].map((match) => JSON.parse(match[1] ?? '""') as string)
-  const pastes = [...text.matchAll(/"contentHash":"([0-9a-f]+)"/g)].map((match) => claudeFolder(roots, 'paste-cache', `${match[1]}.txt`))
-  return [...plans.filter((plan) => plan.startsWith('/')), ...pastes]
+const viewOf = (bytes: Uint8Array | string): Buffer => (typeof bytes === 'string' ? Buffer.from(bytes) : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength))
+const PLAN_MARK = Buffer.from('"planFilePath":"')
+const PASTE_MARK = Buffer.from('"contentHash":"')
+const PLAN_PATH_BYTES = 64 * 1024
+
+export function namedIn(bytes: Uint8Array, roots: MachineRoots): string[] {
+  const view = viewOf(bytes)
+  const named: string[] = []
+  for (let at = view.indexOf(PLAN_MARK); at >= 0; at = view.indexOf(PLAN_MARK, at + PLAN_MARK.length)) {
+    const quoted = /^"(?:[^"\\]|\\.)*"/.exec(view.toString('utf8', at + PLAN_MARK.length - 1, at + PLAN_MARK.length + PLAN_PATH_BYTES))?.[0]
+    const plan = quoted === undefined ? '' : (JSON.parse(quoted) as string)
+    if (plan.startsWith('/')) named.push(plan)
+  }
+  for (let at = view.indexOf(PASTE_MARK); at >= 0; at = view.indexOf(PASTE_MARK, at + PASTE_MARK.length)) {
+    const hash = /^([0-9a-f]+)"/.exec(view.toString('latin1', at + PASTE_MARK.length, at + PASTE_MARK.length + 130))?.[1]
+    if (hash !== undefined) named.push(claudeFolder(roots, 'paste-cache', `${hash}.txt`))
+  }
+  return named
+}
+
+const marks = (...texts: readonly string[]): readonly Buffer[] => texts.map((text) => Buffer.from(text))
+
+function lastLineOf<T>(view: Buffer, markers: readonly Buffer[], read: (line: string) => T | undefined): T | undefined {
+  for (let before = view.length; before > 0; ) {
+    const at = Math.max(...markers.map((marker) => view.lastIndexOf(marker, before - 1)))
+    if (at < 0) return undefined
+    const start = view.lastIndexOf(10, at) + 1
+    const newline = view.indexOf(10, at)
+    const found = read(view.toString('utf8', start, newline < 0 ? view.length : newline))
+    if (found !== undefined) return found
+    before = start
+  }
+  return undefined
+}
+
+function firstLineOf<T>(view: Buffer, markers: readonly Buffer[], read: (line: string) => T | undefined): T | undefined {
+  for (let from = 0; from < view.length; ) {
+    const found = markers.map((marker) => view.indexOf(marker, from)).filter((at) => at >= 0)
+    if (found.length === 0) return undefined
+    const at = Math.min(...found)
+    const newline = view.indexOf(10, at)
+    const value = read(view.toString('utf8', view.lastIndexOf(10, at) + 1, newline < 0 ? view.length : newline))
+    if (value !== undefined) return value
+    if (newline < 0) return undefined
+    from = newline + 1
+  }
+  return undefined
 }
 
 const CWD_LINE_LENGTH = 64 * 1024
@@ -295,27 +338,45 @@ function sourceOf(line: string): string | undefined {
   return typeof found === 'string' ? found : undefined
 }
 
-export function summarize(summary: Summary, text: string, tool: Tool): Summary {
-  let { title, titleRank, firstPrompt, cwd, repo, entrypoint, lastSaid, lastActivity, lastPromptAt, source } = summary
-  for (const line of text.split('\n')) {
-    if (line === '') continue
-    lastActivity = messageAtOf(line, tool) ?? lastActivity
-    cwd = cwdOf(line, tool) ?? cwd
-    const prompt = promptOf(line, tool)
-    if (firstPrompt === '') firstPrompt = oneLine(prompt ?? '')
-    if (prompt !== undefined) lastPromptAt = (JSON.parse(line) as { timestamp?: string }).timestamp ?? lastPromptAt
-    entrypoint = entrypointOf(line, tool) ?? entrypoint
-    lastSaid = lastSaidOf(line, tool) ?? lastSaid
-    source = sourceOf(line) ?? source
-    const type = /^\{"type":"([a-z-]+)"/.exec(line)?.[1]
-    const titled = type === undefined ? undefined : TITLES[type]
-    if (titled !== undefined && titled[1] >= titleRank) {
-      const value = (JSON.parse(line) as Record<string, unknown>)[titled[0]]
-      if (typeof value === 'string' && value.trim() !== '') [title, titleRank] = [oneLine(value), titled[1]]
-    }
-    if (tool === 'codex' && line.includes('"type":"session_meta"')) repo = (JSON.parse(line) as { payload?: { git?: { repository_url?: string } } }).payload?.git?.repository_url ?? repo
+const MARKS = {
+  claude: { message: marks('"type":"user"', '"type":"assistant"'), prompt: marks('"type":"user"'), entrypoint: marks('"entrypoint":"'), said: marks('"type":"assistant"') },
+  codex: { message: marks('"type":"response_item"'), prompt: marks('"user_message"', '"UserMessage"'), entrypoint: marks('"type":"session_meta"'), said: marks('"type":"response_item"') },
+} as const
+const CWD_MARK = marks('"cwd":"')
+const FORK_MARK = marks(FORKED_FROM)
+const META_MARK = marks('"type":"session_meta"')
+const TITLE_RANKS = [...new Set(Object.values(TITLES).map(([, rank]) => rank))].sort((a, b) => b - a)
+
+function titleOf(view: Buffer, atLeast: number): { readonly title: string; readonly titleRank: number } | undefined {
+  for (const rank of TITLE_RANKS.filter((each) => each >= atLeast)) {
+    const types = Object.entries(TITLES).filter(([, [, of]]) => of === rank)
+    const title = lastLineOf(view, marks(...types.map(([type]) => `{"type":"${type}"`)), (line) => {
+      const titled = TITLES[/^\{"type":"([a-z-]+)"/.exec(line)?.[1] ?? '']
+      const value = titled?.[1] === rank ? (JSON.parse(line) as Record<string, unknown>)[titled[0]] : undefined
+      return typeof value === 'string' && value.trim() !== '' ? oneLine(value) : undefined
+    })
+    if (title !== undefined) return { title, titleRank: rank }
   }
-  return { title, titleRank, firstPrompt, cwd, repo, entrypoint, lastSaid, lastActivity, lastPromptAt, source }
+  return undefined
+}
+
+export function summarize(summary: Summary, text: Uint8Array | string, tool: Tool): Summary {
+  const view = viewOf(text)
+  const mark = tool === 'mod' ? MARKS.claude : MARKS[tool]
+  const firstPrompt = summary.firstPrompt || (firstLineOf(view, mark.prompt, (line) => oneLine(promptOf(line, tool) ?? '') || undefined) ?? '')
+  const promptAt = (line: string): string | undefined => (promptOf(line, tool) === undefined ? undefined : (JSON.parse(line) as { timestamp?: string }).timestamp)
+  const repoOf = (line: string): string | undefined => (JSON.parse(line) as { payload?: { git?: { repository_url?: string } } }).payload?.git?.repository_url
+  return {
+    ...(titleOf(view, summary.titleRank) ?? { title: summary.title, titleRank: summary.titleRank }),
+    firstPrompt,
+    cwd: lastLineOf(view, CWD_MARK, (line) => cwdOf(line, tool)) ?? summary.cwd,
+    repo: (tool === 'codex' ? lastLineOf(view, META_MARK, repoOf) : undefined) ?? summary.repo,
+    entrypoint: lastLineOf(view, mark.entrypoint, (line) => entrypointOf(line, tool)) ?? summary.entrypoint,
+    lastSaid: lastLineOf(view, mark.said, (line) => lastSaidOf(line, tool)) ?? summary.lastSaid,
+    lastActivity: lastLineOf(view, mark.message, (line) => messageAtOf(line, tool)) ?? summary.lastActivity,
+    lastPromptAt: lastLineOf(view, mark.prompt, promptAt) ?? summary.lastPromptAt,
+    source: lastLineOf(view, FORK_MARK, sourceOf) ?? summary.source,
+  }
 }
 
 export const transcriptOf = (claudeHome: string, session: string): string | undefined => {
