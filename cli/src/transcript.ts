@@ -587,6 +587,8 @@ export function lastMessageIn(bytes: Uint8Array): string | undefined {
   return undefined
 }
 
+export const namesFork = (bytes: Uint8Array): boolean => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).includes(FORKED_FROM)
+
 export function forkIn(bytes: Uint8Array, session: string): Fork | undefined {
   const view = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const at = view.lastIndexOf(FORKED_FROM)
