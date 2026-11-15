@@ -21,6 +21,20 @@ export default {
         }
       },
     },
+    'spawn-env': {
+      meta: { type: 'problem', docs: { description: 'Bun.spawn without env gives the child the environment the process started with, Claude Code markers included, never process.env as the program cleaned it.' } },
+      create(context) {
+        return {
+          CallExpression(node) {
+            const callee = node.callee
+            if (callee.type !== 'MemberExpression' || callee.object.type !== 'Identifier' || callee.object.name !== 'Bun' || !['spawn', 'spawnSync'].includes(callee.property.name)) return
+            const options = node.arguments[1]
+            if (options?.type === 'ObjectExpression' && options.properties.some((property) => property.type === 'Property' && property.key.name === 'env')) return
+            context.report({ node, message: 'Pass env to Bun.spawn, as without it the child gets the environment this process started with, Claude Code markers included.' })
+          },
+        }
+      },
+    },
     'ui-tokens': {
       meta: { type: 'suggestion', docs: { description: 'Every text size, height, spacing and radius of the Herdr pane comes from its UI table, so the pane keeps one scale.' } },
       create(context) {

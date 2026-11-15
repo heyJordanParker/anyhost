@@ -221,7 +221,7 @@ export async function openSession(tool: Tool, id: string, cwd: string): Promise<
   if (tool === 'claude') return await runSession(['claude'], id)
   const command = ['codex', 'resume', id]
   const startedAt = new Date().toISOString()
-  const codex = Bun.spawn(command, { stdio: ['inherit', 'inherit', 'inherit'] })
+  const codex = Bun.spawn(command, { env: process.env, stdio: ['inherit', 'inherit', 'inherit'] })
   ownRun(id, { process: { id: process.pid, start: startOf(process.pid) }, version: plugin.version, startedAt }, { command, pid: codex.pid, startedAt })
   await labelOwnTerminal(id).catch((error: unknown) => console.error(`anyhost could not label this terminal with ${id}: ${error instanceof Error ? error.message : String(error)}`))
   const code = await codex.exited

@@ -10,6 +10,12 @@
   },
   "overrides": [
     {
+      "files": ["cli/src/**/*.ts"],
+      "rules": {
+        "anyhost/spawn-env": "error"
+      }
+    },
+    {
       "files": ["herdr/**/*.js"],
       "rules": {
         "anyhost/ui-tokens": "error",

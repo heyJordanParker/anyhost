@@ -3,6 +3,7 @@ import { hostname } from 'node:os'
 import { join } from 'node:path'
 import plugin from '../../.claude-plugin/plugin.json'
 import { Database } from 'bun:sqlite'
+import { summaryTextOf } from './capture.ts'
 import { copiesOutside, forgetRun, lastCommandOf, loginEnvironment, ownRun, recordAt, runTerminalOf, startOf, statusOf, stoppedRuns, type RunProcess } from './claude.ts'
 import { rootsHere, stateFolder } from './device.ts'
 import { followLabels, hcPath, isShown, labelOwnTerminal, SESSION_LABEL, SLEEP_LABEL, terminalAt, unlabelOwnTerminal, VIEW_LABEL } from './hc.ts'
@@ -29,7 +30,6 @@ export const START_CLAUDE = [
   '}',
   'exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n";',
 ].join('\n')
-const LEFT_BEHIND = ['CLAUDECODE', 'CLAUDE_PID', 'AI_AGENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN']
 const STATUS_REPORT = '\x1b]7501;'
 const STATUS_CLEAR = '\x1b]7501;state=clear\x1b\\'
 
@@ -93,7 +93,7 @@ const KEY_NAMES: Readonly<Record<string, string>> = { '\r': 'enter', '\x1b': 'es
 
 async function lastScreen(claudeHome: string, session: string, note: string): Promise<string> {
   const transcript = transcriptOf(claudeHome, session)
-  const text = transcript === undefined ? '' : await Bun.file(transcript).text()
+  const text = transcript === undefined ? '' : await summaryTextOf(transcript)
   const [last] = messagesOf(text, 1).filter((message) => message.role === 'assistant')
   const summary = summarize(UNSUMMARIZED, text, 'claude')
   const title = (summary.title || summary.firstPrompt || session.slice(0, 8)).replace(/[\x00-\x1f\x7f]/g, ' ')
@@ -147,9 +147,9 @@ async function viewOf(claudeHome: string, address: string, session: string): Pro
   const hc = hcPath()
   const own = process.env['HC_TERMINAL_ID']
   if (hc === undefined) return 1
-  if (own) await Bun.spawn([hc, 'label', own, `${VIEW_LABEL}=${session}`]).exited
+  if (own) await Bun.spawn([hc, 'label', own, `${VIEW_LABEL}=${session}`], { env: process.env }).exited
   for (let at = address; ; ) {
-    const code = await Bun.spawn([hc, 'attach', at], { stdio: ['inherit', 'inherit', 'inherit'] }).exited
+    const code = await Bun.spawn([hc, 'attach', at], { env: process.env, stdio: ['inherit', 'inherit', 'inherit'] }).exited
     await Bun.sleep(VIEW_AGAIN_MS)
     const running = await runTerminalOf(claudeHome, session)
     if (!isAnotherTerminal(running)) return code
@@ -306,7 +306,7 @@ export async function runSession(given: readonly string[], resumed?: string, ask
     console.error(`anyhost could not read your login environment, so Claude Code starts with this terminal's: ${error instanceof Error ? error.message : String(error)}`)
     return {}
   })
-  const env = Object.fromEntries(Object.entries({ ...process.env, ...login }).filter(([name]) => !LEFT_BEHIND.includes(name)))
+  const env = { ...process.env, ...login }
   const decoder = new TextDecoder()
   let session = resumed
   let usedAt = Date.now()

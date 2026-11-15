@@ -125,6 +125,7 @@ export const fakeHc = (folder: string): string => `#!/bin/bash
 F='${folder}'
 RUNS="\${XDG_STATE_HOME:-$HOME/.local/state}/anyhost/runs"
 mkdir -p "$F/terminals" "$RUNS"
+if [ -n "$CLAUDECODE$CLAUDE_CODE_CHILD_SESSION$CLAUDE_CODE_SESSION_ID" ]; then echo "$1" >> "$F/marked.log"; fi
 case "$1" in
   ls)
     wanted="\${4#anyhost.session=}"

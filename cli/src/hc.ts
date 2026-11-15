@@ -146,7 +146,7 @@ export function followTerminals(heard: (terminals: ReadonlyMap<string, Terminal>
     for (let wait = FOLLOW_FIRST_MS; !isStopped; wait = Math.min(wait * 2, FOLLOW_MOST_MS)) {
       const hc = hcPath()
       if (hc !== undefined) {
-        const following = Bun.spawn([hc, 'events', '--json'], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
+        const following = Bun.spawn([hc, 'events', '--json'], { env: process.env, stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
         events = following
         let left = ''
         for await (const chunk of following.stdout) {
@@ -172,7 +172,7 @@ export function followLabels(address: string, changed: () => void): () => void {
   void (async () => {
     const decoder = new TextDecoder()
     for (let wait = FOLLOW_FIRST_MS; !isStopped; wait = Math.min(wait * 2, FOLLOW_MOST_MS)) {
-      const following = Bun.spawn([hcHere(), 'events', '--terminal', address, '--json'], { stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
+      const following = Bun.spawn([hcHere(), 'events', '--terminal', address, '--json'], { env: process.env, stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
       events = following
       for await (const chunk of following.stdout) {
         wait = FOLLOW_FIRST_MS
