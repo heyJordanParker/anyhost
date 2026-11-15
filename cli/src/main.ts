@@ -12,7 +12,7 @@ import { doctor } from './doctor.ts'
 import type { Moving, Told } from './move.ts'
 import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, restoreData, resumeHere } from './resume.ts'
-import { askProgram, PROGRAM_RESTART_MS, serve, serveSocket, type JoinedRelay, type Status } from './serve.ts'
+import { askProgram, PROGRAM_RESTART_MS, serve, serveSocket, work, type JoinedRelay, type Status } from './serve.ts'
 import { agentsOf, type Agents, type ListedSession } from './sessions.ts'
 import { SETTLE_MOST_DAYS } from './shared.ts'
 
@@ -65,6 +65,7 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost shown <window> [terminal...]
                                      say which terminals a Herdr window shows, as the Herdr pane does, so their sessions stay awake and read
   anyhost serve                      capture this machine's sessions, as the anyhost mod runs it
+  anyhost work                       upload one session's large change in a process of its own, as anyhost serve runs it
   anyhost --version                  print the version`
 
 const cut = (text: string, length: number): string => (text.length > length ? `${text.slice(0, length - 1)}…` : text)
@@ -378,6 +379,10 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (command === 'doctor') return await doctor()
+  if (command === 'work' && rest.length === 0) {
+    await work(deviceFromEnvironment())
+    return 0
+  }
   if (command === 'serve') {
     await serve(deviceFromEnvironment())
     return 0

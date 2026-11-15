@@ -2,15 +2,15 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { changedFiles, countedRelay, indexForkStarts, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Changed, type Problems } from './capture.ts'
 import { loginEnvironment, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, statusOf as sessionStatusOf, statusOfRecord, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
-import { cmod, dataFolders, dataRoot, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type Device } from './device.ts'
+import { cmod, dataFolders, dataRoot, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
 import { followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { installHerdr, PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
 import { deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
-import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type RelayState } from './relay.ts'
+import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type RelayState } from './relay.ts'
 import { agentsOf } from './sessions.ts'
 import { archive, isArchived, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, sharedOf, snooze, updateShared, visit, type Organize } from './shared.ts'
 import { copyT3Marks } from './t3.ts'
@@ -263,6 +263,40 @@ export class UploadQueue {
   }
 }
 
+type Job = { readonly login: Login; readonly dataFolders: readonly DataFolder[]; readonly isEveryWrite: boolean; readonly session: string; readonly tool: Tool; readonly paths: readonly string[] }
+type JobLine = {
+  readonly problem?: string
+  readonly message?: string
+  readonly clear?: string
+  readonly released?: readonly [string, string]
+  readonly code?: readonly [string, Tool, string]
+  readonly left?: readonly string[]
+  readonly error?: string
+}
+
+const ownCommand = (): string[] => (import.meta.dir.startsWith('/$bunfs/') ? [process.execPath] : [process.execPath, join(import.meta.dir, 'main.ts')])
+
+export async function work(device: Device): Promise<void> {
+  const job = (await Bun.stdin.json()) as Job
+  const say = (line: JobLine): void => void process.stdout.write(`${JSON.stringify(line)}\n`)
+  const roots = rootsHere()
+  const relay = connectRelay({ login: async () => job.login, forget: async () => undefined, device, roots, isPatient: true })
+  const capture = openCapture(relay, device, roots, {
+    onCode: (session, tool, folder) => say({ code: [session, tool, folder] }),
+    onReleased: (session, holder) => say({ released: [session, holder] }),
+  })
+  capture.dataFolders = job.dataFolders
+  const problems: Problems = { set: (key, error) => say({ problem: key, message: error instanceof Error ? error.message : String(error) }), clear: (key) => say({ clear: key }) }
+  try {
+    const left = await uploadSessions(capture, [{ session: job.session, tool: job.tool, paths: new Set(job.paths) }], problems, job.isEveryWrite)[0]?.[1]
+    say({ left: [...(left ?? [])] })
+  } catch (error) {
+    say({ error: error instanceof Error ? error.message : String(error) })
+  } finally {
+    relay.close()
+  }
+}
+
 export async function serve(device: Device, names?: RelayNames, cloudflare?: Cloudflare): Promise<void> {
   const socket = serveSocket()
   const running = await fetch('http://localhost/status', { unix: socket, signal: AbortSignal.timeout(RUNNING_MS) }).then(
@@ -338,19 +372,56 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           const timer = setTimeout(wake, LIST_WAIT_MS)
           versionWaits.add(wake)
         })
+  const runJob = async (changed: Changed): Promise<Set<string>> => {
+    const login = await relayLogin()
+    if (login === undefined) throw new Error('This machine is not joined to your relay, so anyhost uploads nothing.')
+    const job: Job = { login, dataFolders: capture.dataFolders, isEveryWrite: queue.uploadEvery === 0, session: changed.session, tool: changed.tool, paths: [...changed.paths] }
+    const child = Bun.spawn([...ownCommand(), 'work'], { env: process.env, stdin: new TextEncoder().encode(JSON.stringify(job)), stdout: 'pipe', stderr: 'inherit' })
+    let left: Set<string> | undefined
+    let failure = ''
+    const heard = (line: string): void => {
+      const said = JSON.parse(line) as JobLine
+      if (said.problem !== undefined) problems.set(said.problem, said.message)
+      if (said.clear !== undefined) problems.clear(said.clear)
+      if (said.released !== undefined) capture.onReleased(...said.released)
+      if (said.code !== undefined) capture.onCode(...said.code)
+      if (said.left !== undefined) left = new Set(said.left)
+      if (said.error !== undefined) failure = said.error
+    }
+    const decoder = new TextDecoder()
+    let rest = ''
+    for await (const chunk of child.stdout) {
+      const lines = (rest + decoder.decode(chunk, { stream: true })).split('\n')
+      rest = lines.pop() ?? ''
+      for (const line of lines) if (line.startsWith('{')) heard(line)
+    }
+    await child.exited
+    if (left !== undefined) return left
+    throw new Error(failure || `anyhost work for ${changed.session} exited with ${child.exitCode} and answered nothing.`)
+  }
+  let jobs: Promise<unknown> = Promise.resolve()
+  const uploadInJob = (changed: Changed): Promise<Set<string>> => {
+    const ran = jobs.then(() => runJob(changed))
+    jobs = ran.catch(() => undefined)
+    return ran
+  }
+  const uploaded = (changed: Changed, upload: Promise<Set<string>>): readonly [Changed, Promise<Set<string>>] => [
+    changed,
+    upload.then((left) => {
+      problems.clear(`upload ${changed.session}`)
+      problems.clear('relay')
+      capturedAt = new Date().toISOString()
+      sessionsChanged()
+      return left
+    }),
+  ]
   const queue = new UploadQueue(
     uploadEveryOf(undefined),
-    (sessions) =>
-      uploadSessions(capture, sessions, problems, queue.uploadEvery === 0).map(([changed, upload]) => [
-        changed,
-        upload.then((left) => {
-          problems.clear(`upload ${changed.session}`)
-          problems.clear('relay')
-          capturedAt = new Date().toISOString()
-          sessionsChanged()
-          return left
-        }),
-      ]),
+    (sessions) => {
+      const heavy = new Set(sessions.filter((changed) => isHeavyUpload(capture, changed)))
+      const light = sessions.filter((changed) => !heavy.has(changed))
+      return [...(light.length === 0 ? [] : uploadSessions(capture, light, problems, queue.uploadEvery === 0)), ...[...heavy].map((changed) => [changed, uploadInJob(changed)] as const)].map(([changed, upload]) => uploaded(changed, upload))
+    },
     (session, error) => problems.set(`upload ${session}`, error),
     () => relay.state.is === 'connected',
   )

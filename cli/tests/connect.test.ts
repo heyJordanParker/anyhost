@@ -1095,8 +1095,8 @@ test('a running program whose relay is an older relay version at its protocol ke
   expect(cloudflare.workers.get(NAMES.worker)?.relay).toBe(RELAY_VERSION - 1)
 
   upload.resolve()
-  await until(() => front.welcomes.length === 2, 'the program connecting to the relay it put up', 30_000)
-  expect(front.welcomes).toEqual([
+  await until(() => front.welcomes.some(({ relay: version }) => version === RELAY_VERSION), 'the program connecting to the relay it put up', 30_000)
+  expect([front.welcomes[0], front.welcomes.at(-1)]).toEqual([
     { relay: RELAY_VERSION - 1, protocol: PROTOCOL_VERSION },
     { relay: RELAY_VERSION, protocol: PROTOCOL_VERSION },
   ])
