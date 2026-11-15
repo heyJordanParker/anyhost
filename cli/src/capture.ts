@@ -11,9 +11,10 @@ import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type DataFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Relay } from './relay.ts'
 import { Replay } from './sessions.ts'
-import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, namedIn, ownerOf, parentOf, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
+import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, namedIn, namesFork, ownerOf, parentOf, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
+const SCAN_READ_BYTES = 2 ** 20
 const FORK_BYTES = 512 * 2 ** 20
 export const CODE_PIECE_BYTES = 128 * 2 ** 10
 export const CODE_PIECES = 4
@@ -787,17 +788,34 @@ export async function indexForkStarts(capture: Pick<Capture, 'db' | 'roots'>): P
   for (const [, { tool, paths }] of await transcriptsOn(roots)) {
     if (tool !== 'claude') continue
     for (const path of paths.filter((each) => each.endsWith('.jsonl'))) {
-      const file = Bun.file(path)
-      for (let at = 0; at < file.size; ) {
-        const read = await file.slice(at, at + FRAME_BYTES).bytes()
-        const whole = read.subarray(0, read.lastIndexOf(10) + 1)
-        recordForkStarts(db, path, whole)
-        at += whole.length === 0 ? read.length : whole.length
-      }
+      for await (const lines of wholeLinesIn(path)) recordForkStarts(db, path, lines)
       indexed += 1
     }
   }
   return indexed
+}
+
+export async function* wholeLinesIn(path: string): AsyncGenerator<Uint8Array> {
+  const handle = await open(path, 'r')
+  try {
+    let buffer = Buffer.allocUnsafe(SCAN_READ_BYTES)
+    let filled = 0
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, null)
+      if (bytesRead === 0) return
+      filled += bytesRead
+      const end = buffer.lastIndexOf(10, filled - 1) + 1
+      if (end === 0) {
+        if (filled === buffer.length) buffer = Buffer.concat([buffer, Buffer.allocUnsafe(buffer.length)])
+        continue
+      }
+      yield buffer.subarray(0, end)
+      buffer.copyWithin(0, end, filled)
+      filled -= end
+    }
+  } finally {
+    await handle.close()
+  }
 }
 
 function chunkedChange(capture: Capture, session: string, path: string, written: Uint8Array, mtime: number, kind: Pick<RecordHeader, 'chunks' | 'fork'>, isPartial: boolean): Change {
@@ -833,8 +851,17 @@ async function forkedChange(capture: Capture, session: string, path: string, who
   return chunkedChange(capture, session, path, derived.bytes, mtime, { chunks, fork }, derived.bytes.length < whole.length)
 }
 
+async function mayBeFork(capture: Capture, path: string): Promise<boolean> {
+  let first: string | undefined
+  for await (const lines of wholeLinesIn(path)) {
+    if (namesFork(lines)) return true
+    first ??= firstUuidIn(lines)
+  }
+  return first !== undefined && capture.db.query('select 1 from fork_starts where uuid = ? and path != ?').get(first, path) !== null
+}
+
 async function forkChange(capture: Capture, session: string, path: string, source: Source): Promise<Change | undefined> {
-  if (source.size > FORK_BYTES) return undefined
+  if (source.size > FORK_BYTES || !(await mayBeFork(capture, path))) return undefined
   const read = await source.read(0, source.size)
   const whole = read.subarray(0, read.lastIndexOf(10) + 1)
   if (whole.length === 0) return undefined
