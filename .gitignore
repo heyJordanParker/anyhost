@@ -1,7 +1,0 @@
-node_modules/
-.claude-plugin/types/
-cli/dist/
-relay/dist/
-/docs/agents/
-herdr/anyhost/gpui-kit.d.ts
-herdr/anyhost/jsconfig.json

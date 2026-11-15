@@ -1,6 +1,0 @@
-{
-  "description": "anyhost hooks module",
-  "modules": [
-    "./register.ts"
-  ]
-}
