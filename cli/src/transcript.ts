@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
+import { open, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, sep } from 'node:path'
 import type { Message } from '../../relay/protocol.ts'
@@ -453,6 +453,37 @@ function cutChance(line: Buffer): number {
   const from = at + UUID_KEY.length
   const key = at >= 0 && from + UUID_LENGTH <= line.length ? line.subarray(from, from + UUID_LENGTH) : line
   return Number(BigInt.asUintN(32, BigInt(Bun.hash(key)))) / 2 ** 32
+}
+
+const PIECE_READ_BYTES = 4 * 2 ** 20
+
+export async function* piecesFrom(path: string, from: number, to: number): AsyncGenerator<Uint8Array> {
+  const handle = await open(path, 'r')
+  try {
+    let buffer = Buffer.allocUnsafe(LARGEST_CHUNK + PIECE_READ_BYTES)
+    let filled = 0
+    for (let at = from; at < to; ) {
+      if (buffer.length - filled < PIECE_READ_BYTES) buffer = Buffer.concat([buffer.subarray(0, filled), Buffer.allocUnsafe(buffer.length)])
+      const { bytesRead } = await handle.read(buffer, filled, Math.min(PIECE_READ_BYTES, to - at), at)
+      if (bytesRead === 0) break
+      at += bytesRead
+      filled += bytesRead
+      const whole = at >= to ? filled : buffer.lastIndexOf(10, filled - 1) + 1
+      if (whole === 0) continue
+      const ends = cutsOf(buffer.subarray(0, whole))
+      const kept = at >= to ? ends : ends.slice(0, -1)
+      let start = 0
+      for (const end of kept) {
+        yield buffer.subarray(start, end)
+        start = end
+      }
+      buffer.copyWithin(0, start, filled)
+      filled -= start
+    }
+    if (filled > 0) yield buffer.subarray(0, filled)
+  } finally {
+    await handle.close()
+  }
 }
 
 export function cutsOf(bytes: Uint8Array): number[] {
