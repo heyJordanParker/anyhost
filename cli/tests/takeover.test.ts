@@ -1,10 +1,10 @@
 import { expect, test } from 'bun:test'
 import { appendFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { decompress, journalOf, openCapture, openDatabase } from '../src/capture.ts'
+import { journalOf, openCapture, openDatabase } from '../src/capture.ts'
 import { machinesOf } from '../src/device.ts'
 import { memoryRelay, noCode, statusOn, until, welcomed } from './memory.ts'
-import { claimOn, decoder, DESKTOP, isUploaded, killAfterTest, LAPTOP, postTo, roots, runningOn, runsOn, serveOn, SESSION, stepsOf, WORKER, workerOn } from './program.ts'
+import { claimOn, DESKTOP, isUploaded, LAPTOP, postTo, roots, runningOn, runsOn, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
 
 test('a move whose session another machine takes while it waits ends failed within seconds, the program answering meanwhile, and leaves the session with that machine', async () => {
   const relay = await memoryRelay()
@@ -77,8 +77,7 @@ test("a released a command's connect took stops the session's copy here at the p
   const relay = await memoryRelay()
   const worker = await workerOn(relay)
   const workerHome = worker.env['HOME'] ?? ''
-  const job = Bun.spawn(['sleep', '600'])
-  killAfterTest(job)
+  const job = spawnForTest(['sleep', '600'])
   writeFileSync(join(workerHome, '.claude', 'sessions', `${job.pid}.json`), JSON.stringify({ pid: job.pid, sessionId: SESSION, kind: 'interactive', cwd: join(workerHome, 'work'), status: 'idle' }))
   const claimer = relay.connect(WORKER, roots(workerHome))
   expect(await claimer.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true, at: expect.any(String) })
@@ -102,8 +101,7 @@ test('a released stops the copy of a session at a permission prompt, as its reco
   const relay = await memoryRelay()
   const worker = await workerOn(relay)
   const workerHome = worker.env['HOME'] ?? ''
-  const job = Bun.spawn(['sleep', '600'])
-  killAfterTest(job)
+  const job = spawnForTest(['sleep', '600'])
   writeFileSync(join(workerHome, '.claude', 'sessions', `${job.pid}.json`), JSON.stringify({ pid: job.pid, sessionId: SESSION, kind: 'interactive', cwd: join(workerHome, 'work'), status: 'waiting' }))
   const claimer = relay.connect(WORKER, roots(workerHome))
   expect(await claimer.runOne({ op: 'claim', session: SESSION, take: false })).toMatchObject({ status: 200, told: true })
@@ -135,7 +133,7 @@ test('a laptop asleep from its move until after the worker reconnected and ran a
   const workerTranscript = join(worker.env['HOME'] ?? '', '.claude', 'projects', workerCwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
   appendFileSync(workerTranscript, `{"type":"user","cwd":"${workerCwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Book the hotel"}}\n`)
   await until(() => isUploaded(relay, SESSION, 'Book the hotel'), 'the worker uploading its turn', 30_000)
-  const turnAt = relay.puts.findIndex(({ key, body }) => key.startsWith(`journals/${SESSION}/hot/`) && decoder.decode(decompress(body)).includes('Book the hotel'))
+  const turnAt = relay.puts.findIndex(({ key, body }) => key.startsWith(`journals/${SESSION}/hot/`) && textOfFrame(body).includes('Book the hotel'))
   await Bun.sleep(Math.max(0, 12_000 - (Date.now() - asleepAt)))
   wake()
   const { last } = await stepsOf(laptop.socket)
@@ -144,7 +142,7 @@ test('a laptop asleep from its move until after the worker reconnected and ran a
   expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)
   expect(worker.logged()).toContain(`${LAPTOP.name} asked again for its answer`)
   expect(runsOn(worker.folder).filter((run) => run.session === SESSION)).toHaveLength(1)
-  const laptopFrames = relay.puts.slice(turnAt + 1).filter(({ key, body }) => key.startsWith(`journals/${SESSION}/`) && decoder.decode(decompress(body)).includes(`"device":"${LAPTOP.id}"`))
+  const laptopFrames = relay.puts.slice(turnAt + 1).filter(({ key, body }) => key.startsWith(`journals/${SESSION}/`) && textOfFrame(body).includes(`"device":"${LAPTOP.id}"`))
   expect(laptopFrames).toEqual([])
   await laptop.claude.exited
   expect(laptop.claude.signalCode).toBe('SIGTERM')

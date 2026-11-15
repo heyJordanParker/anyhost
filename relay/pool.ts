@@ -19,6 +19,7 @@ import {
   conditionHeaders,
   decodeMessage,
   encodeMessage,
+  isOlder,
   tokenOf,
   type Answer,
   type Claimed,
@@ -93,12 +94,6 @@ function jsonOf(text: string | null): unknown {
   }
 }
 const versionOf = (header: string | null): string | null => (header !== null && /^\d+\.\d+\.\d+$/.test(header) ? header : null)
-function isOlder(version: string, than: string): boolean {
-  const ours = version.split('.').map(Number)
-  const theirs = than.split('.').map(Number)
-  const at = ours.findIndex((part, index) => part !== theirs[index])
-  return at >= 0 && (ours[at] ?? 0) < (theirs[at] ?? 0)
-}
 const olderProgramReason = (version: string | null, kept: string): string =>
   version === null ? `This anyhost names no version, and this machine connected with anyhost ${kept}.` : `anyhost ${version} is older than anyhost ${kept}, which this machine connected with.`
 export const refuse = (status: number, error: ErrorCode, message: string, more: object = {}): Reply => ({ status, body: { error, message, ...more } satisfies Refusal })
@@ -532,6 +527,9 @@ export class Pool extends DurableObject<Env> {
       }
       case 'delete': {
         if (!Array.isArray(op.keys) || !op.keys.every(isText) || op.keys.length > MAX_KEYS) return invalid(`A delete names up to ${MAX_KEYS} keys.`)
+        if (op.holder !== undefined && !isText(op.holder)) return invalid('A delete\'s holder names a session.')
+        const held = op.holder === undefined ? undefined : this.#holderOf(op.holder)
+        if (held !== undefined && held.id !== device.id) return { status: 409, holder: held }
         if (op.keys.length > 0) await this.env.BUCKET.delete([...op.keys])
         return { status: 200 }
       }
@@ -567,7 +565,7 @@ export class Pool extends DurableObject<Env> {
       }
       case 'devices': {
         const rows = this.#sql.exec<DeviceRow>('select * from devices order by name').toArray()
-        const devices = rows.map(({ id, name, os, arch, roots, seen_at, removed_at }) => ({
+        const devices = rows.map(({ id, name, os, arch, roots, seen_at, removed_at, program }) => ({
           id,
           name,
           os,
@@ -576,6 +574,7 @@ export class Pool extends DurableObject<Env> {
           connected: this.ctx.getWebSockets(id).some((socket) => this.#isLive(socket)),
           seenAt: iso(seen_at),
           ...(removed_at === null ? {} : { removedAt: iso(removed_at) }),
+          program,
         }))
         return { status: 200, devices }
       }

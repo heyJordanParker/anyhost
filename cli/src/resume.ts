@@ -3,11 +3,13 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
-import { checkoutOf, checkoutOfEntry, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession, type RecordHeader } from './capture.ts'
+import { basesOf, checkoutOf, checkoutOfEntry, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordForkStarts, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession, type RecordHeader } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
-import { statusOf } from './claude.ts'
+import plugin from '../../.claude-plugin/plugin.json'
+import { forgetRun, ownRun, startOf, statusOf } from './claude.ts'
 import { cloneRemote } from './code.ts'
 import { dataFolders, devicesOf, type MachineRoots } from './device.ts'
+import { labelOwnTerminal, unlabelOwnTerminal } from './hc.ts'
 import { relocate, type Roots } from './relocate.ts'
 import { runSession } from './runner.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
@@ -217,7 +219,15 @@ async function keepConflictedCopy(capture: Capture, session: string, local: Loca
 export async function openSession(tool: Tool, id: string, cwd: string): Promise<number> {
   process.chdir(cwd)
   if (tool === 'claude') return await runSession(['claude'], id)
-  return await Bun.spawn(['codex', 'resume', id], { stdio: ['inherit', 'inherit', 'inherit'] }).exited
+  const command = ['codex', 'resume', id]
+  const startedAt = new Date().toISOString()
+  const codex = Bun.spawn(command, { stdio: ['inherit', 'inherit', 'inherit'] })
+  ownRun(id, { process: { id: process.pid, start: startOf(process.pid) }, version: plugin.version, startedAt }, { command, pid: codex.pid, startedAt })
+  await labelOwnTerminal(id).catch((error: unknown) => console.error(`anyhost could not label this terminal with ${id}: ${error instanceof Error ? error.message : String(error)}`))
+  const code = await codex.exited
+  forgetRun(id)
+  await unlabelOwnTerminal().catch(() => undefined)
+  return code
 }
 
 export async function resumeHere(capture: Capture, id: string, options: { take: boolean; checkouts: string }): Promise<{ tool: Tool; cwd: string }> {
@@ -229,7 +239,7 @@ export async function resumeHere(capture: Capture, id: string, options: { take: 
   return { tool: session.tool, cwd: restored }
 }
 
-export async function restore(capture: Capture, id: string, options: { take: boolean; if?: Protocol.TakeCondition; checkouts?: string }): Promise<{ session: ListedSession; cwd: string }> {
+export async function restore(capture: Capture, id: string, options: { take: boolean; if?: Protocol.TakeCondition; checkouts?: string; isMove?: boolean }): Promise<{ session: ListedSession; cwd: string }> {
   const { relay, db, roots } = capture
   const devices = await devicesOf(relay)
   const [indexes, claims] = await Promise.all([indexesOf(relay, devices.keys()), claimsOf(relay, id)])
@@ -251,7 +261,7 @@ export async function restore(capture: Capture, id: string, options: { take: boo
     const key = `${writer.device}\0${writer.checkout ?? ''}\0${writer.path}`
     if (!named.has(key)) named.set(key, relocate(NOTHING, writer.path, rootsOf(writer), provisional).path)
     return named.get(key) ?? writer.path
-  })
+  }, basesOf(db))
   const writers: Writers = { rootsOf, tracked: await trackedFilesOf(replayed, id) }
   const jobs = `${join(roots.claudeHome, 'jobs')}/`
   const files = [...replayed.files].filter(([path]) => !path.startsWith(jobs))
@@ -265,7 +275,7 @@ export async function restore(capture: Capture, id: string, options: { take: boo
     return new Uint8Array(await Bun.file(part.staged).arrayBuffer())
   }
   let cwd = folder
-  if (code !== undefined) cwd = await capture.restoreCode(code.bytes, readPart, folder)
+  if (code !== undefined) cwd = await capture.restoreCode(code.bytes, readPart, folder, options.isMove === true)
   else await cloneMissing(session, folder, roots.home)
   await mkdir(cwd, { recursive: true })
   const here: Roots = { ...roots, checkout: checkoutOfEntry({ ...session, cwd }, roots.home) }
@@ -292,6 +302,7 @@ export async function restore(capture: Capture, id: string, options: { take: boo
     return owner !== undefined && 'isTranscript' in owner && owner.isTranscript
   })
   const restoredText = transcript === undefined ? '' : await Bun.file(transcript.path).text()
+  if (transcript !== undefined && session.tool === 'claude') recordForkStarts(db, transcript.path, new TextEncoder().encode(restoredText))
   for (const kept of before) await keepConflictedCopy(capture, id, kept, restoredText)
   await recordSummary(capture, id, session.tool, restoredText, replayed.end, session.lastActivity)
   await writeIndex(capture)
@@ -321,7 +332,7 @@ export async function restoreData(capture: Capture, mod: string, from: string): 
   const staging = join(dirname(db.filename), 'restore', history)
   await rm(staging, { recursive: true, force: true })
   try {
-    const replayed = await downloadJournal(relay, history, staging, (writer) => relocate(NOTHING, writer.path, rootsOf(writer), here).path)
+    const replayed = await downloadJournal(relay, history, staging, (writer) => relocate(NOTHING, writer.path, rootsOf(writer), here).path, basesOf(db))
     const writers: Writers = { rootsOf, tracked: new Map() }
     for (const file of replayed.files.values()) await checkFile(file, writers)
     for (const file of replayed.files.values()) await placeFile(historyOf(mod, device.id), file, writers, here)

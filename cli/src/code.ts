@@ -426,8 +426,6 @@ async function apply(repo: Repository, patches: readonly string[], parts: Readon
   await git(repo, ['apply', ...(index ? ['--index'] : []), '--whitespace=nowarn', '-'], { input: Buffer.concat(patches.map((hash) => parts.get(hash) ?? new Uint8Array())) })
 }
 
-const besideOf = (folder: string, session: string): string => `${folder}-${session.slice(0, 8)}`
-
 async function isEmptyFolder(folder: string): Promise<boolean> {
   return (await readdir(folder).catch(() => [])).length === 0
 }
@@ -439,23 +437,17 @@ async function holdsFolder(folder: string, record: CodeRecord): Promise<boolean>
   return true
 }
 
-async function restoreFolder(record: CodeRecord, parts: ReadonlyMap<string, Uint8Array>, folder: string): Promise<string> {
-  let target = folder
+async function restoreFolder(record: CodeRecord, parts: ReadonlyMap<string, Uint8Array>, folder: string, isMove: boolean): Promise<string> {
   if (!(await isEmptyFolder(folder))) {
-    if (await holdsFolder(folder, record)) return folder
-    target = besideOf(folder, record.session)
-    if (!(await isEmptyFolder(target))) {
-      if (await holdsFolder(target, record)) return target
-      throw new Error(`${folder} and ${target} both hold files of their own, so session ${record.session}'s folder has nowhere to go.`)
-    }
-    console.log(`${folder} holds files of its own, so session ${record.session}'s folder restores into ${target}.`)
+    if (isMove && !(await holdsFolder(folder, record))) console.log(`${folder} holds files of its own, so session ${record.session}'s files stay in R2 and were not placed there.`)
+    return folder
   }
-  await mkdir(target, { recursive: true })
-  const repo = await folderRepository(target)
+  await mkdir(folder, { recursive: true })
+  const repo = await folderRepository(folder)
   await apply(repo, record.unstaged, parts, false)
   await check(repo, record)
   await rememberJournaled(repo, record)
-  return target
+  return folder
 }
 
 async function rememberJournaled(repo: Repository, record: CodeRecord): Promise<void> {
@@ -484,9 +476,28 @@ export async function cloneRemote(url: string, root: string, options: { readonly
   await git({ cwd: root, env: {} }, ['remote', 'set-url', origin, url])
 }
 
-async function checkoutAt(root: string, record: CodeRecord): Promise<{ repo: Repository; fresh: boolean }> {
+async function checkoutHere(root: string): Promise<Repository | undefined> {
   const found = (await exists(root)) ? await openRepository(root, 'repo') : undefined
-  if (found !== undefined && (await realpath(found.cwd)) === (await realpath(root))) return { repo: found, fresh: false }
+  return found !== undefined && (await realpath(found.cwd)) === (await realpath(root)) ? found : undefined
+}
+
+async function cloneAtBranch(record: CodeRecord & { readonly remote: Remote }, root: string): Promise<void> {
+  const { url, name } = record.remote
+  console.log(`Cloning ${url} into ${root}`)
+  if (record.branch !== null) {
+    const isCloned = await cloneRemote(url, root, { origin: name, branch: record.branch }).then(
+      () => true,
+      () => false,
+    )
+    if (isCloned) return
+    await rm(root, { recursive: true, force: true })
+  }
+  await cloneRemote(url, root, { origin: name })
+}
+
+async function checkoutAt(root: string, record: CodeRecord): Promise<{ repo: Repository; fresh: boolean }> {
+  const found = await checkoutHere(root)
+  if (found !== undefined) return { repo: found, fresh: false }
   if (!(await isEmptyFolder(root))) throw new Error(`${root} holds files and no checkout of its own, so session ${record.session}'s code does not restore there.`)
   await mkdir(dirname(root), { recursive: true })
   if (record.remote === null) await git({ cwd: dirname(root), env: {} }, ['init', '-q', root])
@@ -527,25 +538,6 @@ async function workIn(place: Repository, record: CodeRecord): Promise<'session' 
   const headTree = head === null ? place.emptyTree : await valueOf(place, ['rev-parse', `${head}^{tree}`])
   const isClean = trees.index === headTree && trees.worktree === headTree && trees.conflicts.length === 0 && (await operationFilesOf(place)).length === 0
   return isClean ? 'none' : 'own'
-}
-
-async function placeOf(repo: Repository, record: CodeRecord): Promise<{ readonly work: Repository; readonly isSame: boolean }> {
-  const here = await workIn(repo, record)
-  if (here !== 'own') return { work: repo, isSame: here === 'session' }
-  const beside = besideOf(repo.cwd, record.session)
-  if (await exists(beside)) {
-    const there = await openRepository(beside, 'repo')
-    if (there === undefined || there.commonDir !== repo.commonDir) throw new Error(`${beside} holds something other than a worktree of ${repo.cwd}, so session ${record.session} has nowhere to continue.`)
-    const work = await workIn(there, record)
-    if (work === 'own') throw new Error(`${repo.cwd} and its worktree ${beside} both hold work of their own, so session ${record.session} has nowhere to continue.`)
-    return { work: there, isSame: work === 'session' }
-  }
-  if (record.head === null) throw new Error(`${repo.cwd} holds work of its own, and session ${record.session}'s checkout has no commit to start a worktree from.`)
-  await git(repo, ['worktree', 'add', '-q', '--detach', '--no-checkout', beside, record.head])
-  console.log(`${repo.cwd} holds work of its own, so session ${record.session} continues in the new worktree ${beside}.`)
-  const added = await openRepository(beside, 'repo')
-  if (added === undefined) throw new Error(`git worktree add made ${beside}, and it is not a checkout.`)
-  return { work: added, isSame: false }
 }
 
 async function checkedOutElsewhere(repo: Repository): Promise<Set<string>> {
@@ -609,14 +601,24 @@ async function restoreOperation(repo: Repository, record: CodeRecord, parts: Rea
   }
 }
 
-export async function restoreCode(header: Uint8Array, readPart: (path: string) => Promise<Uint8Array>, folder: string): Promise<string> {
+export async function restoreCode(header: Uint8Array, readPart: (path: string) => Promise<Uint8Array>, folder: string, isMove: boolean): Promise<string> {
   const { record, parts } = await decode(header, readPart)
   const target = resolve(folder)
-  if (record.kind === 'folder') return await restoreFolder(record, parts, target)
+  if (record.kind === 'folder') return await restoreFolder(record, parts, target, isMove)
   const { subfolder } = record
   if (subfolder !== '' && !target.endsWith(`${sep}${subfolder}`)) throw new Error(`${target} does not end in ${subfolder}, the folder session ${record.session} worked in under its checkout.`)
   const root = subfolder === '' ? target : target.slice(0, -subfolder.length - 1)
+  if (!isMove && (await checkoutHere(root)) !== undefined) return target
+  if (!isMove && record.remote !== null) {
+    await cloneAtBranch({ ...record, remote: record.remote }, root)
+    return target
+  }
   const { repo, fresh } = await checkoutAt(root, record)
+  const here = fresh ? 'none' : await workIn(repo, record)
+  if (here === 'own') {
+    console.log(`${root} holds uncommitted changes of its own, so session ${record.session}'s uncommitted code stays in R2 and was not applied there.`)
+    return target
+  }
   await fetchCommits(repo, record, parts, fresh)
   if (record.head !== null && (await commitOf(repo, record.head)) === null) {
     throw new Error(`Session ${record.session}'s HEAD ${record.head.slice(0, 8)} is on neither ${record.remote?.url ?? 'a remote'} nor refs/anyhost/${record.session}.`)
@@ -625,21 +627,20 @@ export async function restoreCode(header: Uint8Array, readPart: (path: string) =
   if (localHead !== null && record.head !== null && (await run(repo, ['merge-base', localHead, record.head])).code !== 0) {
     throw new Error(`${root} holds a checkout that shares no history with session ${record.session}'s ${record.head.slice(0, 8)}.`)
   }
-  const { work, isSame } = fresh ? { work: repo, isSame: false } : await placeOf(repo, record)
-  await moveBranches(work, record, fresh)
-  if (!isSame) {
-    if (record.head !== null) await git(work, ['reset', '-q', '--hard'])
-    await apply(work, record.staged, parts, true)
-    await apply(work, record.unstaged, parts, false)
-    await restoreConflicts(work, record, parts)
+  await moveBranches(repo, record, fresh)
+  if (here !== 'session') {
+    if (record.head !== null) await git(repo, ['reset', '-q', '--hard'])
+    await apply(repo, record.staged, parts, true)
+    await apply(repo, record.unstaged, parts, false)
+    await restoreConflicts(repo, record, parts)
   }
-  await restoreStash(work, record)
-  await restoreOperation(work, record, parts)
-  const isOnBranch = record.branch !== null && textOf((await run(work, ['symbolic-ref', '-q', 'HEAD'])).out).trim() === `refs/heads/${record.branch}`
-  if (isOnBranch && record.upstream !== null && (await run(work, ['branch', '-q', `--set-upstream-to=${record.upstream}`, record.branch ?? ''])).code !== 0) {
+  await restoreStash(repo, record)
+  await restoreOperation(repo, record, parts)
+  const isOnBranch = record.branch !== null && textOf((await run(repo, ['symbolic-ref', '-q', 'HEAD'])).out).trim() === `refs/heads/${record.branch}`
+  if (isOnBranch && record.upstream !== null && (await run(repo, ['branch', '-q', `--set-upstream-to=${record.upstream}`, record.branch ?? ''])).code !== 0) {
     console.log(`${record.branch} tracked ${record.upstream}, which this checkout does not have.`)
   }
-  await check(work, record)
-  await rememberJournaled(work, record)
-  return join(work.cwd === repo.cwd ? root : besideOf(root, record.session), subfolder)
+  await check(repo, record)
+  await rememberJournaled(repo, record)
+  return target
 }

@@ -46,6 +46,7 @@ const IDLE_MS = 30_000
 const OBJECT_TRIES = 6
 
 export type Login = { readonly url: string; readonly token: string }
+export type Claiming = { readonly session: string; readonly call: Call }
 export type Call = Exclude<Op, { readonly op: 'put' }> | { readonly op: 'put'; readonly key: string; readonly bytes: Uint8Array; readonly if?: Condition; readonly holder?: string }
 type Got = { readonly status: 200; readonly etag: string; readonly size: number; readonly bytes: Uint8Array }
 export type RanOf<K extends Op['op']> = K extends 'get' ? Got | { readonly status: 304; readonly etag: string } | { readonly status: 404 } : Results[K]
@@ -55,7 +56,7 @@ export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
   | { readonly is: 'unjoined' | 'offline' | 'refused' | 'outdated'; readonly message: string }
-type Events = { readonly welcome: Welcome; readonly released: Released; readonly claimed: Claimed; readonly offline: Offline } & {
+type Events = { readonly welcome: Welcome; readonly released: Released; readonly claimed: Claimed; readonly offline: Offline; readonly claiming: Claiming } & {
   readonly [T in Delivered['t']]: Extract<Delivered, { readonly t: T }>
 }
 
@@ -460,6 +461,10 @@ export function connectRelay(options: RelayOptions): Relay {
       }
       batch = []
       bytes = 0
+    }
+    for (const call of calls) {
+      if (call.op === 'claim') emit('claiming', { session: call.session, call })
+      if (call.op === 'put' && call.holder !== undefined) emit('claiming', { session: call.holder, call })
     }
     for (const [position, call] of calls.entries()) {
       if (call.op === 'put' && call.bytes.length > MAX_MESSAGE_BYTES) {

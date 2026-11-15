@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
-import type { Mod, ProcessSpawnOptions, Subprocess } from '../node_modules/@cmodjs/core/mod.js'
+import { Prompt, type Mod, type ProcessSpawnOptions, type Subprocess } from '../node_modules/@cmodjs/core/mod.js'
 import { testMod } from '../node_modules/@cmodjs/core/testing.js'
 import { anyhost } from '../src/mod.js'
 import { connectStep, type AnyhostState } from '../src/pages/machines.js'
@@ -80,7 +80,7 @@ test('a session resumed from a machine that was not connected names that machine
 
   await tested.raise.onSessionStart({ source: 'resume' })
   await tested.raise.beforePrompt({ text: 'Keep going' })
-  expect(fetched).toEqual([`${SOCKET} http://localhost/claims/test-session`, `${SOCKET} http://localhost/claims/test-session`])
+  expect(fetched).toEqual([`${SOCKET} http://localhost/claims/test-session`, `${SOCKET} http://localhost/sessions/changed`, `${SOCKET} http://localhost/claims/test-session`])
   expect(tested.shown.toasts.filter(({ type }) => type === 'warning')).toEqual([
     {
       type: 'warning',
@@ -88,6 +88,28 @@ test('a session resumed from a machine that was not connected names that machine
       description: "anyhost-a's anyhost was not connected when this machine took the session, so it learns that this machine holds the session when it next connects.",
     },
   ])
+})
+
+test("a session's start, end, turn start and end, notification, folder change and /rename each tell the program the session and its folder, at once", async () => {
+  const tested = testMod(anyhost, { files: instance })
+  const posted: string[] = []
+  tested.fakes.process.spawn = () => held()
+  tested.fakes.http.fetch = async (url, init) => {
+    if (url.endsWith('/sessions/changed')) posted.push(textOf(init?.body ?? ''))
+    return { status: 200, ok: true, headers: {}, text: '{}' }
+  }
+
+  await tested.raise.onSessionStart({ source: 'startup' })
+  await tested.add({ type: Prompt, text: 'Plan the trip' })
+  await tested.endTurn({ answer: 'Planned.' })
+  await tested.raise.onCwdChange({ previous: '/work/old' })
+  await tested.raise.onNotification({ text: 'Claude needs your permission to use Bash', type: 'permission_prompt' })
+  await tested.raise.onNotification({ text: 'Claude is waiting for your input', type: 'idle_prompt' })
+  await tested.raise.onRun({ name: 'rename', args: 'Trip to Lisbon', from: { type: 'person' } })
+  await tested.raise.onSessionEnd({ reason: 'exit' })
+  await tested.settle()
+
+  expect(posted).toEqual(Array.from({ length: 8 }, () => JSON.stringify({ session: 'test-session', folder: '/test/plugins/anyhost' })))
 })
 
 test('a session this device holds, or no device claims, takes prompts', async () => {
@@ -425,7 +447,7 @@ test('/move names the machine to move to, and shows why the program refused the 
   expect(moveToasts(tested)).toEqual([])
 })
 
-const AGENT = { id: '3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4', tool: 'claude', title: 'Checkout retry', firstPrompt: 'Make the checkout retry a declined card once', machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: '2026-11-10T14:02:00.000Z', repo: 'git@github.com:acme/shop.git', cwd: '/home/jordan/shop', entrypoint: 'cli', device: 'd1', archived: false, parent: '' }
+const AGENT = { id: '3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4', tool: 'claude', title: 'Checkout retry', firstPrompt: 'Make the checkout retry a declined card once', machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: '2026-11-10T14:02:00.000Z', repo: 'git@github.com:acme/shop.git', cwd: '/home/jordan/shop', entrypoint: 'cli', device: 'd1', archived: false, parent: '', source: '' }
 const MACHINES = { here: 'd0', machines: [{ id: 'd0', name: 'test-computer', connected: true, seenAt: '' }, { id: 'd1', name: 'devbox', connected: true, seenAt: '' }] }
 
 test('Claude lists every agent of every machine with what it does, starts one on a machine with its first message, and tells, reads or answers one wherever it runs', async () => {
@@ -437,7 +459,7 @@ test('Claude lists every agent of every machine with what it does, starts one on
   })
 
   expect(await tested.callTool('list_agents', { limit: 1 })).toEqual({
-    result: JSON.stringify([{ id: AGENT.id, tool: 'claude', title: 'Checkout retry', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd, archived: false, parent: null }]),
+    result: JSON.stringify([{ id: AGENT.id, tool: 'claude', title: 'Checkout retry', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd, archived: false, parent: null, source: null }]),
   })
   expect(await tested.callTool('start_agent', { folder: '/Users/jordan/shop', machine: 'devbox', prompt: 'You are the CTO. Watch every agent.' })).toEqual({ result: JSON.stringify({ session: 'c3', machine: 'devbox' }) })
   expect(await tested.callTool('tell_agent', { agent: '3f9c2b1e', text: 'Book the train' })).toEqual({ result: JSON.stringify(told) })
@@ -451,6 +473,39 @@ test('Claude lists every agent of every machine with what it does, starts one on
   ])
 })
 
+test("Claude puts an agent to sleep and shows its terminal on this machine's screen, each through the program", async () => {
+  const { tested, asked } = withProgram({
+    'POST /agents/tell': [{ body: { machine: 'devbox', session: AGENT.id, status: 'working', screen: '' } }],
+    'POST /agents/show': [{ body: { session: AGENT.id, machine: 'devbox', terminal: 'devbox/t4' } }],
+  })
+
+  expect(await tested.callTool('sleep_agent', { agent: '3f9c2b1e' })).toEqual({ result: '3f9c2b1e on devbox goes to sleep once its turn ends. It is working now.' })
+  expect(await tested.callTool('show_agent', { agent: '3f9c2b1e', place: 'right' })).toEqual({ result: JSON.stringify({ session: AGENT.id, machine: 'devbox', terminal: 'devbox/t4' }) })
+  expect(asked.filter(({ method }) => method === 'POST')).toEqual([
+    { method: 'POST', path: '/agents/tell', body: { session: '3f9c2b1e', sleep: true } },
+    { method: 'POST', path: '/agents/show', body: { session: '3f9c2b1e', place: 'right' } },
+  ])
+})
+
+test('Claude settles and snoozes an agent through the program, and takes each back', async () => {
+  const { tested, asked } = withProgram({ 'POST /agents/settle': [{ body: {} }, { body: {} }], 'POST /agents/snooze': [{ body: {} }, { body: {} }] })
+
+  const answers = [
+    await tested.callTool('settle_agent', { agent: '3f9c2b1e' }),
+    await tested.callTool('settle_agent', { agent: '3f9c2b1e', settled: false }),
+    await tested.callTool('snooze_agent', { agent: '3f9c2b1e', until: '2026-11-16T09:00:00.000Z' }),
+    await tested.callTool('snooze_agent', { agent: '3f9c2b1e', until: null }),
+  ]
+
+  expect(answers).toEqual([{ result: 'Settled 3f9c2b1e.' }, { result: 'Unsettled 3f9c2b1e.' }, { result: 'Snoozed 3f9c2b1e until 2026-11-16T09:00:00.000Z.' }, { result: 'Woke 3f9c2b1e.' }])
+  expect(asked.filter(({ method }) => method === 'POST')).toEqual([
+    { method: 'POST', path: '/agents/settle', body: { session: '3f9c2b1e', settled: true } },
+    { method: 'POST', path: '/agents/settle', body: { session: '3f9c2b1e', settled: false } },
+    { method: 'POST', path: '/agents/snooze', body: { session: '3f9c2b1e', until: '2026-11-16T09:00:00.000Z' } },
+    { method: 'POST', path: '/agents/snooze', body: { session: '3f9c2b1e', until: null } },
+  ])
+})
+
 test("Claude lists the agents it started with their parent and its machine, reads a child's last messages, and deletes a child but never itself", async () => {
   const child = { ...AGENT, id: 'c4000000-0000-4000-8000-000000000000', title: 'Book the train', parent: 'test-session' }
   const messages = [{ role: 'assistant', at: '2026-11-12T10:00:04.000Z', text: 'Booked the 9:15 train.' }]
@@ -461,13 +516,13 @@ test("Claude lists the agents it started with their parent and its machine, read
   })
 
   expect(await tested.callTool('list_agents', { children_of: 'me' })).toEqual({
-    result: JSON.stringify([{ id: child.id, tool: 'claude', title: 'Book the train', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd, archived: false, parent: { id: 'test-session', title: 'CTO', machine: 'mac-studio' } }]),
+    result: JSON.stringify([{ id: child.id, tool: 'claude', title: 'Book the train', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd, archived: false, parent: { id: 'test-session', title: 'CTO', machine: 'mac-studio' }, source: null }]),
   })
   expect(await tested.callTool('read_agent', { agent: 'c4000000', messages: 1 })).toEqual({ result: JSON.stringify({ machine: 'devbox', session: child.id, status: 'idle', screen: '', messages }) })
   expect(await tested.callTool('delete_agent', { agent: 'c4000000' })).toEqual({ result: 'Deleted c4000000.' })
   expect(await tested.callTool('delete_agent', { agent: 'test-session' })).toEqual({ deny: 'The delete_agent tool failed: test-ses is this agent, which cannot delete itself.' })
   expect(asked.filter(({ method }) => method === 'POST')).toEqual([
-    { method: 'POST', path: '/agents/tell', body: { session: 'c4000000', messages: 1 } },
+    { method: 'POST', path: '/agents/tell', body: { session: 'c4000000', messages: 1, skip: 0 } },
     { method: 'POST', path: '/agents/delete', body: { session: child.id } },
   ])
 })
@@ -493,6 +548,28 @@ test('Claude opens an agent on this machine, as when the machine that ran it is 
 
   expect(await tested.callTool('open_agent', { agent: '3f9c2b1e' })).toEqual({ result: JSON.stringify({ session: AGENT.id, terminal: 't3', machine: 'test-computer' }) })
   expect(asked.at(-1)).toEqual({ method: 'POST', path: '/agents/open', body: { session: '3f9c2b1e' } })
+})
+
+test('Claude forks an agent through its program, at its end or at one of its messages', async () => {
+  const fork = { session: 'f0000000-0000-4000-8000-000000000000', machine: 'devbox' }
+  const { tested, asked } = withProgram({ 'POST /agents/fork': [{ body: fork }, { body: fork }] })
+
+  expect(await tested.callTool('fork_agent', { agent: '3f9c2b1e' })).toEqual({ result: JSON.stringify(fork) })
+  expect(await tested.callTool('fork_agent', { agent: '3f9c2b1e', at: '7f1e0000-0000-4000-8000-000000000000' })).toEqual({ result: JSON.stringify(fork) })
+  expect(asked.filter(({ method }) => method === 'POST')).toEqual([
+    { method: 'POST', path: '/agents/fork', body: { session: '3f9c2b1e', at: '' } },
+    { method: 'POST', path: '/agents/fork', body: { session: '3f9c2b1e', at: '7f1e0000-0000-4000-8000-000000000000' } },
+  ])
+})
+
+test('Claude lists a fork with the agent it was forked from as its source, and never as a child of that agent', async () => {
+  const fork = { ...AGENT, id: 'f0000000-0000-4000-8000-000000000000', title: 'Checkout retry (fork)', source: AGENT.id }
+  const { tested } = withProgram({ 'GET /agents': [{ body: { agents: [fork, AGENT] } }] })
+
+  expect(await tested.callTool('list_agents', { limit: 1 })).toEqual({
+    result: JSON.stringify([{ id: fork.id, tool: 'claude', title: 'Checkout retry (fork)', firstPrompt: AGENT.firstPrompt, machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: AGENT.lastActivity, repo: AGENT.repo, cwd: AGENT.cwd, archived: false, parent: null, source: { id: AGENT.id, title: 'Checkout retry', machine: 'devbox' } }]),
+  })
+  expect(await tested.callTool('list_agents', { children_of: '3f9c2b1e' })).toEqual({ result: [] })
 })
 
 test('Claude adds a machine it reaches over ssh, and removes one by its name', async () => {

@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, until } from './memory.ts'
-import { claimOn, copiesOn, killAfterTest, LAPTOP, postTo, runningOn, runsOn, serveOn, SESSION, stepsOf, WORKER, workerOn } from './program.ts'
+import { claimOn, copiesOn, LAPTOP, postTo, runningOn, runsOn, serveOn, SESSION, spawnForTest, stepsOf, WORKER, workerOn } from './program.ts'
 
 test('a move to a worker whose program restarts before its Claude Code ran the session runs again there at the laptop\'s next repeat, and reaches moved', async () => {
   const relay = await memoryRelay()
@@ -39,8 +39,7 @@ test("a worker program restarted after it opened a terminal for a move stops tha
   await until(() => runsOn(worker.folder).some((run) => run.session === SESSION), 'the worker starting the session', 30_000)
   worker.child.kill('SIGKILL')
   await worker.child.exited
-  const job = Bun.spawn(['sleep', '600'])
-  killAfterTest(job)
+  const job = spawnForTest(['sleep', '600'])
   const workerHome = worker.env['HOME'] ?? ''
   const record = (status: string): void =>
     writeFileSync(join(workerHome, '.claude', 'sessions', `${job.pid}.json`), JSON.stringify({ pid: job.pid, sessionId: SESSION, kind: 'interactive', cwd: join(workerHome, 'work'), status }))

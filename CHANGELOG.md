@@ -2,6 +2,99 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.0] - 2026-11-15
+
+### New
+- The sidebar is an inbox over your projects, laid out as T3 Code's. Pinned sessions come first under their own header, each with a pin you click to unpin, then Active: sessions that need you, then everything else by its last message, however old. A session whose turn just ended comes to the top at once. Working, Snoozed and Settled are shelves at the foot of the list, however short it is, and every state has one colour and icon everywhere.
+- Snooze a session from its menu: In 1 hour, In 3 hours, This evening, Tomorrow or Next week, soonest first with the time each wakes, or Custom… for a date and time or a duration. The Snoozed shelf lists the soonest wake first and shows how long is left, and Wake now brings a session back early.
+- Settle a session from its menu, its hover check, or s and Cmd-Shift-S in the list. The Settled shelf lists the newest settle first, 10 at a time with Show 25 more. Unpin, Settle, Snooze and Archive each toast an undo, and undoing a settle puts back the pin and snooze it cleared.
+- Archived sessions leave the sidebar for Settings, which lists them by project with Restore and Delete.
+- Projects read as names: `creator-income-blueprint` shows as Creator Income Blueprint, `php-sharp` as PHP Sharp. Rename… in a project's menu sets any name, with Reset to go back, and the sidebar, the filter, the cards and the palette all show it.
+- Each worktree is a workspace of its own, named after its project and branch, holding every pinned, active and working session of that worktree, asleep until you look at one. The projects pane nests a project's worktrees under it by branch: pick the project to open its first worktree, this machine's main checkout before the others, and list that worktree's sessions, with one click on the branch's chip away from every worktree's, or pick a worktree to open its workspace and list only its sessions. A session you settle, snooze or archive leaves its workspace and keeps running, and opening it brings it back. Sessions already open in a project's single space move into their worktree's workspace by themselves, with nothing restarted.
+- One session can show in several tabs at once. Show beside or below this pane puts a live view of it next to any other pane, so tab 1 can hold it alone and tab 2 hold it at 70/30 with another session. Move to tab moves a session's terminal into another tab.
+- A session that works in another terminal here, as in tmux, shows in its tab and continues there once its turn ends. One that runs on another connected machine shows its screen live and takes what you type. One whose machine is offline asks before it continues here from its backup.
+- Tags as in Notion: create, colour, rename and delete them, and give a session several. The Board shows your sessions in columns of stages you define, or by state, and you drag a card to move it. Tags, stages and filters reach every machine.
+- One filter for project, state, tag and machine, with a chip for each that one click removes. Sessions outside git are No project. Background runs, sessions in temporary folders and deleted sessions show once the filter's Also show includes them.
+- In the anyhost layout, the key that opened Herdr's space picker (Cmd-P on a Mac) opens anyhost's palette instead: actions first, then your projects, then your recent sessions, searchable together, as T3 Code's command palette lays them out.
+- Every list, popup and dialog of the sidebar shares one scale of text sizes, row heights, spacing and corners, so rows line up and look alike everywhere.
+- New session inside a project starts at once in that project, with no question. From All projects it lists every project with each of its worktrees by its full path.
+- Each card says what its session last said, asked or ran.
+- anyhost runs the sidebar's footer: Machines lists every machine, adds one in a click and removes one, and Settings sets after how many idle days a session settles by itself.
+- Settle and snooze, as in T3 Code. A settled session leaves the active list for the Settled shelf until its next message, and an idle session settles by itself after 7 days, a setting from 1 to 90 days or off that every machine shares. A snoozed session hides until the time you pick, a prompt to it, or its wait for your permission, and a finished turn never wakes it. `anyhost settle`, `anyhost snooze` and `anyhost settle --after` do the same from the terminal, and agents get `settle_agent` and `snooze_agent`.
+- Archive is yours alone: nothing archives a session by idle time any more. A shared list that set days to archive after now settles after 7 days instead.
+- Rename a project once and every machine shows the new name. `anyhost project-name` does it from the terminal.
+- A session waiting on its background agents, commands or Monitors reads Working, never Done, as Claude Code itself counts it, so sleep, Archive and a move never stop it while that work runs. A session handed to the background with ← reads idle in the window it left, instead of Working for weeks. Moves, sleep and the list all read this one status, so such a session no longer blocks a move or stays awake.
+- A thread you settle in T3 Code settles in anyhost too. Only a thread you archive or delete in T3 Code is archived in anyhost.
+- The keyboard walks the inbox: j and k move, Enter opens, Space peeks, e archives, u marks read or unread, p pins, s settles, t tags.
+- anyhost draws its own tab bar: drag a tab to reorder it, double-click to rename it, middle-click or × to close it, right-click for the session's menu with Close tab, Close other tabs, Close tabs to the right and Reopen closed tab.
+- Each workspace tiles its sessions the way you pick, as Hyprland and niri do: Tabs, Scroll (side-by-side columns you scroll through), Master (one large session on the left, right or top), Dwindle, Grid, Stack (one at a time) and Board. Each workspace keeps its own mode, order and master size. The tab bar stays on top in every mode: it lists the sessions in order, a click focuses one, a drag reorders every mode, and its icons switch modes. The pane keys move focus between tiles, with shift they move the focused session, and in the anyhost layout the pane keys' modifier (Cmd-Option on a Mac) with Enter makes it the master, with M cycles the modes, with = and - sizes the master, and with , and . scrolls the strip. A narrow window shows fewer columns.
+- A worktree's right-click menu starts a session in it, makes a new worktree from it on a new or existing branch, removes it, switches its workspace's mode, marks all its sessions read and copies its path, branch or repository. A project's menu starts a session, makes a worktree, renames it and shows it on another machine.
+- Pins live with the session on every machine, and a pinned session never settles by itself. `anyhost pin` pins from the terminal, and `anyhost tell --keys` presses keys in a session.
+- Fork, split or duplicate any session, at its end or at any of its messages: `anyhost fork <session> [--at <message>] [--open]`, and `fork_agent` for agents. The fork lists at once as `<title> (fork)`, on the machine that holds that session.
+- A fork is a session of its own, never a subagent: the sidebar shows it as its own card that says `fork of <title>`, never folded under the session it came from, and so does a conversation Claude Code's `/branch` forked. `list_agents` gives each agent its `source`, the agent it was forked from, apart from its `parent`, the agent that started it with `start_agent`.
+- A session's history is stored like git: each large file goes up as pieces named by their content, and every session, fork and machine shares the pieces it has in common. A fork costs a few hundred bytes however long its conversation, so 30 forks of a 400 MB conversation cost about what one copy does. A fork Claude Code makes itself uploads only what differs from its parent. Every fork lists, restores, moves and deletes as any session, also after the session it came from was deleted or lives on no machine.
+- The new form turns on once every machine you have runs anyhost 0.9, so a machine still on 0.8 keeps reading and backing up every session meanwhile.
+- anyhost rewrites the history it already keeps into this form, one session a minute in the background, under a daily budget that stays well inside Cloudflare's free plan, and keeps every old copy until the new one reads back byte for byte. That covers every session in your bucket, also those no machine holds, as old imports and the sessions of a machine you removed: once a machine has rewritten its own, it takes those up one at a time, holds each only while it rewrites it, and lets it go after, so any machine opens it as before, and one you open on that machine meanwhile stays yours. `anyhost doctor` shows on every machine how many sessions of your whole bucket are done.
+
+### Fixed
+- A session's first 8 characters open every session `anyhost list` shows, a session no machine has opened since it was imported too, where `anyhost open` said no session's id began with them.
+- anyhost no longer stops answering for seconds at a time on a busy Mac. The sidebar no longer reads "Can't reach anyhost" while it lists dozens of open sessions, and backups and the relay connection keep going meanwhile.
+- A history rewrite that anyhost stopped in the middle, as at a restart, waits a day before it tries again, instead of starting over at every start, and anyhost deletes the space such a rewrite left on disk.
+- A session whose backup a machine had lost track of, as after its database was rebuilt, backs up its new lines at once instead of uploading the whole session twice and hiding the new lines until it went quiet.
+- Archive closes the session's tab and takes it off the list, with a toast to restore it. Delete asks first, never runs on a working session, and can be undone.
+- Archive works from every menu, the tab bar's too, from e and from the tab's ×, whatever the session is doing. A session that works or waits stops once its turn ends.
+- A finished session reads Done, never "Working 12h", when a session it opened in a terminal works on its own.
+- A card shows its project and branch in every filter, as it does under All projects, so its first line never sits empty but for its state. A Board card names its project in every scope too.
+- Leaving a session where it runs, at "any other key leaves it there", no longer archives it, and neither does closing a pane that only shows a session another pane runs.
+- The sidebar no longer shows "could not be re-rendered" errors as you click around.
+- The sidebar, the tab bar and the Board stay drawn and answer every click on a machine under heavy load, with hundreds of sessions: no more "could not be re-rendered" banner over the tab bar or the inbox, and the inbox never goes back to "Reading your sessions…" while a read runs, fails or times out. A reload draws your whole list at once.
+- The sidebar refreshes in one call instead of two, and no longer waits up to 5 seconds on a slow machine.
+- A click on a sleeping session shows its tab instead of opening a second one.
+- The inbox never moves under your pointer: new rows wait behind a `new` marker until you look away.
+- Opening a session on the machine it lives on resumes it right there, on your code as it is now. It no longer downloads it from R2 or rewinds its code, whatever anyhost's database remembers.
+- No restore ever makes a worktree or changes your checkout. A session continues on the checkout you have, and a repository the machine lacks is cloned as the remote has it now. Only a move of a running session brings its uncommitted changes, and only onto a checkout with none of its own.
+- A Codex session shows once, instead of twice with a click that opened another space each time.
+- While anyhost restarts, the sidebar no longer stacks an error toast for each session it could not mark read. It marks them once anyhost answers again.
+- After a Herdr or herdr-core restart, every tab and split comes back as you left it, each session asleep in its own pane, with no second pane beside it. This now works with no Herdr window open too, as anyhost itself puts each session back.
+- Many Herdr windows on one machine no longer race each other: anyhost alone archives a session whose pane you closed, keeps a session awake while any window shows it, and marks it read once.
+- A session whose runner ended by itself is no longer archived as if you had closed its pane.
+- A session woken while anyhost restarts continues in its own folder, instead of the folder its terminal started in.
+- A sleeping session starts Claude Code the moment you look at its tab, instead of asking you to type.
+- Opening a session that works in another terminal, as in tmux, asks before it moves it: Enter moves it once its turn ends, any other key leaves it there. An idle one moves at once.
+- A session nobody named is called by the first line of its first message, with file paths shortened to their file name, everywhere it is listed.
+- Archiving a session takes it off the list at once, and its undo toast appears only once the archive went through.
+- Agents control each other on two layers. `sleep_agent` stops an agent, `read_agent` pages back through its whole history, and `show_agent` puts its terminal on your screen: focused, peeked, in a tab, beside or below your pane, or hidden while it runs on. `anyhost sleep` and `anyhost show` do the same from a shell.
+- The sidebar updates the moment a session changes: a new session, a rename, a `/cd`, a turn that starts or ends.
+- A Codex session shows as the same card as a Claude Code session, matched to its terminal.
+- A finished agent says Done until you answer it, seen or not; one you haven't looked at has a bold title.
+- Every session row has the same three lines, and a session outside a project never shows a branch.
+- The project counts add up to All projects.
+- Projects sit above the inbox in the sidebar.
+- Sessions glide to their new place in the sidebar, fade in as they arrive and fade out as they leave, as in T3 Code. Opening a shelf brings it into view.
+- A list filtered to a project says the project's name under the search, with × back to All projects.
+- Picking one project and then another quickly never jumps the screen back to the first.
+- Peek shows the real Claude Code session in a popup, with Keep to make it a tab.
+- Sleep in a session's menu stops its Claude Code now and keeps its tab. It wakes when you bring it into view or type.
+- New stage… in a session's Stage menu, the same search-or-create picker as tags.
+- An archived session stays archived until it gets a new message. Background backups and Claude Code closing no longer bring it back as Done.
+- Every card says what its session last said, including sessions backed up before anyone kept that, and they sort by their last message instead of their last backup. anyhost reads only the start and end of each transcript to catch up, once.
+- A Codex session whose rollout Codex already compressed goes up to R2 with that rollout, and lists its folder, prompt and last reply.
+- A session the Claude app opened with a hidden note before your first message is named by your own words.
+- Closing a session's tab is instant: the tab leaves, the next one shows and the card archives in the same click, while Claude Code stops in the background. The toast and Cmd-Shift-T reopen it, with its name on the tab.
+- A message from another agent never moves a session you run in tmux or a plain terminal. It says where the session runs and leaves it there.
+- A session never runs twice on one machine. Opening or waking a session that Claude Code already runs in another terminal here, as in tmux, starts no second Claude Code, even when anyhost restarts or its answer is lost while it waits for that copy's turn to end. The tab says which process runs it, and a key closes the tab or puts it back to sleep.
+- When Herdr shows a session of another project by itself, as at a notification click, the sidebar's project follows it.
+- A session opens at its pane's size, so Claude Code never draws a frame at the wrong size first, and the sleeping screen never draws over it.
+- A Codex session no longer offers Sleep, which only Claude Code sessions do.
+- A session carries the name Claude Code gives it everywhere: its /rename, its generated title, or the agent it runs as, such as `cto`, instead of its first message.
+- A session no longer fails to open with `setRawMode failed with errno: 5` when anyhost reads your login shell's environment as it starts.
+- A working Claude Code session reads as working from Claude Code itself, so a card no longer flips state between two sources.
+- A session idle in another terminal says it moves here, instead of claiming it works there.
+- A session running in a tab always has its row, even one archived before.
+- Sessions on the Working, Snoozed and Settled shelves look like every other session.
+- The Board opens from the palette as a view of your workspace, and no longer sits as a button in the sidebar. Its stage headers and Add stage look like the rest of the sidebar.
+- A session whose backup R2 already holds, such as one you imported, backs up from the end of that backup the first time a machine captures it, whether or not a machine holds it. Its new lines restore at once, instead of hiding behind the old backup until a full upload 20 minutes later. A machine that meets another machine's write as it starts a session's backup goes on after it, instead of stopping that session's backup.
+
 ## [0.8.5] - 2026-11-13
 
 ### Fixed

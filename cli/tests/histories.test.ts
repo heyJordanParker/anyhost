@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { decompress, type RecordHeader } from '../src/capture.ts'
+import { zstdDecompressSync } from 'node:zlib'
+import type { RecordHeader } from '../src/capture.ts'
 import type { Agents } from '../src/sessions.ts'
 import { ownerOf } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
@@ -13,7 +14,7 @@ const SECOND = '{"said":"Book the train"}\n'
 
 const recordsOf = (body: Uint8Array): { readonly header: RecordHeader; readonly text: string }[] => {
   const records: { header: RecordHeader; text: string }[] = []
-  for (let at = 0, bytes = decompress(body); at < bytes.length; ) {
+  for (let at = 0, bytes = zstdDecompressSync(body); at < bytes.length; ) {
     const newline = bytes.indexOf(10, at)
     const header = JSON.parse(decoder.decode(bytes.subarray(at, newline))) as RecordHeader
     records.push({ header, text: decoder.decode(bytes.subarray(newline + 1, newline + 1 + header.size)) })

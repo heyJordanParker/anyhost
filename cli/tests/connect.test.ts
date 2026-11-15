@@ -1,15 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test'
-import type { Subprocess } from 'bun'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { COMPATIBILITY_DATE, PROTOCOL_VERSION, RELAY_VERSION } from '../../relay/protocol.ts'
-import { decompress } from '../src/capture.ts'
 import { connectCloudflare, connectForStep, join as joinRelay, runCf, updateRelay, type Account, type Cloudflare, type Progress } from '../src/connect.ts'
 import { forgetRelayLogin, personOptions, relayLogin, saveRelayLogin } from '../src/device.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
-import type { Status } from '../src/serve.ts'
-import { memoryRelay, temporaryFolder, until, welcomed, type MemoryRelay } from './memory.ts'
-import { fakeHc, script } from './program.ts'
+import { memoryRelay, statusOn, until, welcomed, type MemoryRelay } from './memory.ts'
+import { decoder, fakeHc, isUploaded, script, SESSION, spawnForTest, temporaryFolder } from './program.ts'
 
 const NAMES = { worker: 'anyhost-test-connect', bucket: 'anyhost-test' }
 const ACCOUNT: Account = { id: '0534ffa9', name: 'Parker Labs' }
@@ -872,17 +869,22 @@ function service(): Relay {
   return relay
 }
 
-test('a machine its relay removed forgets relay.json and the token, and is unjoined with the reason', async () => {
+test('a machine its relay removed forgets relay.json and the token, and is unjoined with the reason, which a command with its old token fails with', async () => {
   const relay = await memoryRelay()
-  await saveRelayLogin({ url: relay.url, token: await relay.join(DEVICE, ROOTS) })
+  const token = await relay.join(DEVICE, ROOTS)
+  await saveRelayLogin({ url: relay.url, token })
   const here = service()
   await welcomed(here)
 
   relay.remove(DEVICE.id)
   await until(() => here.url === '')
-  expect(here.state).toEqual({ is: 'unjoined', message: 'This machine was removed from your machines. Join it again with a link from Add a machine.' })
+  const message = 'This machine was removed from your machines. Join it again with a link from Add a machine.'
+  expect(here.state).toEqual({ is: 'unjoined', message })
   expect(existsSync(stateFile('relay.json'))).toBe(false)
   expect(existsSync(secretFile())).toBe(false)
+  const command = connectRelay({ login: async () => ({ url: relay.url, token }), forget: async () => undefined, device: DEVICE, roots: ROOTS, isPatient: false })
+  services.push(command)
+  await expect(Promise.all(command.run([{ op: 'claims' }]))).rejects.toThrow(message)
 })
 
 test('a token the relay knows no machine with is forgotten too, and the machine is unjoined with the reason', async () => {
@@ -951,23 +953,10 @@ test('join refuses a link that is no invite link, and says why the relay refused
 })
 
 const SRC = join(import.meta.dir, '..', 'src')
-const SESSION = '11111111-2222-3333-4444-555555555555'
-const decoder = new TextDecoder()
-const children: Subprocess[] = []
 const servers: { stop(closeActiveConnections?: boolean): Promise<void> }[] = []
 afterEach(async () => {
-  for (const child of children.splice(0)) {
-    child.kill()
-    await child.exited
-  }
   await Promise.all(servers.splice(0).map((server) => server.stop(true)))
 })
-
-async function waitFor(what: string, isTrue: () => boolean | Promise<boolean>, ms = 30_000): Promise<void> {
-  for (const started = Date.now(); !(await isTrue()); await Bun.sleep(20)) if (Date.now() - started > ms) throw new Error(`${what} did not happen within ${ms} ms.`)
-}
-
-const statusOf = async (socket: string): Promise<Status> => (await (await fetch('http://localhost/status', { unix: socket })).json()) as Status
 
 function machineEnv(): Record<string, string> {
   const folder = temporaryFolder()
@@ -1032,8 +1021,7 @@ await serve(deviceFromEnvironment(), ${JSON.stringify(NAMES)}, {
 })
 `,
   )
-  const child = Bun.spawn(['bun', script], { env, stdout: 'pipe', stderr: 'inherit' })
-  children.push(child)
+  const child = spawnForTest(['bun', script], { env, stdout: 'pipe', stderr: 'inherit' })
   const reader = child.stdout.getReader()
   let printed = ''
   while (!printed.includes('\n')) {
@@ -1097,17 +1085,17 @@ test('a running program whose relay is an older relay version at its protocol ke
   await saveRelayLogin({ url: front.url, token: await relay.join(DEVICE, ROOTS) })
   const env = machineEnv()
   const socket = await programWith(cloudflare.cloudflare, env)
-  await waitFor('the relay update uploading', () => cloudflare.calls.includes(`PUT /accounts/${ACCOUNT.id}/workers/scripts/${NAMES.worker}`))
-  expect((await statusOf(socket)).relay.state).toBe('connected')
+  await until(() => cloudflare.calls.includes(`PUT /accounts/${ACCOUNT.id}/workers/scripts/${NAMES.worker}`), 'the relay update uploading', 30_000)
+  expect((await statusOn(socket)).relay.state).toBe('connected')
 
   const transcript = join(env['CLAUDE_CONFIG_DIR'] ?? '', 'projects', '-work', `${SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
-  await waitFor('the line uploading', () => relay.puts.some(({ key, body }) => key.startsWith(`journals/${SESSION}/hot/`) && decoder.decode(decompress(body)).includes('Plan the trip')))
+  await until(() => isUploaded(relay, SESSION, 'Plan the trip'), 'the line uploading', 30_000)
   expect(cloudflare.workers.get(NAMES.worker)?.relay).toBe(RELAY_VERSION - 1)
 
   upload.resolve()
-  await waitFor('the program connecting to the relay it put up', () => front.welcomes.length === 2)
+  await until(() => front.welcomes.length === 2, 'the program connecting to the relay it put up', 30_000)
   expect(front.welcomes).toEqual([
     { relay: RELAY_VERSION - 1, protocol: PROTOCOL_VERSION },
     { relay: RELAY_VERSION, protocol: PROTOCOL_VERSION },
@@ -1115,7 +1103,7 @@ test('a running program whose relay is an older relay version at its protocol ke
   const updated = cloudflare.workers.get(NAMES.worker)
   expect(updated?.metadata['keep_bindings']).toEqual(['secret_text'])
   expect(updated?.secret).toBe(sha256('an earlier setup code'))
-  const status = await statusOf(socket)
+  const status = await statusOn(socket)
   expect(status.relay.state).toBe('connected')
   expect(status.updateProblem).toBeUndefined()
 }, 60_000)
@@ -1126,15 +1114,15 @@ test('a running program whose relay update failed loses the relay update problem
   const front = frontOf(relay, () => cloudflare.workers.get(NAMES.worker))
   await saveRelayLogin({ url: front.url, token: await relay.join(DEVICE, ROOTS) })
   const socket = await programWith(cloudflare.cloudflare, machineEnv())
-  await waitFor('the failed update in /status', async () => (await statusOf(socket)).updateProblem !== undefined)
-  const failed = await statusOf(socket)
+  await until(async () => (await statusOn(socket)).updateProblem !== undefined, 'the failed update in /status', 30_000)
+  const failed = await statusOn(socket)
   expect(failed.relay.state).toBe('outdated')
   expect(failed.updateProblem).toEndWith('relay update: Error: cf is logged in to no Cloudflare account on this machine. Connect Cloudflare logs it in.')
 
   const worker = cloudflare.workers.get(NAMES.worker)
   if (worker !== undefined) worker.protocol = PROTOCOL_VERSION
-  await waitFor('the program connecting', async () => (await statusOf(socket)).relay.state === 'connected')
-  expect((await statusOf(socket)).updateProblem).toBeUndefined()
+  await until(async () => (await statusOn(socket)).relay.state === 'connected', 'the program connecting', 30_000)
+  expect((await statusOn(socket)).updateProblem).toBeUndefined()
 }, 60_000)
 
 test("anyhost connect with CLOUDFLARE_API_TOKEN set sends it to the running program, whose Connect Cloudflare logs cf in and calls Cloudflare's API with it", async () => {
@@ -1142,8 +1130,7 @@ test("anyhost connect with CLOUDFLARE_API_TOKEN set sends it to the running prog
   const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', apiToken: true, others: [other] })
   const env = machineEnv()
   await programWith(cloudflare.cloudflare, env)
-  const command = Bun.spawn(['bun', join(SRC, 'main.ts'), 'connect'], { env: { ...env, CLOUDFLARE_API_TOKEN: 'fresh' }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
-  children.push(command)
+  const command = spawnForTest(['bun', join(SRC, 'main.ts'), 'connect'], { env: { ...env, CLOUDFLARE_API_TOKEN: 'fresh' }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
   const reader = command.stdout.getReader()
   let printed = ''
   while (!printed.includes('Type the number of the account your relay goes in:')) {

@@ -11,10 +11,10 @@ import {
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
 import { downloadJournal } from '../src/sessions.ts'
-import { codexState, summarize, type Tool } from '../src/transcript.ts'
-import { MEMORY, failTest, memoryRelay, noCode, temporaryFolder, welcomed, type MemoryRelay } from './memory.ts'
+import { codexState, messagesOf, summarize, UNSUMMARIZED, type Tool } from '../src/transcript.ts'
+import { MEMORY, eventLoopDuring, failTest, memoryRelay, noCode, welcomed, type MemoryRelay } from './memory.ts'
+import { SESSION, spawnForTest, temporaryFolder } from './program.ts'
 
-const SESSION = '11111111-2222-3333-4444-555555555555'
 const OTHER = '99999999-2222-3333-4444-555555555555'
 const TRIP = join(temporaryFolder(), 'trip')
 mkdirSync(TRIP)
@@ -57,6 +57,29 @@ function recordsOf(body: Uint8Array): { header: RecordHeader; text: string }[] {
 const hotFrames = (relay: MemoryRelay, session = SESSION): Promise<string[]> => relay.keys(`journals/${session}/hot/`)
 const frameOf = async (relay: MemoryRelay, key: string): Promise<Uint8Array> => decompress((await relay.read(key)) ?? new Uint8Array())
 const journalBytes = async (relay: MemoryRelay): Promise<Uint8Array> => Buffer.concat(await Promise.all((await hotFrames(relay)).map((key) => frameOf(relay, key))))
+
+test("a frame of 64 MiB compresses and decompresses off the program's thread, so timers run meanwhile", async () => {
+  const body = new TextEncoder().encode(lines.join('').repeat(Math.ceil(2 ** 26 / lines.join('').length)))
+
+  const compressed = await eventLoopDuring(async () => await compressHot(body))
+  const decompressed = await eventLoopDuring(async () => await decompress(compressed.value))
+
+  expect(Buffer.compare(decompressed.value, body)).toBe(0)
+  expect([compressed.ticks > 0, decompressed.ticks > 0]).toEqual([true, true])
+}, 30_000)
+
+test("a session's last activity is its last message, so the lines Claude Code writes as it exits and a later code upload never make an archived session new again", async () => {
+  const relay = await memoryRelay()
+  const { transcript, upload, capture } = machine(deviceA, relay, temporaryFolder(), { captureCode: async () => ({ header: new TextEncoder().encode('{"repo":""}'), parts: [] }), restoreCode: async () => '' })
+  const lastActivity = (): string => capture.db.query<{ last_activity: string }, [string]>('select last_activity from sessions where id = ?').get(SESSION)?.last_activity ?? ''
+  writeFileSync(transcript, `{"type":"user","timestamp":"2026-10-04T15:45:00.000Z","message":{"role":"user","content":"Build kvdb"},"cwd":${JSON.stringify(TRIP)},"sessionId":"${SESSION}"}\n`)
+  await upload(transcript)
+  appendFileSync(transcript, `{"type":"cost-state","sessionId":"${SESSION}"}\n`)
+  await upload(transcript)
+  await upload()
+
+  expect(lastActivity()).toBe('2026-10-04T15:45:00.000Z')
+})
 
 test('offset capture never re-uploads a byte', async () => {
   const relay = await memoryRelay()
@@ -138,9 +161,9 @@ test('replay of append, write-once and rewrite records', async () => {
     encodeRecord({ device, path, at, size: Buffer.byteLength(text), after: { size: at + Buffer.byteLength(text), sha256: '' } }, new TextEncoder().encode(text))
   const first = Buffer.concat([...record('a', '/h/log.jsonl', 0, 'one\n'), ...record('a', '/h/once.txt', 0, 'written once'), ...record('a', '/h/state.json', 0, '{"step":"first, and longer"}')])
   const second = Buffer.concat([...record('b', '/h/log.jsonl', 4, 'two\n'), ...record('b', '/h/state.json', 0, '{"step":2}')])
-  await relay.objects.put(hotKey(SESSION, 0), compressHot(first))
-  await relay.objects.put(hotKey(SESSION, first.length), compressHot(second.subarray(0, 30)))
-  await relay.objects.put(hotKey(SESSION, first.length + 30), compressHot(second.subarray(30)))
+  await relay.objects.put(hotKey(SESSION, 0), await compressHot(first))
+  await relay.objects.put(hotKey(SESSION, first.length), await compressHot(second.subarray(0, 30)))
+  await relay.objects.put(hotKey(SESSION, first.length + 30), await compressHot(second.subarray(30)))
 
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   const text = (path: string): string => readFileSync(replayed.files.get(path)?.staged ?? '', 'utf8')
@@ -163,9 +186,13 @@ test('a drain of several sessions goes up in one request, and the first frame of
     { session: SESSION, tool: 'claude' as const, paths: new Set([transcript]) },
     { session: OTHER, tool: 'claude' as const, paths: new Set([other]) },
   ]
+  await capture.holders.current()
+  const asked = relay.requests.length
   await Promise.all(uploadSessions(capture, sessions, failTest).map(([, left]) => left))
 
-  expect(relay.requests[0]?.map((op) => (op.op === 'put' ? `put ${op.key}` : op.op))).toEqual([`put ${hotKey(SESSION, 0)}`, `put ${hotKey(OTHER, 0)}`])
+  const sent = relay.requests.slice(asked).map((ops) => ops.map((op) => (op.op === 'put' ? `put ${op.key}` : op.op)))
+  expect(sent.filter((ops) => ops.some((op) => op.startsWith('put journals/')))).toEqual([[`put ${hotKey(SESSION, 0)}`, `put ${hotKey(OTHER, 0)}`]])
+  expect(sent.flat().filter((op) => op === 'list')).toEqual(['list', 'list'])
   expect(await relay.claims()).toEqual(new Map([[SESSION, deviceA.id], [OTHER, deviceA.id]]))
   expect(relay.requests.flat().filter(({ op }) => op === 'claim')).toEqual([])
 })
@@ -173,18 +200,18 @@ test('a drain of several sessions goes up in one request, and the first frame of
 test('a frame over 1 MiB goes up by HTTP beside the request, and the journal reads it back byte for byte', async () => {
   const relay = await memoryRelay()
   const { transcript, upload, capture } = machine(deviceA, relay)
-  const toolResult = join(dirname(transcript), SESSION, 'tool-results', 'big.txt')
-  mkdirSync(dirname(toolResult), { recursive: true })
-  const incompressible = Buffer.from(crypto.getRandomValues(new Uint8Array(3 * MAX_MESSAGE_BYTES / 2))).toString('base64')
-  writeFileSync(toolResult, incompressible)
+  const toolResults = ['a', 'b', 'c'].map((name) => join(dirname(transcript), SESSION, 'tool-results', `${name}.txt`))
+  mkdirSync(dirname(toolResults[0] ?? ''), { recursive: true })
+  const incompressible = toolResults.map(() => Buffer.from(crypto.getRandomValues(new Uint8Array(MAX_MESSAGE_BYTES / 2))).toString('base64'))
+  for (const [index, path] of toolResults.entries()) writeFileSync(path, incompressible[index] ?? '')
   writeFileSync(transcript, lines[0] ?? '')
-  await upload(transcript, toolResult)
+  await upload(transcript, ...toolResults)
 
   const [frame = ''] = await hotFrames(relay)
   expect((await relay.read(frame))?.length).toBeGreaterThan(MAX_MESSAGE_BYTES)
   expect(relay.requests.flat().some((op) => op.op === 'put' && op.key === frame)).toBe(false)
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
-  expect(readFileSync(replayed.files.get(toolResult)?.staged ?? '', 'utf8')).toBe(incompressible)
+  expect(toolResults.map((path) => readFileSync(replayed.files.get(path)?.staged ?? '', 'utf8'))).toEqual(incompressible)
 })
 
 test("a drain never waits on git: the files go up at once, the code follows in its own frame, and a part goes up once", async () => {
@@ -294,12 +321,13 @@ test('at uploadEvery 0 a line goes up alone, and a long code part in pieces, sev
   expect(reads).toBe(2)
 })
 
-test('a refused position stops the machine that lost it, and its lines from there are a fork', async () => {
+test('a refused position stops a machine that goes on with its journal, and its lines from there are a fork', async () => {
   const relay = await memoryRelay()
   const a = machine(deviceA, relay)
   const b = machine(deviceB, relay)
   const bytes = new TextEncoder().encode(lines[0])
-  await relay.objects.put(hotKey(SESSION, 0), compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: a.transcript, at: 0, size: bytes.length, after: { size: bytes.length, sha256: '' } }, bytes))))
+  await relay.objects.put(hotKey(SESSION, 0), await compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: a.transcript, at: 0, size: bytes.length, after: { size: bytes.length, sha256: '' } }, bytes))))
+  continueJournal(b.capture.db, { session: SESSION, tool: 'claude', end: 0, sealed: 0 }, [])
   writeFileSync(b.transcript, lines[1] ?? '')
   await welcomed(a.capture.relay)
   const logged = spyOn(console, 'error').mockImplementation(() => undefined)
@@ -325,7 +353,7 @@ test('a frame another machine wrote at this machine\'s position after this machi
   await a.upload(a.transcript)
   const start = journalOf(a.capture.db, SESSION)?.end ?? 0
   const late = new TextEncoder().encode(lines[1])
-  await relay.objects.put(hotKey(SESSION, start), compressHot(Buffer.concat(encodeRecord({ device: deviceB.id, path: a.transcript, at: start, size: late.length, after: { size: late.length, sha256: '' } }, late))))
+  await relay.objects.put(hotKey(SESSION, start), await compressHot(Buffer.concat(encodeRecord({ device: deviceB.id, path: a.transcript, at: start, size: late.length, after: { size: late.length, sha256: '' } }, late))))
   const logged = spyOn(console, 'error').mockImplementation(() => undefined)
 
   appendFileSync(a.transcript, lines[2] ?? '')
@@ -356,7 +384,8 @@ test('a refused position that holds the same bytes counts as uploaded, as a retr
   writeFileSync(transcript, lines[0] ?? '')
   const bytes = new TextEncoder().encode(lines[0])
   const after = { size: bytes.length, sha256: new Bun.CryptoHasher('sha256').update(bytes).digest('hex') }
-  await relay.objects.put(hotKey(SESSION, 0), compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at: 0, size: bytes.length, after }, bytes))))
+  await relay.objects.put(hotKey(SESSION, 0), await compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at: 0, size: bytes.length, after }, bytes))))
+  continueJournal(capture.db, { session: SESSION, tool: 'claude', end: 0, sealed: 0 }, [])
 
   await upload(transcript)
   expect(journalOf(capture.db, SESSION)).toMatchObject({ end: (await frameOf(relay, hotKey(SESSION, 0))).length, stopped: '' })
@@ -369,7 +398,7 @@ test("a frame this machine put up that its journal never counted is written over
   const { transcript, upload, capture } = machine(deviceA, relay)
   writeFileSync(transcript, lines[0] ?? '')
   const old = new TextEncoder().encode('old')
-  const stray = compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at: 0, size: old.length, after: { size: old.length, sha256: '' } }, old)))
+  const stray = await compressHot(Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at: 0, size: old.length, after: { size: old.length, sha256: '' } }, old)))
   await relay.objects.put(hotKey(SESSION, 0), stray)
   await relay.objects.put(hotKey(SESSION, 100_000), stray)
 
@@ -388,7 +417,8 @@ test("a take that lands between a frame's 412 and the put over this machine's un
   expect(await a.capture.relay.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true, at: expect.any(String) })
   const old = new TextEncoder().encode(lines[1])
   const stray = Buffer.concat(encodeRecord({ device: deviceA.id, path: a.transcript, at: 0, size: old.length, after: { size: old.length, sha256: '' } }, old))
-  await relay.objects.put(hotKey(SESSION, 0), compressHot(stray))
+  await relay.objects.put(hotKey(SESSION, 0), await compressHot(stray))
+  continueJournal(a.capture.db, { session: SESSION, tool: 'claude', end: 0, sealed: 0 }, [])
   const first = hotKey(SESSION, 0)
   let isRead = false
   const writing = Promise.withResolvers<void>()
@@ -559,14 +589,14 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
   for (let index = 0; index < 40; index += 1) {
     const bytes = crypto.getRandomValues(new Uint8Array(600 * 1024))
     const body = Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at, size: bytes.length, after: { size: at + bytes.length, sha256: '' } }, bytes))
-    await relay.objects.put(hotKey(SESSION, bodies.reduce((total, frame) => total + frame.length, 0)), compressHot(body))
+    await relay.objects.put(hotKey(SESSION, bodies.reduce((total, frame) => total + frame.length, 0)), await compressHot(body))
     bodies.push(body)
     at += bytes.length
   }
   for (let index = 0; index < 40; index += 1) {
     const bytes = new TextEncoder().encode(`{"line":${index}}\n`)
     const body = Buffer.concat(encodeRecord({ device: deviceA.id, path: `${transcript}.small`, at: index * bytes.length, size: bytes.length, after: { size: (index + 1) * bytes.length, sha256: '' } }, bytes))
-    await relay.objects.put(hotKey(SESSION, bodies.reduce((total, frame) => total + frame.length, 0)), compressHot(body))
+    await relay.objects.put(hotKey(SESSION, bodies.reduce((total, frame) => total + frame.length, 0)), await compressHot(body))
     bodies.push(body)
   }
   const before = Buffer.concat(bodies)
@@ -607,11 +637,12 @@ test('a restore that listed the journal before a compaction reads it whole after
   const writer = machine(deviceA, relay, temporaryFolder(), noCode, undefined, 0)
   const end = await rewrittenAndSealed(relay, writer)
   const sealedKey = `journals/${SESSION}/sealed/${position(0)}-${position(end)}.zst`
-  const compactedKey = `journals/${SESSION}/compacted/${position(0)}-${position(end)}.zst`
   const listed = framesOf(SESSION, await writer.capture.relay.list(`journals/${SESSION}/`)).frames
   const journal = await frameOf(relay, sealedKey)
 
   await sealQuiet(writer.capture, failTest, Date.now() + 1)
+  const [compactedKey = ''] = await relay.keys(`journals/${SESSION}/compacted/`)
+  expect(compactedKey).toMatch(new RegExp(`/compacted/${position(0)}-${position(end)}-\\d{16}\\.zst$`))
   expect(await relay.keys(`journals/${SESSION}/`)).toEqual([compactedKey, sealedKey])
   expect(recordsOf(await frameOf(relay, compactedKey)).map(({ header, text }) => [header.at, text])).toEqual([
     [0, lines[1] ?? ''],
@@ -639,12 +670,14 @@ test("a compaction keeps a whole copy that another machine's append to the same 
     ...record('mac', '/Users/ada/log.jsonl', 0, 'three\n'),
     ...record('mac', '/Users/ada/state.json', 0, '{"step":2}'),
   ])
-  await relay.objects.put(`journals/${SESSION}/sealed/${position(0)}-${position(journal.length)}.zst`, compressHot(journal))
+  await relay.objects.put(`journals/${SESSION}/sealed/${position(0)}-${position(journal.length)}.zst`, await compressHot(journal))
   continueJournal(capture.db, { session: SESSION, tool: 'claude', end: journal.length, sealed: journal.length }, [])
   await welcomed(capture.relay)
 
   await sealQuiet(capture, failTest, Date.now() + 1)
-  const compacted = await frameOf(relay, `journals/${SESSION}/compacted/${position(0)}-${position(journal.length)}.zst`)
+  const [compactedKey = ''] = await relay.keys(`journals/${SESSION}/compacted/`)
+  const compacted = await frameOf(relay, compactedKey)
+  expect(compactedKey).toMatch(new RegExp(`/compacted/${position(0)}-${position(journal.length)}-\\d{16}\\.zst$`))
   expect(recordsOf(compacted).map(({ header, text }) => `${header.path} ${text}`)).toEqual(['/Users/ada/log.jsonl one\n', '/home/ada/log.jsonl two\n', '/Users/ada/log.jsonl three\n', '/Users/ada/state.json {"step":2}'])
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => `/here/${basename(path)}`)
   expect([...replayed.files].map(([path, { staged }]) => `${path} ${readFileSync(staged, 'utf8')}`)).toEqual(['/here/log.jsonl three\n', '/here/state.json {"step":2}'])
@@ -665,7 +698,7 @@ test('a sealed frame younger than the lag is never compacted, and its journal is
   expect(relay.requests.slice(checked)).toEqual([])
 
   await sealQuiet(writer.capture, failTest, Date.now() + 7 * 24 * 60 * 60_000 + 1)
-  expect(await relay.keys(`journals/${SESSION}/`)).toEqual([`journals/${SESSION}/compacted/${position(0)}-${position(end)}.zst`, sealedKey])
+  expect(await relay.keys(`journals/${SESSION}/`)).toEqual([expect.stringMatching(new RegExp(`/compacted/${position(0)}-${position(end)}-\\d{16}\\.zst$`)), sealedKey])
 })
 
 test('a Codex rollout that Codex compresses starts no session when anyhost never captured it, and stays the transcript of one it did', async () => {
@@ -693,6 +726,28 @@ test('a Codex rollout that Codex compresses starts no session when anyhost never
   expect([...replayed.files.keys()].filter((path) => path.includes('rollout-'))).toEqual([`${rollout}.zst`])
   expect([...replayed.deleted]).toEqual([rollout])
   expect(isDeleted(capture.db, SESSION)).toBe(false)
+})
+
+test('a Codex session whose rollout Codex already compressed goes up with that rollout, and lists its folder, prompt and last reply from it', async () => {
+  const relay = await memoryRelay()
+  const { roots, capture } = machine(deviceA, relay)
+  const rollout = join(roots.codexHome, 'sessions', '2026', '11', '04', `rollout-2026-11-04T14-54-13-${SESSION}.jsonl.zst`)
+  mkdirSync(dirname(rollout), { recursive: true })
+  const rolloutLines = [
+    { timestamp: '2026-11-04T13:15:00.000Z', type: 'session_meta', payload: { id: SESSION, cwd: TRIP, originator: 'codex-tui' } },
+    { timestamp: '2026-11-04T13:15:01.000Z', type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', content: [{ type: 'text', text: 'Find the osprey in notes.md' }] } } },
+    { timestamp: '2026-11-04T13:15:09.000Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'The osprey is on line 12.' }] } },
+  ]
+  writeFileSync(rollout, await compressHot(new TextEncoder().encode(rolloutLines.map((line) => `${JSON.stringify(line)}\n`).join(''))))
+  const history = join(roots.codexHome, 'history.jsonl')
+  writeFileSync(history, `{"session_id":"${SESSION}","ts":1793798101,"text":"Find the osprey in notes.md"}\n`)
+
+  await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'codex', paths: new Set([history]) }], failTest).map(([, left]) => left))
+
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
+  expect([...replayed.files.keys()].sort()).toEqual([history, rollout])
+  const row = capture.db.query<{ first_prompt: string; cwd: string; entrypoint: string; last_said: string; last_activity: string }, [string]>('select first_prompt, cwd, entrypoint, last_said, last_activity from sessions where id = ?').get(SESSION)
+  expect(row).toEqual({ first_prompt: 'Find the osprey in notes.md', cwd: TRIP, entrypoint: 'codex-tui', last_said: 'The osprey is on line 12.', last_activity: '2026-11-04T13:15:09.000Z' })
 })
 
 test("a Codex thread on a machine with no Codex database gets its name into the row Codex makes, as Codex writes it", async () => {
@@ -741,6 +796,22 @@ test('the minute sweep stats no file of a session quiet for QUIET_MS, and the fu
   const missed = await changedFiles(capture)
   expect(missed).toEqual(new Map([[SESSION, new Set([transcript])]]))
   await upload(...(missed.get(SESSION) ?? []))
+  const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
+  expect(readFileSync(replayed.files.get(transcript)?.staged ?? '', 'utf8')).toBe(`${lines[0]}${lines[1]}`)
+})
+
+test('a session whose first upload never landed is swept and uploaded by the next pass, as a program killed mid-upload left three sessions out of R2', async () => {
+  const relay = await memoryRelay()
+  const { transcript, capture } = machine(deviceA, relay)
+  writeFileSync(transcript, `${lines[0]}${lines[1]}`)
+  relay.refuse = (op) => (op.op === 'put' ? 'R2 is down' : undefined)
+  const quiet: Problems = { set: () => undefined, clear: () => undefined }
+  await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: new Set([transcript]) }], quiet).map(([, left]) => left.catch(() => new Set())))
+  relay.refuse = () => undefined
+
+  const missed = await changedFiles(capture)
+  expect(missed).toEqual(new Map([[SESSION, new Set([transcript])]]))
+  await Promise.all(uploadSessions(capture, [{ session: SESSION, tool: 'claude', paths: missed.get(SESSION) ?? new Set() }], failTest).map(([, left]) => left))
   const replayed = await downloadJournal(capture.relay, SESSION, temporaryFolder(), ({ path }) => path)
   expect(readFileSync(replayed.files.get(transcript)?.staged ?? '', 'utf8')).toBe(`${lines[0]}${lines[1]}`)
 })
@@ -854,7 +925,8 @@ test('a seal that keeps failing is tried again after 1, 2, 4 and 8 minutes, and 
   expect([await pass(minute), await pass(minute + 1)]).toEqual([true, true])
 })
 
-async function bigFrames(relay: MemoryRelay) {
+test('a seal over a link paced both ways, whose 16 answers queued ahead of any pong take past 70 seconds, finishes on its one socket, asking for each frame once', async () => {
+  const relay = await memoryRelay()
   const { transcript, capture, upload } = machine(deviceA, relay)
   const frames = 17
   for (let frame = 0; frame < frames; frame += 1) {
@@ -867,25 +939,7 @@ async function bigFrames(relay: MemoryRelay) {
   expect(sizes[0]).toBeLessThan(MAX_MESSAGE_BYTES)
   expect((sizes.at(-1) ?? 0) * 2).toBeGreaterThan(MAX_MESSAGE_BYTES)
   rmSync(spoolOf(capture.db, SESSION), { recursive: true, force: true })
-  return { capture, frames, sizes, quiet: (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000 }
-}
-
-test('a seal over a link whose answers take past 40 seconds in all finishes on its one socket, asking for each frame once', async () => {
-  const relay = await memoryRelay()
-  const { capture, frames, sizes, quiet } = await bigFrames(relay)
-  relay.downloadBytesPerMs = 240
-  expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(40_000)
-  const asked = relay.requests.length
-
-  expect(await sealQuiet(capture, failTest, quiet)).toEqual(new Map())
-  expect(journalOf(capture.db, SESSION)?.sealed).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
-  expect(await hotFrames(relay)).toEqual([])
-  expect(relay.requests.slice(asked).filter((ops) => ops.some(({ op }) => op === 'get'))).toHaveLength(frames)
-}, 180_000)
-
-test('a seal over a link paced both ways, whose 16 answers queued ahead of any pong take past 70 seconds, keeps its one socket', async () => {
-  const relay = await memoryRelay()
-  const { capture, frames, sizes, quiet } = await bigFrames(relay)
+  const quiet = (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000
   relay.downloadBytesPerMs = 150
   relay.uploadBytesPerMs = 150
   expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(70_000)
@@ -896,6 +950,7 @@ test('a seal over a link paced both ways, whose 16 answers queued ahead of any p
   expect(await sealQuiet(capture, failTest, quiet)).toEqual(new Map())
   expect(welcomes).toBe(0)
   expect(journalOf(capture.db, SESSION)?.sealed).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
+  expect(await hotFrames(relay)).toEqual([])
   expect(relay.requests.slice(asked).filter((ops) => ops.some(({ op }) => op === 'get'))).toHaveLength(frames)
 }, 240_000)
 
@@ -995,10 +1050,9 @@ test('the queue drains every 5 seconds until the person sets Upload every, and t
 })
 
 test("the working folder is the session's own, never a folder a tool call names", () => {
-  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
-  const claude = summarize(empty, `{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"cwd":"/elsewhere"}}]},"cwd":"/work/app"}\n`, 'claude')
+  const claude = summarize(UNSUMMARIZED, `{"type":"assistant","message":{"content":[{"type":"tool_use","input":{"cwd":"/elsewhere"}}]},"cwd":"/work/app"}\n`, 'claude')
   const codex = summarize(
-    empty,
+    UNSUMMARIZED,
     `{"timestamp":"2026-10-27T20:02:13.653Z","type":"session_meta","payload":{"id":"x","cwd":"/Users/ada","originator":"codex_cli_rs","source":"cli"}}\n{"timestamp":"2026-10-27T20:02:20.000Z","type":"response_item","payload":{"arguments":{"cwd":"file:///Users/ada/other"}}}\n`,
     'codex',
   )
@@ -1006,27 +1060,71 @@ test("the working folder is the session's own, never a folder a tool call names"
 })
 
 test('a Codex session T3 Code runs names T3 Code as its app, though Codex calls every app client vscode', () => {
-  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
   const meta = '{"timestamp":"2026-11-10T09:00:00.000Z","type":"session_meta","payload":{"id":"x","cwd":"/Users/ada","originator":"T3 Code","source":"vscode"}}\n'
-  expect(summarize(empty, meta, 'codex').entrypoint).toBe('T3 Code')
+  expect(summarize(UNSUMMARIZED, meta, 'codex').entrypoint).toBe('T3 Code')
 })
 
 test('a Claude Code session T3 Code started and a terminal continued names the terminal as its app', () => {
-  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
-  const inT3 = summarize(empty, '{"type":"user","entrypoint":"t3-code","cwd":"/work/app"}\n', 'claude')
+  const inT3 = summarize(UNSUMMARIZED, '{"type":"user","entrypoint":"t3-code","cwd":"/work/app"}\n', 'claude')
   expect(summarize(inT3, '{"type":"user","entrypoint":"cli","cwd":"/work/app"}\n', 'claude').entrypoint).toBe('cli')
 })
 
 test('a session that begins with a slash command names it as its first prompt', () => {
-  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
   const loop = JSON.stringify({ type: 'user', message: { role: 'user', content: '<command-message>loop</command-message>\n<command-name>/loop</command-name>\n<command-args>2m Reply with tick.</command-args>' } })
-  expect(summarize(empty, `${loop}\n`, 'claude').firstPrompt).toBe('/loop 2m Reply with tick.')
+  expect(summarize(UNSUMMARIZED, `${loop}\n`, 'claude').firstPrompt).toBe('/loop 2m Reply with tick.')
 })
 
 test("a session whose first message another agent sent with tell_agent names that message as its first prompt, without the agent's tag", () => {
-  const empty = { title: '', titleRank: 0, firstPrompt: '', cwd: '', repo: '', entrypoint: '' }
   const told = JSON.stringify({ type: 'user', message: { role: 'user', content: '<anyhost from="2f115ce2 on mac" reach="tell_agent 2f115ce2 when done or stuck">Fix the login</anyhost>' } })
-  expect(summarize(empty, `${told}\n`, 'claude').firstPrompt).toBe('Fix the login')
+  expect(summarize(UNSUMMARIZED, `${told}\n`, 'claude').firstPrompt).toBe('Fix the login')
+})
+
+test("a session whose first message the Claude app opens with a system reminder names the person's own words as its first prompt", () => {
+  const reminder = '<system-reminder>\nThe user started this session without choosing a project folder, so your working directory is a scratch folder.\n</system-reminder>'
+  const hi = JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: reminder }, { type: 'text', text: 'hi' }] } })
+  expect(summarize(UNSUMMARIZED, `${hi}\n`, 'claude').firstPrompt).toBe('hi')
+})
+
+test("a session is named as Claude Code names it: by its /rename, else its generated title, else the agent it runs as, and its first message only when it has none of them", () => {
+  const prompt = JSON.stringify({ type: 'user', message: { role: 'user', content: 'okay, so I have a few things I want to do here' } })
+  const agent = JSON.stringify({ type: 'agent-setting', agentSetting: 'cto', sessionId: 'a' })
+  const generated = JSON.stringify({ type: 'ai-title', aiTitle: 'Fix the sidebar', sessionId: 'a' })
+  const renamed = JSON.stringify({ type: 'custom-title', customTitle: 'anyhost migrator', sessionId: 'a' })
+
+  expect(summarize(UNSUMMARIZED, `${prompt}\n`, 'claude').title).toBe('')
+  expect(summarize(UNSUMMARIZED, `${prompt}\n${agent}\n`, 'claude').title).toBe('cto')
+  expect(summarize(UNSUMMARIZED, `${agent}\n${generated}\n${agent}\n`, 'claude').title).toBe('Fix the sidebar')
+  expect(summarize(UNSUMMARIZED, `${renamed}\n${generated}\n${agent}\n`, 'claude').title).toBe('anyhost migrator')
+})
+
+test("read_agent's messages keep the person's own words of a message the Claude app opens with a system reminder", () => {
+  const reminder = '<system-reminder>\nThe user started this session without choosing a project folder.\n</system-reminder>'
+  const hi = JSON.stringify({ type: 'user', timestamp: '2026-11-14T10:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: reminder }, { type: 'text', text: 'hi' }] } })
+  expect(messagesOf(`${hi}\n`, 5)).toEqual([{ role: 'user', at: '2026-11-14T10:00:00.000Z', text: 'hi' }])
+})
+
+test('a session says last what its agent last said, asked, or ran, so its row shows what needs you', () => {
+  const said = (content: unknown): string => JSON.stringify({ type: 'assistant', message: { role: 'assistant', content } })
+  const replied = summarize(UNSUMMARIZED, `${said([{ type: 'text', text: '```text\n[█████░░░] 46%\n```\nThe **login** works now.\n\nI changed `two` files.' }])}\n`, 'claude')
+  const asking = summarize(replied, `${said([{ type: 'tool_use', name: 'AskUserQuestion', input: { questions: [{ question: 'Ship it to staging?' }] } }])}\n`, 'claude')
+  const running = summarize(asking, `${said([{ type: 'text', text: 'Running the tests.' }, { type: 'tool_use', name: 'Bash', input: { command: 'bun test' } }])}\n`, 'claude')
+  const subagent = summarize(running, `${JSON.stringify({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'text', text: 'inside' }] } })}\n`, 'claude')
+  const codex = summarize(UNSUMMARIZED, `${JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Done in Codex.' }] } })}\n`, 'codex')
+  const progress = summarize(UNSUMMARIZED, `${said([{ type: 'text', text: 'PHP# [█████░░░] 46% of the files' }])}\n`, 'claude')
+  expect([replied.lastSaid, asking.lastSaid, running.lastSaid, subagent.lastSaid, codex.lastSaid, progress.lastSaid]).toEqual(['The login works now. I changed two files.', 'Ship it to staging?', 'Bash: bun test', 'Bash: bun test', 'Done in Codex.', 'PHP# 46% of the files'])
+})
+
+test("a session's last prompt time is its person's last message, never a tool result, a background task's note or its agent's answer", () => {
+  const line = (value: object): string => `${JSON.stringify(value)}\n`
+  const asked = line({ type: 'user', timestamp: '2026-11-15T09:00:00.000Z', message: { role: 'user', content: 'Plan the trip' } })
+  const result = line({ type: 'user', timestamp: '2026-11-15T09:01:00.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'done' }] } })
+  const note = line({ type: 'user', timestamp: '2026-11-15T09:02:00.000Z', message: { role: 'user', content: '<task-notification>The background command finished.</task-notification>' } })
+  const answered = line({ type: 'assistant', timestamp: '2026-11-15T09:03:00.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Booked.' }] } })
+  const codex = line({ timestamp: '2026-11-15T10:00:00.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'Book the hotel' } })
+
+  const claude = summarize(UNSUMMARIZED, `${asked}${result}${note}${answered}`, 'claude')
+  expect([claude.lastPromptAt, claude.lastActivity]).toEqual(['2026-11-15T09:00:00.000Z', '2026-11-15T09:03:00.000Z'])
+  expect(summarize(UNSUMMARIZED, codex, 'codex').lastPromptAt).toBe('2026-11-15T10:00:00.000Z')
 })
 
 test("the index entry holds the session's title, first prompt, working folder and entrypoint", async () => {
@@ -1077,12 +1175,23 @@ test('a database of a newer anyhost is refused whole, so an older anyhost drops 
   capture.db.run('pragma user_version = 99')
   capture.db.close()
 
-  expect(() => openDatabase(join(folder, 'state'))).toThrow(`${join(folder, 'state', 'anyhost.db')} is a database of a newer anyhost, at version 99, and this anyhost reads version 5, so it changes nothing there. Update anyhost on this machine.`)
+  expect(() => openDatabase(join(folder, 'state'))).toThrow(`${join(folder, 'state', 'anyhost.db')} is a database of a newer anyhost, at version 99, and this anyhost reads version 10, so it changes nothing there. Update anyhost on this machine.`)
   const kept = new Database(join(folder, 'state', 'anyhost.db'))
   expect(kept.query<{ count: number }, []>('select count(*) as count from sessions').get()?.count).toBe(1)
 })
 
-test('a database of version 4 opens at version 5 with every row it held, one stamped 5 without its columns gains them, and one older than version 4 starts over', () => {
+test('a command opens the database while another process writes to it, waiting for that write instead of failing as locked', async () => {
+  const folder = temporaryFolder()
+  openDatabase(folder).close()
+  const writer = spawnForTest(['bun', '-e', `const { Database } = require('bun:sqlite'); const db = new Database(${JSON.stringify(join(folder, 'anyhost.db'))}); db.run('begin exclusive'); console.log('locked'); Bun.sleepSync(1000); db.run('commit')`], { stdout: 'pipe' })
+  const reader = writer.stdout.getReader()
+  expect(new TextDecoder().decode((await reader.read()).value)).toContain('locked')
+
+  expect(() => openDatabase(folder).close()).not.toThrow()
+  await writer.exited
+})
+
+test('a database of version 4 to 9 opens at version 10 with every row it held, one stamped 10 without its columns gains them, one stamped 10 with the hook_states of a 0.9.0 working tree loses that table alone, and one older than version 4 starts over', () => {
   const databaseAt = (version: number): string => {
     const folder = join(temporaryFolder(), 'state')
     mkdirSync(folder)
@@ -1095,6 +1204,10 @@ test('a database of version 4 opens at version 5 with every row it held, one sta
       tail blob not null default x'', sha256 text not null default '', mtime integer not null default 0, primary key (session, path))`)
     db.query("insert into journals (session, tool, end, sealed, written_at) values (?, 'claude', 900, 600, 1700000000000)").run(SESSION)
     db.query('insert into files (session, path, journal_size, local_size) values (?, ?, 900, 900)').run(SESSION, '/home/ada/.claude/projects/-work-trip/s.jsonl')
+    db.run("create table sessions (id text primary key, tool text not null, title text not null default '')")
+    db.query("insert into sessions (id, tool, title) values (?, 'claude', 'trip')").run(SESSION)
+    db.run('create table hook_states (session text primary key, status text not null, at integer not null, pid integer not null default 0)')
+    db.query("insert into hook_states (session, status, at, pid) values (?, 'idle', 1700000000000, 4242)").run(SESSION)
     db.run(`pragma user_version = ${version}`)
     db.close()
     return folder
@@ -1103,13 +1216,22 @@ test('a database of version 4 opens at version 5 with every row it held, one sta
     db.query('pragma user_version').get(),
     db.query('select session, end, sealed, written_at, compacted_end, compacted_kept, compact_after, replaced from journals').all(),
     db.query('select session, path, journal_size from files').all(),
+    db.query('select id, title, last_said, titled, last_prompt_at, source from sessions').all(),
+    db.query("select name from sqlite_master where name = 'hook_states'").all(),
   ]
 
   expect(rowsOf(openDatabase(databaseAt(4)))).toEqual([
-    { user_version: 5 },
+    { user_version: 10 },
     [{ session: SESSION, end: 900, sealed: 600, written_at: 1700000000000, compacted_end: 0, compacted_kept: 0, compact_after: 0, replaced: 0 }],
     [{ session: SESSION, path: '/home/ada/.claude/projects/-work-trip/s.jsonl', journal_size: 900 }],
+    [{ id: SESSION, title: 'trip', last_said: '', titled: 0, last_prompt_at: '', source: '' }],
+    [],
   ])
   expect(rowsOf(openDatabase(databaseAt(5)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
-  expect(rowsOf(openDatabase(databaseAt(3)))).toEqual([{ user_version: 5 }, [], []])
+  expect(rowsOf(openDatabase(databaseAt(6)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
+  expect(rowsOf(openDatabase(databaseAt(7)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
+  expect(rowsOf(openDatabase(databaseAt(8)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
+  expect(rowsOf(openDatabase(databaseAt(9)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
+  expect(rowsOf(openDatabase(databaseAt(10)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
+  expect(rowsOf(openDatabase(databaseAt(3)))).toEqual([{ user_version: 10 }, [], [], [], []])
 })

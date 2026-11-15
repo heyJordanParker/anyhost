@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, until, welcomed } from './memory.ts'
-import { claimOn, CLI, copiesOn, decoder, isUploaded, keepsWriting, killAfterTest, LAPTOP, postTo, roots, runningOn, runsOn, SESSION, stepsOf, WORKER, workerOn } from './program.ts'
+import { claimOn, CLI, copiesOn, decoder, isUploaded, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, SESSION, spawnForTest, stepsOf, WORKER, workerOn } from './program.ts'
 
 test('a move to a worker that took the claim and then goes offline waits, saying so in its line and in anyhost move, which Ctrl-C leaves running, and Keep it here takes the session back', async () => {
   const relay = await memoryRelay()
@@ -14,8 +14,7 @@ test('a move to a worker that took the claim and then goes offline waits, saying
   await welcomed(silent)
   const waiting = `${WORKER.name} took ${SESSION.slice(0, 8)} and does not answer. Keep it here takes the session back.`
 
-  const moving = Bun.spawn(['bun', CLI, 'move', SESSION.slice(0, 8), WORKER.name], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
-  killAfterTest(moving)
+  const moving = spawnForTest(['bun', CLI, 'move', SESSION.slice(0, 8), WORKER.name], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
   let printed = ''
   const reading = (async () => {
     for await (const chunk of moving.stdout) printed += decoder.decode(chunk)

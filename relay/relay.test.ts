@@ -270,6 +270,8 @@ afterAll(async () => {
   }
   for (const socket of sockets) socket.close()
   await relay?.stop()
+  const left = Bun.spawnSync(['pgrep', '-l', '-P', String(process.pid)]).stdout.toString().trim()
+  if (left !== '') throw new Error(`The relay tests left processes running: ${left.split('\n').join('; ')}`)
 })
 
 describe('the first start', () => {
@@ -576,7 +578,7 @@ describe('ops', () => {
     expect(await other.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
   })
 
-  test('devices lists every joined machine with its roots and whether it is connected', async () => {
+  test('devices lists every joined machine with its roots, whether it is connected and the newest anyhost it connected with, none for one that sent no version', async () => {
     const [devices] = await mac.socket.results({ op: 'devices' })
     expect((devices!['devices'] as Json[]).find((device) => device['id'] === mac.device.id)).toEqual({
       id: mac.device.id,
@@ -586,6 +588,7 @@ describe('ops', () => {
       roots: roots('/Users/jordan'),
       connected: true,
       seenAt: expect.any(String),
+      program: '',
     })
   })
 })
@@ -796,39 +799,34 @@ describe('the holder', () => {
     expect(await again.message('welcome')).toMatchObject({ waiting: [] })
   })
 
-  test('a take of a session whose holder\'s socket is open but silent past LIVE_MS answers told false with previous, and the holder\'s next welcome carries released, while a holder that pinged hears it at once', async () => {
+  test("a take of a session whose holder's socket is open but silent past LIVE_MS answers told false with previous, and the holder's next welcome carries released, but none of a session it took back meanwhile, which it holds, while a holder that pinged hears it at once", async () => {
     const asleep = await joinNew(mac, 'asleep')
     const awake = await joinNew(mac, 'awake')
-    const [sleeping, pinging] = [crypto.randomUUID(), crypto.randomUUID()]
-    expect(await asleep.socket.results({ op: 'claim', session: sleeping, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
+    const [sleeping, takenBack, pinging] = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]
+    expect(await asleep.socket.results({ op: 'claim', session: sleeping, take: false }, { op: 'claim', session: takenBack, take: false })).toEqual([
+      { status: 200, told: true, at: expect.any(String) },
+      { status: 200, told: true, at: expect.any(String) },
+    ])
     expect(await awake.socket.results({ op: 'claim', session: pinging, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     asleep.socket.silence()
     await Bun.sleep(LIVE_MS + 2000)
 
-    expect(await mac.socket.results({ op: 'claim', session: sleeping, take: true })).toEqual([{ status: 200, previous: { id: asleep.device.id, name: asleep.device.name }, told: false, at: expect.any(String) }])
+    const previous = { id: asleep.device.id, name: asleep.device.name }
+    expect(await mac.socket.results({ op: 'claim', session: sleeping, take: true }, { op: 'claim', session: takenBack, take: true })).toEqual([
+      { status: 200, previous, told: false, at: expect.any(String) },
+      { status: 200, previous, told: false, at: expect.any(String) },
+    ])
     expect(await mac.socket.results({ op: 'claim', session: pinging, take: true })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     expect(await awake.socket.message('released')).toMatchObject({ session: pinging, to: { id: mac.device.id } })
     const [devices] = await mac.socket.results({ op: 'devices' })
     const connected = (id: string): unknown => (devices!['devices'] as Json[]).find((device) => device['id'] === id)?.['connected']
     expect([connected(asleep.device.id), connected(awake.device.id)]).toEqual([false, true])
     await asleep.socket.none('released', 500)
+    expect(await asleep.socket.results({ op: 'claim', session: takenBack, take: true })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
     const woken = await connect(asleep.token, asleep.device.name, asleep.device.roots)
     expect(await woken.message('welcome')).toMatchObject({ waiting: [{ t: 'released', session: sleeping, to: { id: mac.device.id, name: mac.device.name } }] })
-  })
-
-  test('a machine that took back a session it lost hears no released of it at its next welcome, and holds it', async () => {
-    const laptop = await joinNew(mac, 'took-back')
-    const session = crypto.randomUUID()
-    expect(await laptop.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
-    laptop.socket.silence()
-    await Bun.sleep(LIVE_MS + 2000)
-    expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, previous: { id: laptop.device.id, name: laptop.device.name }, told: false, at: expect.any(String) }])
-    expect(await laptop.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, told: true, at: expect.any(String) }])
-
-    const again = await connect(laptop.token, laptop.device.name, laptop.device.roots)
-    expect(await again.message('welcome')).toMatchObject({ waiting: [] })
-    const [claims] = await again.results({ op: 'claims', prefix: session })
-    expect(claims!['claims']).toEqual({ [session]: { id: laptop.device.id, name: laptop.device.name } })
+    const [claims] = await woken.results({ op: 'claims', prefix: takenBack })
+    expect(claims!['claims']).toEqual({ [takenBack]: previous })
   }, 90_000)
 
   test("a take whose if names another at than the claim's is refused with 409 and takes nothing, one that names the claim's at takes the session, and a take by the holder passes", async () => {
