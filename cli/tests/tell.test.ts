@@ -66,7 +66,7 @@ test("anyhost show puts a session's terminal on this machine's Herdr app with He
     ['terminal.keep', { terminal: 't0', place: 'tab' }],
     ['terminal.peek', { terminal: 't0' }],
     ['agent.focus', { terminal: 't0' }],
-    ['pane.split', { direction: 'right', argv: [join(laptop.folder, 'bin', 'hc'), 'attach', 't0'] }],
+    ['pane.split', { direction: 'right', argv: ['sh', '-c', expect.stringContaining('exec hc attach'), 'view', session, 't0'] }],
     ['terminal.park', { terminal: 't0' }],
   ])
 }, 60_000)
