@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 import { openCapture, openDatabase, uploadSessions, type Capture } from '../src/capture.ts'
-import { startOf } from '../src/claude.ts'
 import { machinesOf, type Device, type MachineRoots } from '../src/device.ts'
 import type { Relay } from '../src/relay.ts'
 import { failTest, noCode, statusOn, until, type MemoryRelay } from './memory.ts'
@@ -80,6 +79,8 @@ function runningOnMac(): Running[] {
     })
 }
 
+const LEAK_CHECK_MS = 60_000
+
 function processesLeftBehind(): Running[] {
   const running = process.platform === 'linux' ? runningOnLinux() : runningOnMac()
   const parentOf = new Map(running.map(({ pid, ppid }) => [pid, ppid]))
@@ -97,7 +98,7 @@ afterAll(() => {
   for (const { pid } of left) kill(pid)
   for (const folder of folders) rmSync(folder, { recursive: true, force: true })
   if (left.length > 0) throw new Error(`The tests of this file left ${left.length} processes running, which are killed now: ${left.map(({ pid, command }) => `${pid} ${command}`).join('; ')}`)
-})
+}, LEAK_CHECK_MS)
 
 export const SESSION = '11111111-2222-3333-4444-555555555555'
 export const roots = (home: string): MachineRoots => ({ home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp'), codexHome: join(home, '.codex') })
@@ -123,8 +124,8 @@ export const script = (path: string, text: string): string => {
 
 export const fakeHc = (folder: string): string => `#!/bin/bash
 F='${folder}'
-RUNS="\${XDG_STATE_HOME:-$HOME/.local/state}/anyhost/runs"
-mkdir -p "$F/terminals" "$RUNS"
+mkdir -p "$F/terminals"
+echo "$*" >> "$F/calls.log"
 if [ -n "$CLAUDECODE$CLAUDE_CODE_CHILD_SESSION$CLAUDE_CODE_SESSION_ID" ]; then echo "$1" >> "$F/marked.log"; fi
 case "$1" in
   ls)
@@ -179,8 +180,7 @@ last=0
 for ((i = 0; i < \${#args[@]}; i++)); do
   case "\${args[i]}" in
     --cwd) cwd="\${args[i + 1]}" ;;
-    --session|--session-id) session="\${args[i + 1]}" ;;
-    --label) case "\${args[i + 1]}" in herdr.space=*) space="\${args[i + 1]#herdr.space=}" ;; esac ;;
+    --label) case "\${args[i + 1]}" in herdr.space=*) space="\${args[i + 1]#herdr.space=}" ;; anyhost.session=*) session="\${args[i + 1]#anyhost.session=}" ;; esac ;;
     --) last=$i ;;
   esac
 done
@@ -195,8 +195,6 @@ running() {
   sleep 600 < /dev/null > /dev/null 2>&1 &
   echo $! >> "$F/copies"
   echo "$session $!" > "$F/terminals/$address"
-  if [ -r "/proc/$!/stat" ]; then stat="$(cat "/proc/$!/stat")"; start="$(echo "\${stat##*) }" | cut -d ' ' -f 20)"; else start="$(TZ=UTC ps -o lstart= -p $! | sed 's/^ *//;s/ *$//')"; fi
-  printf '{"session":"%s","runner":{"process":{"id":%s,"start":"%s"},"version":"","startedAt":""},"terminal":{"address":"%s","machine":""},"claude":{"command":["claude"]}}' "$session" $! "$start" "$address" > "$RUNS/$session.json"
   printf '{"pid":%s,"sessionId":"%s","kind":"interactive","cwd":"%s","status":"idle"}' $! "$session" "$cwd" > "$CLAUDE_CONFIG_DIR/sessions/$!.json"
 }
 if [ -e "$F/unlisted" ]; then (while [ -e "$F/unlisted" ]; do sleep 0.1; done; running) < /dev/null > /dev/null 2>&1 &
@@ -280,17 +278,16 @@ export const logOf = (folder: string, name: string): string[] => readFileSync(jo
 export const runsOn = (folder: string): { readonly at: number; readonly cwd: string; readonly session: string; readonly command: string }[] =>
   logOf(folder, 'hc.log').map((line) => {
     const [at = '', cwd = '', session = '', ...command] = line.split(' ')
-    return { at: Number(at), cwd, session, command: command.join(' ') }
+    return { at: Number(at), cwd, session, command: command.join(' ').replace(/^\S*environment\.json \S* ?/, '') }
   })
 export const startedOn = (machine: { readonly folder: string }): string => runsOn(machine.folder)[0]?.session ?? ''
 export const copiesOn = (folder: string): { readonly pid: number; readonly isRunning: boolean }[] =>
   logOf(folder, 'copies').map((line) => ({ pid: Number(line), isRunning: Bun.spawnSync(['kill', '-0', line]).exitCode === 0 }))
-export const runnerOn = (machine: { readonly env: Record<string, string> }, terminal: string, version: string): Subprocess => {
-  const runner = spawnForTest(['sleep', '600'])
-  const runs = join(machine.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'runs')
-  mkdirSync(runs, { recursive: true })
-  writeFileSync(join(runs, `${SESSION}.json`), JSON.stringify({ session: SESSION, runner: { process: { id: runner.pid, start: startOf(runner.pid) }, version, startedAt: '' }, terminal: { address: terminal, machine: '' }, claude: { command: ['claude'] } }))
-  return runner
+export const terminalOn = (machine: { readonly folder: string }, address: string): Subprocess => {
+  const program = spawnForTest(['sleep', '600'])
+  mkdirSync(join(machine.folder, 'terminals'), { recursive: true })
+  writeFileSync(join(machine.folder, 'terminals', address), `${SESSION} ${program.pid}\n`)
+  return program
 }
 
 export type Moved = { readonly to: string; readonly step: string; readonly line: string }

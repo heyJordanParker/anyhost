@@ -4,9 +4,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import type { AgentStatus, Delivered, Device, Message, Offline, Routed } from '../../relay/protocol.ts'
 import { captureAgainFrom, chainOf, changedFiles, checkoutOf, checkoutOfEntry, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
-import { commandOf, liveRuns, pauseCopy, recordedSessions, resumeCopy, run, runOf, runTerminalOf, statusOf, statusOfRecord, stopCopy, stopOutside, whenSessions, type OnRecordsChange, type Run, type RunningSession } from './claude.ts'
+import { claudeStart, pauseCopy, recordedSessions, resumeArgv, resumedOf, resumeCopy, run, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
 import { devicesOf, otherMachine } from './device.ts'
-import { askToSleep, killTerminal, labelledTerminals, openTerminal, pressKeys, readTerminal, sendTo } from './hc.ts'
+import { askToSleep, hcPath, labelledTerminals, openTerminal, pressKeys, readTerminal, sendTo } from './hc.ts'
 import { showTerminal, type Place } from './herdr.ts'
 import type { Relay } from './relay.ts'
 import { cloneMissing, localFolder, restore } from './resume.ts'
@@ -36,10 +36,7 @@ export type MoveHere = {
   readonly flush: (session: string, signal: AbortSignal, onRelay: (isConnected: boolean) => void) => Promise<void>
   readonly onRecordsChange: OnRecordsChange
   readonly opening: Map<string, Promise<string>>
-  readonly placing: Map<string, Promise<string>>
 }
-
-export type Placed = { readonly session: string; readonly cwd: string } | { readonly session: string; readonly heldBy: string; readonly connected: boolean; readonly seenAt: string }
 
 type Reply = Extract<Routed, { readonly t: 'moved' | 'started' | 'told' | 'listed' | 'deleted' | 'forked' }>
 const ANSWER = { move: 'moved', start: 'started', tell: 'told', list: 'listed', delete: 'deleted', fork: 'forked' } as const
@@ -319,7 +316,7 @@ export async function move(capture: Capture, asked: string, machine: string, her
     signal.throwIfAborted()
     const started = Date.now()
     isAsked = true
-    const answer = await ask(relay, { t: 'move', id: moveId(session), to: target.id, session, trusted, claimedAt, command: [...commandOf(session)] }, { signal, keepsWaiting })
+    const answer = await ask(relay, { t: 'move', id: moveId(session), to: target.id, session, trusted, claimedAt, command: ['claude'] }, { signal, keepsWaiting })
     keeping.abort()
     if (answer.t === 'offline') return await fail(`${machine} is offline, so the session keeps running here.`)
     if ('error' in answer) return await fail(`${machine} could not take the session: ${reasonOf(answer.error)}. It keeps running here.`)
@@ -385,7 +382,7 @@ async function takeSession(capture: Capture, asked: Extract<Delivered, { readonl
     await stopCopy(roots.claudeHome, asked.session)
     const { session, cwd } = await restore(capture, asked.session, { take: true, if: { at: asked.claimedAt }, checkouts: here.checkouts, isMove: true })
     if (asked.trusted) await trustHere(capture, cwd, `${asked.from.name} trusts the session's folder there`)
-    await openTerminal(cwd, session.id, ['claude', ...asked.command.slice(1)], { isResumed: true, checkout: await checkoutAt(cwd) })
+    await openTerminal(cwd, session.id, await claudeOf(capture, session.id), await checkoutAt(cwd))
     isOpened = true
     const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session.id), RUNNING_MS, here.onRecordsChange)
     if (running === undefined) throw new Error(`Claude Code listed the session ${session.id.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start`)
@@ -453,9 +450,9 @@ async function startIn(capture: Capture, cwd: string, prompt: string, here: Move
   let isOpened = false
   try {
     const isTrusted = await trusts(capture, cwd)
-    await openTerminal(cwd, session, ['claude', '--session-id', session], { isResumed: false, checkout: await checkoutAt(cwd) })
+    await openTerminal(cwd, session, claudeStart(['claude', '--session-id', session], false), await checkoutAt(cwd))
     isOpened = true
-    const running = whenSessions(roots.claudeHome, (sessions) => (runOf(session)?.terminal === undefined ? undefined : sessions.find((entry) => entry.sessionId === session)), isTrusted ? RUNNING_MS : TRUST_ANSWER_MS, here.onRecordsChange)
+    const running = whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session), isTrusted ? RUNNING_MS : TRUST_ANSWER_MS, here.onRecordsChange)
     if (!isTrusted) {
       void running.then(begin).catch((error: unknown) => console.error(`${stamp()} ${device.name} could not give ${session} its first message: ${messageOf(error)}`))
       return session
@@ -505,8 +502,15 @@ const tagged = (told: Tell, machine: string): string => {
   return `<anyhost from="${sender} on ${machine}" reach="tell_agent ${sender} when done or stuck">${told.text}</anyhost>`
 }
 
+const labelledHere = async (session: string): Promise<string | undefined> => (hcPath() === undefined ? undefined : (await labelledTerminals(session))[0])
+
+async function claudeOf(capture: Capture, session: string): Promise<string[]> {
+  const transcript = await newestTranscript(capture, session)
+  return transcript === undefined ? claudeStart(['claude', '--session-id', session], false) : claudeStart(resumeArgv(session, await resumedOf(transcript)), true)
+}
+
 async function terminalHere(capture: Capture, session: string): Promise<string | undefined> {
-  const address = await runTerminalOf(capture.roots.claudeHome, session)
+  const address = await labelledHere(session)
   if (address !== undefined) return address
   if ((await statusOf(capture.roots.claudeHome, session)) === undefined) return undefined
   throw new Error(`${session.slice(0, 8)} runs on ${capture.device.name} outside herdr-core, as in tmux, so anyhost cannot type into it or read it, and leaves it where the person runs it. Opening it in the Herdr app moves it into herdr-core.`)
@@ -521,20 +525,19 @@ function terminalOf(capture: Capture, session: string, here: MoveHere): Promise<
 }
 
 async function placeInTerminal(capture: Capture, session: string, here: MoveHere): Promise<string> {
-  const ran = await runTerminalOf(capture.roots.claudeHome, session)
+  const ran = await terminalHere(capture, session).catch(() => undefined)
   if (ran !== undefined) return ran
-  const cwd = await placeHere(capture, session, here, stopCopy)
-  for (const stale of await labelledTerminals(session)) await killTerminal(stale)
-  return await openTerminal(cwd, session, commandOf(session), { isResumed: true, checkout: await checkoutAt(cwd) })
+  const cwd = await placeHere(capture, session, here)
+  return await openTerminal(cwd, session, await claudeOf(capture, session), await checkoutAt(cwd))
 }
 
-async function placeHere(capture: Capture, session: string, here: MoveHere, stop: (claudeHome: string, session: string) => Promise<void>): Promise<string> {
+async function placeHere(capture: Capture, session: string, here: MoveHere): Promise<string> {
   const { db, roots } = capture
   const id = session.slice(0, 8)
   if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost runs Claude Code sessions in herdr-core, and ${id} is a Codex session.`)
   if ((await statusOf(roots.claudeHome, session)) !== undefined) {
     await untilSettledIdle(capture, session, here)
-    await stop(roots.claudeHome, session)
+    await stopCopy(roots.claudeHome, session)
   }
   const transcript = await newestTranscript(capture, session)
   const holder = capture.holders.known().get(session)
@@ -594,7 +597,7 @@ export async function showAgent(capture: Capture, asked: string, place: Place, h
   const holder = (await claimsOf(capture.relay, session)).get(session)
   if (holder === undefined || holder.id === capture.device.id) {
     const terminal = await terminalOf(capture, session, here)
-    await showTerminal(terminal, session, place)
+    await showTerminal(terminal, place)
     return { session, machine: capture.device.name, terminal }
   }
   const reach = await reachOf(holder.id)
@@ -602,7 +605,7 @@ export async function showAgent(capture: Capture, asked: string, place: Place, h
   const told = await tell(capture, session, { text: '', keys: [], lines: 0, sender: '' }, here)
   if (told.terminal === undefined) throw new Error(`${holder.name} answered no terminal of ${session.slice(0, 8)}: it runs there in none, or its anyhost is older than this one.`)
   const terminal = `${reach}/${told.terminal}`
-  await showTerminal(terminal, session, place)
+  await showTerminal(terminal, place)
   return { session, machine: holder.name, terminal }
 }
 
@@ -647,10 +650,8 @@ export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readon
     FORGET_MS,
   )
 
-export async function statusesHere(capture: Capture, runs: ReadonlyMap<string, Run> = liveRuns()): Promise<Record<string, AgentStatus>> {
-  const statuses: Record<string, AgentStatus> = Object.fromEntries([...runs.keys()].map((session) => [session, 'idle']))
-  for (const { sessionId, status } of await recordedSessions(capture.roots.claudeHome)) statuses[sessionId] = statusOfRecord(status)
-  return statuses
+export async function statusesHere(capture: Capture): Promise<Record<string, AgentStatus>> {
+  return Object.fromEntries((await recordedSessions(capture.roots.claudeHome)).map(({ sessionId, status }) => [sessionId, statusOfRecord(status)]))
 }
 
 export const receiveList = (capture: Capture, asked: Extract<Delivered, { readonly t: 'list' }>, here: MoveHere): Promise<void> =>
@@ -668,18 +669,6 @@ export async function statusesElsewhere(capture: Capture): Promise<Record<string
     ),
   )
   return Object.assign({}, ...answers) as Record<string, AgentStatus>
-}
-
-export async function placeSession(capture: Capture, asked: string, take: boolean, here: MoveHere): Promise<Placed> {
-  const session = await sessionOf(capture, asked)
-  const holder = capture.holders.known().get(session)
-  if (!take && holder !== undefined && holder !== capture.device.id) {
-    const listed = (await devicesOf(capture.relay)).get(holder)
-    return { session, heldBy: listed?.name ?? holder, connected: listed?.connected === true && listed.removedAt === undefined, seenAt: listed?.seenAt ?? '' }
-  }
-  const placing = here.placing.get(session) ?? placeHere(capture, session, here, stopOutside).finally(() => here.placing.delete(session))
-  here.placing.set(session, placing)
-  return { session, cwd: await placing }
 }
 
 export async function openHere(capture: Capture, asked: string, here: MoveHere): Promise<{ readonly session: string; readonly terminal: string }> {

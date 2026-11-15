@@ -1,44 +1,29 @@
 import { expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, copiesOn, LAPTOP, machineFor, postTo, roots, runnerOn, runningOn, runsOn, serveOn, SESSION, trustedIn, WORKER, workerOn } from './program.ts'
+import { anyhostOn, LAPTOP, machineFor, postTo, roots, runningOn, runsOn, serveOn, SESSION, terminalOn, trustedIn, WORKER, workerOn } from './program.ts'
 
-test("an open of a session whose live Claude Code is not its run's own, as the Herdr pane's Move it here asks, leaves exactly one copy: the one in the new terminal", async () => {
+test('an open of a session a terminal here runs answers that terminal and starts nothing', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  const runner = runnerOn(laptop, 'opened-before', '0.6.0')
-  mkdirSync(join(laptop.folder, 'terminals'), { recursive: true })
-  writeFileSync(join(laptop.folder, 'terminals', 'opened-before'), `${SESSION} ${runner.pid}\n`)
+  terminalOn(laptop, 'opened-before')
 
   const opened = await postTo(laptop.socket, '/agents/open', { session: SESSION })
 
+  expect(opened.body).toMatchObject({ session: SESSION, terminal: 'opened-before' })
+  expect(runsOn(laptop.folder)).toEqual([])
+}, 60_000)
+
+test("an open runs Claude Code itself in the session's terminal, resumed in the folder it last ran in, which Claude Code then trusts, with no anyhost process in between", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+
+  const opened = await postTo(laptop.socket, '/agents/open', { session: SESSION.slice(0, 8) })
+
   expect(opened.status).toBe(200)
-  expect(opened.body['terminal']).not.toBe('opened-before')
-  expect([laptop.claude.signalCode, runner.signalCode === null]).toEqual(['SIGTERM', false])
-  expect(copiesOn(laptop.folder).filter(({ isRunning }) => isRunning)).toHaveLength(1)
-}, 60_000)
-
-test("a runner placing its own session stops the copy that runs outside it, keeps itself, opens no terminal, and answers the folder to continue in", async () => {
-  const relay = await memoryRelay()
-  const laptop = await runningOn(relay)
-  const runner = runnerOn(laptop, 't9', '')
-
-  const placed = await postTo(laptop.socket, '/agents/place', { session: SESSION.slice(0, 8), take: false })
-
-  expect(placed.status).toBe(200)
-  expect(placed.body).toEqual({ session: SESSION, cwd: expect.any(String) })
-  expect([laptop.claude.signalCode, runner.signalCode]).toEqual(['SIGTERM', null])
-  expect(existsSync(join(laptop.folder, 'hc.log'))).toBe(false)
-}, 60_000)
-
-test("a session placed to continue in the folder it last ran in has that folder trusted in Claude Code, so a resume never asks whether to trust it", async () => {
-  const relay = await memoryRelay()
-  const laptop = await runningOn(relay)
-
-  const placed = await postTo(laptop.socket, '/agents/place', { session: SESSION.slice(0, 8), take: false })
-
-  expect(placed.body).toEqual({ session: SESSION, cwd: laptop.cwd })
+  expect(runsOn(laptop.folder).map(({ cwd, command }) => ({ cwd, command: command.split(' ').slice(-3).join(' ') }))).toEqual([{ cwd: laptop.cwd, command: `claude --resume ${SESSION}` }])
+  expect(runsOn(laptop.folder)[0]?.command).not.toContain(' run ')
   expect(trustedIn(laptop)).toEqual([realpathSync(laptop.cwd)])
 }, 60_000)
 
@@ -130,7 +115,7 @@ test('an open continues a session here from R2 while the machine that ran it is 
   expect(opened.status).toBe(200)
   expect([opened.body['session'], opened.body['machine'], typeof opened.body['terminal']]).toEqual([SESSION, WORKER.name, 'string'])
   expect(again.body).toEqual(opened.body)
-  expect(runsOn(worker.folder).map(({ session, command }) => ({ session, command }))).toEqual([{ session: SESSION, command: 'claude' }])
+  expect(runsOn(worker.folder).map(({ session, command }) => ({ session, command: command.split(' ').slice(-3).join(' ') }))).toEqual([{ session: SESSION, command: `claude --resume ${SESSION}` }])
   expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)
 }, 90_000)
 
@@ -184,7 +169,8 @@ test("a session this machine holds wakes here while the relay answers nothing, a
   const laptop = await runningOn(relay)
   relay.stalled = true
 
-  const placed = await Promise.race([postTo(laptop.socket, '/agents/place', { session: SESSION }), Bun.sleep(8000).then(() => 'still waiting')])
+  const opened = await Promise.race([postTo(laptop.socket, '/agents/open', { session: SESSION }), Bun.sleep(8000).then(() => 'still waiting')])
 
-  expect(placed).toEqual({ status: 200, body: { session: SESSION, cwd: laptop.cwd } })
+  expect(opened).toMatchObject({ status: 200, body: { session: SESSION } })
+  expect(runsOn(laptop.folder).map(({ cwd }) => cwd)).toEqual([laptop.cwd])
 }, 60_000)

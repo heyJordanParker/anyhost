@@ -5,15 +5,12 @@ import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
 import { basesOf, checkoutOf, checkoutOfEntry, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordForkStarts, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession, type RecordHeader } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
-import plugin from '../../.claude-plugin/plugin.json'
-import { forgetRun, ownRun, startOf, statusOf } from './claude.ts'
+import { claudeStart, resumeArgv, resumedOf, statusOf } from './claude.ts'
 import { cloneRemote } from './code.ts'
-import { dataFolders, devicesOf, type MachineRoots } from './device.ts'
-import { labelOwnTerminal, unlabelOwnTerminal } from './hc.ts'
+import { dataFolders, devicesOf, rootsHere, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
-import { runSession } from './runner.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
-import { codexState, filesUnder, historyOf, linesFiles, ownerOf, type Tool } from './transcript.ts'
+import { codexState, filesUnder, historyOf, linesFiles, ownerOf, transcriptOf, type Tool } from './transcript.ts'
 
 const NOTHING = new Uint8Array()
 
@@ -218,16 +215,9 @@ async function keepConflictedCopy(capture: Capture, session: string, local: Loca
 
 export async function openSession(tool: Tool, id: string, cwd: string): Promise<number> {
   process.chdir(cwd)
-  if (tool === 'claude') return await runSession(['claude'], id)
-  const command = ['codex', 'resume', id]
-  const startedAt = new Date().toISOString()
-  const codex = Bun.spawn(command, { env: process.env, stdio: ['inherit', 'inherit', 'inherit'] })
-  ownRun(id, { process: { id: process.pid, start: startOf(process.pid) }, version: plugin.version, startedAt }, { command, pid: codex.pid, startedAt })
-  await labelOwnTerminal(id).catch((error: unknown) => console.error(`anyhost could not label this terminal with ${id}: ${error instanceof Error ? error.message : String(error)}`))
-  const code = await codex.exited
-  forgetRun(id)
-  await unlabelOwnTerminal().catch(() => undefined)
-  return code
+  const transcript = tool === 'claude' ? transcriptOf(rootsHere().claudeHome, id) : undefined
+  const argv = tool === 'codex' ? ['codex', 'resume', id] : claudeStart(resumeArgv(id, transcript === undefined ? {} : await resumedOf(transcript)), true)
+  return await Bun.spawn(argv, { env: process.env, stdio: ['inherit', 'inherit', 'inherit'] }).exited
 }
 
 export async function resumeHere(capture: Capture, id: string, options: { take: boolean; checkouts: string }): Promise<{ tool: Tool; cwd: string }> {

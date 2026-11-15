@@ -32,8 +32,8 @@ import trash from '../../herdr/anyhost/icons/trash.svg' with { type: 'text' }
 import undo from '../../herdr/anyhost/icons/undo-2.svg' with { type: 'text' }
 import pane from '../../herdr/anyhost/main.js' with { type: 'text' }
 import placement from '../../herdr/anyhost/mod.json'
-import { run } from './claude.ts'
-import { self } from './hc.ts'
+import { claudeStart, run } from './claude.ts'
+import { hcPath } from './hc.ts'
 
 const ICONS: Record<string, string> = {
   'alarm-clock-off.svg': alarmClockOff,
@@ -107,7 +107,7 @@ export async function installHerdr(home = herdrHome()): Promise<void> {
   const main = await readFile(join(home, 'layouts', 'main.json'), 'utf8').catch(() => undefined)
   if (main !== undefined) await writeChanged(join(home, 'layouts', `${LAYOUT}.json`), `${JSON.stringify(withSessions(JSON.parse(main) as Node), null, 2)}\n`)
   await switchOnce(home)
-  await runUnderRunner(home)
+  await startClaudeClean(home)
   await bindKeys(home)
 }
 
@@ -167,24 +167,29 @@ async function switchOnce(home: string): Promise<void> {
   if ((await child.exited) === 0) await writeFile(switched, '')
 }
 
-async function runUnderRunner(home: string): Promise<void> {
+const RUNNER_WRAP_0_9_0 = 'program="$HOME/.local/share/cmod/programs/anyhost"; [ -x "$program" ] && exec "$program" run -- "$@"; exec "$@"'
+
+const ownCommandOf = (run: readonly string[]): readonly string[] => {
+  const started = claudeStart([], false)
+  if (started.every((word, at) => run[at] === word)) return run.slice(started.length)
+  if (run[0] === 'sh' && run[2] === RUNNER_WRAP_0_9_0) return run.slice(4)
+  return run
+}
+
+async function startClaudeClean(home: string): Promise<void> {
   const file = join(home, 'programs.json')
   const read = await readFile(file, 'utf8').catch(() => '{}')
   const programs = JSON.parse(read) as Programs
   const claude = programs.programs?.['claude'] ?? {}
-  const command = claude.run ?? ['claude']
-  if (command[0] === 'sh' && command[2] === UNDER_RUNNER) return
-  const written: Programs = { ...programs, programs: { ...programs.programs, claude: { ...claude, run: ['sh', '-c', UNDER_RUNNER, 'anyhost', ...command] } } }
+  const written: Programs = { ...programs, programs: { ...programs.programs, claude: { ...claude, run: claudeStart(ownCommandOf(claude.run ?? ['claude']), false) } } }
   await writeChanged(file, `${JSON.stringify(written, null, 2)}\n`)
 }
-
-const UNDER_RUNNER = 'program="$HOME/.local/share/cmod/programs/anyhost"; [ -x "$program" ] && exec "$program" run -- "$@"; exec "$@"'
 
 export const PLACES = ['focus', 'peek', 'tab', 'right', 'down', 'hide'] as const
 export type Place = (typeof PLACES)[number]
 type Shown = { readonly spaces: readonly { readonly tabs: readonly { readonly terminals: readonly { readonly terminal: string; readonly pane: string | null }[] }[] }[] }
 
-export async function showTerminal(terminal: string, session: string, place: Place): Promise<void> {
+export async function showTerminal(terminal: string, place: Place): Promise<void> {
   const app = herdrApp()
   if (app === undefined) throw new Error('The Herdr app is not installed on this machine, so no screen here shows the session.')
   const say = async (command: string, args: Record<string, unknown>): Promise<void> => void (await run([app, 'do', command, JSON.stringify(args)]))
@@ -194,5 +199,5 @@ export async function showTerminal(terminal: string, session: string, place: Pla
   if (place === 'hide') return pane === null ? undefined : await say('terminal.park', { terminal })
   if (pane === null) return await say('terminal.keep', { terminal, place: place === 'focus' ? 'tab' : place })
   if (place === 'focus' || place === 'tab') return await say('agent.focus', { terminal })
-  await say('pane.split', { direction: place, argv: [...self(), 'run', '--session', session] })
+  await say('pane.split', { direction: place, argv: [hcPath() ?? 'hc', 'attach', terminal] })
 }

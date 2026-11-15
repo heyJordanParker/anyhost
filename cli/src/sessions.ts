@@ -2,7 +2,6 @@ import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync, writeSync } from
 import { join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
 import { bytesOfChunks, chainOf, chunkReader, chunksIn, decompressDelta, downloadBase, framesOf, journalPrefix, ownIndex, type Capture, type ChunkReader, type IndexedSession, type RecordHeader } from './capture.ts'
-import { liveRuns, type Run } from './claude.ts'
 import { devicesOf } from './device.ts'
 import type { Relay } from './relay.ts'
 import { isArchived, isSettled, isSnoozed, sharedOf, type Stage, type Tag } from './shared.ts'
@@ -78,7 +77,7 @@ export type Agents = {
 
 export const titleOfPrompt = (prompt: string): string => (prompt.split('\n')[0] ?? '').replace(/(?:~|\/)\S*\/([^/\s]+)/g, '$1').slice(0, 120)
 
-export async function agentsOf(capture: Capture, statuses: Readonly<Record<string, Protocol.AgentStatus>> = {}, runs: ReadonlyMap<string, Run> = liveRuns(), now = Date.now()): Promise<Agents> {
+export async function agentsOf(capture: Capture, statuses: Readonly<Record<string, Protocol.AgentStatus>> = {}, terminals: ReadonlyMap<string, string> = new Map(), now = Date.now()): Promise<Agents> {
   const devices = await devicesOf(capture.relay)
   const [indexes, own, holders, shared] = await Promise.all([indexesOf(capture.relay, devices.keys()), ownIndex(capture), capture.holders.current(), sharedOf(capture.relay)])
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
@@ -89,7 +88,7 @@ export async function agentsOf(capture: Capture, statuses: Readonly<Record<strin
     return {
       ...session,
       title: session.title || titleOfPrompt(session.firstPrompt),
-      terminal: runs.get(session.id)?.terminal?.address ?? '',
+      terminal: terminals.get(session.id) ?? '',
       status,
       archived: isArchived(shared, session),
       settled,

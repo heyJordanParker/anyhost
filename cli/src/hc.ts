@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { run } from './claude.ts'
@@ -20,13 +19,6 @@ const hcHere = (): string => {
 const inScope = (command: readonly string[]): string[] =>
   Bun.which('systemd-run') === null || !process.env['XDG_RUNTIME_DIR'] ? [...command] :['systemd-run', '--user', '--scope', '--quiet', '--collect', '--slice', SESSIONS_SLICE, '--unit', `anyhost-hc-${crypto.randomUUID().slice(0, 8)}.scope`, ...command]
 
-const LINKED_PROGRAM = join(homedir(), '.local', 'share', 'cmod', 'programs', 'anyhost')
-
-export const self = (): string[] => {
-  if (!import.meta.dir.startsWith('/$bunfs/')) return [process.execPath, join(import.meta.dir, 'main.ts')]
-  return [existsSync(LINKED_PROGRAM) ? LINKED_PROGRAM : process.execPath]
-}
-
 const hex12 = (text: string): string => new Bun.CryptoHasher('sha256').update(text).digest('hex').slice(0, 12)
 
 const TEMP_ROOTS = ['/tmp', '/private/tmp', '/var/folders', '/private/var/folders']
@@ -36,11 +28,10 @@ const isTemporary = (cwd: string, roots: { readonly home: string; readonly claud
 
 export const spaceOf = (cwd: string, checkout: string): string => (isTemporary(cwd, rootsHere()) ? 'anyhost-temporary' : checkout === '' ? 'anyhost-none' : `anyhost-w-${hex12(checkout)}`)
 
-export async function openTerminal(cwd: string, session: string, command: readonly string[], options: { readonly isResumed: boolean; readonly checkout: string }): Promise<string> {
-  const runner = [...self(), 'run', ...(options.isResumed ? ['--session', session] : []), '--', ...command]
-  const placed = { [SPACE_LABEL]: spaceOf(cwd, options.checkout), 'herdr.tab': session.slice(0, 8), [SESSION_LABEL]: session }
+export async function openTerminal(cwd: string, session: string, argv: readonly string[], checkout: string): Promise<string> {
+  const placed = { [SPACE_LABEL]: spaceOf(cwd, checkout), 'herdr.tab': session.slice(0, 8), [SESSION_LABEL]: session }
   const labels = Object.entries(placed).flatMap(([key, value]) => ['--label', `${key}=${value}`])
-  const { address } = JSON.parse(await run(inScope([hcHere(), 'run', '--bg', '--json', '--keep', '--no-parent', '--cwd', cwd, ...labels, '--', ...runner]), { cwd })) as { readonly address: string }
+  const { address } = JSON.parse(await run(inScope([hcHere(), 'run', '--bg', '--json', '--no-parent', '--cwd', cwd, ...labels, '--', ...argv]), { cwd })) as { readonly address: string }
   return address
 }
 
@@ -67,7 +58,6 @@ export async function killTerminal(address: string): Promise<void> {
 }
 
 export const SHOWN_LABEL = 'anyhost.shown.'
-export const VIEW_LABEL = 'anyhost.view'
 export const SHOWN_MS = 90_000
 
 export const isShown = (labels: Readonly<Record<string, string>>, now = Date.now()): boolean =>
@@ -83,6 +73,7 @@ export type Terminal = {
   readonly pid: number | null
   readonly labels: Readonly<Record<string, string>>
   readonly foreground: { readonly argv: readonly string[]; readonly pid: number } | null
+  readonly reason: string | null
 }
 export type TerminalChange = { readonly type: string; readonly address: string }
 
@@ -102,6 +93,7 @@ const terminalOf = (data: Record<string, unknown>): Terminal => ({
   pid: (data['pid'] as number | null | undefined) ?? null,
   labels: (data['labels'] as Record<string, string> | undefined) ?? {},
   foreground: (data['foreground'] as Terminal['foreground'] | undefined) ?? null,
+  reason: (data['reason'] as string | null | undefined) ?? null,
 })
 
 function changed(terminals: Map<string, Terminal>, type: string, address: string, data: Record<string, unknown>): void {
@@ -112,7 +104,7 @@ function changed(terminals: Map<string, Terminal>, type: string, address: string
   if (type === 'foreground') terminals.set(address, { ...before, foreground: { argv: (data['argv'] as string[] | undefined) ?? [], pid: Number(data['pid']) } })
   if (type === 'labels') terminals.set(address, { ...before, labels: (data['labels'] as Record<string, string> | undefined) ?? {} })
   if (type === 'lost') terminals.set(address, { ...before, foreground: null })
-  if (type === 'finished') terminals.set(address, { ...before, state: 'finished', foreground: null })
+  if (type === 'finished') terminals.set(address, { ...before, state: 'finished', foreground: null, reason: (data['reason'] as string | null | undefined) ?? null })
 }
 
 type EventLine = {
@@ -166,29 +158,6 @@ export function followTerminals(heard: (terminals: ReadonlyMap<string, Terminal>
   }
 }
 
-export function followLabels(address: string, changed: () => void): () => void {
-  let isStopped = false
-  let events: ReturnType<typeof Bun.spawn> | undefined
-  void (async () => {
-    const decoder = new TextDecoder()
-    for (let wait = FOLLOW_FIRST_MS; !isStopped; wait = Math.min(wait * 2, FOLLOW_MOST_MS)) {
-      const following = Bun.spawn([hcHere(), 'events', '--terminal', address, '--json'], { env: process.env, stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
-      events = following
-      for await (const chunk of following.stdout) {
-        wait = FOLLOW_FIRST_MS
-        if (decoder.decode(chunk).includes('"labels"')) changed()
-      }
-      if (isStopped) return
-      await Bun.sleep(wait)
-      changed()
-    }
-  })()
-  return () => {
-    isStopped = true
-    events?.kill()
-  }
-}
-
 const STILL_STARTING = 'is still starting: its output has not settled'
 const SETTLE_MS = 60_000
 
@@ -201,10 +170,6 @@ export async function sendTo(address: string, text: string): Promise<void> {
     }
   }
 }
-
-const shellWord = (word: string): string => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`)
-
-export const execInShell = async (address: string, argv: readonly string[]): Promise<void> => await sendTo(address, `exec ${argv.map(shellWord).join(' ')}`)
 
 export const pressKeys = async (address: string, keys: readonly string[]): Promise<void> => void (await run([hcHere(), 'keys', address, ...keys]))
 
@@ -231,11 +196,3 @@ export const forgetMachine = async (name: string): Promise<void> => void (await 
 
 export const runOn = async (machine: string, script: string): Promise<string> =>
   await run([hcHere(), 'exec', '--on', machine, '--timeout', '600', 'sh', '-c', 'exec "${SHELL:-sh}" -i -l -c "$0"', script])
-
-export async function labelOwnTerminal(session: string): Promise<void> {
-  const address = process.env['HC_TERMINAL_ID']
-  if (address === undefined || address === '') return
-  await label(address, SESSION_LABEL, session)
-}
-
-export const unlabelOwnTerminal = async (): Promise<void> => labelOwnTerminal('')
