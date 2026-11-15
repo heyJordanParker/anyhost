@@ -7,7 +7,7 @@ import { machinesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { forkAgent, type MoveHere } from '../src/move.ts'
 import { restore } from '../src/resume.ts'
 import { agentsOf, downloadJournal } from '../src/sessions.ts'
-import { forkedTranscript } from '../src/transcript.ts'
+import { forkedTranscript, piecesFrom } from '../src/transcript.ts'
 import { sharedOf } from '../src/shared.ts'
 import { eventLoopDuring, failTest, memoryRelay, noCode, until, type MemoryRelay } from './memory.ts'
 import { anyhostOn, captureOn, HOST, isUploaded, machineFor, serveOn, SESSION, temporaryFolder, uploadFiles } from './program.ts'
@@ -259,6 +259,24 @@ test('a row read with the rules before the source was read gains its source at t
 
   expect(relisted).toBe(PARENT)
   expect(a.capture.db.query<{ source: string }, [string]>('select source from sessions where id = ?').get(fork)?.source).toBe('')
+})
+
+test('a file streamed in pieces cuts at the very bytes a cut of the whole file does, a line longer than a chunk included', async () => {
+  const lines = Array.from({ length: 9000 }, (_, at) => `{"type":"user","uuid":"${crypto.randomUUID()}","text":"${'x'.repeat((at * 7919) % 9000)}"}\n`)
+  lines.splice(4000, 0, `{"type":"assistant","text":"${'y'.repeat(20 * 2 ** 20)}"}\n`)
+  const bytes = new TextEncoder().encode(lines.join(''))
+  const path = join(temporaryFolder(), 'big.jsonl')
+  writeFileSync(path, bytes)
+  const appended = Buffer.byteLength(lines.slice(0, 100).join(''))
+  const streamed = async (from: number): Promise<string[]> => {
+    const names: string[] = []
+    for await (const piece of piecesFrom(path, from, bytes.length)) names.push(sha256(piece))
+    return names
+  }
+
+  expect(bytes.length).toBeGreaterThan(3 * 16 * 2 ** 20)
+  expect(await streamed(0)).toEqual(piecesOf(bytes).map(sha256))
+  expect(await streamed(appended)).toEqual(piecesOf(bytes.subarray(appended)).map(sha256))
 })
 
 test("forks of a parent over 16 MiB, one anyhost's and one Claude Code wrote, go up as references to its several chunks and as deltas against them, and restore byte-exact", async () => {

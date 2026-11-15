@@ -11,7 +11,7 @@ import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type DataFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Relay } from './relay.ts'
 import { Replay } from './sessions.ts'
-import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, namedIn, namesFork, ownerOf, parentOf, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
+import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, namedIn, namesFork, ownerOf, parentOf, piecesFrom, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
 const SCAN_READ_BYTES = 2 ** 20
@@ -107,7 +107,9 @@ type FileRow = { session: string; path: string; journal_size: number; local_size
 type JournalRow = { session: string; tool: Tool; end: number; sealed: number; written_at: number; stopped: string; holder: string }
 type SessionRow = { id: string; tool: Tool; title: string; title_rank: number; first_prompt: string; cwd: string; repo: string; repo_folder: string; entrypoint: string; last_said: string; last_activity: string; last_prompt_at: string; source: string; size: number }
 type Source = { readonly size: number; readonly mtime: number; read(from: number, to: number): Promise<Uint8Array> }
-type Change = { readonly header: RecordHeader; readonly bytes: Uint8Array; readonly fileBytes?: Uint8Array; readonly state: FileState; readonly hasher: Bun.CryptoHasher; readonly isPartial: boolean }
+type Change = { readonly header: RecordHeader; readonly bytes: Uint8Array; readonly region?: { readonly from: number; readonly to: number }; readonly state: FileState; readonly hasher: Bun.CryptoHasher; readonly isPartial: boolean }
+
+const blocksOf = (change: Change): AsyncIterable<Uint8Array> | Iterable<Uint8Array> => (change.region === undefined ? [change.bytes] : wholeLinesIn(change.header.path, change.region.from, change.region.to))
 
 export function openDatabase(folder = stateFolder()): Database {
   mkdirSync(folder, { recursive: true })
@@ -409,27 +411,28 @@ async function keepChunk(relay: Relay, name: string, etag: string | undefined, b
   if (put.status !== 200) throw new Error(`The relay answered ${put.status} to the put over ${chunkKey(name)}, so anyhost uploads no record that names it.`)
 }
 
-export async function storeChunks(capture: Pick<Capture, 'relay' | 'db'>, pieces: readonly Piece[]): Promise<ChunkList> {
-  const { relay, db } = capture
-  const chunks = pieces.map(({ bytes }) => [sha256(bytes), bytes.length] as const)
-  const fresh = new Map<string, Piece>()
-  for (const [index, [name]] of chunks.entries()) {
-    const piece = pieces[index]
-    if (piece !== undefined && !fresh.has(name) && !knowsChunk(db, name)) fresh.set(name, piece)
+async function putChunk(capture: Pick<Capture, 'relay' | 'db'>, name: string, body: Uint8Array): Promise<void> {
+  const answer = await capture.relay.runOne({ op: 'put', key: chunkKey(name), bytes: body, if: { none: '*' } })
+  if (answer.status !== 200 && answer.status !== 412) throw new Error(`The relay answered ${answer.status} to the put of ${chunkKey(name)}, so anyhost uploads no record that names it.`)
+  if (answer.status === 412) await keepChunk(capture.relay, name, answer.etag, body)
+  capture.db.query('insert or ignore into chunks (name) values (?)').run(name)
+}
+
+export async function storeChunks(capture: Pick<Capture, 'relay' | 'db'>, pieces: AsyncIterable<Piece> | Iterable<Piece>): Promise<ChunkList> {
+  const chunks: (readonly [string, number])[] = []
+  const sent = new Set<string>()
+  const putting: Promise<void>[] = []
+  for await (const piece of pieces) {
+    const name = sha256(piece.bytes)
+    chunks.push([name, piece.bytes.length])
+    if (sent.has(name) || knowsChunk(capture.db, name)) continue
+    sent.add(name)
+    const put = putChunk(capture, name, await storedChunk(piece, name))
+    put.catch(() => undefined)
+    putting.push(put)
+    if (putting.length >= CHUNK_PUTS_AT_ONCE) await putting.shift()
   }
-  const names = [...fresh.keys()]
-  for (let from = 0; from < names.length; from += CHUNK_PUTS_AT_ONCE) {
-    const batch = names.slice(from, from + CHUNK_PUTS_AT_ONCE)
-    const bodies: Uint8Array[] = []
-    for (const name of batch) bodies.push(await storedChunk(fresh.get(name) ?? { bytes: new Uint8Array() }, name))
-    const answers = await Promise.all(relay.run(batch.map((name, at): Call => ({ op: 'put', key: chunkKey(name), bytes: bodies[at] ?? new Uint8Array(), if: { none: '*' } }))))
-    for (const [at, answer] of answers.entries()) {
-      const name = batch[at] ?? ''
-      if (answer.status !== 200 && answer.status !== 412) throw new Error(`The relay answered ${answer.status} to the put of ${chunkKey(name)}, so anyhost uploads no record that names it.`)
-      if (answer.status === 412) await keepChunk(relay, name, answer.etag, bodies[at] ?? new Uint8Array())
-      db.query('insert or ignore into chunks (name) values (?)').run(name)
-    }
-  }
+  await Promise.all(putting)
   return chunks
 }
 
@@ -701,8 +704,51 @@ export const sha256 = (bytes: Uint8Array): string => new Bun.CryptoHasher('sha25
 
 async function hasherOf(source: Source, size: number): Promise<Bun.CryptoHasher> {
   const hasher = new Bun.CryptoHasher('sha256')
-  for (let at = 0; at < size; at += FRAME_BYTES) hasher.update(await source.read(at, Math.min(size, at + FRAME_BYTES)))
+  for (let at = 0; at < size; at += SCAN_READ_BYTES) hasher.update(await source.read(at, Math.min(size, at + SCAN_READ_BYTES)))
   return hasher
+}
+
+async function lineEndOf(source: Source, from: number): Promise<number> {
+  for (let to = source.size; to > from; to -= SCAN_READ_BYTES) {
+    const start = Math.max(from, to - SCAN_READ_BYTES)
+    const newline = (await source.read(start, to)).lastIndexOf(10)
+    if (newline >= 0) return start + newline + 1
+  }
+  return from
+}
+
+const isAppendedFile = (path: string, roots: MachineRoots): boolean => !linesFiles(roots).has(path) && path !== codexState(roots) && (isLog(path, roots) || isTranscript(path, roots))
+
+async function streamedChange(
+  capture: Capture,
+  session: string,
+  path: string,
+  source: Source,
+  region: { readonly from: number; readonly to: number },
+  journalSize: number,
+  prefix: Bun.CryptoHasher,
+  baseOf: () => Promise<Uint8Array | undefined> = async () => undefined,
+): Promise<Change> {
+  const hasher = prefix.copy()
+  let tail: Uint8Array = new Uint8Array()
+  const pieces = async function* (): AsyncGenerator<Piece> {
+    for await (const bytes of piecesFrom(path, region.from, region.to)) {
+      hasher.update(bytes)
+      tail = tailOf(Buffer.concat([tail, bytes.subarray(Math.max(0, bytes.length - TAIL_BYTES))]))
+      const base = await baseOf()
+      yield base === undefined ? { bytes } : { bytes, against: base }
+    }
+  }
+  const chunks = await storeChunks(capture, pieces())
+  const sha256 = hasher.copy().digest('hex')
+  return {
+    header: { ...writerOf(capture, session), path, at: journalSize, size: 0, after: { size: region.to, sha256 }, chunks },
+    bytes: new Uint8Array(),
+    region,
+    state: { session, path, journalSize: journalSize + region.to - region.from, localSize: region.to, tail, sha256, mtime: source.mtime },
+    hasher,
+    isPartial: false,
+  }
 }
 
 export const checkoutOfEntry = (entry: Pick<IndexedSession, 'cwd' | 'repo' | 'repoFolder'>, home: string): string =>
@@ -754,30 +800,38 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
     const fork = await forkChange(capture, session, path, source)
     if (fork !== undefined) return fork
   }
+  const isChunkable = async (): Promise<boolean> => isAppendedFile(path, capture.roots) && (await everyMachineReadsChunks(capture))
   if (isLog(path, capture.roots) && source.size >= known.localSize) {
     if (source.size === known.localSize) return touched()
     const from = Math.max(0, known.localSize - known.tail.length)
-    let end = Math.min(source.size, known.localSize + budget)
-    let read = await source.read(from, end)
-    while (read.lastIndexOf(10) < known.localSize - from && end < source.size) {
-      end = Math.min(source.size, end + FRAME_BYTES)
-      read = await source.read(from, end)
-    }
-    if (sameBytes(read.subarray(0, known.localSize - from), known.tail)) {
-      const gained = read.subarray(known.localSize - from, read.lastIndexOf(10) + 1)
-      if (gained.length === 0) return undefined
+    if (sameBytes(await source.read(from, known.localSize), known.tail)) {
+      const lineEnd = await lineEndOf(source, known.localSize)
+      if (lineEnd === known.localSize) return undefined
       let hasher = known.localSize === 0 ? new Bun.CryptoHasher('sha256') : capture.hashers.get(key)
       if (hasher !== undefined && known.localSize > 0 && hasher.copy().digest('hex') !== known.sha256) hasher = undefined
       if (hasher === undefined && known.localSize > 0) {
-        hasher = linesFiles(capture.roots).has(path) ? await hasherOf(source, known.localSize) : await hashedPrefix(path, known.localSize)
+        hasher = await hasherOf(source, known.localSize)
         if (hasher.copy().digest('hex') !== known.sha256) hasher = undefined
       }
+      if (hasher !== undefined && lineEnd - known.localSize >= CHUNKED_FROM && (await isChunkable())) return await streamedChange(capture, session, path, source, { from: known.localSize, to: lineEnd }, known.journalSize, hasher)
       if (hasher !== undefined) {
+        let end = Math.min(source.size, known.localSize + budget)
+        let read = await source.read(from, end)
+        while (read.lastIndexOf(10) < known.localSize - from && end < source.size) {
+          end = Math.min(source.size, end + FRAME_BYTES)
+          read = await source.read(from, end)
+        }
+        const gained = read.subarray(known.localSize - from, read.lastIndexOf(10) + 1)
         const grown = hasher.copy().update(gained)
         const localSize = known.localSize + gained.length
         return record(known.journalSize, gained, localSize, known.journalSize + gained.length, grown, tailOf(read.subarray(0, localSize - from)), end < source.size)
       }
     }
+  }
+  const wholeEnd = isLog(path, capture.roots) ? await lineEndOf(source, 0) : source.size
+  if (wholeEnd >= CHUNKED_FROM && (await isChunkable())) {
+    if (row !== null && source.size === known.localSize && (await hasherOf(source, source.size)).digest('hex') === known.sha256) return touched()
+    return await streamedChange(capture, session, path, source, { from: 0, to: wholeEnd }, 0, new Bun.CryptoHasher('sha256'))
   }
   const bytes = await source.read(0, source.size)
   const hasher = new Bun.CryptoHasher('sha256').update(bytes)
@@ -810,31 +864,15 @@ export async function indexForkStarts(capture: Pick<Capture, 'db' | 'roots'>): P
   return indexed
 }
 
-async function hashedPrefix(path: string, size: number): Promise<Bun.CryptoHasher> {
-  const hasher = new Bun.CryptoHasher('sha256')
-  const handle = await open(path, 'r')
-  try {
-    const buffer = Buffer.allocUnsafe(SCAN_READ_BYTES)
-    for (let at = 0; at < size; ) {
-      const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, size - at), at)
-      if (bytesRead === 0) break
-      hasher.update(buffer.subarray(0, bytesRead))
-      at += bytesRead
-    }
-  } finally {
-    await handle.close()
-  }
-  return hasher
-}
-
-export async function* wholeLinesIn(path: string): AsyncGenerator<Uint8Array> {
+export async function* wholeLinesIn(path: string, from = 0, to = Infinity): AsyncGenerator<Uint8Array> {
   const handle = await open(path, 'r')
   try {
     let buffer = Buffer.allocUnsafe(SCAN_READ_BYTES)
     let filled = 0
-    for (;;) {
-      const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, null)
-      if (bytesRead === 0) return
+    for (let at = from; at < to; ) {
+      const { bytesRead } = await handle.read(buffer, filled, Math.min(buffer.length - filled, to - at), at)
+      if (bytesRead === 0) break
+      at += bytesRead
       filled += bytesRead
       const end = buffer.lastIndexOf(10, filled - 1) + 1
       if (end === 0) {
@@ -856,7 +894,7 @@ function chunkedChange(capture: Capture, session: string, path: string, written:
   return {
     header: { ...writerOf(capture, session), path, at: 0, size: 0, after: { size: written.length, sha256 }, ...kind },
     bytes: new Uint8Array(),
-    fileBytes: written,
+    region: { from: 0, to: written.length },
     state: { session, path, journalSize: written.length, localSize: written.length, tail: tailOf(written), sha256, mtime },
     hasher,
     isPartial,
@@ -883,38 +921,71 @@ async function forkedChange(capture: Capture, session: string, path: string, who
   return chunkedChange(capture, session, path, derived.bytes, mtime, { chunks, fork }, derived.bytes.length < whole.length)
 }
 
-async function mayBeFork(capture: Capture, path: string): Promise<boolean> {
+async function forkSignsOf(path: string): Promise<{ readonly isNamed: boolean; readonly first: string | undefined }> {
   let first: string | undefined
   for await (const lines of wholeLinesIn(path)) {
-    if (namesFork(lines)) return true
+    if (namesFork(lines)) return { isNamed: true, first: first ?? firstUuidIn(lines) }
     first ??= firstUuidIn(lines)
   }
-  return first !== undefined && capture.db.query('select 1 from fork_starts where uuid = ? and path != ?').get(first, path) !== null
+  return { isNamed: false, first }
+}
+
+const fileSource = (path: string): Source => {
+  const file = Bun.file(path)
+  return { size: file.size, mtime: file.lastModified, read: async (from, to) => new Uint8Array(await file.slice(from, to).arrayBuffer()) }
+}
+
+function holderOf(piece: Uint8Array, holders: ReadonlyMap<string, number>): number | undefined {
+  const counts = new Map<number, number>()
+  for (const { uuid } of uuidsIn(piece)) {
+    const index = holders.get(uuid)
+    if (index !== undefined) counts.set(index, (counts.get(index) ?? 0) + 1)
+  }
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0]
+}
+
+async function deltaChange(capture: Capture, session: string, path: string, source: Source, parentPath: string): Promise<Change | undefined> {
+  const parent = fileSource(parentPath)
+  const read = (from: number, to: number): Promise<Uint8Array> => parent.read(from, to)
+  const places: { readonly from: number; readonly to: number }[] = []
+  const holders = new Map<string, number>()
+  for await (const piece of piecesFrom(parentPath, 0, await lineEndOf(parent, 0))) {
+    for (const { uuid } of uuidsIn(piece)) if (!holders.has(uuid)) holders.set(uuid, places.length)
+    const from = places.at(-1)?.to ?? 0
+    places.push({ from, to: from + piece.length })
+  }
+  const end = await lineEndOf(source, 0)
+  if (end === 0) return undefined
+  const against: (number | undefined)[] = []
+  for await (const piece of piecesFrom(path, 0, end)) against.push(holderOf(piece, holders))
+  const pieceOf = async (index: number | undefined): Promise<Uint8Array | undefined> => {
+    const place = index === undefined ? undefined : places[index]
+    return place === undefined ? undefined : await read(place.from, place.to)
+  }
+  const used = async function* (): AsyncGenerator<Piece> {
+    for (const index of new Set(against)) {
+      const bytes = await pieceOf(index)
+      if (bytes !== undefined) yield { bytes }
+    }
+  }
+  await storeChunks(capture, used())
+  let next = 0
+  return await streamedChange(capture, session, path, source, { from: 0, to: end }, 0, new Bun.CryptoHasher('sha256'), () => pieceOf(against[next++]))
 }
 
 async function forkChange(capture: Capture, session: string, path: string, source: Source): Promise<Change | undefined> {
-  if (source.size > FORK_BYTES || !(await mayBeFork(capture, path))) return undefined
-  const read = await source.read(0, source.size)
-  const whole = read.subarray(0, read.lastIndexOf(10) + 1)
-  if (whole.length === 0) return undefined
-  const forked = await forkedChange(capture, session, path, whole, source.mtime)
-  if (forked !== undefined) return forked
-  const first = firstUuidIn(whole)
+  if (source.size > FORK_BYTES) return undefined
+  const { isNamed, first } = await forkSignsOf(path)
+  if (isNamed) {
+    const read = await source.read(0, source.size)
+    const forked = await forkedChange(capture, session, path, read.subarray(0, read.lastIndexOf(10) + 1), source.mtime)
+    if (forked !== undefined) return forked
+  }
   if (first === undefined) return undefined
   const candidates = capture.db.query<{ path: string }, [string, string]>('select path from fork_starts where uuid = ? and path != ?').all(first, path).map((start) => start.path)
   const parent = await parentOf(path, candidates, FORK_BYTES)
   if (parent === undefined || !(await everyMachineReadsChunks(capture))) return undefined
-  const history = await Bun.file(parent).bytes()
-  const chunks = await chunkListOf(capture, whole, history.subarray(0, history.lastIndexOf(10) + 1))
-  return chunkedChange(capture, session, path, whole, source.mtime, { chunks }, false)
-}
-
-async function asChunks(capture: Capture, change: Change): Promise<Change> {
-  const { header, bytes } = change
-  const isView = linesFiles(capture.roots).has(header.path) || header.path === codexState(capture.roots)
-  const isAppended = isLog(header.path, capture.roots) || isTranscript(header.path, capture.roots)
-  if (header.chunks !== undefined || bytes.length < CHUNKED_FROM || isView || !isAppended || !(await everyMachineReadsChunks(capture))) return change
-  return { ...change, header: { ...header, size: 0, chunks: await chunkListOf(capture, bytes) }, bytes: new Uint8Array(), fileBytes: change.fileBytes ?? bytes }
+  return await deltaChange(capture, session, path, source, parent)
 }
 
 type Upload = {
@@ -992,18 +1063,18 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
       left.add(path)
       continue
     }
-    const change = await changeOf(capture, session, path, budget)
-      .then((found) => (found === undefined ? undefined : asChunks(capture, found)))
-      .then(
-        (found) => (problems.clear(path), found),
-        (error: unknown) => void problems.set(path, error),
-      )
+    const change = await changeOf(capture, session, path, budget).then(
+      (found) => (problems.clear(path), found),
+      (error: unknown) => void problems.set(path, error),
+    )
     if (change === undefined) continue
     changes.push(change)
-    budget -= change.header.chunks === undefined ? change.bytes.length : (change.fileBytes ?? change.bytes).length
+    budget -= change.region === undefined ? change.bytes.length : change.region.to - change.region.from
     if (change.isPartial) left.add(path)
     if (data === undefined && path.endsWith('.jsonl')) {
-      const named = [...new Set(namedIn(change.fileBytes ?? change.bytes, roots))].filter((file) => !work.has(file))
+      const found = new Set<string>()
+      for await (const block of blocksOf(change)) for (const file of namedIn(block, roots)) found.add(file)
+      const named = [...found].filter((file) => !work.has(file))
       rememberFiles(db, session, named)
       for (const file of named) work.add(file)
     }
@@ -1060,13 +1131,22 @@ async function finishUpload(capture: Capture, upload: Upload, puts: readonly Put
       for (const record of records) saveFile(db, record.state)
     })()
     for (const record of records) capture.hashers.set(`${session}\0${record.header.path}`, record.hasher)
-    for (const { header, bytes, fileBytes = bytes } of records) if (tool === 'claude' && header.path.endsWith('.jsonl') && isTranscript(header.path, roots)) recordForkStarts(db, header.path, fileBytes)
+    for (const record of records) {
+      if (tool !== 'claude' || !record.header.path.endsWith('.jsonl') || !isTranscript(record.header.path, roots)) continue
+      for await (const block of blocksOf(record)) recordForkStarts(db, record.header.path, block)
+    }
   }
   if (failure !== undefined && 'error' in failure) throw failure.error
   const own = changes.filter(({ header }) => !linesFiles(roots).has(header.path) && header.path !== codexState(roots))
   const lastActivity = new Date(own.length === 0 ? Date.now() : Math.max(...own.map((change) => change.state.mtime))).toISOString()
-  const texts = await Promise.all(transcripts.map(({ header, bytes, fileBytes = bytes }) => (header.path.endsWith('.zst') ? zstdSummaryTextOf(Readable.from([fileBytes]), header.path) : fileBytes)))
-  if (tool !== 'mod' && (await recordSummary(capture, session, tool, texts, end, lastActivity))) {
+  const texts = async function* (): AsyncGenerator<Uint8Array | string> {
+    for (const change of transcripts) {
+      const { header, region, bytes } = change
+      if (!header.path.endsWith('.zst')) yield* blocksOf(change)
+      else yield await zstdSummaryTextOf(region === undefined ? Readable.from([bytes]) : createReadStream(header.path, { start: region.from, end: region.to - 1 }), header.path)
+    }
+  }
+  if (tool !== 'mod' && (await recordSummary(capture, session, tool, texts(), end, lastActivity))) {
     await writeIndex(capture).then(() => problems.clear('index'), (error: unknown) => problems.set('index', error))
   }
   if (waiting !== undefined && !code.isDone) left.add(`${waiting.folder}/`)
@@ -1839,11 +1919,11 @@ function sessionRow(db: Database, id: string, tool: Tool): SessionRow {
   )
 }
 
-export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: string, tool: Tool, texts: Iterable<Uint8Array | string>, size: number, writtenAt: string): Promise<boolean> {
+export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: string, tool: Tool, texts: AsyncIterable<Uint8Array | string> | Iterable<Uint8Array | string>, size: number, writtenAt: string): Promise<boolean> {
   const { db } = capture
   const row = sessionRow(db, id, tool)
   let after: Summary = { title: row.title, titleRank: row.title_rank, firstPrompt: row.first_prompt, cwd: row.cwd, repo: tool === 'codex' ? row.repo : '', entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source }
-  for (const text of texts) after = summarize(after, text, tool)
+  for await (const text of texts) after = summarize(after, text, tool)
   const lastActivity = after.lastActivity || writtenAt
   const checkout = after.cwd === row.cwd && row.last_activity !== '' ? { repo: row.repo, folder: row.repo_folder } : await checkoutOf(after.cwd)
   const title = (tool === 'codex' ? await codexNameOf(id, capture.roots.codexHome) : undefined) ?? after.title
