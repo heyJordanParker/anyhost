@@ -218,6 +218,7 @@ export async function machineFor(relay: MemoryRelay, device: Device, person: Rec
     CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CLAUDE_CODE_TMPDIR: join(folder, 'tmp'),
     CODEX_HOME: join(home, '.codex'),
+    CLAUDE_CODE_EXECPATH: join(folder, 'bin', 'claude'),
     ANYHOST_DEVICE_ID: device.id,
     ANYHOST_DEVICE_NAME: device.name,
     ANYHOST_DEVICE_OS: device.os,
@@ -227,7 +228,7 @@ export async function machineFor(relay: MemoryRelay, device: Device, person: Rec
   const token = await relay.join(device, roots(home))
   script(
     join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'),
-    `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") printf '%s' '${JSON.stringify({ person })}' ;;\n  "device --json") printf '%s' '${JSON.stringify(device)}' ;;\n  *) exit 1 ;;\nesac\n`,
+    `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") [ -n "$CLAUDE_CODE_EXECPATH" ] || { echo 'cmod options: claude is not on PATH. Install it, then run the command again.' >&2; exit 1; }; printf '%s' '${JSON.stringify({ person })}' ;;\n  "device --json") printf '%s' '${JSON.stringify(device)}' ;;\n  *) exit 1 ;;\nesac\n`,
   )
   mkdirSync(join(env.XDG_STATE_HOME, 'anyhost'), { recursive: true })
   writeFileSync(join(env.XDG_STATE_HOME, 'anyhost', 'relay.json'), JSON.stringify({ url: relay.url }))

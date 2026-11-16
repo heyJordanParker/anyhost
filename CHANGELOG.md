@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.2] - 2026-11-16
+
+### Fixed
+- anyhost reads your options again, such as how often it uploads and where it clones checkouts. 0.9.1 could not find Claude Code when it read them, kept its defaults, and logged `claude is not on PATH` every minute.
+
 ## [0.9.1] - 2026-11-16
 
 ### Changed

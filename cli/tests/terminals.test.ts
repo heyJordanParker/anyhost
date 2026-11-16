@@ -34,6 +34,14 @@ test("a program started from inside a Claude Code session runs herdr-core withou
   expect(logOf(laptop.folder, 'marked.log')).toEqual([])
 }, 60_000)
 
+test("a program started with a Claude Code session's markers keeps the Claude Code path cmod gives it, so it reads the person's options", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 0 })
+
+  await serveOn({ ...laptop.env, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CODE_SESSION_ID: OTHER_SESSION })
+  await until(async () => ((await (await fetch('http://localhost/status', { unix: laptop.socket })).json()) as Status).uploadEvery === 0, "the person's uploadEvery in /status", 15_000)
+}, 60_000)
+
 test("a herdr-core that gives its terminals a Claude Code session's markers shows in /status, and the line goes once a core without them follows", async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
