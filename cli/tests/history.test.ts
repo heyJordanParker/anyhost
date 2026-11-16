@@ -244,7 +244,7 @@ test("a transcript whose lines carry Claude Code's own forkedFrom lists with tha
   const relay = await memoryRelay()
   const { a, fork } = await branchedOn(relay)
 
-  const { agents } = await agentsOf(a.capture, {}, new Map())
+  const { agents } = await agentsOf(a.capture, undefined, new Map())
 
   expect(agents.find(({ id }) => id === fork)).toMatchObject({ title: 'Plan the trip (Branch)', source: PARENT, parent: '' })
   expect(agents.find(({ id }) => id === PARENT)).toMatchObject({ source: '', parent: '' })

@@ -5,18 +5,21 @@ import { statusOf } from '../src/claude.ts'
 import { memoryRelay, until } from './memory.ts'
 import { anyhostOn, hookOn, isUploaded, LAPTOP, machineFor, postTo, runningOn, serveOn, SESSION, spawnForTest, temporaryFolder, WORKER, workerOn } from './program.ts'
 
-test('a session whose record says busy after its turn ended, as while its background agents run, reads working from /agents and from statusOf', async () => {
+test('a session whose record says busy after its turn ended, as while its background agents run, lists its main agent idle with background work, and statusOf reads working', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const claudeHome = laptop.env['CLAUDE_CONFIG_DIR'] ?? ''
   writeFileSync(join(claudeHome, 'sessions', `${laptop.claude.pid}.json`), JSON.stringify({ pid: laptop.claude.pid, sessionId: SESSION, kind: 'interactive', cwd: laptop.cwd, status: 'busy', statusUpdatedAt: Date.now() - 60_000 }))
-  const statusOfSession = async (): Promise<string | undefined> =>
-    ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; status: string }[] }).agents.find(({ id }) => id === SESSION)?.status
-  await until(async () => (await statusOfSession()) !== undefined, 'the session listed')
+  const listed = async (): Promise<{ status: string; background: boolean } | undefined> =>
+    ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; status: string; background: boolean }[] }).agents.find(({ id }) => id === SESSION)
+  await until(async () => (await listed()) !== undefined, 'the session listed')
+  await hookOn(laptop.socket, 'turnStart', laptop.cwd)
+  const inTurn = await listed()
 
   await hookOn(laptop.socket, 'turnEnd', laptop.cwd)
 
-  expect(await statusOfSession()).toBe('working')
+  expect([inTurn?.status, inTurn?.background]).toEqual(['working', false])
+  expect(await listed()).toMatchObject({ status: 'idle', background: true })
   expect(await statusOf(claudeHome, SESSION)).toBe('working')
 }, 60_000)
 

@@ -250,7 +250,7 @@ async function listedWith(sessions: readonly { readonly lastActivity: string; re
   const entry = { tool: 'claude', title: '', firstPrompt: 'Plan the trip', cwd: '/work', repo: '', repoFolder: '', entrypoint: 'cli', size: 10, lastPromptAt: '' }
   await relay.objects.put(`sessions/${mac.id}/index.json`, new TextEncoder().encode(JSON.stringify(sessions.map((session, at) => ({ ...entry, id: idOf(at + 1), ...session })))))
   await relay.objects.put('shared.json', new TextEncoder().encode(JSON.stringify(shared)))
-  const listed = await agentsOf(capture, statuses, new Map(), undefined, NOW)
+  const listed = await agentsOf(capture, { statuses, since: {}, background: [] }, new Map(), undefined, NOW)
   const byId = (field: 'settled' | 'settledAt' | 'snoozedUntil' | 'archived') => sessions.map((_, at) => listed.agents.find(({ id }) => id === idOf(at + 1))?.[field])
   return { capture, relay, listed, byId }
 }

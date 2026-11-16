@@ -76,6 +76,7 @@ export type Terminal = {
   readonly labels: Readonly<Record<string, string>>
   readonly foreground: { readonly argv: readonly string[]; readonly pid: number } | null
   readonly reason: string | null
+  readonly exitCode: number | null
 }
 export type TerminalChange = { readonly type: string; readonly address: string }
 
@@ -96,6 +97,7 @@ const terminalOf = (data: Record<string, unknown>): Terminal => ({
   labels: (data['labels'] as Record<string, string> | undefined) ?? {},
   foreground: (data['foreground'] as Terminal['foreground'] | undefined) ?? null,
   reason: (data['reason'] as string | null | undefined) ?? null,
+  exitCode: (data['exit_code'] as number | null | undefined) ?? null,
 })
 
 function changed(terminals: Map<string, Terminal>, type: string, address: string, data: Record<string, unknown>): void {
@@ -105,8 +107,8 @@ function changed(terminals: Map<string, Terminal>, type: string, address: string
   if (before === undefined) return
   if (type === 'foreground') terminals.set(address, { ...before, foreground: { argv: (data['argv'] as string[] | undefined) ?? [], pid: Number(data['pid']) } })
   if (type === 'labels') terminals.set(address, { ...before, labels: (data['labels'] as Record<string, string> | undefined) ?? {} })
-  if (type === 'lost') terminals.set(address, { ...before, foreground: null })
-  if (type === 'finished') terminals.set(address, { ...before, state: 'finished', foreground: null, reason: (data['reason'] as string | null | undefined) ?? null })
+  if (type === 'lost') terminals.set(address, { ...before, foreground: null, exitCode: (data['exit_code'] as number | null | undefined) ?? null })
+  if (type === 'finished') terminals.set(address, { ...before, state: 'finished', foreground: null, reason: (data['reason'] as string | null | undefined) ?? null, exitCode: (data['exit_code'] as number | null | undefined) ?? null })
 }
 
 type EventLine = {

@@ -14,6 +14,7 @@ export type Shared = {
   readonly reach: Readonly<Record<string, string>>
   readonly parents: Readonly<Record<string, string>>
   readonly pinned: Readonly<Record<string, string>>
+  readonly pinOrder: readonly string[]
   readonly tags: Readonly<Record<string, Tag>>
   readonly tagged: Readonly<Record<string, readonly string[]>>
   readonly stages: readonly Stage[]
@@ -29,11 +30,12 @@ export type Organize =
   | { readonly op: 'defineStages'; readonly stages: readonly Stage[] }
   | { readonly op: 'stageSession'; readonly session: string; readonly stage: string }
   | { readonly op: 'orderProjects'; readonly projects: readonly string[] }
+  | { readonly op: 'orderPins'; readonly sessions: readonly string[] }
 
 export const SHARED_KEY = 'shared.json'
 const DAY_MS = 86_400_000
 export const SETTLE_MOST_DAYS = 90
-const EMPTY: Shared = { archived: {}, settled: {}, snoozed: {}, settleAfterDays: 7, projectNames: {}, projectOrder: [], visited: {}, lastMachine: '', reach: {}, parents: {}, pinned: {}, tags: {}, tagged: {}, stages: [], staged: {} }
+const EMPTY: Shared = { archived: {}, settled: {}, snoozed: {}, settleAfterDays: 7, projectNames: {}, projectOrder: [], visited: {}, lastMachine: '', reach: {}, parents: {}, pinned: {}, pinOrder: [], tags: {}, tagged: {}, stages: [], staged: {} }
 
 const decodedOnce = new WeakMap<Read, Shared>()
 
@@ -94,7 +96,7 @@ export const settle = (relay: Relay, session: string, settled: boolean): Promise
   updateShared(relay, (shared) => ({
     ...shared,
     settled: { ...shared.settled, [session]: { settled, at: markedNow() } },
-    pinned: settled ? without(shared.pinned, session) : shared.pinned,
+    ...(settled ? unpinned(shared, session) : {}),
     snoozed: settled ? without(shared.snoozed, session) : shared.snoozed,
   }))
 
@@ -109,6 +111,7 @@ export function nameProject(relay: Relay, project: string, name: string | null):
 export const visit = (relay: Relay, session: string, at: string): Promise<Shared> => updateShared(relay, (shared) => ({ ...shared, visited: { ...shared.visited, [session]: at } }))
 
 const without = <T>(record: Readonly<Record<string, T>>, key: string): Record<string, T> => Object.fromEntries(Object.entries(record).filter(([each]) => each !== key))
+const unpinned = (shared: Shared, session: string): Pick<Shared, 'pinned' | 'pinOrder'> => ({ pinned: without(shared.pinned, session), pinOrder: shared.pinOrder.filter((each) => each !== session) })
 
 function organized(shared: Shared, change: Organize): Shared {
   switch (change.op) {
@@ -134,6 +137,9 @@ function organized(shared: Shared, change: Organize): Shared {
     case 'orderProjects':
       if (new Set(change.projects).size !== change.projects.length) throw new Error('The project order names each project once.')
       return { ...shared, projectOrder: change.projects }
+    case 'orderPins':
+      if (new Set(change.sessions).size !== change.sessions.length) throw new Error('The pin order names each session once.')
+      return { ...shared, pinOrder: change.sessions }
   }
 }
 
@@ -143,5 +149,5 @@ export const pin = (relay: Relay, session: string, pinned: boolean): Promise<Sha
   updateShared(relay, (shared) =>
     pinned
       ? { ...shared, pinned: { ...shared.pinned, [session]: shared.pinned[session] ?? markedNow() }, settled: { ...shared.settled, [session]: { settled: false, at: markedNow() } }, snoozed: without(shared.snoozed, session) }
-      : { ...shared, pinned: without(shared.pinned, session) },
+      : { ...shared, ...unpinned(shared, session) },
   )

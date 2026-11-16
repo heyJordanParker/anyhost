@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { open, readdir, stat } from 'node:fs/promises'
+import { open, readdir, readlink, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, sep } from 'node:path'
 import type { Message } from '../../relay/protocol.ts'
@@ -34,6 +34,43 @@ const ROLLOUT = /^rollout-.*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const claudeFolder = (roots: MachineRoots, ...parts: string[]): string => join(roots.claudeHome, ...parts)
 
 export const codexState = (roots: MachineRoots): string => join(roots.codexHome, 'state_5.sqlite')
+
+export const isCodexRun = (argv: readonly string[]): boolean => argv.slice(0, 2).some((part) => /^codex(\.js)?$/.test(basename(part)))
+
+const textOf = async (argv: string[]): Promise<string> => {
+  const child = Bun.spawn(argv, { env: process.env, stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
+  const [text] = await Promise.all([new Response(child.stdout).text(), child.exited])
+  return text
+}
+
+async function familyOf(pid: number): Promise<number[]> {
+  const children = new Map<number, number[]>()
+  for (const line of (await textOf(['ps', '-A', '-o', 'pid=,ppid='])).split('\n')) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number)
+    if (child !== undefined && parent !== undefined && Number.isInteger(child)) children.set(parent, [...(children.get(parent) ?? []), child])
+  }
+  const family = [pid]
+  for (let at = 0; at < family.length; at++) family.push(...(children.get(family[at] ?? 0) ?? []))
+  return family
+}
+
+async function openFilesOf(pids: readonly number[]): Promise<string[]> {
+  if (process.platform !== 'linux') return (await textOf(['lsof', '-n', '-P', '-Fn', '-p', pids.join(',')])).split('\n').flatMap((line) => (line.startsWith('n') ? [line.slice(1)] : []))
+  const opened = await Promise.all(pids.map(async (pid) => {
+    const folder = `/proc/${pid}/fd`
+    const fds = await readdir(folder).catch(() => [])
+    return Promise.all(fds.map((fd) => readlink(join(folder, fd)).catch(() => '')))
+  }))
+  return opened.flat()
+}
+
+export async function codexSessionOf(pid: number): Promise<string | undefined> {
+  for (const path of await openFilesOf(await familyOf(pid))) {
+    const session = ROLLOUT.exec(basename(path))?.[1]
+    if (session !== undefined) return session
+  }
+  return undefined
+}
 
 export const linesFiles = (roots: MachineRoots): Map<string, { readonly lines: string; readonly tool: Tool }> =>
   new Map([

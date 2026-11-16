@@ -2,13 +2,13 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { Activity } from './activity.ts'
+import { Activity, type Shown } from './activity.ts'
 import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
 import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
-import { installHerdr, PLACES, type Place } from './herdr.ts'
+import { PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
 import { activityOf, deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type RelayState, type Written } from './relay.ts'
@@ -16,7 +16,7 @@ import { HOOK_EVENTS, type AgentStatus, type HookEvent, type Routed } from '../.
 import { agentsOf, indexesIn, indexKeyOf, type ListRead } from './sessions.ts'
 import { archive, isArchived, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, type Organize } from './shared.ts'
 import { copyT3Marks } from './t3.ts'
-import { codexState, filesUnder, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
+import { codexSessionOf, codexState, filesUnder, isCodexRun, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = Number(process.env['ANYHOST_BACKUP_MS'] ?? 60_000)
 const SWEEP_ALL_MS = 60 * 60_000
@@ -582,8 +582,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const labelOwnRuns = async (): Promise<void> => {
     const sessionOfPid = new Map((await recordedSessions(roots.claudeHome)).map(({ pid, sessionId }) => [pid, sessionId]))
     for (const [address, terminal] of terminals) {
-      const session = terminal.pid === null ? undefined : sessionOfPid.get(terminal.pid)
-      if (!isHere(address) || terminal.state !== 'live' || session === undefined || sessionIn(address) === session || labelledAs.get(address) === session) continue
+      if (!isHere(address) || terminal.state !== 'live') continue
+      const codex = terminal.foreground !== null && sessionIn(address) === '' && isCodexRun(terminal.foreground.argv) ? await codexSessionOf(terminal.foreground.pid) : undefined
+      const session = codex ?? (terminal.pid === null ? undefined : sessionOfPid.get(terminal.pid))
+      if (session === undefined || sessionIn(address) === session || labelledAs.get(address) === session) continue
       await label(address, SESSION_LABEL, session)
       labelledAs.set(address, session)
     }
@@ -618,9 +620,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     void settle('discard', discardIdle).finally(() => (isDiscarding = false))
   }
   setInterval(discardNow, DISCARD_EVERY_MS)
+  const isClosedByPerson = (terminal: Terminal | undefined): boolean => terminal !== undefined && (terminal.reason === 'killed' || terminal.exitCode === 0)
   const archiveClosed = (change: TerminalChange): void => {
     const session = sessionIn(change.address)
-    if (change.type !== 'finished' || !isHere(change.address) || session === '' || terminals.get(change.address)?.reason !== 'killed') return
+    if ((change.type !== 'finished' && change.type !== 'lost') || !isHere(change.address) || session === '' || !isClosedByPerson(terminals.get(change.address))) return
     void settle('closed', async () => {
       await archiveSession(session, true)
       sessionsChanged()
@@ -687,7 +690,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const stopFollowing = followTerminals((now, change) => {
     terminals = now
     if (change === undefined) void settle('herdr-core environment', checkCoreMarkers)
-    if (change === undefined || change.type === 'created' || change.type === 'restarted') labelNow()
+    if (change === undefined || change.type === 'created' || change.type === 'restarted' || (change.type === 'foreground' && isCodexRun(now.get(change.address)?.foreground?.argv ?? []))) labelNow()
     if (change === undefined || (change.type === 'labels' && (now.get(change.address)?.labels[SLEEP_LABEL] ?? '') !== '')) discardNow()
     if (change !== undefined) archiveClosed(change)
     if (change?.type === 'turn' && labelledShown.has(change.address) && sessionIn(change.address) !== '') unvisited.add(sessionIn(change.address))
@@ -698,6 +701,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const heard = (path: string): void => {
     if (watchable.some(({ folder }) => folder === path)) void watchFolders()
     if (dirname(path) === records) return recordsChanged()
+    if (path.startsWith(`${join(roots.codexHome, 'sessions')}/`) && [...terminals].some(([address, terminal]) => isHere(address) && sessionIn(address) === '' && isCodexRun(terminal.foreground?.argv ?? []))) labelNow()
     const changed = path.startsWith(codexState(roots)) ? codexState(roots) : path
     void sessionsOf(capture, path).then(
       (owners) => {
@@ -934,7 +938,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     await readDataFolders()
     await listWritten()
     await readOptions()
-    await settle('herdr', () => installHerdr())
     await settle('environment', () => loginEnvironment())
     await settle('backup', async () => {
       queueFiles(await changedFiles(capture, isAll ? 0 : started - QUIET_MS))
@@ -1006,21 +1009,22 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     }
   }
   const machinesForList = revalidating(machinesListed, 'the machines', ({ machines }) => JSON.stringify(machines))
-  const othersStatuses = new Map<string, { readonly statuses: Readonly<Record<string, AgentStatus>>; readonly at: number }>()
+  const othersStatuses = new Map<string, { readonly shown: Shown; readonly at: number }>()
   const statusesOfOthers = revalidating(
     async () => {
       const started = Date.now()
       const answered = await statusesElsewhere(capture)
       for (const [id, kept] of othersStatuses) if (!answered.has(id) && kept.at < started) othersStatuses.delete(id)
-      for (const [id, statuses] of answered) if ((othersStatuses.get(id)?.at ?? 0) < started) othersStatuses.set(id, { statuses, at: started })
+      for (const [id, shown] of answered) if ((othersStatuses.get(id)?.at ?? 0) < started) othersStatuses.set(id, { shown, at: started })
       return answered
     },
     "the other machines' sessions",
     (answered) => JSON.stringify([...answered]),
   )
-  const statusesElsewhereNow = async (): Promise<Record<string, AgentStatus>> => {
+  const statusesElsewhereNow = async (): Promise<Shown> => {
     await statusesOfOthers()
-    return Object.assign({}, ...[...othersStatuses.values()].map(({ statuses }) => statuses)) as Record<string, AgentStatus>
+    const shown = [...othersStatuses.values()].map((kept) => kept.shown)
+    return { statuses: Object.assign({}, ...shown.map(({ statuses }) => statuses)) as Record<string, AgentStatus>, since: Object.assign({}, ...shown.map(({ since }) => since)) as Record<string, number>, background: shown.flatMap(({ background }) => background) }
   }
   let listKeys: readonly string[] = []
   let listReadAt = 0
@@ -1061,11 +1065,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   for (const kind of ['list', 'stored', 'statuses'] as const) relay.on(kind, ({ from }) => void heardFrom.add(from.id))
   let toldStatuses = ''
   const tellStatuses = async (): Promise<void> => {
-    const statuses = await statusesHere(capture, mover.activity)
-    const told = JSON.stringify(statuses)
+    const shown = await statusesHere(capture, mover.activity)
+    const told = JSON.stringify(shown)
     if (told === toldStatuses) return
     toldStatuses = told
-    tellOthers((to) => ({ t: 'statuses', to, statuses }))
+    tellOthers((to) => ({ t: 'statuses', to, ...shown }))
   }
   activityChanged = () => void tellStatuses().catch(readFailed('the sessions here'))
   announceWrite = ({ key, etag }) => {
@@ -1077,8 +1081,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if ((kept !== undefined && 'etag' in kept && kept.etag === etag) || !listKeys.includes(key)) return
     readList(listKeys).catch(readFailed('the session lists'))
   })
-  relay.on('statuses', ({ from, statuses }) => {
-    othersStatuses.set(from.id, { statuses, at: Date.now() })
+  relay.on('statuses', ({ from, statuses, since, background }) => {
+    othersStatuses.set(from.id, { shown: { statuses: { ...statuses }, since: { ...since }, background: [...(background ?? [])] }, at: Date.now() })
     sessionsChanged()
   })
   const failed = (status: number, error: unknown): Response => Response.json({ message: error instanceof Error ? error.message : String(error) }, { status })
@@ -1178,6 +1182,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           activityChanged()
         }
         if (event === 'asked') noteChildren()
+        if (event === 'quit')
+          void settle('closed', async () => {
+            await archiveSession(session, true)
+            sessionsChanged()
+          })
         await recordFolder(capture.db, session, folder)
         queueFiles(await changedFiles(capture, 0, session))
         const transcript = journalOf(capture.db, session) === undefined ? transcriptOf(capture.roots.claudeHome, session) : undefined
@@ -1288,7 +1297,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   relay.on('welcome', () => void releaseHeld().then(resumeHeld))
   void releaseHeld()
-  void settle('herdr', () => installHerdr())
   void settle('environment', () => saveLoginEnvironment())
   void settle('fork starts', () => indexForkStarts(capture))
 
@@ -1319,7 +1327,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         return await throughRelay(async () => {
           const version = sessionsVersion()
           const [elsewhere, here, { devices, machines }] = await Promise.all([statusesElsewhereNow(), statusesHere(capture, mover.activity), machinesForList()])
-          return { ...(await agentsOf(capture, { ...elsewhere, ...here }, sessionTerminals(), await listOf(devices))), here: device.id, machines, version }
+          return { ...(await agentsOf(capture, { statuses: { ...elsewhere.statuses, ...here.statuses }, since: { ...elsewhere.since, ...here.since }, background: [...elsewhere.background, ...here.background] }, sessionTerminals(), await listOf(devices))), here: device.id, machines, version }
         })
       }
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]

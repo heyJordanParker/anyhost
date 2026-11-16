@@ -2,7 +2,7 @@ import { mkdir, readFile, readlink, realpath, rename, rm, rmdir, stat, writeFile
 import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AgentStatus, Delivered, Device, Message, Offline, Routed } from '../../relay/protocol.ts'
-import type { Activity } from './activity.ts'
+import type { Activity, Shown } from './activity.ts'
 import { captureAgainFrom, chainOf, changedFiles, checkoutOf, checkoutOfEntry, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { claudeStart, pauseCopy, recordedSessions, resumeArgv, resumedOf, resumeCopy, run, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
@@ -652,20 +652,20 @@ export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readon
     FORGET_MS,
   )
 
-export const statusesHere = async (capture: Capture, activity: Activity): Promise<Record<string, AgentStatus>> => activity.ofAll(await recordedSessions(capture.roots.claudeHome))
+export const statusesHere = async (capture: Capture, activity: Activity): Promise<Shown> => activity.shownOf(await recordedSessions(capture.roots.claudeHome))
 
 export const activityOf = async (capture: Capture, activity: Activity, session: string): Promise<AgentStatus | undefined> => activity.of((await recordedSessions(capture.roots.claudeHome)).find((record) => record.sessionId === session))
 
 export const receiveList = (capture: Capture, asked: Extract<Delivered, { readonly t: 'list' }>, here: MoveHere): Promise<void> =>
-  answerOnce(capture.relay, here.answers, asked, async () => ({ t: 'listed', id: asked.id, to: asked.from.id, statuses: await statusesHere(capture, here.activity) }), FORGET_MS)
+  answerOnce(capture.relay, here.answers, asked, async () => ({ t: 'listed', id: asked.id, to: asked.from.id, ...(await statusesHere(capture, here.activity)) }), FORGET_MS)
 
-export async function statusesElsewhere(capture: Capture): Promise<Map<string, Readonly<Record<string, AgentStatus>>>> {
+export async function statusesElsewhere(capture: Capture): Promise<Map<string, Shown>> {
   const { relay, device } = capture
   const others = [...(await devicesOf(relay)).values()].filter((machine) => machine.id !== device.id && machine.connected && machine.removedAt === undefined)
   const answers = await Promise.all(
     others.map((machine) =>
       ask(relay, { t: 'list', id: crypto.randomUUID(), to: machine.id }, { signal: AbortSignal.timeout(LIST_MS), keepsWaiting: async () => false }).then(
-        (answer) => (answer.t === 'listed' ? [[machine.id, answer.statuses] as const] : []),
+        (answer) => (answer.t === 'listed' ? [[machine.id, { statuses: { ...answer.statuses }, since: { ...answer.since }, background: [...(answer.background ?? [])] }] as const] : []),
         () => [],
       ),
     ),

@@ -99,7 +99,7 @@ export const anyhost = defineMod({
       await check()
       await changed('started')()
     })
-    sessions.current.onSessionEnd(changed('ended'))
+    sessions.current.onSessionEnd((ended) => changed(ended.reason === 'exit' ? 'quit' : 'ended')())
     sessions.current.onTurnStart(changed('turnStart'))
     sessions.current.onTurnEnd(changed('turnEnd'))
     sessions.current.onElicitation(changed('asked'))

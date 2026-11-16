@@ -8,10 +8,13 @@
     "test": "bun test"
   },
   "cmod": {
+    "install": "./setup/install.sh",
+    "uninstall": "./setup/uninstall.sh",
     "program": "anyhost"
   },
   "files": [
     "hooks",
+    "setup",
     "src"
   ],
   "dependencies": {

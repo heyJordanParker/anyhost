@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { anyhostOn, LAPTOP, postTo, runningOn, serveOn, SESSION, sharedIn, workerOn } from './program.ts'
 
-test('an archive, a visit, a pin, a settle, a snooze, a project name, tags, stages and the project order one machine sets reach every machine through the shared list, which another machine reads again only when told it changed, and --undo takes each back', async () => {
+test('an archive, a visit, a pin, a settle, a snooze, a project name, tags, stages, the project order and the pin order one machine sets reach every machine through the shared list, which another machine reads again only when told it changed, and --undo takes each back', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
@@ -19,7 +19,7 @@ test('an archive, a visit, a pin, a settle, a snooze, a project name, tags, stag
     const agent = listed.agents.find(({ id }) => id === SESSION)
     return { ...agent, name: listed.projectNames['acme/trip'], settleAfterDays: listed.settleAfterDays, catalog: listed.tags, stages: listed.stages.map(({ name }) => name) }
   }
-  const orderOn = async (socket: string): Promise<string[]> => ((await (await fetch('http://localhost/agents', { unix: socket })).json()) as { projectOrder: string[] }).projectOrder
+  const orderOn = async (socket: string, order: 'projectOrder' | 'pinOrder' = 'projectOrder'): Promise<string[]> => ((await (await fetch('http://localhost/agents', { unix: socket })).json()) as Record<typeof order, string[]>)[order]
   const asked = (...args: string[]) => anyhostOn(laptop.env, args)
   const id = SESSION.slice(0, 8)
 
@@ -35,8 +35,12 @@ test('an archive, a visit, a pin, a settle, a snooze, a project name, tags, stag
 
   const pinned = await asked('pin', id)
   await until(async () => ((await listOn(worker.socket)).pinned ?? '') !== '', 'the worker reading the pin')
+  const pinOrdered = await asked('organize', JSON.stringify([{ op: 'orderPins', sessions: [SESSION] }]))
+  await until(async () => (await orderOn(worker.socket, 'pinOrder')).length === 1, 'the worker reading the pin order')
+  const pinOrderThere = await orderOn(worker.socket, 'pinOrder')
   const unpinned = await asked('pin', id, '--undo')
   await until(async () => (await listOn(worker.socket)).pinned === '', 'the worker reading the unpin')
+  const pinOrderUnpinned = await orderOn(worker.socket, 'pinOrder')
 
   const settings = [await asked('settle', id), await asked('project-name', 'acme/trip', 'Lisbon Trip'), await asked('settle', '--after', '30')]
   await until(async () => (await listOn(worker.socket)).settleAfterDays === 30, 'the worker reading the settings')
@@ -63,7 +67,8 @@ test('an archive, a visit, a pin, a settle, a snooze, a project name, tags, stag
   const unknown = await asked('organize', JSON.stringify([{ op: 'tagSession', session: id, tag: 'nope', on: true }]))
   const dropped = await asked('organize', JSON.stringify([{ op: 'dropTag', id: 'bug' }, { op: 'defineStages', stages: [{ id: 'todo', name: 'To do' }] }]))
 
-  expect([archived, visited, restored, pinned, unpinned, ...settings, snoozed, ...undone, organized, dropped].map(({ code }) => code)).toEqual(Array(14).fill(0))
+  expect([archived, visited, restored, pinned, pinOrdered, unpinned, ...settings, snoozed, ...undone, organized, dropped].map(({ code }) => code)).toEqual(Array(15).fill(0))
+  expect([pinOrderThere, pinOrderUnpinned]).toEqual([[SESSION], []])
   expect(readAgain).toEqual([])
   expect(afterVisit).toMatchObject({ archived: false, visitedAt: '2026-11-11T16:00:00.000Z' })
   expect(set).toMatchObject({ settled: true, snoozedUntil: '', name: 'Lisbon Trip', settleAfterDays: 30 })

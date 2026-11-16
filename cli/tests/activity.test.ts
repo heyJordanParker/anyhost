@@ -7,27 +7,29 @@ import { hookOn, runningOn, SESSION, workerOn } from './program.ts'
 
 const recordAt = (status: string, at: number): RunningSession => ({ pid: 1, sessionId: SESSION, cwd: '/work', status, statusSince: at })
 
-test('the newest of a hook and Claude Code’s record decides a session’s activity, and a turn’s end hands it back to the record', () => {
-  const steps: readonly (readonly [string, HookEvent | RunningSession, AgentStatus])[] = [
-    ['a prompt, before the record changes', 'turnStart', 'working'],
-    ['the record catching up', recordAt('busy', 2000), 'working'],
-    ['a permission dialog', 'asked', 'waiting'],
-    ['the person answers it', recordAt('busy', 4000), 'working'],
-    ['the turn ends with background agents running', 'turnEnd', 'working'],
-    ['the agents finish', recordAt('idle', 6000), 'idle'],
-    ['a prompt again', 'turnStart', 'working'],
-    ['a record write older than the prompt', recordAt('idle', 6000), 'working'],
-    ['the session ends', 'ended', 'idle'],
+test('the newest of a hook and Claude Code’s record decides a session’s activity, and the main agent shows apart from its background work', () => {
+  const steps: readonly (readonly [string, HookEvent | RunningSession, AgentStatus, AgentStatus, boolean])[] = [
+    ['a prompt, before the record changes', 'turnStart', 'working', 'working', false],
+    ['the record catching up', recordAt('busy', 2000), 'working', 'working', false],
+    ['a permission dialog', 'asked', 'waiting', 'waiting', false],
+    ['the person answers it', recordAt('busy', 4000), 'working', 'working', false],
+    ['the turn ends with background agents running', 'turnEnd', 'working', 'idle', true],
+    ['the main agent asks a question while they run', 'asked', 'waiting', 'waiting', true],
+    ['the person answers and its turn ends', 'turnEnd', 'working', 'idle', true],
+    ['the agents finish', recordAt('idle', 8000), 'idle', 'idle', false],
+    ['a background command after a turn', recordAt('shell', 9000), 'working', 'idle', true],
+    ['a prompt again', 'turnStart', 'working', 'working', false],
+    ['the session ends', 'ended', 'working', 'idle', true],
   ]
   const activity = new Activity()
   let record = recordAt('idle', 0)
   const seen = steps.map(([, step], at) => {
     if (typeof step === 'string') activity.hear(SESSION, step, at * 1000 + 500)
     else record = step
-    return activity.of(record)
+    return [activity.of(record), activity.mainOf(record), activity.isBackground(record)]
   })
 
-  expect(seen).toEqual(steps.map(([, , status]) => status))
+  expect(seen).toEqual(steps.map(([, , status, main, background]) => [status, main, background]))
 })
 
 test('a prompt turns its session Working in the list within 500 ms of its hook, through list reads that wait for each change', async () => {
@@ -73,3 +75,12 @@ test("a prompt on one machine turns its session Working in another machine's wai
   expect(statusIn(listed)).toBe('working')
   expect(Date.now() - started).toBeLessThan(1000)
 }, 60_000)
+
+test("a session's state counts from the hook that set it, else from the record's own change", () => {
+  const activity = new Activity()
+  const record = recordAt('busy', 1000)
+  const before = activity.mainSince(record)
+  activity.hear(SESSION, 'asked', 5000)
+
+  expect([before, activity.mainSince(record), activity.mainSince(recordAt('idle', 9000))]).toEqual([1000, 5000, 9000])
+})

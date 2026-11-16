@@ -1,6 +1,7 @@
 import { closeSync, ftruncateSync, mkdirSync, openSync, rmSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
+import type { Shown } from './activity.ts'
 import { bytesOfChunks, chainOf, chunkReader, chunksIn, decompressDelta, downloadBase, framesOf, journalPrefix, ownIndex, type Capture, type ChunkReader, type IndexedSession, type RecordHeader } from './capture.ts'
 import { devicesOf } from './device.ts'
 import type { Read, Relay } from './relay.ts'
@@ -64,6 +65,8 @@ export async function listSessions(
 export type Agent = ListedSession & {
   readonly terminal: string
   readonly status: Protocol.AgentStatus | ''
+  readonly statusSince: string
+  readonly background: boolean
   readonly archived: boolean
   readonly settled: boolean
   readonly settledAt: string
@@ -79,6 +82,7 @@ export type Agents = {
   readonly settleAfterDays: number | null
   readonly projectNames: Readonly<Record<string, string>>
   readonly projectOrder: readonly string[]
+  readonly pinOrder: readonly string[]
   readonly lastMachine: string
   readonly tags: Readonly<Record<string, Tag>>
   readonly stages: readonly Stage[]
@@ -90,7 +94,7 @@ export type ListRead = { readonly devices: ReadonlyMap<string, Protocol.Device>;
 
 export async function agentsOf(
   capture: Capture,
-  statuses: Readonly<Record<string, Protocol.AgentStatus>> = {},
+  shown: Shown = { statuses: {}, since: {}, background: [] },
   terminals: ReadonlyMap<string, string> = new Map(),
   known?: ListRead,
   now = Date.now(),
@@ -98,14 +102,18 @@ export async function agentsOf(
   const devices = known?.devices ?? (await devicesOf(capture.relay))
   const [indexes, own, holders, shared] = await Promise.all([known?.indexes ?? indexesOf(capture.relay, devices.keys()), ownIndex(capture), capture.holders.current(), known?.shared ?? sharedOf(capture.relay)])
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
+  const background = new Set(shown.background)
   const agents = sessions.filter((session) => session.firstPrompt !== '').map((session) => {
-    const status: Agent['status'] = statuses[session.id] ?? ''
-    const settledAt = settledAtOf(shared, session, status, now)
+    const status: Agent['status'] = shown.statuses[session.id] ?? ''
+    const isBackground = background.has(session.id)
+    const settledAt = settledAtOf(shared, session, isBackground ? 'working' : status, now)
     return {
       ...session,
       title: session.title || titleOfPrompt(session.firstPrompt),
       terminal: terminals.get(session.id) ?? '',
       status,
+      statusSince: shown.since[session.id] ? new Date(shown.since[session.id] ?? 0).toISOString() : '',
+      background: isBackground,
       archived: isArchived(shared, session),
       settled: settledAt !== '',
       settledAt,
@@ -118,7 +126,7 @@ export async function agentsOf(
       stage: shared.staged[session.id] ?? '',
     }
   })
-  return { agents, settleAfterDays: shared.settleAfterDays, projectNames: shared.projectNames, projectOrder: shared.projectOrder, lastMachine: shared.lastMachine, tags: shared.tags, stages: shared.stages }
+  return { agents, settleAfterDays: shared.settleAfterDays, projectNames: shared.projectNames, projectOrder: shared.projectOrder, pinOrder: shared.pinOrder, lastMachine: shared.lastMachine, tags: shared.tags, stages: shared.stages }
 }
 
 export class Replay {

@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { resolve } from 'node:path'
+import { join as joinPath, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import plugin from '../../.claude-plugin/plugin.json'
 import type * as Protocol from '../../relay/protocol.ts'
@@ -9,6 +9,7 @@ import { forgetClaudeMarkers } from './claude.ts'
 import { connectCloudflare, join, type Connecting, type Progress } from './connect.ts'
 import { cmodDevice, deviceFromEnvironment, forgetRelayLogin, inviteMachine, machinesOf, otherMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder } from './device.ts'
 import { doctor } from './doctor.ts'
+import { installHerdr, uninstallHerdr } from './herdr.ts'
 import type { Moving, Told } from './move.ts'
 import { connectRelay } from './relay.ts'
 import { openSession, repoSlug, restoreData, resumeHere } from './resume.ts'
@@ -49,7 +50,7 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost project-name <project> [<name>|--undo]
                                      name a project, by its owner/name key, on every machine, or go back to its own name
   anyhost pin <session> [--undo]     pin a session to the top of every machine's list, where it never settles by itself, or unpin it
-  anyhost organize '<json list>'     change the tags, stages and project order every machine shows: defineTag, dropTag, tagSession, defineStages, stageSession, orderProjects
+  anyhost organize '<json list>'     change the tags, stages, project order and pin order every machine shows: defineTag, dropTag, tagSession, defineStages, stageSession, orderProjects, orderPins
   anyhost visit <session> [--at <time>]
                                      mark a session read on every machine up to now or that ISO time, earlier than its last turn marks it unread
   anyhost delete <session>           stop a session and delete its files on the machine that holds it; Deleted lists it, and opening it brings it back
@@ -65,6 +66,7 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost shown <window> [terminal...]
                                      say which terminals a Herdr window shows, as the Herdr pane does, so their sessions stay awake and read
   anyhost serve                      capture this machine's sessions, as the anyhost mod runs it
+  anyhost herdr install|uninstall    add or take out anyhost's pane, layout and keys in the Herdr app, as anyhost's cmod install and uninstall steps run it
   anyhost work                       upload one session's large change in a process of its own, as anyhost serve runs it
   anyhost --version                  print the version`
 
@@ -269,7 +271,7 @@ async function main(argv: string[]): Promise<number> {
   }
   if (command === 'list') {
     const listed = (await askProgram<Agents>(values.wait === undefined ? '/agents' : `/agents?after=${encodeURIComponent(values.wait)}`, undefined, existsSync(serveSocket()) ? PROGRAM_RESTART_MS : 0)) ?? (await connected(async (capture) => ({ ...(await agentsOf(capture)), here: capture.device.id, machines: await machinesOf(capture.relay) })))
-    const brief = values.brief === true ? { ...listed, agents: listed.agents.map(({ id, tool, title, cwd, repo, repoFolder, machine, holder, entrypoint, lastSaid, lastActivity, lastPromptAt, status, terminal, archived, settled, settledAt, snoozedUntil, visitedAt, deleted, parent, source, pinned, tags, stage }) => ({ id, tool, title, terminal, cwd, repo, repoFolder, machine, holder, entrypoint, lastSaid: (lastSaid ?? '').slice(0, 160), lastActivity, lastPromptAt: lastPromptAt ?? '', status, archived, settled, settledAt, snoozedUntil, visitedAt, deleted: deleted === true, parent, source: source ?? '', pinned, tags, stage })) } : listed
+    const brief = values.brief === true ? { ...listed, agents: listed.agents.map(({ id, tool, title, cwd, repo, repoFolder, machine, holder, entrypoint, lastSaid, lastActivity, lastPromptAt, status, statusSince, background, terminal, archived, settled, settledAt, snoozedUntil, visitedAt, deleted, parent, source, pinned, tags, stage }) => ({ id, tool, title, terminal, cwd, repo, repoFolder, machine, holder, entrypoint, lastSaid: (lastSaid ?? '').slice(0, 160), lastActivity, lastPromptAt: lastPromptAt ?? '', status, statusSince, background, archived, settled, settledAt, snoozedUntil, visitedAt, deleted: deleted === true, parent, source: source ?? '', pinned, tags, stage })) } : listed
     console.log(values.json === true ? JSON.stringify(brief, null, values.brief === true ? undefined : 2) : table(listed.agents))
     return 0
   }
@@ -379,6 +381,12 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (command === 'doctor') return await doctor()
+  if (command === 'herdr' && rest.length === 1 && (rest[0] === 'install' || rest[0] === 'uninstall')) {
+    const data = process.env['CMOD_DATA']
+    if (data === undefined) throw new Error(`anyhost herdr ${rest[0]} is anyhost's cmod ${rest[0]} step, which cmod runs with CMOD_DATA set.`)
+    await (rest[0] === 'install' ? installHerdr : uninstallHerdr)(joinPath(data, 'herdr.json'))
+    return 0
+  }
   if (command === 'work' && rest.length === 0) {
     await work(deviceFromEnvironment())
     return 0
