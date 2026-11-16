@@ -2,6 +2,25 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.7] - 2026-11-17
+
+### Changed
+- Drag a tab or a session from the inbox: onto another tab to reorder it, onto the work area to split it beside the terminal you look at, or onto a project or worktree to move it there. A tab holds as many sessions as you put in it.
+- Drag your pinned sessions to put them in your own order. A pinned session is a pinned tab, as in Chrome: it comes first in the tab bar, All projects shows every pinned session there, and closing or archiving it does nothing until you unpin it.
+- Archiving or closing a session that still runs asks first, as it stops the session.
+- Tasks running is a state of its own, violet, in the same place and with the same count as Working, Done and the others, when a session's agents or commands still run after its turn.
+- The session you look at stays highlighted in the inbox, also while the Herdr window is in the background.
+- Tabs share the tab bar's width and scroll with the trackpad or wheel, with no scrollbar.
+- Clicking a session from the sidebar, the palette or a tab focuses it where it is, in any split, with no zoom.
+- Needs you, Working and Tasks running count from the moment they started, and only Needs you keeps a filled chip.
+- A tab's icon shows its session's state, Files and Changes are icon buttons, and the projects list counts idle sessions too.
+- A session you move to another project's workspace stays there and lists under that project while it runs.
+- Opening a project shows Opening until its tabs are there, where it flashed the recent sessions first.
+- cmod installs the anyhost pane into the Herdr app as it installs or updates anyhost, and removing anyhost takes it out. Your own edits to the pane, its layout or its keys stay, where anyhost wrote them over every minute.
+
+### Fixed
+- Quitting a session inside Claude Code, quitting an agent in its tab, or closing a Codex tab archives the session, where it stayed at the top of the inbox.
+
 ## [0.9.6] - 2026-11-16
 
 ### Changed
