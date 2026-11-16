@@ -80,6 +80,7 @@ function runningOnMac(): Running[] {
 }
 
 const LEAK_CHECK_MS = 60_000
+const ENDING_MS = 10_000
 
 function processesLeftBehind(): Running[] {
   const running = process.platform === 'linux' ? runningOnLinux() : runningOnMac()
@@ -93,8 +94,9 @@ function processesLeftBehind(): Running[] {
   return running.filter(({ pid, command, cwd, isMarked }) => pid !== process.pid && (isMarked || isDescendant(pid) || isInFolder(cwd) || namesFolder(command)))
 }
 
-afterAll(() => {
-  const left = processesLeftBehind()
+afterAll(async () => {
+  let left = processesLeftBehind()
+  for (const started = Date.now(); left.length > 0 && Date.now() - started < ENDING_MS; left = processesLeftBehind()) await Bun.sleep(100)
   for (const { pid } of left) kill(pid)
   for (const folder of folders) rmSync(folder, { recursive: true, force: true })
   if (left.length > 0) throw new Error(`The tests of this file left ${left.length} processes running, which are killed now: ${left.map(({ pid, command }) => `${pid} ${command}`).join('; ')}`)
