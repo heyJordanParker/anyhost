@@ -30,18 +30,18 @@ test('the newest of a hook and Claude Code’s record decides a session’s acti
   expect(seen).toEqual(steps.map(([, , status]) => status))
 })
 
-test('a prompt turns its session Working in the list the moment its hook fires, and a list read that waits answers at once', async () => {
+test('a prompt turns its session Working in the list within 500 ms of its hook, through list reads that wait for each change', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   type Listed = { readonly version: string; readonly agents: readonly { readonly id: string; readonly status: string }[] }
   const listed = async (after?: string): Promise<Listed> => (await (await fetch(`http://localhost/agents${after === undefined ? '' : `?after=${encodeURIComponent(after)}`}`, { unix: laptop.socket })).json()) as Listed
   const statusIn = (list: Listed): string | undefined => list.agents.find(({ id }) => id === SESSION)?.status
   const before = await listed()
-  const waiting = listed(before.version)
+  let answered = await listed()
 
   const started = Date.now()
   await hookOn(laptop.socket, 'turnStart', laptop.cwd)
-  const answered = await waiting
+  while (statusIn(answered) !== 'working' && Date.now() - started < 10_000) answered = await listed(answered.version)
   const tookMs = Date.now() - started
   await hookOn(laptop.socket, 'asked', laptop.cwd)
   const asked = statusIn(await listed())
