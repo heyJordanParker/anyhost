@@ -102,6 +102,7 @@ afterAll(async () => {
   if (left.length > 0) throw new Error(`The tests of this file left ${left.length} processes running, which are killed now: ${left.map(({ pid, command }) => `${pid} ${command}`).join('; ')}`)
 }, LEAK_CHECK_MS)
 
+const UNKNOWN_CMOD_COMMAND = `*) printf 'cmod: "%s" is not a command.\\n\\nUsage: cmod <command> [arguments]\\n\\n  install     Install any plugin through Claude Code.\\n' "$1" >&2; exit 1 ;;`
 export const SESSION = '11111111-2222-3333-4444-555555555555'
 export const roots = (home: string): MachineRoots => ({ home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp'), codexHome: join(home, '.codex') })
 export const DAILY_LIMIT = "Cloudflare refuses the relay with its error 1027: the relay's Worker reached the Free plan's limit of 100,000 requests a day, which resets at 00:00 UTC."
@@ -230,7 +231,7 @@ export async function machineFor(relay: MemoryRelay, device: Device, person: Rec
   const token = await relay.join(device, roots(home))
   script(
     join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'),
-    `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") [ -n "$CLAUDE_CODE_EXECPATH" ] || { echo 'cmod options: claude is not on PATH. Install it, then run the command again.' >&2; exit 1; }; printf '%s' '${JSON.stringify({ person })}' ;;\n  "device --json") printf '%s' '${JSON.stringify(device)}' ;;\n  *) exit 1 ;;\nesac\n`,
+    `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") [ -n "$CLAUDE_CODE_EXECPATH" ] || { echo 'cmod options: claude is not on PATH. Install it, then run the command again.' >&2; exit 1; }; printf '%s' '${JSON.stringify({ person })}' ;;\n  "device --json") printf '%s' '${JSON.stringify(device)}' ;;\n  ${UNKNOWN_CMOD_COMMAND}\nesac\n`,
   )
   mkdirSync(join(env.XDG_STATE_HOME, 'anyhost'), { recursive: true })
   writeFileSync(join(env.XDG_STATE_HOME, 'anyhost', 'relay.json'), JSON.stringify({ url: relay.url }))
@@ -375,6 +376,6 @@ export const isWatcherProblem = (problem: string): boolean => problem.includes('
 export const dataFolderOn = (machine: { readonly env: Record<string, string> }, mod: string, rebuildable: readonly string[]): string => {
   const folder = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'data', mod)
   const cmod = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs', 'cmod')
-  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace('  *) exit 1', `  "data --json") printf '%s' '${JSON.stringify([{ mod, folder, rebuildable }])}' ;;\n  *) exit 1`))
+  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace(UNKNOWN_CMOD_COMMAND, `"data --json") printf '%s' '${JSON.stringify([{ mod, folder, rebuildable }])}' ;;\n  ${UNKNOWN_CMOD_COMMAND}`))
   return folder
 }

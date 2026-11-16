@@ -33,7 +33,7 @@ export async function cmod(args: readonly string[], stdin?: string): Promise<str
   if (program === null) throw new Error(`anyhost runs cmod ${args[0]}, and neither ${cmodProgram()} nor a cmod on PATH exists. Install cmod with npm install -g @cmodjs/cli.`)
   const child = Bun.spawn([program, ...args], { env: process.env, stdin: stdin === undefined ? 'ignore' : new Blob([stdin]), stdout: 'pipe', stderr: 'pipe' })
   const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-  if (code !== 0) throw new Error(error.trim() || `cmod ${args.slice(0, 2).join(' ')} exited with ${code}.`)
+  if (code !== 0) throw new Error(error.trim().split('\n')[0] || `cmod ${args.slice(0, 2).join(' ')} exited with ${code}.`)
   return output
 }
 

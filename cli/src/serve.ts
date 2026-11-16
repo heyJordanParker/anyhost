@@ -20,13 +20,25 @@ const BACKUP_MS = 60_000
 const SWEEP_ALL_MS = 60 * 60_000
 const READ_MS = 1000
 const CORE_MARKERS = 'herdr-core markers'
-const WATCHER = `
+export const WATCHER = `
 const { join, sep } = require('node:path')
 const { watch, writeFileSync } = require('node:fs')
 const { probe, folders } = JSON.parse(process.argv.at(-1))
 if (process.env.ANYHOST_WATCHER_HANGS === '1') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)
 const isDropping = process.env.ANYHOST_WATCHER_DROPS === '1'
-const say = (line) => process.stdout.write(line + '\\n')
+const end = () => process.kill(process.pid, 'SIGKILL')
+const endAtClosedOutput = (error) => {
+  if (error.code !== 'EPIPE') throw error
+  end()
+}
+const say = (line) => {
+  try {
+    process.stdout.write(line + '\\n')
+  } catch (error) {
+    endAtClosedOutput(error)
+  }
+}
+process.stdout.on('error', endAtClosedOutput)
 for (const { folder, depth } of folders) {
   const failed = (error) => {
     console.error(new Date().toISOString() + ' anyhost hears no change in a folder under ' + folder + ': ' + error.message)
@@ -52,7 +64,7 @@ watch(probe, () => {
   probing = undefined
   say('ready')
 })
-process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL')).resume()
+process.stdin.on('end', end).resume()
 `
 const WATCHER_MS = 10_000
 const RUNNING_MS = 2000
@@ -301,7 +313,18 @@ const ownCommand = (): string[] => (import.meta.dir.startsWith('/$bunfs/') ? [pr
 
 export async function work(device: Device): Promise<void> {
   const job = (await Bun.stdin.json()) as Job
-  const say = (line: JobLine): void => void process.stdout.write(`${JSON.stringify(line)}\n`)
+  const endAtClosedOutput = (error: NodeJS.ErrnoException): void => {
+    if (error.code !== 'EPIPE') throw error
+    process.exit(1)
+  }
+  process.stdout.on('error', endAtClosedOutput)
+  const say = (line: JobLine): void => {
+    try {
+      process.stdout.write(`${JSON.stringify(line)}\n`)
+    } catch (error) {
+      endAtClosedOutput(error as NodeJS.ErrnoException)
+    }
+  }
   const roots = rootsHere()
   const relay = connectRelay({ login: async () => job.login, forget: async () => undefined, device, roots, isPatient: true })
   const capture = openCapture(relay, device, roots, { readsCode: false, onReleased: (session, holder) => say({ released: [session, holder] }) })

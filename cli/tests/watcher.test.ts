@@ -4,7 +4,8 @@ import { dirname, join } from 'node:path'
 import { isAlive } from '../src/claude.ts'
 import { filesUnder } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
-import { HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, problemsOn, ranAnHourAgo, serveOn, SESSION, temporaryFolder } from './program.ts'
+import { WATCHER } from '../src/serve.ts'
+import { HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, problemsOn, ranAnHourAgo, serveOn, SESSION, spawnForTest, temporaryFolder } from './program.ts'
 
 test("a program whose watcher hangs at its start names the stall in /status, backs up a captured session's line and a new session within one backup pass, and ends at SIGTERM within 5 s", async () => {
   const relay = await memoryRelay()
@@ -32,6 +33,21 @@ test("a program whose watcher hangs at its start names the stall in /status, bac
   expect(served.child.signalCode).toBe('SIGTERM')
   await until(() => !isAlive(watcher), 'the hung watcher ending with the program', 5000)
 }, 150_000)
+
+test('a watcher whose program stopped reading ends quietly at its next change, as when its input closes', async () => {
+  const folder = temporaryFolder()
+  const watcher = spawnForTest([process.execPath, '-e', WATCHER, JSON.stringify({ probe: join(folder, 'probe'), folders: [{ folder, depth: null }] })], { env: { ...process.env, BUN_BE_BUN: '1' }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+  const reader = watcher.stdout.getReader()
+  let printed = ''
+  while (!printed.includes('ready\n')) printed += new TextDecoder().decode((await reader.read()).value)
+  await reader.cancel()
+
+  writeFileSync(join(folder, 'session.jsonl'), '{}\n')
+
+  expect(await Promise.race([watcher.exited.then(() => 'ended'), Bun.sleep(5000).then(() => 'running')])).toBe('ended')
+  expect(watcher.signalCode).toBe('SIGKILL')
+  expect(await new Response(watcher.stderr).text()).toBe('')
+})
 
 test('a watcher that exits is a problem in /status until the one started after it is ready, which hears a new session', async () => {
   const relay = await memoryRelay()

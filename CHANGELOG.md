@@ -2,6 +2,12 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.4] - 2026-11-16
+
+### Fixed
+- anyhost's log names a failed cmod command in one line, where it held cmod's whole help text each time.
+- anyhost's helper processes end quietly once anyhost stops, where they printed a broken-pipe crash into the log.
+
 ## [0.9.3] - 2026-11-16
 
 ### Changed

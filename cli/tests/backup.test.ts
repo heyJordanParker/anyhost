@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, symli
 import { dirname, join } from 'node:path'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSessions } from '../src/capture.ts'
 import { failTest, memoryRelay, noCode, until, welcomed } from './memory.ts'
-import { decoder, HOST, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, postTo, problemsOn, ranAnHourAgo, roots, serveOn, SESSION } from './program.ts'
+import { CLI, decoder, HOST, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, postTo, problemsOn, ranAnHourAgo, roots, serveOn, SESSION, spawnForTest } from './program.ts'
 
 test("a session whose first capture is over 1 MiB uploads in a job, and its working folder's code goes up after it with no later change", async () => {
   const relay = await memoryRelay()
@@ -37,6 +37,17 @@ test("a session whose first capture is over 1 MiB uploads in a job, and its work
   expect(Buffer.byteLength(progress)).toBeGreaterThan(2 * 2 ** 20)
   await until(async () => (await paths()).includes(`${cwd}/`), "the working folder's code going up", 30_000)
 }, 60_000)
+
+test('a job whose service stopped reading ends quietly as it reports, as its report has no reader', async () => {
+  const relay = await memoryRelay()
+  const host = await machineFor(relay, HOST)
+  const job = { login: { url: relay.url, token: host.token }, dataFolders: [], isEveryWrite: false, upload: { session: SESSION, tool: 'claude', paths: [] } }
+  const child = spawnForTest([process.execPath, CLI, 'work'], { env: host.env, stdin: new Blob([JSON.stringify(job)]), stdout: 'pipe', stderr: 'pipe' })
+  await child.stdout.cancel()
+
+  expect(await Promise.race([child.exited.then(() => 'ended'), Bun.sleep(10_000).then(() => 'running')])).toBe('ended')
+  expect(await new Response(child.stderr).text()).not.toContain('EPIPE')
+})
 
 test("the program's start stats every captured file, and uploads a line a quiet session gained while the program did not run", async () => {
   const relay = await memoryRelay()

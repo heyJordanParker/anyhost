@@ -111,7 +111,8 @@ test('a cmod that answers cmod data with a nonzero exit keeps no data folder', a
   await Bun.sleep(1000)
 
   expect(await relay.keys(`journals/${MOD}@`)).toEqual([])
-  expect(served.logged()).toContain('anyhost keeps no mod\'s data folder, as cmod data --json, which names each folder and the files its mod rebuilds by itself, failed: ')
+  expect(served.logged()).toContain('anyhost keeps no mod\'s data folder, as cmod data --json, which names each folder and the files its mod rebuilds by itself, failed: cmod: "data" is not a command.\n')
+  expect(served.logged()).not.toContain('Usage: cmod')
 }, 60_000)
 
 test('/agents, anyhost list and the index list no mod history, and no session id prefix names one', async () => {
