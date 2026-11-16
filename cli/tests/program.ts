@@ -163,6 +163,7 @@ case "$1" in
     exit 0 ;;
   machine) printf '{"machines":[]}'; exit 0 ;;
   label) shift; echo "$*" >> "$F/labels.log"; exit 0 ;;
+  exec) if [ "$2 $3" = "env -0" ]; then cat "$F/core.env" 2>/dev/null; exit 0; fi; exit 2 ;;
   events)
     touch "$F/events.jsonl"
     tail -n +1 -f "$F/events.jsonl" &

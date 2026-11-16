@@ -3,10 +3,10 @@ import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
-import { loginEnvironment, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, statusOf as sessionStatusOf, statusOfRecord, stopCopy, type OnRecordsChange } from './claude.ts'
+import { loginEnvironment, markersIn, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, statusOf as sessionStatusOf, statusOfRecord, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
-import { followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
+import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { installHerdr, PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
 import { deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
@@ -19,6 +19,7 @@ import { codexState, filesUnder, transcriptOf, watchedFolders, type Tool } from 
 const BACKUP_MS = 60_000
 const SWEEP_ALL_MS = 60 * 60_000
 const READ_MS = 1000
+const CORE_MARKERS = 'herdr-core markers'
 const WATCHER = `
 const { join, sep } = require('node:path')
 const { watch, writeFileSync } = require('node:fs')
@@ -103,6 +104,7 @@ export type Status = {
   readonly journalGaps: readonly string[]
   readonly rewritten?: { readonly done: number; readonly journals: number; readonly olderMachines: readonly string[] }
   readonly updateProblem?: string
+  readonly coreProblem?: string
   readonly connecting?: Connecting
   readonly joining?: { readonly is: 'running' } | { readonly is: 'failed'; readonly error: string }
 }
@@ -642,8 +644,14 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     }
   }
   const SHOWN_CHANGES = new Set(['created', 'restarted', 'labels', 'finished', 'removed'])
+  const checkCoreMarkers = async (): Promise<void> => {
+    const markers = markersIn(await coreEnvironment())
+    if (markers.length === 0) return problems.clear(CORE_MARKERS)
+    problems.set(CORE_MARKERS, `herdr-core gives every terminal it starts ${markers.join(', ')}, which it took from the Claude Code session that started it, so a claude typed into one of its shells saves no transcript and anyhost backs up nothing of that session.`)
+  }
   const stopFollowing = followTerminals((now, change) => {
     terminals = now
+    if (change === undefined) void settle('herdr-core environment', checkCoreMarkers)
     if (change === undefined || change.type === 'created' || change.type === 'restarted') labelNow()
     if (change === undefined || (change.type === 'labels' && (now.get(change.address)?.labels[SLEEP_LABEL] ?? '') !== '')) discardNow()
     if (change !== undefined) archiveClosed(change)
@@ -920,6 +928,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const statusOf = (): Status => {
     const { state, url } = relay
     const updateProblem = current.get('relay update')
+    const coreProblem = current.get(CORE_MARKERS)
     const rewritten = rewriteProgress(capture)
     return {
       device,
@@ -927,10 +936,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       pending: queue.pending,
       uploadEvery: queue.uploadEvery,
       capturedAt,
-      problems: [...current].filter(([key]) => !key.startsWith('journal ') && key !== 'relay update').map(([, line]) => line),
+      problems: [...current].filter(([key]) => !key.startsWith('journal ') && key !== 'relay update' && key !== CORE_MARKERS).map(([, line]) => line),
       journalGaps: [...current].filter(([key]) => key.startsWith('journal ')).map(([, line]) => line),
       ...(rewritten === undefined ? {} : { rewritten }),
       ...(updateProblem === undefined ? {} : { updateProblem }),
+      ...(coreProblem === undefined ? {} : { coreProblem }),
       ...(connecting === undefined ? {} : { connecting: connecting.view }),
       ...(joining === undefined ? {} : { joining }),
     }

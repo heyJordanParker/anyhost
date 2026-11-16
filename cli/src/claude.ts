@@ -22,6 +22,11 @@ type SessionRecord = { readonly pid?: number; readonly sessionId?: string; reado
 
 const CLAUDE_MARKERS = ['CLAUDECODE', 'CLAUDE_PID', 'AI_AGENT', 'CLAUDE_EFFORT', 'TRACEPARENT', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_EXECPATH', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ATTENDED', 'CLAUDE_CODE_MESSAGING_SOCKET', 'CLAUDE_CODE_MESSAGING_TOKEN']
 
+export const markersIn = (environment: string): readonly string[] => {
+  const names = new Set(environment.split('\0').map((entry) => entry.slice(0, entry.indexOf('='))))
+  return CLAUDE_MARKERS.filter((name) => names.has(name))
+}
+
 export const forgetClaudeMarkers = (): void => {
   for (const name of CLAUDE_MARKERS) delete process.env[name]
 }

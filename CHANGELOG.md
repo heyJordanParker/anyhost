@@ -15,6 +15,7 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 
 ### Fixed
 - Every session anyhost starts saves its transcript again. A program started from inside a Claude Code session passed that session's markers to herdr-core, and Claude Code saves no transcript for a session that carries them.
+- `anyhost doctor` says when herdr-core itself carries those markers, as one started from inside a Claude Code session does, so a `claude` typed into any of its shells saves no transcript, and says how to start it clean.
 
 ## [0.9.0] - 2026-11-15
 

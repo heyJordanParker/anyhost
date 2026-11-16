@@ -53,11 +53,11 @@ export type MemoryRelay = {
   waiting(): Promise<{ readonly device: string; readonly released: Released }[]>
   join(device: Device, roots: MachineRoots): Promise<string>
   isConnected(device: string): boolean
-  socketsOf(device: string): number
   remove(device: string): void
   holdNext(t: string): Promise<() => void>
   loseNext(device: string, t: string): Promise<void>
   dropNext(device: string, t: string): Promise<void>
+  withholdReleased(device: string): void
   disconnect(device: string, kept?: number): () => void
   silence(device: string): () => void
   connect(device: Device, roots: MachineRoots): Relay
@@ -200,6 +200,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
   }
   let holding: { readonly t: string; readonly heard: (release: () => void) => void } | undefined
   let losing: { readonly device: string; readonly t: string; readonly lost: () => void; readonly isKept: boolean } | undefined
+  const withheld = new Set<string>()
   const disconnected = new Set<string>()
   const fromMachine = (front: ServerWebSocket<Front>, message: string | Uint8Array): void => {
     if (front.data.isSilent === true) return
@@ -263,6 +264,8 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
           if (data !== 'pong') {
             const message = JSON.parse(data) as { readonly t: string; readonly device?: { readonly id: string } }
             if (message.t === 'welcome' && message.device !== undefined) front.data.device = message.device.id
+            if (withheld.has(front.data.device ?? '') && message.t === 'released') return
+            if (withheld.has(front.data.device ?? '') && message.t === 'welcome') return toMachine(front, JSON.stringify({ ...message, waiting: [] }))
             if (losing !== undefined && front.data.device === losing.device && message.t === losing.t) {
               const { lost, isKept } = losing
               losing = undefined
@@ -346,7 +349,6 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       return token
     },
     isConnected: (device) => [...fronts].some((front) => front.data.device === device),
-    socketsOf: (device) => [...fronts].filter((front) => front.data.device === device).length,
     remove(device) {
       const socket = [...fronts].find((front) => front.data.device === device)?.data.pool
       if (socket?.readyState !== WebSocket.OPEN) throw new Error(`No socket of ${device} is open to remove it on.`)
@@ -355,6 +357,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
     holdNext: (t) => new Promise((heard) => void (holding = { t, heard })),
     loseNext: (device, t) => new Promise((lost) => void (losing = { device, t, lost, isKept: false })),
     dropNext: (device, t) => new Promise((lost) => void (losing = { device, t, lost, isKept: true })),
+    withholdReleased: (device) => void withheld.add(device),
     disconnect(device, kept = 0) {
       disconnected.add(device)
       for (const front of [...fronts].filter((each) => each.data.device === device).slice(kept)) front.terminate()

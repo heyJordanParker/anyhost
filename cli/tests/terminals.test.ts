@@ -3,6 +3,7 @@ import type { Subprocess } from 'bun'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { claudeStart, resumeArgv, resumedOf, startOf } from '../src/claude.ts'
+import type { Status } from '../src/serve.ts'
 import { memoryRelay, until } from './memory.ts'
 import { anyhostOn, coreEvent, coreSays, decoder, LAPTOP, logOf, machineFor, OTHER_SESSION, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn } from './program.ts'
 
@@ -31,6 +32,24 @@ test("a program started from inside a Claude Code session runs herdr-core withou
   await until(() => ['events', 'machine'].every((command) => logOf(laptop.folder, 'calls.log').some((line) => line.startsWith(command))), 'the program following herdr-core and reading its machines', 15_000)
 
   expect(logOf(laptop.folder, 'marked.log')).toEqual([])
+}, 60_000)
+
+test("a herdr-core that gives its terminals a Claude Code session's markers shows in /status, and the line goes once a core without them follows", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const coreEnvironment = join(laptop.folder, 'core.env')
+  const status = async (): Promise<Status> => (await (await fetch('http://localhost/status', { unix: laptop.socket })).json()) as Status
+  writeFileSync(coreEnvironment, 'HOME=/home/laptop\0CLAUDE_CODE_CHILD_SESSION=1\0CLAUDECODE=1\0PATH=/usr/bin\0')
+
+  await serveOn(laptop.env)
+  coreSays(laptop.folder, { terminals: [] })
+  await until(async () => (await status()).coreProblem !== undefined, 'the marked core in /status', 15_000)
+  const marked = (await status()).coreProblem
+  writeFileSync(coreEnvironment, 'HOME=/home/laptop\0PATH=/usr/bin\0')
+  coreSays(laptop.folder, { terminals: [] })
+  await until(async () => (await status()).coreProblem === undefined, 'the clean core in /status', 15_000)
+
+  expect(marked).toContain('CLAUDECODE, CLAUDE_CODE_CHILD_SESSION')
 }, 60_000)
 
 test("the launcher starts Claude Code with the saved login environment, without a Claude Code session's markers, and with the home folder's trust as its own pid and start", async () => {

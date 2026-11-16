@@ -14,6 +14,7 @@ const UPDATE = 'The program tries the update once a run. Connect Cloudflare in t
 const UPDATE_FROM_TERMINAL = 'The program tries the update once a run. Run anyhost connect, which updates the relay with your Cloudflare login.'
 const OUTDATED = 'Wait 5 minutes first: after an upload of the relay, from this machine or another, Cloudflare runs its older version for up to 5 minutes, and the program connects again within a minute. If this line is still here then, Connect Cloudflare again in the anyhost mod, or run anyhost connect, which updates the relay.'
 const REACH = 'Check this machine reaches the internet. The program keeps every change meanwhile and uploads it once the relay answers.'
+const CORE_FIX = 'Once nothing you need runs in its terminals, stop it with hc server stop, since hc server restart keeps the markers, and start the next one from the Herdr app, never from inside Claude Code. Every anyhost session continues on its next open.'
 const HEALTH_MS = 10_000
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -91,6 +92,7 @@ function programChecks(address: string, status: Status | undefined): Check[] {
             },
           ]
   const update: Check[] = updateProblem === undefined || isOutdatedUpdate ? [] : [{ problem: updateProblem, fix: state === 'unjoined' ? UPDATE : UPDATE_FROM_TERMINAL }]
+  const core: Check[] = status.coreProblem === undefined ? [] : [{ problem: status.coreProblem, fix: CORE_FIX }]
   const retried = status.problems.map((problem): Check => ({ problem, fix: 'The program tries this again by itself, and this line goes once it works.' }))
   const { rewritten } = status
   const history: Check[] =
@@ -101,7 +103,7 @@ function programChecks(address: string, status: Status | undefined): Check[] {
         : rewritten.olderMachines.length > 0
           ? [{ wait: `${rewritten.done} of the ${rewritten.journals} journals in R2 keep their history as shared chunks, and no machine rewrites the rest while ${rewritten.olderMachines.join(', ')} has not connected with anyhost 0.9.0 or newer.` }]
           : [{ wait: `Your machines rewrite the journals in R2 into shared chunks, each one a minute up to a daily budget: ${rewritten.done} of ${rewritten.journals} so far.` }]
-  return [connection, ...history, ...join, ...update, ...retried, ...gaps]
+  return [connection, ...history, ...join, ...update, ...core, ...retried, ...gaps]
 }
 
 function terminalCheck(): Check {

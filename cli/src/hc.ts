@@ -50,6 +50,8 @@ export async function labelledTerminals(session: string): Promise<string[]> {
   return terminals.map(({ address }) => address)
 }
 
+export const coreEnvironment = (): Promise<string> => run([hcHere(), 'exec', 'env', '-0'])
+
 export const label = async (address: string, key: string, value: string): Promise<void> => void (await run([hcHere(), 'label', address, `${key}=${value}`]))
 
 export async function killTerminal(address: string): Promise<void> {
