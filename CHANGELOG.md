@@ -2,6 +2,14 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.5] - 2026-11-16
+
+### Changed
+- The sidebar's list reads take half the round trips to Cloudflare, as anyhost reads your machines once for each list instead of twice.
+- New sessions that arrive while you work in the list show as a pill over its top, and nothing in the list moves. A click on it shows them.
+- The keyboard reaches every shelf: Enter or Space on a shelf's header opens or folds it.
+- Promote on the master swaps it with the next window, as in Hyprland, where it did nothing.
+
 ## [0.9.4] - 2026-11-16
 
 ### Fixed

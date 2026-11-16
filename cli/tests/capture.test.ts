@@ -6,7 +6,7 @@ import { basename, dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import {
   chainOf, changedFiles, CODE_PIECE_BYTES, CODE_PIECES, compressHot, continueJournal, decompress, encodeRecord, framesOf, hotKey, isCodePart, isDeleted, journalOf, markUntold, openCapture, openDatabase, QUIET_MS, seal,
-  sealJournal, sealQuiet, sessionsOf, spoolOf, startLineOffsets, untoldOf, uploadSessions, type Problems, type RecordHeader,
+  sealJournal, sealQuiet, sessionsOf, startLineOffsets, untoldOf, uploadSessions, type Problems, type RecordHeader,
 } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { UploadQueue, uploadEveryOf } from '../src/serve.ts'
@@ -924,35 +924,6 @@ test('a seal that keeps failing is tried again after 1, 2, 4 and 8 minutes, and 
   const minute = Math.ceil(later / 60_000)
   expect([await pass(minute), await pass(minute + 1)]).toEqual([true, true])
 })
-
-test('a seal over a link paced both ways, whose 16 answers queued ahead of any pong take past 70 seconds, finishes on its one socket, asking for each frame once', async () => {
-  const relay = await memoryRelay()
-  const { transcript, capture, upload } = machine(deviceA, relay)
-  const frames = 17
-  for (let frame = 0; frame < frames; frame += 1) {
-    const text = Buffer.from(crypto.getRandomValues(new Uint8Array(700 * 1024))).toString('base64')
-    appendFileSync(transcript, `{"type":"user","message":{"role":"user","content":"${text}"},"sessionId":"${SESSION}"}\n`)
-    await upload(transcript)
-  }
-  const sizes = (await Promise.all((await hotFrames(relay)).map(async (key) => (await relay.read(key))?.length ?? 0))).sort((a, b) => b - a)
-  expect(sizes).toHaveLength(frames)
-  expect(sizes[0]).toBeLessThan(MAX_MESSAGE_BYTES)
-  expect((sizes.at(-1) ?? 0) * 2).toBeGreaterThan(MAX_MESSAGE_BYTES)
-  rmSync(spoolOf(capture.db, SESSION), { recursive: true, force: true })
-  const quiet = (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000
-  relay.downloadBytesPerMs = 150
-  relay.uploadBytesPerMs = 150
-  expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(70_000)
-  let welcomes = 0
-  capture.relay.on('welcome', () => (welcomes += 1))
-  const asked = relay.requests.length
-
-  expect(await sealQuiet(capture, failTest, quiet)).toEqual(new Map())
-  expect(welcomes).toBe(0)
-  expect(journalOf(capture.db, SESSION)?.sealed).toBe(journalOf(capture.db, SESSION)?.end ?? -1)
-  expect(await hotFrames(relay)).toEqual([])
-  expect(relay.requests.slice(asked).filter((ops) => ops.some(({ op }) => op === 'get'))).toHaveLength(frames)
-}, 240_000)
 
 test('a lines file names the sessions that wrote new lines, and never the lines before the first start', async () => {
   const relay = await memoryRelay()

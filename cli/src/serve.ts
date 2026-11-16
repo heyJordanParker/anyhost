@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, statusOf as sessionStatusOf, statusOfRecord, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
-import { cmod, dataFolders, dataRoot, forgetRelayLogin, inviteMachine, machinesOf, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
+import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
 import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { installHerdr, PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
@@ -16,7 +16,7 @@ import { archive, isArchived, nameProject, organize, pin, settle as settleSessio
 import { copyT3Marks } from './t3.ts'
 import { codexState, filesUnder, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
 
-const BACKUP_MS = 60_000
+const BACKUP_MS = Number(process.env['ANYHOST_BACKUP_MS'] ?? 60_000)
 const SWEEP_ALL_MS = 60 * 60_000
 const READ_MS = 1000
 const CORE_MARKERS = 'herdr-core markers'
@@ -972,8 +972,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   const adding = new Map<string, { readonly error?: string }>()
   const machinesListed = async () => {
-    const [machines, shared, reached] = await Promise.all([machinesOf(relay), sharedOf(relay), hcPath() === undefined ? [] : machinesReached()])
-    return { shared, machines: machines.map((machine) => ({ ...machine, herdr: reachedAt(reached, shared.reach[machine.id])?.name ?? null })) }
+    const [devices, shared, reached] = await Promise.all([devicesOf(relay), sharedOf(relay), hcPath() === undefined ? [] : machinesReached()])
+    const machines = [...devices.values()].filter((device) => device.removedAt === undefined)
+    return { shared, devices, machines: machines.map((machine) => ({ ...machine, herdr: reachedAt(reached, shared.reach[machine.id])?.name ?? null })) }
   }
   const revalidating = <T,>(read: () => Promise<T>, what: string): (() => Promise<T>) => {
     let kept: { readonly value: T; readonly at: number } | undefined
@@ -1219,8 +1220,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         if (after !== null) await changedAfter(after)
         return await throughRelay(async () => {
           const version = sessionsVersion()
-          const [elsewhere, here, { machines }] = await Promise.all([statusesOfOthers(), statusesHere(capture), machinesForList()])
-          return { ...(await agentsOf(capture, { ...elsewhere, ...here }, sessionTerminals())), here: device.id, machines, version }
+          const [elsewhere, here, { devices, machines }] = await Promise.all([statusesOfOthers(), statusesHere(capture), machinesForList()])
+          return { ...(await agentsOf(capture, { ...elsewhere, ...here }, sessionTerminals(), devices)), here: device.id, machines, version }
         })
       }
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]

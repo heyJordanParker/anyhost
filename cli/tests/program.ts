@@ -103,6 +103,7 @@ afterAll(async () => {
 }, LEAK_CHECK_MS)
 
 const UNKNOWN_CMOD_COMMAND = `*) printf 'cmod: "%s" is not a command.\\n\\nUsage: cmod <command> [arguments]\\n\\n  install     Install any plugin through Claude Code.\\n' "$1" >&2; exit 1 ;;`
+export const PASS_MS = '2000'
 export const SESSION = '11111111-2222-3333-4444-555555555555'
 export const roots = (home: string): MachineRoots => ({ home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp'), codexHome: join(home, '.codex') })
 export const DAILY_LIMIT = "Cloudflare refuses the relay with its error 1027: the relay's Worker reached the Free plan's limit of 100,000 requests a day, which resets at 00:00 UTC."

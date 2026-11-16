@@ -77,8 +77,14 @@ export type Agents = {
 
 export const titleOfPrompt = (prompt: string): string => (prompt.split('\n')[0] ?? '').replace(/(?:~|\/)\S*\/([^/\s]+)/g, '$1').slice(0, 120)
 
-export async function agentsOf(capture: Capture, statuses: Readonly<Record<string, Protocol.AgentStatus>> = {}, terminals: ReadonlyMap<string, string> = new Map(), now = Date.now()): Promise<Agents> {
-  const devices = await devicesOf(capture.relay)
+export async function agentsOf(
+  capture: Capture,
+  statuses: Readonly<Record<string, Protocol.AgentStatus>> = {},
+  terminals: ReadonlyMap<string, string> = new Map(),
+  known?: ReadonlyMap<string, Protocol.Device>,
+  now = Date.now(),
+): Promise<Agents> {
+  const devices = known ?? (await devicesOf(capture.relay))
   const [indexes, own, holders, shared] = await Promise.all([indexesOf(capture.relay, devices.keys()), ownIndex(capture), capture.holders.current(), sharedOf(capture.relay)])
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
   const agents = sessions.filter((session) => session.firstPrompt !== '').map((session) => {

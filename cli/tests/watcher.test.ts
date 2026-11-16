@@ -5,7 +5,7 @@ import { isAlive } from '../src/claude.ts'
 import { filesUnder } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
 import { WATCHER } from '../src/serve.ts'
-import { HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, problemsOn, ranAnHourAgo, serveOn, SESSION, spawnForTest, temporaryFolder } from './program.ts'
+import { HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, PASS_MS, problemsOn, ranAnHourAgo, serveOn, SESSION, spawnForTest, temporaryFolder } from './program.ts'
 
 test("a program whose watcher hangs at its start names the stall in /status, backs up a captured session's line and a new session within one backup pass, and ends at SIGTERM within 5 s", async () => {
   const relay = await memoryRelay()
@@ -16,7 +16,7 @@ test("a program whose watcher hangs at its start names the stall in /status, bac
   mkdirSync(dirname(transcriptOf(SESSION)), { recursive: true })
   writeFileSync(transcriptOf(SESSION), line(SESSION, 'Plan the trip'))
 
-  const served = await serveOn({ ...host.env, ANYHOST_WATCHER_HANGS: '1' })
+  const served = await serveOn({ ...host.env, ANYHOST_WATCHER_HANGS: '1', ANYHOST_BACKUP_MS: PASS_MS })
   await until(async () => (await problemsOn(host.socket)).some((problem) => problem.includes(" watcher: Error: anyhost's watcher heard none of its watches 10 s after its start, as while macOS's fseventsd takes no new watcher")), 'the stall in /status', 30_000)
   await until(() => isUploaded(relay, SESSION, 'Plan the trip'), 'the session the start captured uploaded', 30_000)
   appendFileSync(transcriptOf(SESSION), line(SESSION, 'Book the train'))
@@ -75,7 +75,7 @@ test('a watched folder removed and made again while the program runs is watched 
   const host = await machineFor(relay, HOST)
   const tempRoot = join(realpathSync(host.env['CLAUDE_CODE_TMPDIR'] ?? ''), `claude-${process.getuid?.() ?? 0}`)
   mkdirSync(tempRoot, { recursive: true })
-  await serveOn(host.env)
+  await serveOn({ ...host.env, ANYHOST_BACKUP_MS: PASS_MS })
   const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${OTHER_SESSION}.jsonl`)
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${OTHER_SESSION}"}\n`)

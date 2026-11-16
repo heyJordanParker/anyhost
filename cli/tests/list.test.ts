@@ -83,6 +83,24 @@ test("a change Claude Code reports, a new session, a /rename and a /cd alike, re
   expect((await session())?.cwd).toBe(moved)
 }, 60_000)
 
+test('a list read reads the machines no second time, so it costs the relay one round trip of reads', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 3600 })
+  await serveOn(laptop.env)
+  await until(() => relay.isConnected(LAPTOP.id), 'the laptop connecting')
+  const agents = async (): Promise<void> => void (await (await fetch('http://localhost/agents', { unix: laptop.socket })).text())
+  await agents()
+  const asked: string[] = []
+  relay.before = (op) => {
+    asked.push(op.op)
+    return undefined
+  }
+
+  await agents()
+
+  expect(asked.filter((op) => op === 'devices')).toEqual([])
+}, 60_000)
+
 test('a list read that waits with the version of a program since restarted answers at once, so the sidebar follows the new program without waiting out each read', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 3600 })

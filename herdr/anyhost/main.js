@@ -342,6 +342,7 @@ const shownTerminalsIn = (node) => {
   return (node.children ?? []).flatMap(shownTerminalsIn);
 };
 const tileTerminals = (tree = layout()) => shownTerminalsIn(find(tree, "tiles"));
+const shelfStop = (id) => `shelf-${id}`;
 const paletteChildOf = (groups, cursor) => {
   let child = 0;
   let left = cursor;
@@ -1946,17 +1947,19 @@ export default class Anyhost extends View {
     const shelves = this.shelvesOf(held, shown);
     const found = this.found;
     this.visible = found ?? [...placed.pinned, ...placed.active, ...shelves.visible];
-    const body = found !== null ? (found.length === 0 ? [this.empty(t, "No sessions found")] : found.map((r) => this.cardFor(ctx, r, mounted))) : this.listRows(ctx, placed, shelves, this.arrived);
+    const body = found !== null ? (found.length === 0 ? [this.empty(t, "No sessions found")] : found.map((r) => this.cardFor(ctx, r, mounted))) : this.listRows(ctx, placed, shelves);
     this.mounted = mounted;
     if (this.isArriving) cx.timer.after(FRAME_MS, (cx) => cx.notify());
     if (this.departing.size > 0) cx.timer.after(UI.motion.duration + FRAME_MS, (cx) => cx.notify());
-    return this.frameOf(t, [this.searchBar(t, filter, shown.projectName), ...this.filterChips(t, filter, shown.projectName)], body, (el) => el.on_hover((on, cx) => {
-      this.isPointerIn = on;
-      cx.notify();
-    }));
+    const hover = (el) =>
+      el.on_hover((on, cx) => {
+        this.isPointerIn = on;
+        cx.notify();
+      });
+    return this.frameOf(t, [this.searchBar(t, filter, shown.projectName), ...this.filterChips(t, filter, shown.projectName)], body, hover, found === null && this.arrived > 0 ? [this.arrivals(t, this.arrived)] : []);
   }
 
-  frameOf(t, head, body, decorate = (el) => el) {
+  frameOf(t, head, body, decorate = (el) => el, over = []) {
     return v_flex()
       .id("anyhost")
       .track_focus(this.keys)
@@ -1968,7 +1971,14 @@ export default class Anyhost extends View {
       .border_color(t.border)
       .text_color(t.foreground)
       .children(head)
-      .child(decorate(v_flex().id("ah-list").flex_1().min_h(0).px(UI.space.sm).pb(UI.space.sm).gap(1).overflow_y_scrollbar().track_scroll(this.listScroll)).children(body));
+      .child(
+        v_flex()
+          .relative()
+          .flex_1()
+          .min_h(0)
+          .child(decorate(v_flex().id("ah-list").flex_1().min_h(0).px(UI.space.sm).pb(UI.space.sm).gap(1).overflow_y_scrollbar().track_scroll(this.listScroll)).children(body))
+          .children(over.map((el) => h_flex().absolute().top(UI.space.xs).left(0).right(0).justify_center().child(el))),
+      );
   }
 
   shelvesOf(held, { model, filter, onScreen }) {
@@ -1982,13 +1992,13 @@ export default class Anyhost extends View {
       const limit = this.shelfShown[id] ?? SHELF_FIRST;
       const isWhole = SHELVES_WHOLE.has(id);
       const shown = isOpen ? keys.slice(0, isWhole ? keys.length : limit).map((key) => model.byKey.get(key)).filter(Boolean) : onScreen[id];
-      visible.push(...shown);
+      visible.push({ key: shelfStop(id), shelf: id }, ...shown);
       shelves.push({ id, label, count: keys.length, shown, isOpen, more: isOpen && !isWhole && keys.length > limit ? Math.min(SHELF_MORE, keys.length - limit) : 0 });
     }
     return { visible, shelves };
   }
 
-  listRows(ctx, sections, { shelves }, arrived) {
+  listRows(ctx, sections, { shelves }) {
     const { t, model } = ctx;
     const card = (r) => {
       const subs = this.subsOf(r, model);
@@ -2023,7 +2033,6 @@ export default class Anyhost extends View {
     const stale = this.error !== null && this.readAt !== null ? [this.note(t, `Can't reach anyhost · last read ${since(this.readAt)}`, t.blocked)] : [];
     const isEmpty = sections.pinned.length + sections.active.length === 0 && shelves.length === 0;
     const list = [
-      ...(arrived > 0 ? [this.arrivals(t, arrived)] : []),
       ...stale,
       placedBlock("ah-active"),
       ...(isEmpty ? [this.empty(t, isFiltered(ctx.filter) ? "Nothing here matches the filter" : "All caught up")] : []),
@@ -2079,6 +2088,16 @@ export default class Anyhost extends View {
     return this.item(`ah-head-${id}`).text_size(UI.text.caption).font_medium().text_color(t.dim).child(label);
   }
 
+  toggleShelf(id, cx) {
+    if (!this.opened.delete(id)) {
+      this.opened.add(id);
+      this.listScroll.scroll_to_item(this.listChildren - 1);
+    }
+    save("shelves", [...this.opened]);
+    this.isToggling = true;
+    cx.notify();
+  }
+
   shelf(t, { id, label, count, isOpen }) {
     return this.item(`ah-shelf-${id}`)
       .text_size(UI.text.caption)
@@ -2086,15 +2105,9 @@ export default class Anyhost extends View {
       .text_color(t.muted)
       .cursor_pointer()
       .hover((s) => s.text_color(t.foreground))
-      .on_click((_e, cx) => {
-        if (!this.opened.delete(id)) {
-          this.opened.add(id);
-          this.listScroll.scroll_to_item(this.listChildren - 1);
-        }
-        save("shelves", [...this.opened]);
-        this.isToggling = true;
-        cx.notify();
-      })
+      .relative()
+      .when(this.isCursorOn(shelfStop(id)), (el) => el.child(this.ring(t)))
+      .on_click((_e, cx) => this.toggleShelf(id, cx))
       .child(div().flex_1().min_w(0).truncate().child(label))
       .child(div().flex_none().font_normal().child(String(count)))
       .child(svg(`${ICON}/chevron-${isOpen ? "down" : "right"}.svg`).size(UI.icon.small).flex_none());
@@ -2515,8 +2528,9 @@ export default class Anyhost extends View {
       return this.redrawAll(cx);
     }
     const target = r ?? this.model?.rows.find((row) => row.address && (row.address === this.live?.shown || row.views.includes(this.live?.shown)));
-    if (e.keystroke === "cmd-shift-s" && target && !target.archived && !target.deleted) return this.toggleSettle(cx, target);
-    if (!r) return;
+    if (r?.shelf && (e.key === "enter" || e.key === "space")) return this.toggleShelf(r.shelf, cx);
+    if (e.keystroke === "cmd-shift-s" && target?.session && !target.archived && !target.deleted) return this.toggleSettle(cx, target);
+    if (!r?.session) return;
     if (e.key === "enter") return this.act((cx) => this.open(r, cx));
     if (e.key === "space") return this.peek(r);
     if (e.key === "u") return r.isUnread ? this.markRead(cx, r) : this.markUnread(cx, r);
@@ -2535,7 +2549,28 @@ export default class Anyhost extends View {
   }
 
   arrivals(t, count) {
-    return this.reveal(t, "ah-arrived", `${OWN}/chevron-up`, `${count} new`, () => (this.frozen = null));
+    return h_flex()
+      .id("ah-arrived")
+      .h(UI.height.control)
+      .px(UI.space.md)
+      .gap(UI.space.xs)
+      .items_center()
+      .rounded(UI.radius.panel)
+      .bg(t.popover)
+      .border_1()
+      .border_color(t.border)
+      .shadow_lg()
+      .text_size(UI.text.body)
+      .text_color(t.foreground)
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => {
+        this.frozen = null;
+        this.listScroll.scroll_to_item(0);
+        cx.notify();
+      })
+      .child(svg(iconPath(`${OWN}/chevron-up`)).size(UI.icon.small))
+      .child(`${count} new`);
   }
 
   empty(t, text) {
@@ -4476,9 +4511,12 @@ export default class Anyhost extends View {
   }
 
   promote(work) {
-    const tab = work.mode === "tabs" ? work.space?.tabs.find((x) => x.active)?.id : work.list.find((c) => c.terminal === work.focused)?.tab;
+    const tabs = work.space?.tabs ?? [];
+    const tab = work.mode === "tabs" ? tabs.find((x) => x.active)?.id : work.list.find((c) => c.terminal === work.focused)?.tab;
     if (!tab) return;
-    run("tab.move", { id: tab, index: 1 });
+    const isMaster = tabs[0]?.id === tab;
+    if (isMaster && tabs.length < 2) return;
+    run("tab.move", { id: isMaster ? tabs[1].id : tab, index: 1 });
     if (TILED.has(work.mode)) this.focusTarget = work.focused;
   }
 

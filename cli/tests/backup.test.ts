@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, symli
 import { dirname, join } from 'node:path'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSessions } from '../src/capture.ts'
 import { failTest, memoryRelay, noCode, until, welcomed } from './memory.ts'
-import { CLI, decoder, HOST, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, postTo, problemsOn, ranAnHourAgo, roots, serveOn, SESSION, spawnForTest } from './program.ts'
+import { CLI, decoder, HOST, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, PASS_MS, postTo, problemsOn, ranAnHourAgo, roots, serveOn, SESSION, spawnForTest } from './program.ts'
 
 test("a session whose first capture is over 1 MiB uploads in a job, and its working folder's code goes up after it with no later change", async () => {
   const relay = await memoryRelay()
@@ -81,7 +81,7 @@ test('a watched folder the watcher cannot watch at its start, as one removed aft
   mkdirSync(sessionEnv)
   chmodSync(sessionEnv, 0)
   try {
-    const served = await serveOn(host.env)
+    const served = await serveOn({ ...host.env, ANYHOST_BACKUP_MS: PASS_MS })
     await until(() => served.logged().includes(`anyhost hears no change in a folder under ${sessionEnv}`), 'the watch failing')
     const transcript = join(host.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
     mkdirSync(dirname(transcript), { recursive: true })
