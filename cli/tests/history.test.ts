@@ -2,6 +2,7 @@ import { expect, onTestFinished, spyOn, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import zlib from 'node:zlib'
+import plugin from '../../.claude-plugin/plugin.json'
 import { chunkKey, compressHot, decompress, encodeRecord, hotKey, indexForkStarts, journalOf, openCapture, openDatabase, piecesOf, QUIET_MS, relistSessions, REWRITE_OPS_PER_DAY, rewriteJournal, rewriteNext, rewriteProgress, seal, sealQuiet, sha256, UNREAD_FLEET, writeIndex, type Capture, type IndexedSession, type RecordHeader } from '../src/capture.ts'
 import { machinesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { forkAgent, type MoveHere } from '../src/move.ts'
@@ -792,7 +793,7 @@ test('while a machine that is not removed has not connected with anyhost 0.9.0 o
   writeFileSync(parent, history)
   await uploadFiles(a.capture, PARENT, parent)
 
-  expect(programs.sort()).toEqual(['mac 0.9.0', 'server '])
+  expect(programs.sort()).toEqual([`mac ${plugin.version}`, 'server '])
   expect(closed.chunks).toEqual([])
   expect(closed.parent.every(({ chunks }) => chunks === undefined)).toBe(true)
   expect(closed.fork.every(({ chunks, fork }) => chunks === undefined && fork === undefined)).toBe(true)

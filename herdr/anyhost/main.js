@@ -341,6 +341,7 @@ const shownTerminalsIn = (node) => {
   return (node.children ?? []).flatMap(shownTerminalsIn);
 };
 const tileTerminals = (tree = layout()) => shownTerminalsIn(find(tree, "tiles"));
+const isLayoutLoaded = () => machines().some((m) => m.name === null && m.layout !== "loading");
 const workspaceOf = (id) => ({ ...WORKSPACE, ...(shared(WORKSPACES) ?? {})[id ?? ""] });
 const changeWorkspace = (id, change) => {
   if (id) setShared(WORKSPACES, { ...shared(WORKSPACES), [id]: { ...workspaceOf(id), ...change } });
@@ -614,15 +615,11 @@ export default class Anyhost extends View {
     this.branchesVersion = 0;
     this.branchesReading = false;
     const cached = saved("listed", null);
-    this.isRestoring = Boolean(cached?.listed);
-    if (this.isRestoring)
-      cx.timer.after(0, (cx) => {
-        this.isRestoring = false;
-        if (this.data === null) this.apply(cached.listed, 0, cached.readAt ?? null);
-        this.rebuild();
-        this.placeParts(cx);
-        cx.notify();
-      });
+    if (cached?.listed) {
+      this.apply(cached.listed, 0, cached.readAt ?? null);
+      this.rebuild();
+      this.placeParts(cx);
+    }
     cx.spawn(async (cx) => {
       for (;;) {
         if (this.acts.length === 0) await new Promise((resolve) => (this.wake = resolve));
@@ -1511,7 +1508,7 @@ export default class Anyhost extends View {
   }
 
   reconcileWhenDue(cx) {
-    if (!this.model) return;
+    if (!this.model || !isLayoutLoaded()) return;
     const key = `${this.signature}|${Math.floor(Date.now() / TICK_MS)}|${shared(ASK)?.at ?? 0}|${shared(CHANGED) ?? 0}|${this.live.focusedTab}|${panes().length}|${spaces().length}`;
     if (key === this.reconciledKey) return;
     this.reconciledKey = key;
@@ -1912,7 +1909,7 @@ export default class Anyhost extends View {
 
   renderInbox(t, cx) {
     const shown = this.shown;
-    if (shown === null) return this.frameOf(t, [this.searchBar(t, filterOf(), null)], this.isRestoring ? [] : [this.empty(t, this.error === null ? "Reading your sessions…" : "anyhost could not read your sessions yet. It tries again every 30 seconds.")]);
+    if (shown === null) return this.frameOf(t, [this.searchBar(t, filterOf(), null)], [this.empty(t, this.error === null ? "Reading your sessions…" : "anyhost could not read your sessions yet. It tries again every 30 seconds.")]);
     const { model, filter } = shown;
     if (shown.isNarrow) return this.rail(t, shown.railed);
     const isHolding = this.isPointerIn || this.keys.is_focused();
@@ -2984,7 +2981,7 @@ export default class Anyhost extends View {
 
   renderBoard(t) {
     const board = this.board;
-    if (board === null) return v_flex().size_full().bg(t.background).when(!this.isRestoring, (el) => el.child(this.empty(t, "Reading your sessions…")));
+    if (board === null) return v_flex().size_full().bg(t.background).child(this.empty(t, "Reading your sessions…"));
     const { model, cards } = board;
     const columns = board[this.groupBy];
     const projectName = board.name;
@@ -4249,7 +4246,7 @@ export default class Anyhost extends View {
     const work = this.workNow();
     const tree = layout();
     const width = this.tilesWidth();
-    const key = `${work.mode}|${work.id}|${work.terminals.join(",")}|${JSON.stringify(work.settings)}|${scrollShown(width)}:${Math.floor(width / TILE_WIDTH)}|${find(tree, "views")?.active}|${tileTerminals(tree).join(",")}|${this.focusTarget ?? ""}|${shared(REVEAL)?.at ?? 0}|${spaces().reduce((sum, sp) => sum + sp.tabs.length, 0)}|${panes().length}`;
+    const key = `${work.mode}|${work.id}|${work.terminals.join(",")}|${JSON.stringify(work.settings)}|${scrollShown(width)}:${Math.floor(width / TILE_WIDTH)}|${find(tree, "views")?.active}|${tileTerminals(tree).join(",")}|${this.focusTarget ?? ""}|${shared(REVEAL)?.at ?? 0}|${spaces().reduce((sum, sp) => sum + sp.tabs.length, 0)}|${panes().length}|${isLayoutLoaded()}`;
     if (key !== this.tabsKey) {
       this.tabsKey = key;
       this.tabsReconcile(cx);
@@ -4286,6 +4283,7 @@ export default class Anyhost extends View {
     const panel = find(root, "panel");
     const panelBody = find(root, "panel-body")?.active;
     this.tabsView = {
+      isLoaded: isLayoutLoaded(),
       work,
       pills,
       discarded,
@@ -4295,14 +4293,14 @@ export default class Anyhost extends View {
       project: work.workspace?.name ?? (work.workspace?.key ? (shared(PULSE)?.known.find((p) => p.key === work.workspace.key)?.name ?? projectNameOf(work.workspace.key)) : null),
       panels: { files: Boolean(panel) && !panel.hidden && panelBody === "files", changes: Boolean(panel) && !panel.hidden && panelBody === "changes" },
     };
-    const signature = JSON.stringify([pills.map((pill) => [pill.tab.id, pill.tab.name, pill.tab.index, pill.program?.icon ?? null, pill.program?.tint ?? null, pill.sessions, pill.state, pill.isShown, pill.isVisible]), discarded, work.mode, work.id, work.settings, work.focused, work.terminals, this.tabsView.lights, this.tabsView.hasViews, this.tabsView.hasButtons, this.tabsView.project, this.tabsView.panels]);
+    const signature = JSON.stringify([this.tabsView.isLoaded, pills.map((pill) => [pill.tab.id, pill.tab.name, pill.tab.index, pill.program?.icon ?? null, pill.program?.tint ?? null, pill.sessions, pill.state, pill.isShown, pill.isVisible]), discarded, work.mode, work.id, work.settings, work.focused, work.terminals, this.tabsView.lights, this.tabsView.hasViews, this.tabsView.hasButtons, this.tabsView.project, this.tabsView.panels]);
     if (signature === this.tabsSignature) return false;
     this.tabsSignature = signature;
     return true;
   }
 
   tabsReconcile(cx) {
-    if (!find(layout(), "views")) return;
+    if (!find(layout(), "views") || !isLayoutLoaded()) return;
     const work = this.workNow();
     const reveal = shared(REVEAL);
     if (reveal && reveal.at > this.revealedAt) {
@@ -4435,10 +4433,10 @@ export default class Anyhost extends View {
   }
 
   renderTabs(t) {
-    const { work, lights, hasViews, hasButtons, project, panels } = this.tabsView;
+    const { isLoaded, work, lights, hasViews, hasButtons, project, panels } = this.tabsView;
     const pills = this.tabsView.pills.filter((pill) => !this.closing.has(pill.tab.id));
     const shownTabs = pills.map((pill) => pill.tab);
-    const strip = stripOf(pills, this.tabsView.discarded);
+    const strip = isLoaded ? stripOf(pills, this.tabsView.discarded) : [];
     return h_flex()
       .id("ah-tabs")
       .size_full()
@@ -4471,17 +4469,18 @@ export default class Anyhost extends View {
           .items_center()
           .overflow_x_scrollbar()
           .track_scroll(this.tabScroll)
-          .when(strip.length === 0, (el) => el.child(div().px(UI.space.sm).text_size(UI.text.caption).text_color(t.dim).child(project ? `No open sessions in ${project}` : "No open sessions")))
+          .when(isLoaded && strip.length === 0, (el) => el.child(div().px(UI.space.sm).text_size(UI.text.caption).text_color(t.dim).child(project ? `No open sessions in ${project}` : "No open sessions")))
           .children(strip.map((at) => (at.pill ? this.tabPill(t, at.pill, at.i, work, shownTabs) : this.discardedPill(t, at.discarded)))),
       )
-      .child(this.iconButton(t, "ah-tab-new", "plus", project && work.workspace?.key !== NONE ? `New session in ${project}` : "New session", () => ask({ action: "newHere" })))
-      .children(
-        [
-          ["files", "Files", "mods/files/file"],
-          ["changes", "Changes", "mods/changes/changes"],
-        ].map(([id, label, icon]) => this.panelButton(t, id, label, icon, panels[id])),
+      .when(isLoaded, (el) =>
+        el.child(this.iconButton(t, "ah-tab-new", "plus", project && work.workspace?.key !== NONE ? `New session in ${project}` : "New session", () => ask({ action: "newHere" }))).children(
+          [
+            ["files", "Files", "mods/files/file"],
+            ["changes", "Changes", "mods/changes/changes"],
+          ].map(([id, label, icon]) => this.panelButton(t, id, label, icon, panels[id])),
+        ),
       )
-      .when(hasViews && work.id !== null, (el) => el.child(h_flex().id("ah-modes").flex_none().gap(1).items_center().children(MODES.map(([mode, label, icon]) => this.modeButton(t, mode, label, icon, work)))))
+      .when(isLoaded && hasViews && work.id !== null, (el) => el.child(h_flex().id("ah-modes").flex_none().gap(1).items_center().children(MODES.map(([mode, label, icon]) => this.modeButton(t, mode, label, icon, work)))))
       .when(hasButtons, (el) => el.child(this.iconButton(t, "ah-window-min", "minus", "Minimize", () => run("window.minimize"))).child(this.iconButton(t, "ah-window-max", "square", "Maximize", () => run("window.maximize"))).child(this.iconButton(t, "ah-window-close", "x", "Close", () => run("window.close"))));
   }
 
