@@ -383,14 +383,16 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       problems.set(key, error)
     }
   }
-  let sessionsVersion = 0
+  const run = crypto.randomUUID().slice(0, 8)
+  let sessionsChanges = 0
+  const sessionsVersion = (): string => `${run}.${sessionsChanges}`
   const versionWaits = new Set<() => void>()
   const sessionsChanged = (): void => {
-    sessionsVersion += 1
+    sessionsChanges += 1
     for (const wake of versionWaits) wake()
   }
-  const changedAfter = (version: number): Promise<void> =>
-    version < sessionsVersion
+  const changedAfter = (version: string): Promise<void> =>
+    version !== sessionsVersion()
       ? Promise.resolve()
       : new Promise((resolve) => {
           const wake = (): void => {
@@ -1190,10 +1192,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           }
         })
       if (request.method === 'GET' && pathname === '/agents') {
-        const after = Number(new URL(request.url).searchParams.get('after') ?? -1)
-        await changedAfter(after)
+        const after = new URL(request.url).searchParams.get('after')
+        if (after !== null) await changedAfter(after)
         return await throughRelay(async () => {
-          const version = sessionsVersion
+          const version = sessionsVersion()
           const [elsewhere, here, { machines }] = await Promise.all([statusesOfOthers(), statusesHere(capture), machinesForList()])
           return { ...(await agentsOf(capture, { ...elsewhere, ...here }, sessionTerminals())), here: device.id, machines, version }
         })

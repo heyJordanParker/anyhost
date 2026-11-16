@@ -112,6 +112,7 @@ const FILTER_BODY_MOST = 460;
 const CARD_HEIGHT = UI.space.xs * 2 + UI.height.inline * 3;
 const MENU_WIDTH = 220;
 const MENU_SEPARATOR = UI.space.xs * 2 + 1;
+const BUSY_REASON = "Not while it works or waits for you";
 const HUES = [
   ["#4b5563", "#9ca3af"],
   ["#dc2626", "#f87171"],
@@ -341,7 +342,19 @@ const shownTerminalsIn = (node) => {
   return (node.children ?? []).flatMap(shownTerminalsIn);
 };
 const tileTerminals = (tree = layout()) => shownTerminalsIn(find(tree, "tiles"));
-const isLayoutLoaded = () => machines().some((m) => m.name === null && m.layout !== "loading");
+const paletteChildOf = (groups, cursor) => {
+  let child = 0;
+  let left = cursor;
+  for (const [, rows] of groups) {
+    child += 1;
+    if (left < rows.length) return child + left;
+    child += rows.length;
+    left -= rows.length;
+  }
+  return child;
+};
+const layoutOf = (on) => machines().find((m) => (m.name ?? "") === on)?.layout ?? "loading";
+const isLayoutLoaded = () => layoutOf("") !== "loading";
 const workspaceOf = (id) => ({ ...WORKSPACE, ...(shared(WORKSPACES) ?? {})[id ?? ""] });
 const changeWorkspace = (id, change) => {
   if (id) setShared(WORKSPACES, { ...shared(WORKSPACES), [id]: { ...workspaceOf(id), ...change } });
@@ -609,6 +622,7 @@ export default class Anyhost extends View {
     this.wake = null;
     this.isRedrawDue = false;
     this.isTaking = false;
+    this.isFollowing = false;
     this.changedAt = shared(CHANGED) ?? 0;
     this.listed = "";
     this.branches = new Map(saved("branches", []));
@@ -627,25 +641,29 @@ export default class Anyhost extends View {
         this.redrawCard(cx, null);
       }
     });
-    cx.timer.every(REFRESH_MS, (cx) => {
-      if (isPolled()) this.refresh(cx);
-    });
     cx.timer.every(TICK_MS, (cx) => this.redrawAll(cx));
-    this.refresh(cx);
     this.follow(cx, isPolled);
   }
 
   follow(cx, isPolled) {
-    if (!isPolled() || this.version === undefined) return cx.timer.after(FOLLOW_MS, (cx) => this.follow(cx, isPolled));
+    if (!isPolled()) return cx.timer.after(FOLLOW_MS, (cx) => this.follow(cx, isPolled));
     const asked = ++this.refreshes;
+    const wait = this.isFollowing ? ["--wait", String(this.version)] : [];
     cx.spawn(async (cx) => {
-      const listed = await anyhost(["list", "--json", "--brief", "--wait", String(this.version)]).catch(() => null);
-      if (listed !== null && asked >= this.applied) {
-        this.error = null;
-        await this.take(cx, listed, asked);
-        cx.notify();
+      try {
+        const listed = await anyhost(["list", "--json", "--brief", ...wait]);
+        this.isFollowing = true;
+        if (asked >= this.applied) {
+          this.error = null;
+          await this.take(cx, listed, asked);
+        }
+      } catch (error) {
+        this.isFollowing = false;
+        this.error = messageOf(error);
+        this.dataVersion++;
       }
-      cx.timer.after(listed === null ? REFRESH_MS : FOLLOW_MS, (cx) => this.follow(cx, isPolled));
+      cx.notify();
+      cx.timer.after(this.isFollowing ? FOLLOW_MS : REFRESH_MS, (cx) => this.follow(cx, isPolled));
     });
   }
 
@@ -658,7 +676,6 @@ export default class Anyhost extends View {
         this.error = null;
         await this.take(cx, listed, asked);
       } catch (error) {
-        if (this.error === null && this.isInbox) notify({ title: "anyhost could not refresh your sessions", body: `${messageOf(error)}\nThe list shows what it last read, and tries again every 30 seconds.`, level: "error" });
         this.error = messageOf(error);
         this.dataVersion++;
       }
@@ -754,10 +771,9 @@ export default class Anyhost extends View {
     const machine = s.holder || s.machine;
     const kind = isTemporaryIn(s.cwd, this.deviceOf(machine)?.roots) ? TEMPORARY : isBackground(s.entrypoint ?? "") ? "background" : "own";
     const projectKey = kind === TEMPORARY ? TEMPORARY : s.repo ? repoOf(s) : NONE;
-    const days = this.data.settleAfterDays;
     const checkout = checkoutOf(s);
     const atMs = Date.parse(s.lastActivity);
-    const settledAt = change.settledAt ?? s.settledAt ?? (Number.isFinite(atMs) ? new Date(atMs + (days ?? 0) * DAY_MS).toISOString() : "");
+    const settledAt = change.settledAt ?? s.settledAt ?? "";
     const snoozedUntil = change.snoozedUntil ?? s.snoozedUntil ?? "";
     const visitedAt = change.visitedAt ?? s.visitedAt ?? "";
     return {
@@ -816,7 +832,7 @@ export default class Anyhost extends View {
     const { sessions } = this.data;
     const here = this.hereName();
     const names = this.namesNow();
-    const context = JSON.stringify([here, names, this.data.settleAfterDays, this.data.devices.map((d) => [d.name, d.roots])]);
+    const context = JSON.stringify([here, names, this.data.devices.map((d) => [d.name, d.roots])]);
     const kept = this.cardBySession ?? new Map();
     const bySession = new Map();
     const cards = [];
@@ -1369,8 +1385,9 @@ export default class Anyhost extends View {
       run("space.select", { id: space });
       return this.fillWorkspace(key, worktree);
     }
-    const ready = new Set(machines().filter((m) => m.layout === "ready").map((m) => m.name ?? ""));
-    if (!ready.has(on)) return notify({ title: `${this.placeOf(worktree.machine)}'s layout is not ready yet`, body: "Pick it again in a moment.", level: "info" });
+    const layoutState = layoutOf(on);
+    if (layoutState === "loading") return void (this.afterLayout = { on, run: () => this.showWorkspace(key, worktree) });
+    if (layoutState === "unavailable") return notify({ title: `The Herdr app does not reach ${this.placeOf(worktree.machine)} now`, body: "Its workspaces open once it answers again.", level: "warning" });
     const held = this.fillWorkspace(key, worktree);
     const newest = [...held].sort(byRecent)[0];
     this.selecting = { space, until: Date.now() + 15_000 };
@@ -1440,7 +1457,6 @@ export default class Anyhost extends View {
 
 
   initInbox(cx) {
-    this.isInbox = true;
     for (const key of RETIRED) if (shared(key) != null) setShared(key, null);
     this.keys = cx.focus_handle();
     this.search = InputState.new({ placeholder: "Search" });
@@ -1509,7 +1525,7 @@ export default class Anyhost extends View {
 
   reconcileWhenDue(cx) {
     if (!this.model || !isLayoutLoaded()) return;
-    const key = `${this.signature}|${Math.floor(Date.now() / TICK_MS)}|${shared(ASK)?.at ?? 0}|${shared(CHANGED) ?? 0}|${this.live.focusedTab}|${panes().length}|${spaces().length}`;
+    const key = `${this.signature}|${Math.floor(Date.now() / TICK_MS)}|${shared(ASK)?.at ?? 0}|${shared(CHANGED) ?? 0}|${this.live.focusedTab}|${panes().length}|${spaces().length}|${machines().map((m) => m.layout).join(",")}`;
     if (key === this.reconciledKey) return;
     this.reconciledKey = key;
     this.reconcile(cx);
@@ -1527,6 +1543,11 @@ export default class Anyhost extends View {
     const model = this.model;
     const live = this.live;
     if (!model || !live || this.data === null) return;
+    const waiting = this.afterLayout;
+    if (waiting && layoutOf(waiting.on) !== "loading") {
+      this.afterLayout = null;
+      waiting.run();
+    }
     const written = JSON.stringify(model.pulse);
     if (written !== this.pulsed) {
       this.pulsed = written;
@@ -2046,6 +2067,14 @@ export default class Anyhost extends View {
     return h_flex().id(id).h(UI.height.row).px(UI.space.sm).gap(UI.space.sm).flex_none().items_center().rounded(UI.radius.control);
   }
 
+  isCursorOn(key) {
+    return this.cursor === key && this.keys?.is_focused() === true;
+  }
+
+  ring(t) {
+    return div().absolute().inset_0().rounded(UI.radius.control).border_1().border_color(t.accent);
+  }
+
   sectionHead(t, id, label) {
     return this.item(`ah-head-${id}`).text_size(UI.text.caption).font_medium().text_color(t.dim).child(label);
   }
@@ -2141,7 +2170,7 @@ export default class Anyhost extends View {
     const rows = 1 + (pulse?.known.length ?? 0) + Object.keys(STATE).length + tags + (machinesCount > 1 ? machinesCount : 0) + INCLUDES.length;
     const heads = 3 + (tags > 0 ? 1 : 0) + (machinesCount > 1 ? 1 : 0);
     const bodyHeight = Math.min(FILTER_BODY_MOST, rows * UI.height.row + heads * UI.height.control);
-    const clearHeight = isFiltered(filterOf()) ? UI.height.row + UI.space.xs * 2 + 1 : 0;
+    const clearHeight = UI.height.row + UI.space.xs * 2 + 1;
     openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: 260, height: bodyHeight + clearHeight + UI.space.xs * 2 + 2, props: { view: "filter", bodyHeight, projects: pulse?.known ?? [], machines: (pulse?.all.machines ?? []).map((m) => ({ name: m.name, place: m.place })), tags: this.data?.tags ?? {} } });
   }
 
@@ -2362,7 +2391,8 @@ export default class Anyhost extends View {
       .rounded(UI.radius.control)
       .cursor_pointer()
       .when(isShown, (el) => el.bg(t.selected))
-      .when(this.cursor === r.key && this.keys?.is_focused() === true, (el) => el.border_1().border_color(t.accent))
+      .relative()
+      .when(this.isCursorOn(r.key), (el) => el.child(this.ring(t)))
       .hover((st) => st.bg(t.hover))
       .on_hover((on, cx) => {
         if (on) this.hovered = r.key;
@@ -2544,7 +2574,7 @@ export default class Anyhost extends View {
             .justify_center()
             .hover((s) => s.bg(t.hover))
             .tooltip(r.title)
-            .on_click((_e, cx) => this.open(r, cx))
+            .on_click(() => this.act((cx) => this.open(r, cx)))
             .child(this.mark(t, r.projectName, false, r.projectKey === NONE || r.projectKey === TEMPORARY))
             .child(svg(iconPath(STATE[r.state].icon)).size(UI.icon.small).text_color(this.stateColor(r.state))),
         ),
@@ -2610,6 +2640,7 @@ export default class Anyhost extends View {
     this.isPointerIn = false;
     this.cursor = null;
     this.keys = cx.focus_handle();
+    this.projectsScroll = ScrollHandle.new();
     this.entries = [];
     this.projectsKey = "";
     this.projectsView = null;
@@ -2680,6 +2711,7 @@ export default class Anyhost extends View {
           .pb(UI.space.sm)
           .gap(1)
           .overflow_y_scrollbar()
+          .track_scroll(this.projectsScroll)
           .on_hover((on, cx) => {
             this.isPointerIn = on;
             cx.notify();
@@ -2698,6 +2730,8 @@ export default class Anyhost extends View {
     const at = this.entries.findIndex((entry) => entry.id === this.cursor);
     if (e.key === "j" || e.key === "down") this.cursor = this.entries[Math.min(this.entries.length - 1, at + 1)]?.id ?? null;
     if (e.key === "k" || e.key === "up") this.cursor = at <= 0 ? ALL : this.entries[at - 1].id;
+    const shown = this.entries.findIndex((entry) => entry.id === this.cursor);
+    if (shown >= 0 && shown !== at) this.projectsScroll.scroll_to_item(shown);
     const entry = this.entries[at] ?? null;
     if (e.key === "enter" && entry) this.pickEntry(entry);
     if (e.key === "enter" && !entry) setFilter({ project: null });
@@ -2766,7 +2800,8 @@ export default class Anyhost extends View {
     return this.item("ah-project-all")
       .cursor_pointer()
       .when(isSelected, (el) => el.bg(t.selected))
-      .when(this.cursor === ALL && this.keys.is_focused(), (el) => el.border_1().border_color(t.accent))
+      .relative()
+      .when(this.isCursorOn(ALL), (el) => el.child(this.ring(t)))
       .hover((s) => s.bg(t.hover))
       .when(isStale, (el) => el.tooltip(`Can't reach anyhost · counts from ${since(pulse.readAt)}`))
       .on_click(() => {
@@ -2785,7 +2820,8 @@ export default class Anyhost extends View {
     return this.item(`ah-${id}`)
       .cursor_pointer()
       .when(isSelected, (el) => el.bg(t.selected))
-      .when(this.cursor === p.key && this.keys.is_focused(), (el) => el.border_1().border_color(t.accent))
+      .relative()
+      .when(this.isCursorOn(p.key), (el) => el.child(this.ring(t)))
       .hover((s) => s.bg(t.hover))
       .on_hover((on, cx) => {
         if (on) this.hovered = id;
@@ -2810,7 +2846,8 @@ export default class Anyhost extends View {
       .pl(UI.space.sm + UI.icon.lead + UI.space.sm)
       .cursor_pointer()
       .when(isSelected, (el) => el.bg(t.selected))
-      .when(this.cursor === id && this.keys.is_focused(), (el) => el.border_1().border_color(t.accent))
+      .relative()
+      .when(this.isCursorOn(id), (el) => el.child(this.ring(t)))
       .hover((s) => s.bg(t.hover))
       .tooltip(worktree.isGone ? `${worktree.folder} is gone` : worktree.folder)
       .on_hover((on, cx) => {
@@ -3071,7 +3108,7 @@ export default class Anyhost extends View {
       .when(isChosen, (el) => el.bg(t.selected).text_color(t.foreground))
       .when(!isChosen, (el) => el.text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)))
       .on_click((_e, cx) => {
-        onClick();
+        onClick(cx);
         cx.notify();
       })
       .when(icon !== null, (el) => el.child(svg(iconPath(icon)).size(UI.icon.small)))
@@ -3219,6 +3256,7 @@ export default class Anyhost extends View {
 
   initPopup(cx) {
     this.at = null;
+    this.subAt = null;
     this.handle = cx.focus_handle();
     this.handle.focus();
   }
@@ -3245,7 +3283,7 @@ export default class Anyhost extends View {
       [
         ...(inGit ? [{ id: "new-here", icon: "square-pen", label: w ? `New session in ${w.branch}` : "New session", ask: { action: "startIn", project, ...at } }] : []),
         ...(inGit ? [{ id: "worktree-new", icon: `${OWN}/git-branch-plus`, label: w ? `New worktree from ${w.branch}…` : "New worktree…", open: "worktree", from: at }] : []),
-        ...(p.worktree ? [{ id: "worktree-remove", icon: `${OWN}/trash`, label: "Remove worktree", disabled: p.worktree.isMain, isDestructive: true, ask: { action: "removeWorktree", ...at } }] : []),
+        ...(p.worktree ? [{ id: "worktree-remove", icon: `${OWN}/trash`, label: "Remove worktree", disabled: p.worktree.isMain, reason: "The main checkout stays", isDestructive: true, ask: { action: "removeWorktree", ...at } }] : []),
       ],
       [
         ...(!p.worktree && isRepository ? [{ id: "rename", icon: `${OWN}/pencil`, label: "Rename…", open: "rename" }] : []),
@@ -3269,22 +3307,22 @@ export default class Anyhost extends View {
       tabs
         ? [
             { id: "close-tab", icon: "x", label: "Close tab", ask: { action: "closeTabs", tabs: [tabs.tab] } },
-            { id: "close-others", icon: "x", label: "Close other tabs", disabled: tabs.others.length === 0, ask: { action: "closeTabs", tabs: tabs.others } },
-            { id: "close-right", icon: "x", label: "Close tabs to the right", disabled: tabs.right.length === 0, ask: { action: "closeTabs", tabs: tabs.right } },
-            { id: "reopen", icon: `${OWN}/archive-restore`, label: "Reopen closed tab", disabled: !p.canReopen, ask: { action: "reopen" } },
+            { id: "close-others", icon: "x", label: "Close other tabs", disabled: tabs.others.length === 0, reason: "No other tab is open", ask: { action: "closeTabs", tabs: tabs.others } },
+            { id: "close-right", icon: "x", label: "Close tabs to the right", disabled: tabs.right.length === 0, reason: "No tab is to its right", ask: { action: "closeTabs", tabs: tabs.right } },
+            { id: "reopen", icon: `${OWN}/archive-restore`, label: "Reopen closed tab", disabled: !p.canReopen, reason: "No closed tab to reopen", ask: { action: "reopen" } },
           ]
         : [],
       [
         { id: "peek", icon: `${OWN}/eye`, label: "Peek", ask: { action: "peek" } },
-        ...(p.canSleep ? [{ id: "sleep", icon: `${OWN}/moon`, label: "Sleep", disabled: isBusy, ask: { action: "sleep" } }] : []),
+        ...(p.canSleep ? [{ id: "sleep", icon: `${OWN}/moon`, label: "Sleep", disabled: isBusy, reason: BUSY_REASON, ask: { action: "sleep" } }] : []),
         ...(p.canStartHere ? [{ id: "start-here", icon: "square-pen", label: "New session in its folder", ask: { action: "startHere" } }] : []),
       ],
       p.archived || p.deleted
         ? []
         : [
             { id: "pin", icon: p.pinned ? "pin-off" : "pin", label: p.pinned ? "Unpin" : "Pin", ask: { action: "pin" } },
-            { id: "settle", icon: "circle-check", label: p.settled ? "Unsettle" : "Settle", disabled: isBusy, ask: { action: "settle" } },
-            p.snoozed ? { id: "wake", icon: `${OWN}/alarm-clock-off`, label: "Wake now", ask: { action: "snooze", until: null } } : { id: "snooze", icon: "clock", label: "Snooze", disabled: p.state === "blocked", sub: snoozeItems },
+            { id: "settle", icon: "circle-check", label: p.settled ? "Unsettle" : "Settle", disabled: isBusy, reason: BUSY_REASON, ask: { action: "settle" } },
+            p.snoozed ? { id: "wake", icon: `${OWN}/alarm-clock-off`, label: "Wake now", ask: { action: "snooze", until: null } } : { id: "snooze", icon: "clock", label: "Snooze", disabled: p.state === "blocked", reason: "It waits for you, which wakes a snooze at once", sub: snoozeItems },
           ],
       [
         { id: "tags", icon: `${OWN}/tag`, label: "Tags", sub: tagItems },
@@ -3307,7 +3345,7 @@ export default class Anyhost extends View {
       [{ id: "copy", icon: `${OWN}/copy`, label: "Copy", sub: [...(p.cwd ? [{ id: "copy-path", icon: "folder", label: "Folder path", copy: p.cwd }] : []), { id: "copy-id", icon: `${OWN}/hash`, label: "Session ID", copy: p.key }] }],
       [
         ...(p.deleted ? [{ id: "undelete", icon: `${OWN}/archive-restore`, label: "Restore", ask: { action: "open" } }] : p.archived ? [{ id: "restore", icon: `${OWN}/archive-restore`, label: "Restore", ask: { action: "restore" } }] : [{ id: "archive", icon: "archive", label: "Archive", ask: { action: "archive" } }]),
-        ...(!p.deleted ? [{ id: "delete", icon: `${OWN}/trash`, label: "Delete…", ask: { action: "confirmDelete" }, isDestructive: true, disabled: isBusy }] : []),
+        ...(!p.deleted ? [{ id: "delete", icon: `${OWN}/trash`, label: "Delete…", ask: { action: "confirmDelete" }, isDestructive: true, disabled: isBusy, reason: BUSY_REASON }] : []),
       ],
     ];
   }
@@ -3344,12 +3382,13 @@ export default class Anyhost extends View {
   popupMenu(t, groups) {
     const items = groups.flat();
     const opened = items.find((item) => item.id === this.at && item.sub && !item.disabled) ?? null;
-    const entry = (item, onHover) => {
+    const entry = (item, onHover, isAt) => {
       const color = item.disabled ? t.dim : item.isDestructive ? t.ansi1 : t.foreground;
       return this.item(`ah-menu-${item.id}`)
         .text_color(color)
-        .when(!item.disabled && this.at === item.id, (el) => el.bg(t.selected))
+        .when(!item.disabled && isAt, (el) => el.bg(t.selected))
         .when(!item.disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
+        .when(Boolean(item.disabled && item.reason), (el) => el.tooltip(item.reason))
         .on_hover((on, cx) => {
           if (on) onHover(cx);
         })
@@ -3363,6 +3402,11 @@ export default class Anyhost extends View {
     };
     const hoverAt = (item) => (cx) => {
       this.at = item.id;
+      this.subAt = null;
+      cx.notify();
+    };
+    const hoverSub = (item) => (cx) => {
+      this.subAt = item.id;
       cx.notify();
     };
     const panel = () => this.panel(t).w(MENU_WIDTH).text_size(UI.text.body);
@@ -3372,24 +3416,44 @@ export default class Anyhost extends View {
       .size_full()
       .items_start()
       .gap(UI.space.xs)
-      .on_key_down((e) => {
-        if (e.key === "escape") closeOverlay(props().overlay);
-      })
-      .child(panel().children(groups.flatMap((group, n) => [...(n > 0 ? [this.divider(t)] : []), ...group.map((item) => entry(item, hoverAt(item)))])))
-      .when(opened !== null, (el) => el.child(panel().mt(menuOffsetOf(groups, opened)).children(opened.sub.flatMap((item) => [...(item.separatorBefore ? [this.divider(t)] : []), entry(item, () => undefined)]))));
+      .on_key_down((e, cx) => this.menuKey(e, cx, items, opened))
+      .child(panel().children(groups.flatMap((group, n) => [...(n > 0 ? [this.divider(t)] : []), ...group.map((item) => entry(item, hoverAt(item), this.at === item.id && this.subAt == null))])))
+      .when(opened !== null, (el) => el.child(panel().mt(menuOffsetOf(groups, opened)).children(opened.sub.flatMap((item) => [...(item.separatorBefore ? [this.divider(t)] : []), entry(item, hoverSub(item), this.subAt === item.id)]))));
+  }
+
+  menuKey(e, cx, items, opened) {
+    const inSub = opened !== null && this.subAt != null;
+    const list = (inSub ? opened.sub : items).filter((item) => !item.disabled);
+    const at = list.findIndex((item) => item.id === (inSub ? this.subAt : this.at));
+    const move = (step) => list[at < 0 ? (step > 0 ? 0 : list.length - 1) : (at + step + list.length) % list.length]?.id ?? null;
+    if (e.key === "down" || e.key === "up") {
+      if (inSub) this.subAt = move(e.key === "down" ? 1 : -1);
+      else this.at = move(e.key === "down" ? 1 : -1);
+    }
+    const current = inSub ? opened.sub.find((item) => item.id === this.subAt) : items.find((item) => item.id === this.at);
+    const firstSub = (item) => item?.sub?.find((sub) => !sub.disabled)?.id ?? null;
+    if (e.key === "right" && !inSub && current?.sub && !current.disabled) this.subAt = firstSub(current);
+    if (e.key === "left" && inSub) this.subAt = null;
+    if ((e.key === "enter" || e.key === "space") && current && !current.disabled) {
+      if (current.sub && !inSub) this.subAt = firstSub(current);
+      else this.choose(current, cx);
+    }
+    if (e.key === "escape") {
+      if (inSub) this.subAt = null;
+      else closeOverlay(props().overlay);
+    }
+    cx.notify();
   }
 
   renderFilter(t) {
     const p = props();
     const f = filterOf();
     const toggle = (field, value) => setFilter({ [field]: f[field].includes(value) ? f[field].filter((x) => x !== value) : [...f[field], value] });
-    const option = (id, label, isOn, onClick, lead) =>
+    const option = (id, label, isOn, onClick, lead, isDisabled = false) =>
       this.item(`ah-f-${id}`)
-        .cursor_pointer()
-        .hover((s) => s.bg(t.hover))
-        .on_click(() => onClick())
+        .when(!isDisabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => onClick()))
         .child(lead)
-        .child(div().flex_1().min_w(0).truncate().text_size(UI.text.body).text_color(t.foreground).child(label))
+        .child(div().flex_1().min_w(0).truncate().text_size(UI.text.body).text_color(isDisabled ? t.dim : t.foreground).child(label))
         .when(isOn, (el) => el.child(svg(`${ICON}/check.svg`).size(UI.icon.body).text_color(t.foreground)));
     const head = (text) => this.item(`ah-f-head-${text}`).h(UI.height.control).text_size(UI.text.caption).font_medium().text_color(t.dim).child(text);
     const icon = (name, color = t.muted) => this.leadIcon(name).text_color(color);
@@ -3421,7 +3485,8 @@ export default class Anyhost extends View {
           .child(head("Also show"))
           .children(INCLUDES.map(([kind, label, includeIcon]) => option(`i-${kind}`, label, f.include.includes(kind), () => toggle("include", kind), icon(includeIcon)))),
       )
-      .when(isFiltered(f), (el) => el.child(this.divider(t)).child(option("clear", "Clear filters", false, () => setShared(FILTER, NO_FILTER), icon("x"))));
+      .child(this.divider(t))
+      .child(option("clear", "Clear filters", false, () => setShared(FILTER, NO_FILTER), icon("x", isFiltered(f) ? t.muted : t.dim), !isFiltered(f)));
   }
 
   panel(t) {
@@ -3441,12 +3506,18 @@ export default class Anyhost extends View {
   renderSettings(t) {
     const p = props();
     const chosen = this.chosenDays === undefined ? p.settleAfterDays : this.chosenDays;
-    const choose = (days) => {
+    const choose = (days, cx) => {
       this.chosenDays = days;
-      anyhost(["settle", "--after", days === null ? "never" : String(days)]).then(
-        () => setShared(CHANGED, Date.now()),
-        (error) => notify({ title: "anyhost kept the setting", body: messageOf(error), level: "error" }),
-      );
+      cx.spawn(async (cx) => {
+        try {
+          await anyhost(["settle", "--after", days === null ? "never" : String(days)]);
+          setShared(CHANGED, Date.now());
+        } catch (error) {
+          this.chosenDays = undefined;
+          notify({ title: "anyhost could not change when sessions settle", body: messageOf(error), level: "error" });
+          cx.notify();
+        }
+      });
     };
     return v_flex()
       .id("ah-settings")
@@ -3456,16 +3527,18 @@ export default class Anyhost extends View {
       })
       .w_full()
       .p(UI.space.lg)
-      .gap(UI.space.md)
+      .gap(UI.space.lg)
       .bg(t.popover)
       .text_color(t.foreground)
       .child(div().text_size(UI.text.title).font_semibold().child("Settings"))
-      .child(div().text_size(UI.text.body).font_medium().child("Settle an idle session after"))
-      .child(h_flex().gap(UI.space.xs).flex_wrap().children(SETTLE_AFTER.map((days) => this.choice(t, `ah-after-${days}`, days === null ? "Off" : plural(days, "day"), days === chosen, () => choose(days)))))
-      .child(div().text_size(UI.text.caption).text_color(t.dim).child("A settled session moves to the Settled shelf. Pinned, snoozed, working and waiting sessions never settle by themselves."))
-      .child(div().h(1).bg(t.border))
+      .child(
+        v_flex()
+          .gap(UI.space.sm)
+          .child(div().text_size(UI.text.body).font_medium().child("Settle an idle session after"))
+          .child(h_flex().gap(UI.space.xs).flex_wrap().children(SETTLE_AFTER.map((days) => this.choice(t, `ah-after-${days}`, days === null ? "Off" : plural(days, "day"), days === chosen, (cx) => choose(days, cx)))))
+          .child(div().text_size(UI.text.caption).text_color(t.dim).child("A settled session moves to the Settled shelf. Pinned, snoozed, working and waiting sessions never settle by themselves.")),
+      )
       .child(this.archivedList(t, p.archived.filter((a) => !this.restored.has(a.key))))
-      .child(div().h(1).bg(t.border))
       .child(
         this.item("ah-herdr-settings")
           .text_size(UI.text.body)
@@ -3832,6 +3905,7 @@ export default class Anyhost extends View {
     const p = props();
     this.machine = pulse?.here ?? "";
     this.cursorAt = 0;
+    this.newScroll = ScrollHandle.new();
     this.handle = cx.focus_handle();
     this.folder = InputState.new({ placeholder: "Or a folder: ~/Developer/app" });
     this.folder.on("submit", () => {
@@ -3866,6 +3940,7 @@ export default class Anyhost extends View {
       .on_key_down((e, cx) => {
         if (e.key === "down") this.cursorAt = Math.min(choices.length - 1, this.cursorAt + 1);
         if (e.key === "up") this.cursorAt = Math.max(0, this.cursorAt - 1);
+        if (e.key === "down" || e.key === "up") this.newScroll.scroll_to_item(this.cursorAt);
         if (e.key === "enter" && choices[this.cursorAt]) pick(choices[this.cursorAt]);
         if (e.key === "escape") closeOverlay(p.overlay);
         cx.notify();
@@ -3882,6 +3957,7 @@ export default class Anyhost extends View {
           .max_h(340)
           .gap(1)
           .overflow_y_scrollbar()
+          .track_scroll(this.newScroll)
           .children(
             choices.map((choice, n) =>
               this.item(`ah-new-${n}`)
@@ -4116,6 +4192,7 @@ export default class Anyhost extends View {
 
   initPalette(cx) {
     this.cursorAt = 0;
+    this.paletteScroll = ScrollHandle.new();
     this.palette = props();
     this.query = InputState.new({ placeholder: "Search sessions, projects and actions" });
     this.groups = this.paletteGroups();
@@ -4581,26 +4658,25 @@ export default class Anyhost extends View {
       })
       .child(this.harnessIcon(t, session))
       .child(div().max_w(220).truncate().child(session.title))
-      .when(isHovered, (el) =>
-        el.child(
-          div()
-            .id(`ah-tab-close-${id}`)
-            .size(UI.icon.lead)
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
-            .rounded(UI.radius.pill)
-            .text_color(t.dim)
-            .hover((s) => s.bg(t.hover).text_color(t.foreground))
-            .tooltip("Archive")
-            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-            .on_click((_e, cx) => {
-              cx.stop_propagation();
-              ask({ action: "archive", key: session.key });
-            })
-            .child(svg(`${ICON}/x.svg`).size(UI.icon.small)),
-        ),
+      .child(
+        div()
+          .id(`ah-tab-close-${id}`)
+          .size(UI.icon.lead)
+          .flex()
+          .flex_none()
+          .items_center()
+          .justify_center()
+          .rounded(UI.radius.pill)
+          .opacity(isHovered ? 1 : 0)
+          .text_color(t.dim)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .tooltip("Archive")
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => {
+            cx.stop_propagation();
+            ask({ action: "archive", key: session.key });
+          })
+          .child(svg(`${ICON}/x.svg`).size(UI.icon.small)),
       );
   }
 
@@ -4621,8 +4697,9 @@ export default class Anyhost extends View {
       .text_size(UI.text.body)
       .cursor_pointer()
       .tooltip(tab.name)
+      .relative()
       .opacity(isDragged ? 0.5 : 1)
-      .when(isDropTarget, (el) => (droppedBefore ? el.border_l_2() : el.border_r_2()).border_color(t.accent))
+      .when(isDropTarget, (el) => el.child(div().absolute().top(0).bottom(0).w(2).bg(t.accent).when(droppedBefore, (bar) => bar.left(0)).when(!droppedBefore, (bar) => bar.right(0))))
       .when(isShown, (el) => el.bg(t.selected).text_color(t.foreground))
       .when(!isShown, (el) => el.text_color(isVisible ? t.foreground : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)))
       .on_hover((on, cx) => {
@@ -4661,8 +4738,7 @@ export default class Anyhost extends View {
       .child(div().max_w(220).truncate().child(tab.name))
       .when(state === "working", (el) => el.child(svg(`${ICON}/spinner.svg`).size(UI.icon.small).flex_none().text_color(this.stateColor("working")).spin(900)))
       .when(state === "blocked" || state === "done", (el) => el.child(this.dot(this.stateColor(state))))
-      .when(isShown || isHovered, (el) =>
-        el.child(
+      .child(
           div()
             .id(`ah-tab-close-${tab.id}`)
             .size(UI.icon.lead)
@@ -4671,6 +4747,7 @@ export default class Anyhost extends View {
             .items_center()
             .justify_center()
             .rounded(UI.radius.pill)
+            .opacity(isShown || isHovered ? 1 : 0)
             .text_color(t.dim)
             .hover((s) => s.bg(t.hover).text_color(t.foreground))
             .tooltip(sessions.length > 0 ? "Close and archive · Reopen closed tab brings it back" : "Close the tab")
@@ -4680,7 +4757,6 @@ export default class Anyhost extends View {
               this.closeNow(tab, shownTabs, cx);
             })
             .child(svg(`${ICON}/x.svg`).size(UI.icon.small)),
-        ),
       );
   }
 
@@ -4718,6 +4794,7 @@ export default class Anyhost extends View {
       .on_key_down((e, cx) => {
         if (e.key === "down") this.cursorAt = Math.min(count - 1, this.cursorAt + 1);
         if (e.key === "up") this.cursorAt = Math.max(0, this.cursorAt - 1);
+        if (e.key === "down" || e.key === "up") this.paletteScroll.scroll_to_item(paletteChildOf(groups, this.cursorAt));
         if (e.key === "escape") closeOverlay(p.overlay);
         cx.notify();
       })
@@ -4740,6 +4817,7 @@ export default class Anyhost extends View {
           .p(UI.space.sm)
           .gap(1)
           .overflow_y_scrollbar()
+          .track_scroll(this.paletteScroll)
           .when(count === 0, (el) => el.child(this.empty(t, "Nothing matches")))
           .children(groups.flatMap(([label, rows]) => [this.item(`ah-pal-head-${label}`).h(UI.height.control).text_size(UI.text.caption).font_medium().text_color(t.dim).child(label), ...rows.map(row)])),
       );

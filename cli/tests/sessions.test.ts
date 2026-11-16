@@ -290,7 +290,16 @@ test('a settle mark holds until the next message, which un-settles the session, 
   )
 
   expect(byId('settled')).toEqual([true, false, false, true])
-  expect(byId('settledAt')).toEqual([hoursAgo(0.5), '', '', ''])
+  expect(byId('settledAt')).toEqual([hoursAgo(0.5), '', '', hoursAgo(3 * 24)])
+})
+
+test('a session settles settleAfterDays after the later of its last message and the end of a snooze, and the list says when', async () => {
+  const quiet = { lastActivity: hoursAgo(20 * 24) }
+
+  const { byId } = await listedWith([quiet, quiet, quiet], { snoozed: { [idOf(2)]: { until: hoursAgo(10 * 24), at: hoursAgo(19 * 24) }, [idOf(3)]: { until: hoursAgo(2 * 24), at: hoursAgo(19 * 24) } } })
+
+  expect(byId('settled')).toEqual([true, true, false])
+  expect(byId('settledAt')).toEqual([hoursAgo(13 * 24), hoursAgo(3 * 24), ''])
 })
 
 test('settleAfterDays null settles nothing by itself, and a shared list that still carries archiveAfterDays reads as settleAfterDays 7, archives nothing by idle time, and loses the key at its next write', async () => {

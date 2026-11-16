@@ -268,7 +268,7 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (command === 'list') {
-    const listed = (await askProgram<Agents>(values.wait === undefined ? '/agents' : `/agents?after=${Number(values.wait)}`, undefined, existsSync(serveSocket()) ? PROGRAM_RESTART_MS : 0)) ?? (await connected(async (capture) => ({ ...(await agentsOf(capture)), here: capture.device.id, machines: await machinesOf(capture.relay) })))
+    const listed = (await askProgram<Agents>(values.wait === undefined ? '/agents' : `/agents?after=${encodeURIComponent(values.wait)}`, undefined, existsSync(serveSocket()) ? PROGRAM_RESTART_MS : 0)) ?? (await connected(async (capture) => ({ ...(await agentsOf(capture)), here: capture.device.id, machines: await machinesOf(capture.relay) })))
     const brief = values.brief === true ? { ...listed, agents: listed.agents.map(({ id, tool, title, cwd, repo, repoFolder, machine, holder, entrypoint, lastSaid, lastActivity, lastPromptAt, status, terminal, archived, settled, settledAt, snoozedUntil, visitedAt, deleted, parent, source, pinned, tags, stage }) => ({ id, tool, title, terminal, cwd, repo, repoFolder, machine, holder, entrypoint, lastSaid: (lastSaid ?? '').slice(0, 160), lastActivity, lastPromptAt: lastPromptAt ?? '', status, archived, settled, settledAt, snoozedUntil, visitedAt, deleted: deleted === true, parent, source: source ?? '', pinned, tags, stage })) } : listed
     console.log(values.json === true ? JSON.stringify(brief, null, values.brief === true ? undefined : 2) : table(listed.agents))
     return 0

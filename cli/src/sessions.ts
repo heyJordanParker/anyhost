@@ -4,7 +4,7 @@ import type * as Protocol from '../../relay/protocol.ts'
 import { bytesOfChunks, chainOf, chunkReader, chunksIn, decompressDelta, downloadBase, framesOf, journalPrefix, ownIndex, type Capture, type ChunkReader, type IndexedSession, type RecordHeader } from './capture.ts'
 import { devicesOf } from './device.ts'
 import type { Relay } from './relay.ts'
-import { isArchived, isSettled, isSnoozed, sharedOf, type Stage, type Tag } from './shared.ts'
+import { isArchived, isSnoozed, settledAtOf, sharedOf, type Stage, type Tag } from './shared.ts'
 
 export type ListedSession = IndexedSession & { readonly machine: string; readonly device: string; readonly holder: string }
 export type Segment = Pick<RecordHeader, 'device' | 'checkout' | 'path'> & { readonly offset: number; readonly size: number }
@@ -83,16 +83,15 @@ export async function agentsOf(capture: Capture, statuses: Readonly<Record<strin
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
   const agents = sessions.filter((session) => session.firstPrompt !== '').map((session) => {
     const status: Agent['status'] = statuses[session.id] ?? ''
-    const settled = isSettled(shared, session, status, now)
-    const mark = shared.settled[session.id]
+    const settledAt = settledAtOf(shared, session, status, now)
     return {
       ...session,
       title: session.title || titleOfPrompt(session.firstPrompt),
       terminal: terminals.get(session.id) ?? '',
       status,
       archived: isArchived(shared, session),
-      settled,
-      settledAt: settled && mark?.settled === true ? mark.at : '',
+      settled: settledAt !== '',
+      settledAt,
       snoozedUntil: isSnoozed(shared, session, status, now) ? (shared.snoozed[session.id]?.until ?? '') : '',
       visitedAt: shared.visited[session.id] ?? '',
       parent: shared.parents[session.id] ?? '',

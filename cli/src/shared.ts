@@ -63,13 +63,13 @@ export function isSnoozed(shared: Shared, session: Activity, status: AgentStatus
   return snooze !== undefined && Date.parse(snooze.until) > now && status !== 'waiting' && !(session.lastPromptAt > snooze.at)
 }
 
-export function isSettled(shared: Shared, session: Activity, status: AgentStatus | '', now = Date.now()): boolean {
+export function settledAtOf(shared: Shared, session: Activity, status: AgentStatus | '', now = Date.now()): string {
   const mark = shared.settled[session.id]
-  if (mark !== undefined && mark.at >= session.lastActivity) return mark.settled
-  if (shared.settleAfterDays === null || shared.pinned[session.id] !== undefined || status === 'working' || status === 'waiting' || isSnoozed(shared, session, status, now)) return false
+  if (mark !== undefined && mark.at >= session.lastActivity) return mark.settled ? mark.at : ''
+  if (shared.settleAfterDays === null || shared.pinned[session.id] !== undefined || status === 'working' || status === 'waiting' || isSnoozed(shared, session, status, now)) return ''
   const until = Date.parse(shared.snoozed[session.id]?.until ?? '')
-  const quietSince = Math.max(Date.parse(session.lastActivity), until <= now ? until : 0)
-  return now - quietSince > shared.settleAfterDays * DAY_MS
+  const settlesAt = Math.max(Date.parse(session.lastActivity), until <= now ? until : 0) + shared.settleAfterDays * DAY_MS
+  return now > settlesAt ? new Date(settlesAt).toISOString() : ''
 }
 
 const markedNow = (): string => new Date().toISOString()

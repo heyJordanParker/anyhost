@@ -2,6 +2,21 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.3] - 2026-11-16
+
+### Changed
+- Menus answer the keyboard: Up and Down move, Right opens a submenu and Left closes it, Enter or Space picks, Escape steps back. A greyed-out item says why when you point at it, such as "Not while it works or waits for you".
+- The palette, the new-session picker and the projects list keep the selected row in view as you move through them with the keyboard. The keyboard ring around a row no longer nudges the rows beside it.
+- Tabs keep their width as you point at them and while you drag one, so the tab bar no longer shifts under the pointer.
+- The filter popup always shows Clear filters, greyed out until a filter is on, so picking the first filter no longer cuts the last row off.
+- Picking a workspace while its machine is still connecting opens it once the machine answers, instead of asking you to pick it again.
+- A missed refresh of your sessions shows only in the list's own "Can't reach anyhost" line, with no toast.
+
+### Fixed
+- The sidebar shows changes again within a second after anyhost restarts, as after an update. Until now each read after a restart waited 25 seconds until anyhost had seen as many changes as before it.
+- The Settled shelf orders a session that settled by itself by when it settled, counting from the end of a snooze it had, as anyhost settles it.
+- Choosing when idle sessions settle shows your earlier choice again when anyhost could not save the new one, and says why.
+
 ## [0.9.2] - 2026-11-16
 
 ### Fixed
