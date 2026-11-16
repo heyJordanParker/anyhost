@@ -2,6 +2,19 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.6] - 2026-11-16
+
+### Changed
+- A session turns Working the moment you press Enter, and Needs you the moment it asks, from Claude Code's own hooks, where the card waited for Claude Code's next status write.
+- The sidebar answers from memory, so a change shows within a quarter second, and a change on one of your machines shows on the others within a second.
+- Projects keep their place in the sidebar. A new project goes in once at the top, and you drag a project to move it.
+- With no session open, the work area shows Tabs and the layout buttons, with the workspace's recent sessions to pick from, where it showed the Board.
+- A session opens in a side panel, a popup or full screen, from Open in on its menu, and its title bar switches between them on the same terminal. A Board card opens in the side panel.
+- A Board card and a recent session show Opening from the click.
+
+### Fixed
+- Opening a session focuses it as soon as Herdr shows it. It could wait up to 25 seconds when the pane showed before anyhost answered.
+
 ## [0.9.5] - 2026-11-16
 
 ### Changed

@@ -303,6 +303,7 @@ export const postTo = async (socket: string, path: string, body: object): Promis
   const answer = await fetch(`http://localhost${path}`, { unix: socket, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
   return { status: answer.status, body: (await answer.json()) as Record<string, unknown> }
 }
+export const hookOn = (socket: string, event: string, folder: string, session = SESSION): ReturnType<typeof postTo> => postTo(socket, '/sessions/changed', { session, folder, event, at: new Date().toISOString() })
 export async function stepsOf(socket: string, until: ReadonlySet<string> = new Set(['moved', 'failed']), read: readonly string[] = []): Promise<{ readonly steps: string[]; readonly last: Moved }> {
   const steps = [...read]
   for (const started = Date.now(); Date.now() - started < 30_000; await Bun.sleep(10)) {
@@ -326,9 +327,9 @@ export async function runningOn(relay: MemoryRelay, device = LAPTOP, person: Rec
   mkdirSync(dirname(transcript), { recursive: true })
   writeFileSync(transcript, `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Plan the trip"}}\n`)
   const claude = spawnForTest(argv)
-  const status = (value: string): void => writeFileSync(join(home, '.claude', 'sessions', `${claude.pid}.json`), JSON.stringify({ pid: claude.pid, sessionId: SESSION, kind: 'interactive', cwd, status: value }))
+  const status = (value: string): void => writeFileSync(join(home, '.claude', 'sessions', `${claude.pid}.json`), JSON.stringify({ pid: claude.pid, sessionId: SESSION, kind: 'interactive', cwd, status: value, statusUpdatedAt: Date.now() }))
   status('idle')
-  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: cwd, event: 'sessionStart' })
+  await hookOn(laptop.socket, 'started', cwd)
   await until(async () => (await relay.claims()).get(SESSION) === device.id, 'the machine claiming the session', 15_000)
   await until(() => isIndexed(relay, device, SESSION), "the machine's index listing the session", 15_000)
   return { ...laptop, cwd, transcript, claude, status, child, logged }

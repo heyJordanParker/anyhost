@@ -2,6 +2,7 @@ import { Database } from 'bun:sqlite'
 import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
+import { Activity } from '../src/activity.ts'
 import { compressHot, journalOf, openCapture, openDatabase, QUIET_MS, recordSummary, relistSessions, seal, sealQuiet, untoldOf, writeIndex, type Capture } from '../src/capture.ts'
 import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Relay } from '../src/relay.ts'
@@ -262,7 +263,7 @@ test('the list of 50 sessions with 50 live terminals never holds the thread for 
   await relay.objects.put(`sessions/${mac.id}/index.json`, new TextEncoder().encode(JSON.stringify(sessions.map((id) => ({ ...entry, id })))))
   const terminals = new Map(sessions.map((session, at) => [session, `t${at}`]))
 
-  const loop = await eventLoopDuring(async () => await agentsOf(capture, await statusesHere(capture), terminals))
+  const loop = await eventLoopDuring(async () => await agentsOf(capture, await statusesHere(capture, new Activity()), terminals))
 
   expect(loop.value.agents.map(({ terminal }) => terminal).sort()).toEqual(sessions.map((_, at) => `t${at}`).sort())
   expect(loop.longestStallMs).toBeLessThan(100)

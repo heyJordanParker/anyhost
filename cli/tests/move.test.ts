@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { hotKey } from '../src/capture.ts'
 import { isPaused } from '../src/claude.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
-import { claimOn, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
+import { claimOn, hookOn, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
 
 const OTHER = '99999999-2222-3333-4444-555555555555'
 
@@ -71,7 +71,7 @@ test('a move of a session whose record still says busy after its turn ended, as 
   await workerOn(relay)
   const record = join(laptop.env['HOME'] ?? '', '.claude', 'sessions', `${laptop.claude.pid}.json`)
   writeFileSync(record, JSON.stringify({ pid: laptop.claude.pid, sessionId: SESSION, kind: 'interactive', cwd: laptop.cwd, status: 'busy', statusUpdatedAt: Date.now() - 60_000 }))
-  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: laptop.cwd })
+  await hookOn(laptop.socket, 'turnEnd', laptop.cwd)
 
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
   await stepsOf(laptop.socket, new Set(['waiting']))

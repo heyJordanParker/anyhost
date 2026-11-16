@@ -2,6 +2,7 @@ import { commands, defineMod, device, messageOf, sessions } from '../node_module
 import { program } from '../node_modules/@cmodjs/core/jobs/program.js'
 import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
 import { option } from '../node_modules/@cmodjs/core/options.js'
+import type { HookEvent } from '../relay/protocol.ts'
 import { agentTools } from './agents.js'
 import { askProgram, connectStep, FOLLOW_MS, initialState, machinesPage, NoAnswer, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
 
@@ -85,21 +86,26 @@ export const anyhost = defineMod({
       if (holder.move !== undefined && MOVING.has(holder.move.step)) follow()
       return holder
     }
-    const changed = (): Promise<void> =>
-      askProgram(mod, '/sessions/changed', { session: sessions.current.id, folder: sessions.current.cwd }).then(
-        () => undefined,
-        (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: 'warning' })),
-      )
+    const changed =
+      (event: HookEvent) =>
+      (): Promise<void> => {
+        const at = new Date().toISOString()
+        return askProgram(mod, '/sessions/changed', { session: sessions.current.id, folder: sessions.current.cwd, event, at }).then(
+          () => undefined,
+          (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: 'warning' })),
+        )
+      }
     sessions.current.onSessionStart(async () => {
       await check()
-      await changed()
+      await changed('started')()
     })
-    sessions.current.onSessionEnd(changed)
-    sessions.current.onTurnStart(changed)
-    sessions.current.onTurnEnd(changed)
-    sessions.current.onCwdChange(changed)
-    sessions.current.onNotification(changed)
-    commands.onRun({ name: 'rename' }, changed)
+    sessions.current.onSessionEnd(changed('ended'))
+    sessions.current.onTurnStart(changed('turnStart'))
+    sessions.current.onTurnEnd(changed('turnEnd'))
+    sessions.current.onElicitation(changed('asked'))
+    sessions.current.onNotification({ type: /^(permission_prompt|elicitation_dialog)$/ }, changed('asked'))
+    sessions.current.onCwdChange(changed('moved'))
+    commands.onRun({ name: 'rename' }, changed('renamed'))
     const continuesOn = (machine: string): string => `This session continues on ${machine}, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.`
     sessions.current.beforePrompt(
       async () => {

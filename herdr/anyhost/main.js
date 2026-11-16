@@ -5,6 +5,7 @@ import { createHash } from "crypto";
 
 const REFRESH_MS = 30_000;
 const FOLLOW_MS = 1000;
+const FOLLOW_GAP_MS = 250;
 const TICK_MS = 30_000;
 const LONG_MS = 600_000;
 const FRESH_MS = 48 * 3_600_000;
@@ -43,6 +44,22 @@ const CYCLED = MODES.map(([mode]) => mode).filter((mode) => mode !== "board");
 const SIDES = ["left", "right", "top"];
 const VIEW_NODE = { tabs: "main", board: "board", tiles: "tiles" };
 const WORKSPACE = { mode: "tabs", side: "left", ratio: 0.6, offset: 0, zoomed: null };
+const ALL_WORK = "anyhost-all";
+const START_MOST = 8;
+const START_WIDTH = 560;
+const FOCUS_STEP_MS = 50;
+const FOCUS_WAIT_MS = 60_000;
+const OPENING_SHOWN_MS = 60_000;
+const SHAPES = [
+  ["panel", "Side panel", `${OWN}/panel-right`],
+  ["popup", "Popup", `${OWN}/picture-in-picture-2`],
+  ["full", "Full screen", `${OWN}/maximize-2`],
+  ["tab", "Tab", `${OWN}/app-window`],
+];
+const TABS_WIDTH = "anyhost.tabsWidth";
+const PANEL_SHARE = 0.45;
+const POPUP_SHARE = 0.75;
+const PRESENT_FALLBACK_WIDTH = 1200;
 const RATIO_STEP = 0.05;
 const RATIO_MOST = 0.8;
 const RATIO_LEAST = 0.2;
@@ -103,6 +120,7 @@ const UI = {
   space: { xs: 4, sm: 8, md: 12, lg: 16, xl: 24 },
   radius: { pill: 4, control: 6, panel: 8 },
   dot: 8,
+  rule: 2,
   motion: { duration: 150, easing: "ease-out" },
 };
 const MOTION_TRAVEL = 40;
@@ -470,7 +488,7 @@ export default class Anyhost extends View {
     if (view === "tags") return this.initTags(cx);
     if (view === "new") return this.initNew(cx);
     if (view === "machines") return this.initMachines(cx);
-    if (view === "remove" || view === "delete") return;
+    if (view === "remove" || view === "delete" || view === "present") return;
     if (view === "palette") return this.initPalette(cx);
     if (view === "tabs") return this.initTabs(cx);
     if (view === "worktree") return this.initWorktree(cx);
@@ -504,6 +522,7 @@ export default class Anyhost extends View {
     if (view === "delete") return this.renderDelete(t);
     if (view === "palette") return this.renderPalette(t);
     if (view === "tabs") return this.renderTabs(t);
+    if (view === "present") return this.renderPresent(t);
     if (view === "worktree") return this.renderWorktree(t);
     return this.renderInbox(t, cx);
   }
@@ -649,6 +668,7 @@ export default class Anyhost extends View {
   follow(cx, isPolled) {
     if (!isPolled()) return cx.timer.after(FOLLOW_MS, (cx) => this.follow(cx, isPolled));
     const asked = ++this.refreshes;
+    const askedAt = Date.now();
     const wait = this.isFollowing ? ["--wait", String(this.version)] : [];
     cx.spawn(async (cx) => {
       try {
@@ -664,7 +684,7 @@ export default class Anyhost extends View {
         this.dataVersion++;
       }
       cx.notify();
-      cx.timer.after(this.isFollowing ? FOLLOW_MS : REFRESH_MS, (cx) => this.follow(cx, isPolled));
+      cx.timer.after(this.isFollowing ? Math.max(0, FOLLOW_GAP_MS - (Date.now() - askedAt)) : REFRESH_MS, (cx) => this.follow(cx, isPolled));
     });
   }
 
@@ -706,10 +726,10 @@ export default class Anyhost extends View {
     if (this.pending.size !== before) this.pendingVersion++;
     this.readAt = readAt;
     if (listed === this.listed && this.data !== null) return false;
-    const { here = "", machines: devices = [], agents: sessions, settleAfterDays = null, projectNames = {}, lastMachine, tags = {}, stages = [], version } = JSON.parse(listed);
+    const { here = "", machines: devices = [], agents: sessions, settleAfterDays = null, projectNames = {}, projectOrder = [], lastMachine, tags = {}, stages = [], version } = JSON.parse(listed);
     this.version = version;
     this.listed = listed;
-    this.data = { here, devices, sessions, settleAfterDays, projectNames, lastMachine, tags, stages };
+    this.data = { here, devices, sessions, settleAfterDays, projectNames, projectOrder, lastMachine, tags, stages };
     this.devices = new Map(devices.map((d) => [d.name, d]));
     this.dataVersion++;
     return true;
@@ -757,12 +777,13 @@ export default class Anyhost extends View {
     if (this.data === null || this.isTaking) return false;
     const filter = this.kind === "board" ? this.boardFilter() : filterOf();
     const live = this.liveInputs();
-    const signature = this.signatureOf(live, filter);
+    const isStart = this.kind === "board" && this.workNow().mode === "start";
+    const signature = `${this.signatureOf(live, filter)}|${isStart}`;
     if (signature === this.signature) return false;
     this.signature = signature;
     this.live = live;
     this.model = this.computeModel(live, filter);
-    if (this.kind === "board") this.board = this.boardOf(this.model, filter);
+    if (this.kind === "board") this.board = { ...this.boardOf(this.model, filter), isStart };
     else this.shown = this.shownOf(this.model, live, filter);
     return true;
   }
@@ -819,6 +840,20 @@ export default class Anyhost extends View {
       else names[key.slice(5)] = change.name;
     }
     return names;
+  }
+
+  orderNow() {
+    return this.pending.get("order")?.order ?? this.data?.projectOrder ?? [];
+  }
+
+  orderProjects(cx, shown) {
+    const order = this.orderNow();
+    const isShown = new Set(shown);
+    const placed = shown.filter((key) => order.includes(key));
+    let slot = 0;
+    const next = [...shown.filter((key) => !order.includes(key)), ...order.map((key) => (isShown.has(key) ? placed[slot++] : key))];
+    if (next.join("\0") === order.join("\0")) return;
+    this.change(cx, "order", { order: next }, () => anyhost(["organize", JSON.stringify([{ op: "orderProjects", projects: next }])]), "anyhost could not keep the order of your projects");
   }
 
   cardsNow() {
@@ -1012,6 +1047,9 @@ export default class Anyhost extends View {
       const checkouts = Object.fromEntries(onMachines.map((m) => [m, [...new Set(p.rows.filter((r) => r.machine === m).sort(byRecent).map((r) => r.checkout))]]));
       return { key: p.key, name: p.name, defaultName: p.defaultName, isNamed: p.isNamed, ...this.countsOf(p.rows), worktrees: p.key === NONE ? [] : this.worktreesOf(p), machines: onMachines, checkouts, newest: p.newest };
     });
+    const order = this.orderNow();
+    const placeOf = (p) => (p.key === NONE ? Infinity : order.indexOf(p.key));
+    listed.sort((a, b) => placeOf(a) - placeOf(b) || b.newest - a.newest);
     return { here, error: this.error, readAt: this.readAt, all: { ...this.countsOf(counted), overall: rows.filter((r) => !r.isOffline && r.state === "working").length + kidsWorking, machines: machinesListed }, projects: listed, workspaces: this.workspacesOf(rows), known: [...new Map(rows.filter((r) => !r.deleted && r.projectKey !== TEMPORARY).map((r) => [r.projectKey, { key: r.projectKey, name: r.projectName }])).values()] };
   }
 
@@ -1271,7 +1309,7 @@ export default class Anyhost extends View {
     if (this.opening.has(r.key)) return;
     if (r.archived) this.archive(cx, r, false);
     if (r.deleted) this.change(cx, r.key, { deleted: false }, async () => undefined, "");
-    this.launch(r, on ?? "", (at) => (this.focusing = at));
+    this.launch(r, on ?? "", (at) => this.focusWhenShown(at, r.title));
   }
 
   launch(r, on, opened) {
@@ -1313,7 +1351,7 @@ export default class Anyhost extends View {
     if (!pane) {
       const isParked = !terminals().find((x) => x.address === address)?.labels?.["herdr.space"];
       if (r && isParked) this.adopt(r);
-      this.focusing = address;
+      this.focusWhenShown(address, r?.title ?? address);
       return;
     }
     run("pane.focus", { terminal: address });
@@ -1342,6 +1380,31 @@ export default class Anyhost extends View {
     if (r.address) return run("terminal.peek", { terminal: r.address });
     if (this.opening.has(r.key)) return;
     this.launch(r, this.onOf(r.machine) ?? "", (at) => run("terminal.peek", { terminal: at }));
+  }
+
+  present(cx, r, shape) {
+    if (shape === "tab") {
+      this.closePresented();
+      return this.open(r, cx);
+    }
+    if (r.address) return this.showIn(r, r.address, shape);
+    if (this.opening.has(r.key)) return;
+    this.launch(r, this.onOf(r.machine) ?? "", (at) => this.showIn(r, at, shape));
+  }
+
+  showIn(r, address, shape) {
+    const frame = (find(layout(), "sidebar")?.hidden ? 0 : (this.sidebarWidth ?? 0)) + (shared(TABS_WIDTH) ?? PRESENT_FALLBACK_WIDTH);
+    const placed = shape === "full" ? { width: 1, height: 1, at: { x: 0, y: 0 } } : shape === "popup" ? { width: POPUP_SHARE, height: POPUP_SHARE } : { width: PANEL_SHARE, height: 1, at: { x: Math.round(frame * (1 - PANEL_SHARE)), y: 0 } };
+    const bar = { type: "block", size: { px: UI.height.row }, content: { mod: "anyhost", props: { view: "present", key: r.key, title: r.title, shape } } };
+    if (this.presented && this.presented.shape !== shape) closeOverlay(this.presented.id);
+    const id = openOverlay({ kind: "window", key: `anyhost-${shape}`, ...placed, layout: { type: "column", children: [bar, { type: "block", content: { terminal: address } }] } });
+    this.presented = { id, shape, key: r.key };
+    this.opening.delete(r.key);
+  }
+
+  closePresented() {
+    if (this.presented) closeOverlay(this.presented.id);
+    this.presented = null;
   }
 
   showHere(r, direction) {
@@ -1393,7 +1456,7 @@ export default class Anyhost extends View {
     const newest = [...held].sort(byRecent)[0];
     this.selecting = { space, until: Date.now() + 15_000 };
     if (held.some((r) => r.address || this.opening.has(r.key))) return;
-    if (newest) return this.launch(newest, on, (at) => (this.focusing = at));
+    if (newest) return this.launch(newest, on, (at) => this.focusWhenShown(at, newest.title));
     void hc(["run", "--bg", "--keep", "--no-parent", "--json", ...(on ? ["--on", on] : []), "--cwd", worktree.folder, "--label", `herdr.space=${id}`, "--", "sh", "-c", 'exec "${SHELL:-/bin/sh}" -l']);
   }
 
@@ -1445,7 +1508,12 @@ export default class Anyhost extends View {
   }
 
   focusOpened(terminal, on) {
-    this.focusing = this.openedAt(terminal, on);
+    this.focusWhenShown(this.openedAt(terminal, on), "the new session");
+  }
+
+  focusWhenShown(address, title) {
+    this.focusing = { address, title, until: Date.now() + FOCUS_WAIT_MS };
+    this.act((cx) => this.stepFocus(cx));
   }
 
   newSession() {
@@ -1511,9 +1579,10 @@ export default class Anyhost extends View {
           setShared(UNDO, null);
           this.organize(cx, undone.changes);
         }
-        const [, verb, id] = /^(open|menu|restore|unsettle|repin|wake)-(.+)$/.exec(command) ?? [];
+        const [, verb, id] = /^(open|menu|restore|unsettle|repin|wake|present-panel|present-popup|present-full)-(.+)$/.exec(command) ?? [];
         const r = id ? this.model?.rows.find((row) => row.key.startsWith(id)) : null;
         if (r && verb === "open") this.open(r, cx);
+        if (r && verb?.startsWith("present-")) this.present(cx, r, verb.slice("present-".length));
         if (r && verb === "menu") this.menu(r);
         if (r && verb === "restore") this.restore(cx, r);
         if (r && verb === "unsettle") this.unsettle(cx, r, this.takeUndone(r.key));
@@ -1555,6 +1624,12 @@ export default class Anyhost extends View {
       setShared(PULSE, { ...model.pulse, at: Date.now() });
     }
     this.publishDiscarded(model);
+    const order = this.orderNow();
+    const arrived = model.pulse.projects.filter((p) => p.key !== NONE && !order.includes(p.key)).map((p) => p.key);
+    if (arrived.length > 0 && arrived.join("\0") !== this.orderArrived) {
+      this.orderArrived = arrived.join("\0");
+      this.orderProjects(cx, arrived);
+    }
     const changed = shared(CHANGED) ?? 0;
     if (changed > this.changedAt) {
       this.changedAt = changed;
@@ -1579,9 +1654,9 @@ export default class Anyhost extends View {
     this.nameTabs(model);
     this.nameSpaces(model);
     this.stepMoves(live);
-    this.stepFocus();
+    this.stepFocus(cx);
     this.unzoomWhenLeft();
-    for (const [key, at] of this.opening) if (model.byKey.get(key)?.address || Date.now() - at > 60_000) this.opening.delete(key);
+    for (const [key, at] of this.opening) if (model.byKey.get(key)?.address || Date.now() - at > OPENING_SHOWN_MS) this.opening.delete(key);
     for (const [address, at] of this.launched) if (Date.now() - at > LAUNCHED_MS) this.launched.delete(address);
   }
 
@@ -1591,6 +1666,7 @@ export default class Anyhost extends View {
     if (asked.action === "startIn") return this.startIn(asked.project, cx, { machine: asked.machine ?? null, folder: asked.folder ?? null });
     if (asked.action === "startFolder") return this.startFolder(asked.machine, asked.folder, cx);
     if (asked.action === "organize") return this.organize(cx, asked.changes, asked.optimistic ?? []);
+    if (asked.action === "orderProjects") return this.orderProjects(cx, asked.order);
     if (asked.action === "board") return this.openBoard(asked.project ?? null);
     if (asked.action === "newHere") return this.newHere(cx);
     if (asked.action === "readProject") return (this.model?.rows ?? []).filter((r) => r.projectKey === asked.project.key && (!asked.worktree || sameWorktree(asked.worktree, { machine: r.machine, folder: r.checkout })) && r.isUnread && !r.archived).forEach((r) => this.markRead(cx, r));
@@ -1604,6 +1680,7 @@ export default class Anyhost extends View {
     const r = this.model?.byKey.get(asked.key);
     if (!r) return;
     if (asked.action === "open") return this.open(r, cx);
+    if (asked.action === "present") return this.present(cx, r, asked.shape);
     if (asked.action === "menu") return this.menu(r, asked.tabActions ?? null);
     if (asked.action === "peek") return this.peek(r);
     if (asked.action === "sleep") return r.address && hc(["label", r.address, `${SLEEP_LABEL}=${Date.now()}`]);
@@ -1769,14 +1846,23 @@ export default class Anyhost extends View {
     }
   }
 
-  stepFocus() {
-    const landed = this.focusing ? panes().find((p) => p.terminal === this.focusing) : undefined;
+  stepFocus(cx) {
+    const waiting = this.focusing;
+    const landed = waiting ? panes().find((p) => p.terminal === waiting.address) : undefined;
     if (landed) {
-      const address = this.focusing;
       this.focusing = null;
       const space = spaces().find((sp) => sp.tabs.some((x) => x.id === landed.tab))?.id;
       if (space && space !== focused()?.space) run("space.select", { id: space });
-      this.focusSession(address);
+      this.focusSession(waiting.address);
+    } else if (waiting && Date.now() > waiting.until) {
+      this.focusing = null;
+      notify({ title: `Herdr has not shown ${waiting.title.slice(0, 40)}`, body: `Its terminal ${waiting.address} runs, and no pane showed it within ${FOCUS_WAIT_MS / 1000} s.`, level: "error" });
+    } else if (waiting && !this.focusStep) {
+      this.focusStep = true;
+      cx.timer.after(FOCUS_STEP_MS, (cx) => {
+        this.focusStep = false;
+        this.stepFocus(cx);
+      });
     }
     if (this.selecting) {
       if (spaces().some((sp) => sp.id === this.selecting.space)) {
@@ -1964,6 +2050,7 @@ export default class Anyhost extends View {
       .id("anyhost")
       .track_focus(this.keys)
       .on_key_down((e, cx) => this.key(e, cx))
+      .on_size_change((size) => (this.sidebarWidth = size.width))
       .size_full()
       .min_h(0)
       .bg(t.chrome)
@@ -2195,7 +2282,7 @@ export default class Anyhost extends View {
     if (project !== filterOf().project) setFilter({ project });
     const active = spaces().find((sp) => sp.active) ?? null;
     const shown = (shared(PULSE)?.workspaces ?? []).find((w) => w.id === active?.id);
-    if (project === null || shown?.key === project) return changeWorkspace(active?.id, { mode: "board" });
+    if (project === null || shown?.key === project) return changeWorkspace(active?.id ?? ALL_WORK, { mode: "board" });
     const worktree = this.worktreeToShow(project, null);
     const on = worktree === null ? null : this.onOf(worktree.machine);
     if (on !== null) changeWorkspace(placedSpace(on, spaceOf(project, worktree.folder)), { mode: "board" });
@@ -2670,7 +2757,8 @@ export default class Anyhost extends View {
 
   initProjects(cx) {
     this.hovered = null;
-    this.picked = saved("picked", {});
+    this.pressed = null;
+    this.dropped = null;
     this.order = null;
     this.isPointerIn = false;
     this.cursor = null;
@@ -2679,7 +2767,6 @@ export default class Anyhost extends View {
     this.entries = [];
     this.projectsKey = "";
     this.projectsView = null;
-    this.pickedVersion = 0;
     this.refreshProjects();
     this.placeParts(cx);
     cx.spawn(async (cx) => {
@@ -2706,15 +2793,13 @@ export default class Anyhost extends View {
     const filter = filterOf();
     const isHolding = this.isPointerIn || this.keys.is_focused();
     const isNarrow = narrow();
-    const key = `${pulse?.at ?? ""}|${JSON.stringify(filter)}|${isHolding}|${isNarrow}|${this.pickedVersion}`;
+    const key = `${pulse?.at ?? ""}|${JSON.stringify(filter)}|${isHolding}|${isNarrow}|${this.order?.join("\0")}`;
     if (key === this.projectsKey) return false;
     this.projectsKey = key;
     if (!pulse) return false;
-    const rank = (p) => this.picked[p.key] ?? p.newest - 1e13;
-    const sorted = [...pulse.projects].sort((a, b) => (a.key === NONE) - (b.key === NONE) || rank(b) - rank(a));
-    if (!isHolding || this.order === null) this.order = sorted.map((p) => p.key);
+    if (!isHolding || this.order === null) this.order = pulse.projects.map((p) => p.key);
     const byKey = new Map(pulse.projects.map((p) => [p.key, p]));
-    const projects = [...this.order.map((key) => byKey.get(key)).filter(Boolean), ...sorted.filter((p) => !this.order.includes(p.key))];
+    const projects = [...this.order.map((key) => byKey.get(key)).filter(Boolean), ...pulse.projects.filter((p) => !this.order.includes(p.key))];
     this.entries = projects.flatMap((p) => [{ id: p.key, project: p, worktree: null }, ...(p.worktrees.length > 1 ? p.worktrees : []).map((w) => ({ id: `${p.key}\0${w.machine}\0${w.folder}`, project: p, worktree: w }))]);
     this.projectsView = { pulse, filter, projects, isNarrow, byId: new Map(this.entries.map((entry) => [entry.id, entry])) };
     return true;
@@ -2749,8 +2834,10 @@ export default class Anyhost extends View {
           .track_scroll(this.projectsScroll)
           .on_hover((on, cx) => {
             this.isPointerIn = on;
-            cx.notify();
+            if (!on) this.pressed = null;
+            this.redrawAll(cx);
           })
+          .on_mouse_up("left", (_e, cx) => this.dropProject(cx))
           .children(this.entries.map((entry) => this.partFor(entry.id, mounted, () => this.entryElement(t, entry)))),
       );
   }
@@ -2852,18 +2939,33 @@ export default class Anyhost extends View {
     const id = `project:${p.key}`;
     const hovered = this.hovered === id;
     const canStart = Object.values(p.checkouts ?? {}).some((list) => list.length > 0);
+    const pressed = this.pressed;
+    const isDragged = pressed?.isMoving === true && pressed.key === p.key;
+    const isTarget = pressed?.isMoving === true && pressed.over === p.key && pressed.key !== p.key && p.key !== NONE;
+    const dropsAbove = isTarget && this.order.indexOf(pressed.key) > this.order.indexOf(p.key);
     return this.item(`ah-${id}`)
       .cursor_pointer()
       .when(isSelected, (el) => el.bg(t.selected))
       .relative()
+      .opacity(isDragged ? 0.5 : 1)
+      .when(isTarget, (el) => el.child(div().absolute().left(0).right(0).h(UI.rule).bg(t.accent).when(dropsAbove, (bar) => bar.top(0)).when(!dropsAbove, (bar) => bar.bottom(0))))
       .when(this.isCursorOn(p.key), (el) => el.child(this.ring(t)))
       .hover((s) => s.bg(t.hover))
       .on_hover((on, cx) => {
         if (on) this.hovered = id;
         else if (this.hovered === id) this.hovered = null;
-        cx.notify();
+        if (on && this.pressed !== null && (this.pressed.key !== p.key || this.pressed.isMoving)) this.pressed = { ...this.pressed, over: p.key, isMoving: true };
+        this.redrawAll(cx);
       })
-      .on_click(() => this.pickProject(p))
+      .on_mouse_down("left", () => {
+        this.dropped = null;
+        if (p.key !== NONE) this.pressed = { key: p.key, over: p.key, isMoving: false };
+      })
+      .on_mouse_up("left", (_e, cx) => this.dropProject(cx))
+      .on_click(() => {
+        if (this.dropped === p.key) return void (this.dropped = null);
+        this.pickProject(p);
+      })
       .on_mouse_down("right", () => this.projectMenu(p, pulse))
       .child(this.mark(t, p.name, false, p.key === NONE))
       .child(div().flex_1().min_w(0).truncate().text_size(UI.text.body).font_medium().child(p.name))
@@ -2888,7 +2990,8 @@ export default class Anyhost extends View {
       .on_hover((on, cx) => {
         if (on) this.hovered = rowId;
         else if (this.hovered === rowId) this.hovered = null;
-        cx.notify();
+        if (on && this.pressed?.isMoving) this.pressed = { ...this.pressed, over: project.key };
+        this.redrawAll(cx);
       })
       .on_click(() => this.pickWorktree(project, worktree))
       .on_mouse_down("right", () => this.projectMenu(project, pulse, worktree))
@@ -2904,22 +3007,31 @@ export default class Anyhost extends View {
     openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: MENU_WIDTH * 2 + UI.space.sm, height: this.menuHeight(this.projectMenuGroups(shown)), props: shown });
   }
 
-  pick(key) {
-    this.cursor = null;
-    this.picked[key] = Date.now();
-    this.pickedVersion++;
-    save("picked", this.picked);
+  dropProject(cx) {
+    const pressed = this.pressed;
+    this.pressed = null;
+    if (pressed?.isMoving) this.dropped = pressed.key;
+    if (pressed?.isMoving && pressed.over !== pressed.key && pressed.over !== NONE) {
+      const order = this.order.filter((key) => key !== pressed.key);
+      const at = order.indexOf(pressed.over) + (this.order.indexOf(pressed.key) > this.order.indexOf(pressed.over) ? 0 : 1);
+      order.splice(at, 0, pressed.key);
+      this.order = order;
+      ask({ action: "orderProjects", order: order.filter((key) => key !== NONE) });
+      this.refreshProjects();
+      this.placeParts(cx);
+    }
+    this.redrawAll(cx);
   }
 
   pickProject(p) {
-    this.pick(p.key);
+    this.cursor = null;
     setFilter({ project: p.key, worktree: firstWorktreeOf(p.key) });
     ask({ action: "showProject", key: p.key, machine: null });
   }
 
   pickWorktree(p, w) {
     const worktree = { machine: w.machine, folder: w.folder };
-    this.pick(p.key);
+    this.cursor = null;
     setFilter({ project: p.key, worktree });
     ask({ action: "showWorkspace", key: p.key, worktree });
   }
@@ -2986,6 +3098,7 @@ export default class Anyhost extends View {
     this.renaming = null;
     this.board = null;
     this.groupBy = saved("groupBy", "stage");
+    this.opening = new Map();
     this.isAdding = false;
     this.adding = InputState.new({ placeholder: "Stage name" });
     this.adding.on("submit", (_e, cx) => {
@@ -3041,6 +3154,54 @@ export default class Anyhost extends View {
     };
   }
 
+  renderStart(t, board) {
+    const recent = [...board.cards].sort((a, b) => b.since - a.since).slice(0, START_MOST);
+    return v_flex()
+      .id("ah-start")
+      .size_full()
+      .items_center()
+      .overflow_y_scrollbar()
+      .bg(t.background)
+      .text_color(t.foreground)
+      .child(
+        v_flex()
+          .w_full()
+          .max_w(START_WIDTH)
+          .px(UI.space.lg)
+          .pt(UI.space.xl)
+          .gap(UI.space.sm)
+          .child(
+            h_flex()
+              .gap(UI.space.sm)
+              .items_center()
+              .child(div().flex_1().min_w(0).truncate().text_size(UI.text.title).font_semibold().child(board.name))
+              .child(this.choice(t, "ah-start-new", "New session", false, () => ask({ action: "newHere" }))),
+          )
+          .child(div().text_size(UI.text.caption).text_color(t.dim).child(recent.length === 0 ? "No sessions yet. Start one to see it here." : "No session is open. Pick one to continue it."))
+          .children(
+            recent.map((r) =>
+              this.item(`ah-start-${r.key}`)
+                .cursor_pointer()
+                .hover((s) => s.bg(t.hover))
+                .on_click(() => this.act(() => this.askOpen(r, "tab")))
+                .child(this.harnessIcon(t, r))
+                .child(div().flex_1().min_w(0).truncate().text_size(UI.text.body).child(r.title))
+                .child(div().flex_none().text_size(UI.text.caption).text_color(t.dim).child(since(r.since)))
+                .child(this.isAskedOpen(r) ? this.spinnerLabel(t, "Opening") : this.status(t, r)),
+            ),
+          ),
+      );
+  }
+
+  askOpen(r, shape) {
+    if (!r.address) this.opening.set(r.key, Date.now());
+    ask({ action: "present", key: r.key, shape });
+  }
+
+  isAskedOpen(r) {
+    return !r.address && Date.now() - (this.opening.get(r.key) ?? 0) < OPENING_SHOWN_MS;
+  }
+
   boardReconcile(cx) {
     const changed = shared(CHANGED) ?? 0;
     const isShown = this.isBoardShown();
@@ -3054,6 +3215,7 @@ export default class Anyhost extends View {
   renderBoard(t) {
     const board = this.board;
     if (board === null) return v_flex().size_full().bg(t.background).child(this.empty(t, "Reading your sessions…"));
+    if (board.isStart) return this.renderStart(t, board);
     const { model, cards } = board;
     const columns = board[this.groupBy];
     const projectName = board.name;
@@ -3252,7 +3414,7 @@ export default class Anyhost extends View {
       .on_click(() =>
         this.act(() => {
           if (this.dropped === r.key) return void (this.dropped = null);
-          ask({ action: "open", key: r.key });
+          this.askOpen(r, "panel");
         }),
       )
       .on_mouse_down("right", () => ask({ action: "menu", key: r.key }))
@@ -3263,7 +3425,7 @@ export default class Anyhost extends View {
           .gap(UI.space.xs)
           .flex_wrap()
           .items_center()
-          .child(this.status(t, r))
+          .child(this.isAskedOpen(r) ? this.spinnerLabel(t, "Opening") : this.status(t, r))
           .children(tags.map((tag) => this.chip(t, tag.name, this.tagColor(tag.color))))
           .child(div().flex_1())
           .child(div().min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(r.projectName)),
@@ -3368,6 +3530,7 @@ export default class Anyhost extends View {
         p.isFiltered ? { id: "all", icon: "layers", label: "Show all projects", filter: null } : { id: "only", icon: `${OWN}/list-filter`, label: `Filter by ${p.projectName}`, ask: { action: "filterProject" } },
       ],
       [
+        ...(!p.deleted ? [{ id: "open-in", icon: `${OWN}/panel-right`, label: "Open in", sub: SHAPES.map(([shape, label, icon]) => ({ id: `open-${shape}`, icon, label, ask: { action: "present", shape } })) }] : []),
         ...(p.canShowHere
           ? [
               { id: "here-right", icon: `${OWN}/columns-2`, label: "Show beside this pane", ask: { action: "showHere", direction: "right" } },
@@ -3723,6 +3886,60 @@ export default class Anyhost extends View {
     closeOverlay(overlay);
     if (name === project.name) return;
     ask({ action: "nameProject", project: project.key, name: name === "" || name === project.defaultName ? null : name });
+  }
+
+  renderPresent(t) {
+    const p = props();
+    const stop = (_e, cx) => cx.stop_propagation();
+    return h_flex()
+      .id("ah-present")
+      .size_full()
+      .px(UI.space.sm)
+      .gap(UI.space.xs)
+      .items_center()
+      .bg(t.chrome)
+      .border_b(1)
+      .border_color(t.border)
+      .text_color(t.foreground)
+      .child(div().flex_1().min_w(0).truncate().text_size(UI.text.body).font_medium().child(p.title))
+      .children(
+        SHAPES.map(([shape, label, icon]) =>
+          div()
+            .id(`ah-present-${shape}`)
+            .size(UI.height.inline)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .rounded(UI.radius.control)
+            .cursor_pointer()
+            .tooltip(label)
+            .when(shape === p.shape, (el) => el.bg(t.selected).text_color(t.foreground))
+            .when(shape !== p.shape, (el) => el.text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)))
+            .on_mouse_down("left", stop)
+            .on_click(() => {
+              if (shape !== p.shape) ask({ action: "present", key: p.key, shape });
+            })
+            .child(svg(iconPath(icon)).size(UI.icon.small)),
+        ),
+      )
+      .child(
+        div()
+          .id("ah-present-close")
+          .size(UI.height.inline)
+          .flex()
+          .flex_none()
+          .items_center()
+          .justify_center()
+          .rounded(UI.radius.control)
+          .cursor_pointer()
+          .tooltip("Close")
+          .text_color(t.dim)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_mouse_down("left", stop)
+          .on_click(() => closeOverlay(p.overlay))
+          .child(svg(`${ICON}/x.svg`).size(UI.icon.small)),
+      );
   }
 
   renderRename(t) {
@@ -4336,11 +4553,12 @@ export default class Anyhost extends View {
     const { workspace, space } = workPlace();
     const ps = panes();
     const list = (space?.tabs ?? []).flatMap((tab) => ps.filter((p) => p.tab === tab.id && p.terminal).map((p) => ({ tab: tab.id, terminal: p.terminal })));
-    const settings = workspaceOf(space?.id);
+    const settingsId = space?.id ?? workspace?.id ?? ALL_WORK;
+    const settings = workspaceOf(settingsId);
     const canTile = Boolean(find(layout(), "tiles")) && list.length > 0;
-    const mode = space === null ? "board" : TILED.has(settings.mode) && !canTile ? "tabs" : settings.mode;
+    const mode = space === null ? (settings.mode === "board" ? "board" : "start") : TILED.has(settings.mode) && !canTile ? "tabs" : settings.mode;
     const at = focused()?.terminal ?? null;
-    return { workspace, space, id: space?.id ?? null, list, terminals: list.map((c) => c.terminal), mode, settings, focused: list.some((c) => c.terminal === at) ? at : null };
+    return { workspace, space, id: space?.id ?? null, settingsId, list, terminals: list.map((c) => c.terminal), mode, settings, focused: list.some((c) => c.terminal === at) ? at : null };
   }
 
   tilesFor(work) {
@@ -4421,7 +4639,7 @@ export default class Anyhost extends View {
     }
     if (this.focusTarget !== null && !work.terminals.includes(this.focusTarget)) this.focusTarget = null;
     if (this.focusTarget !== null && TILED.has(work.mode) && !tileTerminals().includes(this.focusTarget) && this.bringIntoView(work, this.focusTarget)) return;
-    const node = work.mode === "tabs" ? VIEW_NODE.tabs : work.mode === "board" ? VIEW_NODE.board : VIEW_NODE.tiles;
+    const node = work.mode === "tabs" ? VIEW_NODE.tabs : work.mode === "board" || work.mode === "start" ? VIEW_NODE.board : VIEW_NODE.tiles;
     const shown = () => {
       if (find(layout(), "views")?.active !== node) run("layout.select", { stack: "views", child: node });
       if (this.focusTarget !== null && (!TILED.has(work.mode) || tileTerminals().includes(this.focusTarget))) {
@@ -4542,8 +4760,7 @@ export default class Anyhost extends View {
   }
 
   setMode(work, mode) {
-    if (work.id === null) return;
-    changeWorkspace(work.id, { mode, zoomed: null });
+    changeWorkspace(work.settingsId, { mode, zoomed: null });
     if (mode !== "board") this.focusTarget = work.focused;
   }
 
@@ -4567,6 +4784,7 @@ export default class Anyhost extends View {
       .on_size_change((size, cx) => {
         if (Math.abs(size.width - this.width) < 1) return;
         this.width = size.width;
+        setShared(TABS_WIDTH, Math.round(size.width));
         cx.notify();
       })
       .on_mouse_up("left", (_e, cx) => {
@@ -4595,7 +4813,7 @@ export default class Anyhost extends View {
           ].map(([id, label, icon]) => this.panelButton(t, id, label, icon, panels[id])),
         ),
       )
-      .when(isLoaded && hasViews && work.id !== null, (el) => el.child(h_flex().id("ah-modes").flex_none().gap(1).items_center().children(MODES.map(([mode, label, icon]) => this.modeButton(t, mode, label, icon, work)))))
+      .when(isLoaded && hasViews, (el) => el.child(h_flex().id("ah-modes").flex_none().gap(1).items_center().children(MODES.map(([mode, label, icon]) => this.modeButton(t, mode, label, icon, work)))))
       .when(hasButtons, (el) => el.child(this.iconButton(t, "ah-window-min", "minus", "Minimize", () => run("window.minimize"))).child(this.iconButton(t, "ah-window-max", "square", "Maximize", () => run("window.maximize"))).child(this.iconButton(t, "ah-window-close", "x", "Close", () => run("window.close"))));
   }
 
@@ -4638,7 +4856,7 @@ export default class Anyhost extends View {
   }
 
   modeButton(t, mode, label, icon, work) {
-    const isChosen = work.mode === mode;
+    const isChosen = (work.mode === "start" ? "tabs" : work.mode) === mode;
     const side = work.settings.side;
     const nextSide = SIDES[(SIDES.indexOf(side) + 1) % SIDES.length];
     const tooltip = mode === "master" && isChosen ? `Master on the ${side} at ${Math.round(work.settings.ratio * 100)}% · click for the ${nextSide}` : label;
@@ -4737,7 +4955,7 @@ export default class Anyhost extends View {
       .tooltip(tab.name)
       .relative()
       .opacity(isDragged ? 0.5 : 1)
-      .when(isDropTarget, (el) => el.child(div().absolute().top(0).bottom(0).w(2).bg(t.accent).when(droppedBefore, (bar) => bar.left(0)).when(!droppedBefore, (bar) => bar.right(0))))
+      .when(isDropTarget, (el) => el.child(div().absolute().top(0).bottom(0).w(UI.rule).bg(t.accent).when(droppedBefore, (bar) => bar.left(0)).when(!droppedBefore, (bar) => bar.right(0))))
       .when(isShown, (el) => el.bg(t.selected).text_color(t.foreground))
       .when(!isShown, (el) => el.text_color(isVisible ? t.foreground : t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)))
       .on_hover((on, cx) => {

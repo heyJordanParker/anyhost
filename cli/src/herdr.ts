@@ -23,8 +23,11 @@ import layoutGrid from '../../herdr/anyhost/icons/layout-grid.svg' with { type: 
 import layoutPanelLeft from '../../herdr/anyhost/icons/layout-panel-left.svg' with { type: 'text' }
 import listFilter from '../../herdr/anyhost/icons/list-filter.svg' with { type: 'text' }
 import mailOpen from '../../herdr/anyhost/icons/mail-open.svg' with { type: 'text' }
+import maximize from '../../herdr/anyhost/icons/maximize-2.svg' with { type: 'text' }
 import moon from '../../herdr/anyhost/icons/moon.svg' with { type: 'text' }
+import panelRight from '../../herdr/anyhost/icons/panel-right.svg' with { type: 'text' }
 import pencil from '../../herdr/anyhost/icons/pencil.svg' with { type: 'text' }
+import pictureInPicture from '../../herdr/anyhost/icons/picture-in-picture-2.svg' with { type: 'text' }
 import rows from '../../herdr/anyhost/icons/rows-2.svg' with { type: 'text' }
 import squareStack from '../../herdr/anyhost/icons/square-stack.svg' with { type: 'text' }
 import tag from '../../herdr/anyhost/icons/tag.svg' with { type: 'text' }
@@ -56,8 +59,11 @@ const ICONS: Record<string, string> = {
   'layout-panel-left.svg': layoutPanelLeft,
   'list-filter.svg': listFilter,
   'mail-open.svg': mailOpen,
+  'maximize-2.svg': maximize,
   'moon.svg': moon,
+  'panel-right.svg': panelRight,
   'pencil.svg': pencil,
+  'picture-in-picture-2.svg': pictureInPicture,
   'rows-2.svg': rows,
   'square-stack.svg': squareStack,
   'tag.svg': tag,

@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, symli
 import { dirname, join } from 'node:path'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSessions } from '../src/capture.ts'
 import { failTest, memoryRelay, noCode, until, welcomed } from './memory.ts'
-import { CLI, decoder, HOST, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, PASS_MS, postTo, problemsOn, ranAnHourAgo, roots, serveOn, SESSION, spawnForTest } from './program.ts'
+import { CLI, decoder, HOST, hookOn, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, PASS_MS, problemsOn, ranAnHourAgo, roots, serveOn, SESSION, spawnForTest } from './program.ts'
 
 test("a session whose first capture is over 1 MiB uploads in a job, and its working folder's code goes up after it with no later change", async () => {
   const relay = await memoryRelay()
@@ -18,7 +18,7 @@ test("a session whose first capture is over 1 MiB uploads in a job, and its work
   mkdirSync(dirname(transcript), { recursive: true })
   const progress = Array.from({ length: 2000 }, (_, at) => `{"type":"progress","cwd":"${cwd}","sessionId":"${SESSION}","line":${at},"text":"${'x'.repeat(1100)}"}\n`).join('')
   writeFileSync(transcript, `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Plan the trip"}}\n${progress}`)
-  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: cwd, event: 'sessionStart' })
+  await hookOn(laptop.socket, 'started', cwd)
   const paths = async (): Promise<string[]> => {
     const found: string[] = []
     for (const key of await relay.keys(`journals/${SESSION}/hot/`)) {

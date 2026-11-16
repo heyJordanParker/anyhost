@@ -49,7 +49,7 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost project-name <project> [<name>|--undo]
                                      name a project, by its owner/name key, on every machine, or go back to its own name
   anyhost pin <session> [--undo]     pin a session to the top of every machine's list, where it never settles by itself, or unpin it
-  anyhost organize '<json list>'     change tags and stages every machine shows: defineTag, dropTag, tagSession, defineStages, stageSession
+  anyhost organize '<json list>'     change the tags, stages and project order every machine shows: defineTag, dropTag, tagSession, defineStages, stageSession, orderProjects
   anyhost visit <session> [--at <time>]
                                      mark a session read on every machine up to now or that ISO time, earlier than its last turn marks it unread
   anyhost delete <session>           stop a session and delete its files on the machine that holds it; Deleted lists it, and opening it brings it back

@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { statusOf } from '../src/claude.ts'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, isUploaded, LAPTOP, machineFor, postTo, runningOn, serveOn, SESSION, spawnForTest, temporaryFolder, WORKER, workerOn } from './program.ts'
+import { anyhostOn, hookOn, isUploaded, LAPTOP, machineFor, postTo, runningOn, serveOn, SESSION, spawnForTest, temporaryFolder, WORKER, workerOn } from './program.ts'
 
 test('a session whose record says busy after its turn ended, as while its background agents run, reads working from /agents and from statusOf', async () => {
   const relay = await memoryRelay()
@@ -14,7 +14,7 @@ test('a session whose record says busy after its turn ended, as while its backgr
     ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; status: string }[] }).agents.find(({ id }) => id === SESSION)?.status
   await until(async () => (await statusOfSession()) !== undefined, 'the session listed')
 
-  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: laptop.cwd })
+  await hookOn(laptop.socket, 'turnEnd', laptop.cwd)
 
   expect(await statusOfSession()).toBe('working')
   expect(await statusOf(claudeHome, SESSION)).toBe('working')
@@ -70,35 +70,49 @@ test("a change Claude Code reports, a new session, a /rename and a /cd alike, re
   const waiting = listed(before.version)
   expect(await Promise.race([waiting.then(() => 'answered'), Bun.sleep(500).then(() => 'waiting')])).toBe('waiting')
 
-  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: cwd })
+  await hookOn(laptop.socket, 'started', cwd)
   expect((await waiting).version).not.toBe(before.version)
   await until(async () => (await session())?.title === 'Plan the trip', 'the new session listed', 3000)
 
   appendFileSync(transcript, `{"type":"custom-title","customTitle":"Trip to Lisbon","sessionId":"${SESSION}"}\n`)
-  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: cwd })
+  await hookOn(laptop.socket, 'renamed', cwd)
   await until(() => isUploaded(relay, SESSION, 'Trip to Lisbon'), 'the rename uploaded', 3000)
   await until(async () => (await session())?.title === 'Trip to Lisbon', 'the rename listed', 3000)
 
-  await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: moved })
+  await hookOn(laptop.socket, 'moved', moved)
   expect((await session())?.cwd).toBe(moved)
 }, 60_000)
 
-test('a list read reads the machines no second time, so it costs the relay one round trip of reads', async () => {
+type Listed = { readonly agents: readonly { readonly id: string; readonly archived: boolean }[] }
+const agentsOn = async (socket: string): Promise<Listed> => (await (await fetch('http://localhost/agents', { unix: socket })).json()) as Listed
+
+test('a list read after the first answers from memory, waiting on no relay read however slow the relay is', async () => {
   const relay = await memoryRelay()
-  const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 3600 })
-  await serveOn(laptop.env)
-  await until(() => relay.isConnected(LAPTOP.id), 'the laptop connecting')
-  const agents = async (): Promise<void> => void (await (await fetch('http://localhost/agents', { unix: laptop.socket })).text())
-  await agents()
-  const asked: string[] = []
-  relay.before = (op) => {
-    asked.push(op.op)
-    return undefined
-  }
+  const laptop = await runningOn(relay)
+  await agentsOn(laptop.socket)
+  relay.delayMs = 3000
 
-  await agents()
+  const started = Date.now()
+  const listed = await agentsOn(laptop.socket)
+  const tookMs = Date.now() - started
 
-  expect(asked.filter((op) => op === 'devices')).toEqual([])
+  expect(listed.agents.map(({ id }) => id)).toEqual([SESSION])
+  expect(tookMs).toBeLessThan(500)
+}, 60_000)
+
+test('an archive shows in the next list read from what the program wrote, waiting on no read of shared.json however slow the relay is', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  await agentsOn(laptop.socket)
+  await postTo(laptop.socket, '/agents/archive', { session: SESSION, archived: true })
+  relay.delayMs = 3000
+
+  const started = Date.now()
+  const listed = await agentsOn(laptop.socket)
+  const tookMs = Date.now() - started
+
+  expect(listed.agents.find(({ id }) => id === SESSION)?.archived).toBe(true)
+  expect(tookMs).toBeLessThan(500)
 }, 60_000)
 
 test('a list read that waits with the version of a program since restarted answers at once, so the sidebar follows the new program without waiting out each read', async () => {
@@ -107,7 +121,7 @@ test('a list read that waits with the version of a program since restarted answe
   const first = await serveOn(laptop.env)
   await until(() => relay.isConnected(LAPTOP.id), 'the laptop connecting')
   const versionOf = async (after?: string): Promise<string> => ((await (await fetch(`http://localhost/agents${after === undefined ? '' : `?after=${encodeURIComponent(after)}`}`, { unix: laptop.socket })).json()) as { version: string }).version
-  for (let n = 0; n < 3; n += 1) await postTo(laptop.socket, '/sessions/changed', { session: SESSION, folder: laptop.env['HOME'] ?? '' })
+  for (let n = 0; n < 3; n += 1) await hookOn(laptop.socket, 'turnEnd', laptop.env['HOME'] ?? '')
   const before = await versionOf()
 
   first.child.kill('SIGKILL')

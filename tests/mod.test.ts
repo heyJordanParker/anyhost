@@ -90,7 +90,7 @@ test('a session resumed from a machine that was not connected names that machine
   ])
 })
 
-test("a session's start, end, turn start and end, notification, folder change and /rename each tell the program the session and its folder, at once", async () => {
+test("a session's start, end, turn start and end, permission prompt, folder change and /rename each tell the program the event, the session and its folder, at once", async () => {
   const tested = testMod(anyhost, { files: instance })
   const posted: string[] = []
   tested.fakes.process.spawn = () => held()
@@ -109,7 +109,9 @@ test("a session's start, end, turn start and end, notification, folder change an
   await tested.raise.onSessionEnd({ reason: 'exit' })
   await tested.settle()
 
-  expect(posted).toEqual(Array.from({ length: 8 }, () => JSON.stringify({ session: 'test-session', folder: '/test/plugins/anyhost' })))
+  const bodies = posted.map((body) => JSON.parse(body) as { session: string; folder: string; event: string; at: string })
+  expect(bodies.map(({ event }) => event)).toEqual(['started', 'turnStart', 'turnEnd', 'moved', 'asked', 'renamed', 'ended'])
+  expect(bodies.every(({ session, folder, at }) => session === 'test-session' && folder === '/test/plugins/anyhost' && !Number.isNaN(Date.parse(at)))).toBe(true)
 })
 
 test('a session this device holds, or no device claims, takes prompts', async () => {

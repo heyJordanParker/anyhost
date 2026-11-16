@@ -2,17 +2,19 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { Activity } from './activity.ts'
 import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
-import { loginEnvironment, markersIn, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, statusOf as sessionStatusOf, statusOfRecord, stopCopy, type OnRecordsChange } from './claude.ts'
+import { loginEnvironment, markersIn, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
 import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { installHerdr, PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
-import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type RelayState } from './relay.ts'
-import { agentsOf } from './sessions.ts'
-import { archive, isArchived, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, sharedOf, snooze, updateShared, visit, type Organize } from './shared.ts'
+import { activityOf, deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
+import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type RelayState, type Written } from './relay.ts'
+import { HOOK_EVENTS, type AgentStatus, type HookEvent, type Routed } from '../../relay/protocol.ts'
+import { agentsOf, indexesIn, indexKeyOf, type ListRead } from './sessions.ts'
+import { archive, isArchived, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, type Organize } from './shared.ts'
 import { copyT3Marks } from './t3.ts'
 import { codexState, filesUnder, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
 
@@ -70,6 +72,7 @@ const WATCHER_MS = 10_000
 const RUNNING_MS = 2000
 const STATUSES_FRESH_MS = 10_000
 const STATUSES_KEPT_MS = 120_000
+const LIST_FRESH_MS = 5000
 const LIST_WAIT_MS = 25_000
 const STOP_MS = Number(process.env['ANYHOST_STOP_MS'] ?? 8 * 60 * 60_000)
 const DISCARD_EVERY_MS = Math.min(30_000, STOP_MS / 4)
@@ -293,6 +296,7 @@ type JobLine = {
   readonly again?: readonly (readonly [string, readonly string[]])[]
   readonly upkeep?: Upkeep
   readonly rewrote?: boolean
+  readonly written?: Written
   readonly error?: string
 }
 
@@ -327,6 +331,7 @@ export async function work(device: Device): Promise<void> {
   }
   const roots = rootsHere()
   const relay = connectRelay({ login: async () => job.login, forget: async () => undefined, device, roots, isPatient: true })
+  relay.on('written', (written) => say({ written }))
   const capture = openCapture(relay, device, roots, { readsCode: false, onReleased: (session, holder) => say({ released: [session, holder] }) })
   capture.dataFolders = job.dataFolders
   const problems: Problems = { set: (key, error) => say({ problem: key, message: error instanceof Error ? error.message : String(error) }), clear: (key) => say({ clear: key }) }
@@ -414,6 +419,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     sessionsChanges += 1
     for (const wake of versionWaits) wake()
   }
+  let activityChanged = (): void => undefined
+  let announceWrite: (written: Written) => void = () => undefined
   const changedAfter = (version: string): Promise<void> =>
     version !== sessionsVersion()
       ? Promise.resolve()
@@ -438,6 +445,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       if (said.problem !== undefined) problems.set(said.problem, said.message)
       if (said.clear !== undefined) problems.clear(said.clear)
       if (said.released !== undefined) capture.onReleased(...said.released)
+      if (said.written !== undefined) announceWrite(said.written)
       if (said.left !== undefined || said.upkeep !== undefined) answer = said
       if (said.error !== undefined) failure = said.error
     }
@@ -531,19 +539,21 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     flush: (session, signal, onRelay) => queue.flush(session, signal, onRelay),
     onRecordsChange,
     opening: new Map(),
+    activity: new Activity(),
   }
   const noteChildren = noteWaiting(capture, mover)
   const archivedBusy = new Set<string>()
   let closingSettled = Promise.resolve()
   const closeSettled = async (): Promise<void> => {
     for (const session of archivedBusy) {
-      const status = await sessionStatusOf(capture.roots.claudeHome, session)
+      const status = await activityOf(capture, mover.activity, session)
       if (status === 'working' || status === 'waiting') continue
       archivedBusy.delete(session)
       await stopCopy(capture.roots.claudeHome, session)
     }
   }
   const recordsChanged = (): void => {
+    activityChanged()
     noteChildren()
     labelNow()
     if (archivedBusy.size > 0) closingSettled = closingSettled.then(() => settle('archived', () => closeSettled()))
@@ -552,7 +562,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   const archiveSession = async (asked: string, archived: boolean): Promise<void> => {
     const id = await sessionOf(capture, asked)
-    const status = await sessionStatusOf(capture.roots.claudeHome, id)
+    const status = await activityOf(capture, mover.activity, id)
     const isBusy = status === 'working' || status === 'waiting'
     if (archived && isBusy) archivedBusy.add(id)
     else archivedBusy.delete(id)
@@ -595,7 +605,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         await killTerminal(address)
         continue
       }
-      if (record === undefined || statusOfRecord(record.status) !== 'idle') continue
+      if (record === undefined || mover.activity.of(record) !== 'idle') continue
       const since = record.statusSince ?? now
       const isAsked = Number(terminal.labels[SLEEP_LABEL] ?? 0) > since
       if (isAsked || (!isShown(terminal.labels, now) && now - since >= STOP_MS)) await stopCopy(roots.claudeHome, session)
@@ -905,7 +915,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const closeArchived = async (): Promise<void> => {
     const settled = []
     for (const session of sessionTerminals().keys()) {
-      const status = await sessionStatusOf(capture.roots.claudeHome, session)
+      const status = await activityOf(capture, mover.activity, session)
       if (status !== 'working' && status !== 'waiting') settled.push(session)
     }
     if (settled.length === 0) return
@@ -976,21 +986,101 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     const machines = [...devices.values()].filter((device) => device.removedAt === undefined)
     return { shared, devices, machines: machines.map((machine) => ({ ...machine, herdr: reachedAt(reached, shared.reach[machine.id])?.name ?? null })) }
   }
-  const revalidating = <T,>(read: () => Promise<T>, what: string): (() => Promise<T>) => {
+  const readFailed = (what: string) => (error: unknown) => console.error(`${new Date().toISOString()} anyhost could not read ${what}: ${error instanceof Error ? error.message : String(error)}`)
+  const revalidating = <T,>(read: () => Promise<T>, what: string, signatureOf: (value: T) => string): (() => Promise<T>) => {
     let kept: { readonly value: T; readonly at: number } | undefined
     let reading: Promise<T> | undefined
     const again = (): Promise<T> =>
       (reading ??= read()
-        .then((value) => (kept = { value, at: Date.now() }).value)
+        .then((value) => {
+          const isChanged = kept !== undefined && signatureOf(kept.value) !== signatureOf(value)
+          kept = { value, at: Date.now() }
+          if (isChanged) sessionsChanged()
+          return value
+        })
         .finally(() => (reading = undefined)))
     return async () => {
       if (kept === undefined || Date.now() - kept.at > STATUSES_KEPT_MS) return await again()
-      if (Date.now() - kept.at > STATUSES_FRESH_MS) again().catch((error: unknown) => console.error(`anyhost could not read ${what}: ${error instanceof Error ? error.message : String(error)}`))
+      if (Date.now() - kept.at > STATUSES_FRESH_MS) again().catch(readFailed(what))
       return kept.value
     }
   }
-  const machinesForList = revalidating(machinesListed, 'the machines')
-  const statusesOfOthers = revalidating(() => statusesElsewhere(capture), "the other machines' sessions")
+  const machinesForList = revalidating(machinesListed, 'the machines', ({ machines }) => JSON.stringify(machines))
+  const othersStatuses = new Map<string, { readonly statuses: Readonly<Record<string, AgentStatus>>; readonly at: number }>()
+  const statusesOfOthers = revalidating(
+    async () => {
+      const started = Date.now()
+      const answered = await statusesElsewhere(capture)
+      for (const [id, kept] of othersStatuses) if (!answered.has(id) && kept.at < started) othersStatuses.delete(id)
+      for (const [id, statuses] of answered) if ((othersStatuses.get(id)?.at ?? 0) < started) othersStatuses.set(id, { statuses, at: started })
+      return answered
+    },
+    "the other machines' sessions",
+    (answered) => JSON.stringify([...answered]),
+  )
+  const statusesElsewhereNow = async (): Promise<Record<string, AgentStatus>> => {
+    await statusesOfOthers()
+    return Object.assign({}, ...[...othersStatuses.values()].map(({ statuses }) => statuses)) as Record<string, AgentStatus>
+  }
+  let listKeys: readonly string[] = []
+  let listReadAt = 0
+  let listReading: Promise<void> | undefined
+  let isListReadAgain = false
+  const readList = (keys: readonly string[]): Promise<void> => {
+    if (listReading !== undefined) {
+      isListReadAgain = true
+      return listReading
+    }
+    listReading = (async () => {
+      do {
+        isListReadAgain = false
+        const before = relay.cached(keys)
+        await relay.read(keys)
+        listReadAt = Date.now()
+        if (relay.cached(keys).some((read, at) => read !== before[at])) sessionsChanged()
+      } while (isListReadAgain)
+    })().finally(() => (listReading = undefined))
+    return listReading
+  }
+  const listOf = async (devices: ListRead['devices']): Promise<ListRead> => {
+    const others = [...devices.keys()].filter((id) => id !== device.id)
+    const keys = [SHARED_KEY, ...others.map(indexKeyOf)]
+    listKeys = keys
+    if (relay.cached(keys).some((read) => read === undefined)) await readList(keys)
+    else if (Date.now() - listReadAt > LIST_FRESH_MS) readList(keys).catch(readFailed('the session lists'))
+    const [shared, ...indexes] = relay.cached(keys)
+    return { devices, indexes: indexesIn(others, indexes), shared: sharedIn(shared) }
+  }
+  const heardFrom = new Set<string>()
+  const tellOthers = (message: (to: string) => Routed): void =>
+    void machinesForList()
+      .then(({ machines }) => {
+        for (const id of new Set([...machines.map((machine) => machine.id), ...heardFrom])) if (id !== device.id) relay.send(message(id))
+      })
+      .catch(readFailed('the machines'))
+  for (const kind of ['list', 'stored', 'statuses'] as const) relay.on(kind, ({ from }) => void heardFrom.add(from.id))
+  let toldStatuses = ''
+  const tellStatuses = async (): Promise<void> => {
+    const statuses = await statusesHere(capture, mover.activity)
+    const told = JSON.stringify(statuses)
+    if (told === toldStatuses) return
+    toldStatuses = told
+    tellOthers((to) => ({ t: 'statuses', to, statuses }))
+  }
+  activityChanged = () => void tellStatuses().catch(readFailed('the sessions here'))
+  announceWrite = ({ key, etag }) => {
+    if (key === SHARED_KEY || key === indexKeyOf(device.id)) tellOthers((to) => ({ t: 'stored', to, key, etag }))
+  }
+  relay.on('written', (written) => announceWrite(written))
+  relay.on('stored', ({ key, etag }) => {
+    const kept = relay.cached([key])[0]
+    if ((kept !== undefined && 'etag' in kept && kept.etag === etag) || !listKeys.includes(key)) return
+    readList(listKeys).catch(readFailed('the session lists'))
+  })
+  relay.on('statuses', ({ from, statuses }) => {
+    othersStatuses.set(from.id, { statuses, at: Date.now() })
+    sessionsChanged()
+  })
   const failed = (status: number, error: unknown): Response => Response.json({ message: error instanceof Error ? error.message : String(error) }, { status })
   const throughRelay = async (work: () => Promise<unknown>): Promise<Response> => {
     const { state } = relay
@@ -1030,8 +1120,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     readonly changes?: readonly Organize[]
     readonly window?: string
     readonly terminals?: readonly string[]
+    readonly event?: string
   }
-  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, skip = 0, sleep = false, place = 'focus', sender = '', apiToken, target = '', archived = true, settled = true, until, pinned = true, settleAfterDays, project = '', name, at = '', changes = [], window = '', terminals: onScreen = [] }: Asked): Promise<Response> => {
+  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, skip = 0, sleep = false, place = 'focus', sender = '', apiToken, target = '', archived = true, settled = true, until, pinned = true, settleAfterDays, project = '', name, at = '', changes = [], window = '', terminals: onScreen = [], event = '' }: Asked): Promise<Response> => {
     switch (pathname) {
       case '/connect': {
         if (connecting?.view.is === 'running') return Response.json(connecting.view)
@@ -1080,6 +1171,13 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           showAgent(capture, session, place as Place, mover, async (id) => (await machinesListed()).machines.find((machine) => machine.id === id)?.herdr ?? null),
         ).catch((error: unknown) => failed(400, error))
       case '/sessions/changed': {
+        if (!(HOOK_EVENTS as readonly string[]).includes(event)) return failed(400, `/sessions/changed takes event, one of ${HOOK_EVENTS.join(', ')}, not ${JSON.stringify(event)}.`)
+        if (Number.isNaN(Date.parse(at))) return failed(400, `/sessions/changed takes at, the ISO time its hook fired, not ${JSON.stringify(at)}.`)
+        if (mover.activity.hear(session, event as HookEvent, Date.parse(at))) {
+          sessionsChanged()
+          activityChanged()
+        }
+        if (event === 'asked') noteChildren()
         await recordFolder(capture.db, session, folder)
         queueFiles(await changedFiles(capture, 0, session))
         const transcript = journalOf(capture.db, session) === undefined ? transcriptOf(capture.roots.claudeHome, session) : undefined
@@ -1220,8 +1318,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         if (after !== null) await changedAfter(after)
         return await throughRelay(async () => {
           const version = sessionsVersion()
-          const [elsewhere, here, { devices, machines }] = await Promise.all([statusesOfOthers(), statusesHere(capture), machinesForList()])
-          return { ...(await agentsOf(capture, { ...elsewhere, ...here }, sessionTerminals(), devices)), here: device.id, machines, version }
+          const [elsewhere, here, { devices, machines }] = await Promise.all([statusesElsewhereNow(), statusesHere(capture, mover.activity), machinesForList()])
+          return { ...(await agentsOf(capture, { ...elsewhere, ...here }, sessionTerminals(), await listOf(devices))), here: device.id, machines, version }
         })
       }
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]

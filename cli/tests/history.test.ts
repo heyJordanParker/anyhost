@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { dirname, join } from 'node:path'
 import zlib from 'node:zlib'
 import plugin from '../../.claude-plugin/plugin.json'
+import { Activity } from '../src/activity.ts'
 import { chunkKey, compressHot, decompress, encodeRecord, hotKey, indexForkStarts, journalOf, openCapture, openDatabase, piecesOf, QUIET_MS, relistSessions, REWRITE_OPS_PER_DAY, rewriteJournal, rewriteNext, rewriteProgress, seal, sealQuiet, sha256, UNREAD_FLEET, writeIndex, type Capture, type IndexedSession, type RecordHeader } from '../src/capture.ts'
 import { machinesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { forkAgent, type MoveHere } from '../src/move.ts'
@@ -25,6 +26,7 @@ function moverOf(capture: Capture): MoveHere {
     problems: failTest,
     checkouts: '',
     opening: new Map(),
+    activity: new Activity(),
     onRecordsChange: () => () => undefined,
     queue: (session, _tool, path) => void queued.set(session, (queued.get(session) ?? new Set()).add(path)),
     flush: async (session) => {

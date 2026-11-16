@@ -56,7 +56,8 @@ export type RelayState =
   | { readonly is: 'connecting' }
   | { readonly is: 'connected'; readonly welcome: Welcome }
   | { readonly is: 'unjoined' | 'offline' | 'refused' | 'outdated'; readonly message: string }
-type Events = { readonly welcome: Welcome; readonly released: Released; readonly claimed: Claimed; readonly offline: Offline; readonly claiming: Claiming } & {
+export type Written = { readonly key: string; readonly etag: string }
+type Events = { readonly welcome: Welcome; readonly released: Released; readonly claimed: Claimed; readonly offline: Offline; readonly claiming: Claiming; readonly written: Written } & {
   readonly [T in Delivered['t']]: Extract<Delivered, { readonly t: T }>
 }
 
@@ -68,6 +69,7 @@ export type Relay = {
   list(prefix: string): Promise<Listed[]>
   getObject(key: string): Promise<Got | undefined>
   read(keys: readonly string[]): Promise<Read[]>
+  cached(keys: readonly string[]): (Read | undefined)[]
   send(message: Routed | Heard): boolean
   on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): () => void
   reconnect(): void
@@ -414,24 +416,30 @@ export function connectRelay(options: RelayOptions): Relay {
     return found === 'missing' ? undefined : found
   }
 
-  const known = new Map<string, Got>()
+  const known = new Map<string, Read>()
   const read = (keys: readonly string[]): Promise<Read[]> => {
     const answers = run(keys.map((key): Call => {
-      const etag = known.get(key)?.etag
-      return { op: 'get', key, ...(etag === undefined ? {} : { if: { noneMatch: etag } }) }
+      const kept = known.get(key)
+      return { op: 'get', key, ...(kept === undefined || !('etag' in kept) ? {} : { if: { noneMatch: kept.etag } }) }
     }))
     return Promise.all(
       answers.map(async (answer, at): Promise<Read> => {
         const key = keys[at] ?? ''
         const result = (await answer) as RanOf<'get'>
         const kept = known.get(key)
-        if (result.status === 304 && kept !== undefined) return kept
+        if (result.status === 304 && kept !== undefined && 'etag' in kept) return kept
         if (result.status === 304) throw new Error(`The relay answered that ${key} did not change, and anyhost has no copy of it.`)
-        if (result.status === 404) known.delete(key)
-        else known.set(key, result)
+        if (kept?.status === 404 && result.status === 404) return kept
+        known.set(key, result)
         return result
       }),
     )
+  }
+  const keptWrite = (call: Call, ran: Ran): Ran => {
+    if (call.op !== 'put' || ran.status !== 200 || !('etag' in ran)) return ran
+    if (known.has(call.key)) known.set(call.key, { status: 200, etag: ran.etag, size: call.bytes.length, bytes: call.bytes })
+    emit('written', { key: call.key, etag: ran.etag })
+    return ran
   }
 
   const run = (calls: readonly Call[]): Promise<Ran>[] => {
@@ -456,7 +464,7 @@ export function connectRelay(options: RelayOptions): Relay {
           if ('error' in result) throw new Error(result.message)
           if (result.status === 413 && call.op === 'get' && 'etag' in result && result.etag === call.if?.noneMatch) return { status: 304, etag: result.etag }
           if (result.status === 413 && call.op === 'get') return (await getObject(call.key)) ?? { status: 404 }
-          return written(call, result as Ran)
+          return keptWrite(call, written(call, result as Ran))
         })
       }
       batch = []
@@ -468,7 +476,7 @@ export function connectRelay(options: RelayOptions): Relay {
     }
     for (const [position, call] of calls.entries()) {
       if (call.op === 'put' && call.bytes.length > MAX_MESSAGE_BYTES) {
-        answers[position] = putObject(call)
+        answers[position] = putObject(call).then((ran) => keptWrite(call, ran))
         continue
       }
       const size = call.op === 'put' ? call.bytes.length : 0
@@ -503,6 +511,7 @@ export function connectRelay(options: RelayOptions): Relay {
     },
     getObject,
     read,
+    cached: (keys) => keys.map((key) => known.get(key)),
     send(message) {
       if (state.is !== 'connected' || socket === undefined || isLate()) return false
       socket.send(JSON.stringify(message))

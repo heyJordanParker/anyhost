@@ -122,7 +122,11 @@ export type Routed =
   | { readonly t: 'forked'; readonly id: string; readonly to: string; readonly error: string }
   | { readonly t: 'list'; readonly id: string; readonly to: string }
   | { readonly t: 'listed'; readonly id: string; readonly to: string; readonly statuses: Readonly<Record<string, AgentStatus>> }
+  | { readonly t: 'stored'; readonly to: string; readonly key: string; readonly etag: string }
+  | { readonly t: 'statuses'; readonly to: string; readonly statuses: Readonly<Record<string, AgentStatus>> }
 export type AgentStatus = 'working' | 'idle' | 'waiting'
+export const HOOK_EVENTS = ['started', 'turnStart', 'asked', 'turnEnd', 'ended', 'moved', 'renamed'] as const
+export type HookEvent = (typeof HOOK_EVENTS)[number]
 export type Message = { readonly role: 'user' | 'assistant'; readonly at: string; readonly text: string }
 export type Delivered = Routed & { readonly from: DeviceRef }
 export type Offline = { readonly t: 'offline'; readonly id?: string; readonly to: string }

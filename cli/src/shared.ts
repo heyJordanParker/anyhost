@@ -1,6 +1,6 @@
 import type { AgentStatus } from '../../relay/protocol.ts'
 import type { IndexedSession } from './capture.ts'
-import type { Relay } from './relay.ts'
+import type { Read, Relay } from './relay.ts'
 
 export type Shared = {
   readonly archived: Readonly<Record<string, { readonly archived: boolean; readonly at: string }>>
@@ -8,6 +8,7 @@ export type Shared = {
   readonly snoozed: Readonly<Record<string, { readonly until: string; readonly at: string }>>
   readonly settleAfterDays: number | null
   readonly projectNames: Readonly<Record<string, string>>
+  readonly projectOrder: readonly string[]
   readonly visited: Readonly<Record<string, string>>
   readonly lastMachine: string
   readonly reach: Readonly<Record<string, string>>
@@ -27,17 +28,29 @@ export type Organize =
   | { readonly op: 'tagSession'; readonly session: string; readonly tag: string; readonly on: boolean }
   | { readonly op: 'defineStages'; readonly stages: readonly Stage[] }
   | { readonly op: 'stageSession'; readonly session: string; readonly stage: string }
+  | { readonly op: 'orderProjects'; readonly projects: readonly string[] }
 
-const KEY = 'shared.json'
+export const SHARED_KEY = 'shared.json'
 const DAY_MS = 86_400_000
 export const SETTLE_MOST_DAYS = 90
-const EMPTY: Shared = { archived: {}, settled: {}, snoozed: {}, settleAfterDays: 7, projectNames: {}, visited: {}, lastMachine: '', reach: {}, parents: {}, pinned: {}, tags: {}, tagged: {}, stages: [], staged: {} }
+const EMPTY: Shared = { archived: {}, settled: {}, snoozed: {}, settleAfterDays: 7, projectNames: {}, projectOrder: [], visited: {}, lastMachine: '', reach: {}, parents: {}, pinned: {}, tags: {}, tagged: {}, stages: [], staged: {} }
+
+const decodedOnce = new WeakMap<Read, Shared>()
+
+
+export function sharedIn(answer: Read | undefined): Shared {
+  if (answer === undefined || answer.status === 404) return EMPTY
+  const kept = decodedOnce.get(answer)
+  if (kept !== undefined) return kept
+  const stored = without(JSON.parse(new TextDecoder().decode(answer.bytes)) as Record<string, unknown>, 'archiveAfterDays') as Partial<Shared>
+  const shared = { ...EMPTY, ...stored }
+  decodedOnce.set(answer, shared)
+  return shared
+}
 
 const read = async (relay: Relay): Promise<{ readonly shared: Shared; readonly etag?: string }> => {
-  const [answer] = await relay.read([KEY])
-  if (answer === undefined || answer.status === 404) return { shared: EMPTY }
-  const stored = without(JSON.parse(new TextDecoder().decode(answer.bytes)) as Record<string, unknown>, 'archiveAfterDays') as Partial<Shared>
-  return { shared: { ...EMPTY, ...stored }, etag: answer.etag }
+  const [answer] = await relay.read([SHARED_KEY])
+  return { shared: sharedIn(answer), ...(answer !== undefined && 'etag' in answer ? { etag: answer.etag } : {}) }
 }
 
 export const sharedOf = async (relay: Relay): Promise<Shared> => (await read(relay)).shared
@@ -46,7 +59,7 @@ export async function updateShared(relay: Relay, change: (shared: Shared) => Sha
   for (;;) {
     const { shared, etag } = await read(relay)
     const changed = change(shared)
-    const put = await relay.runOne({ op: 'put', key: KEY, bytes: new TextEncoder().encode(JSON.stringify(changed)), if: etag === undefined ? { none: '*' } : { match: etag } })
+    const put = await relay.runOne({ op: 'put', key: SHARED_KEY, bytes: new TextEncoder().encode(JSON.stringify(changed)), if: etag === undefined ? { none: '*' } : { match: etag } })
     if (put.status === 200) return changed
   }
 }
@@ -118,6 +131,9 @@ function organized(shared: Shared, change: Organize): Shared {
     case 'stageSession':
       if (change.stage !== '' && !shared.stages.some(({ id }) => id === change.stage)) throw new Error(`No stage has the id ${change.stage}.`)
       return { ...shared, staged: change.stage === '' ? without(shared.staged, change.session) : { ...shared.staged, [change.session]: change.stage } }
+    case 'orderProjects':
+      if (new Set(change.projects).size !== change.projects.length) throw new Error('The project order names each project once.')
+      return { ...shared, projectOrder: change.projects }
   }
 }
 

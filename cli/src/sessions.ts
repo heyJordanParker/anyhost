@@ -3,8 +3,8 @@ import { join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
 import { bytesOfChunks, chainOf, chunkReader, chunksIn, decompressDelta, downloadBase, framesOf, journalPrefix, ownIndex, type Capture, type ChunkReader, type IndexedSession, type RecordHeader } from './capture.ts'
 import { devicesOf } from './device.ts'
-import type { Relay } from './relay.ts'
-import { isArchived, isSnoozed, settledAtOf, sharedOf, type Stage, type Tag } from './shared.ts'
+import type { Read, Relay } from './relay.ts'
+import { isArchived, isSnoozed, settledAtOf, sharedOf, type Shared, type Stage, type Tag } from './shared.ts'
 
 export type ListedSession = IndexedSession & { readonly machine: string; readonly device: string; readonly holder: string }
 export type Segment = Pick<RecordHeader, 'device' | 'checkout' | 'path'> & { readonly offset: number; readonly size: number }
@@ -19,14 +19,22 @@ export type Replayed = {
 }
 
 const decoded = (body: Uint8Array): unknown => JSON.parse(new TextDecoder().decode(body))
+const decodedOnce = new WeakMap<Read, IndexedSession[]>()
+
+export const indexKeyOf = (device: string): string => `sessions/${device}/index.json`
+
+export const indexesIn = (ids: readonly string[], read: readonly (Read | undefined)[]): Map<string, IndexedSession[]> =>
+  new Map(ids.flatMap((device, at) => {
+    const index = read[at]
+    if (index === undefined || !('bytes' in index)) return []
+    const sessions = decodedOnce.get(index) ?? (decoded(index.bytes) as IndexedSession[])
+    decodedOnce.set(index, sessions)
+    return [[device, sessions] as const]
+  }))
 
 export async function indexesOf(relay: Relay, devices: Iterable<string>): Promise<Map<string, IndexedSession[]>> {
   const ids = [...devices]
-  const read = await relay.read(ids.map((device) => `sessions/${device}/index.json`))
-  return new Map(ids.flatMap((device, at) => {
-    const index = read[at]
-    return index !== undefined && 'bytes' in index ? [[device, decoded(index.bytes) as IndexedSession[]] as const] : []
-  }))
+  return indexesIn(ids, await relay.read(ids.map(indexKeyOf)))
 }
 
 export async function listSessions(
@@ -70,6 +78,7 @@ export type Agents = {
   readonly agents: readonly Agent[]
   readonly settleAfterDays: number | null
   readonly projectNames: Readonly<Record<string, string>>
+  readonly projectOrder: readonly string[]
   readonly lastMachine: string
   readonly tags: Readonly<Record<string, Tag>>
   readonly stages: readonly Stage[]
@@ -77,15 +86,17 @@ export type Agents = {
 
 export const titleOfPrompt = (prompt: string): string => (prompt.split('\n')[0] ?? '').replace(/(?:~|\/)\S*\/([^/\s]+)/g, '$1').slice(0, 120)
 
+export type ListRead = { readonly devices: ReadonlyMap<string, Protocol.Device>; readonly indexes: ReadonlyMap<string, readonly IndexedSession[]>; readonly shared: Shared }
+
 export async function agentsOf(
   capture: Capture,
   statuses: Readonly<Record<string, Protocol.AgentStatus>> = {},
   terminals: ReadonlyMap<string, string> = new Map(),
-  known?: ReadonlyMap<string, Protocol.Device>,
+  known?: ListRead,
   now = Date.now(),
 ): Promise<Agents> {
-  const devices = known ?? (await devicesOf(capture.relay))
-  const [indexes, own, holders, shared] = await Promise.all([indexesOf(capture.relay, devices.keys()), ownIndex(capture), capture.holders.current(), sharedOf(capture.relay)])
+  const devices = known?.devices ?? (await devicesOf(capture.relay))
+  const [indexes, own, holders, shared] = await Promise.all([known?.indexes ?? indexesOf(capture.relay, devices.keys()), ownIndex(capture), capture.holders.current(), known?.shared ?? sharedOf(capture.relay)])
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
   const agents = sessions.filter((session) => session.firstPrompt !== '').map((session) => {
     const status: Agent['status'] = statuses[session.id] ?? ''
@@ -107,7 +118,7 @@ export async function agentsOf(
       stage: shared.staged[session.id] ?? '',
     }
   })
-  return { agents, settleAfterDays: shared.settleAfterDays, projectNames: shared.projectNames, lastMachine: shared.lastMachine, tags: shared.tags, stages: shared.stages }
+  return { agents, settleAfterDays: shared.settleAfterDays, projectNames: shared.projectNames, projectOrder: shared.projectOrder, lastMachine: shared.lastMachine, tags: shared.tags, stages: shared.stages }
 }
 
 export class Replay {

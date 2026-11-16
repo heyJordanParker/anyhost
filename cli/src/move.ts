@@ -2,6 +2,7 @@ import { mkdir, readFile, readlink, realpath, rename, rm, rmdir, stat, writeFile
 import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AgentStatus, Delivered, Device, Message, Offline, Routed } from '../../relay/protocol.ts'
+import type { Activity } from './activity.ts'
 import { captureAgainFrom, chainOf, changedFiles, checkoutOf, checkoutOfEntry, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { claudeStart, pauseCopy, recordedSessions, resumeArgv, resumedOf, resumeCopy, run, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
@@ -36,6 +37,7 @@ export type MoveHere = {
   readonly flush: (session: string, signal: AbortSignal, onRelay: (isConnected: boolean) => void) => Promise<void>
   readonly onRecordsChange: OnRecordsChange
   readonly opening: Map<string, Promise<string>>
+  readonly activity: Activity
 }
 
 type Reply = Extract<Routed, { readonly t: 'moved' | 'started' | 'told' | 'listed' | 'deleted' | 'forked' }>
@@ -560,12 +562,12 @@ async function tellHere(capture: Capture, session: string, told: Tell, here: Mov
   const id = session.slice(0, 8)
   const holder = journalOf(db, session)?.holder ?? ''
   if (holder !== '') throw new Error(`${id} continues on ${holder}.`)
-  if ((told.messages ?? 0) > 0) return { status: (await statusOf(roots.claudeHome, session)) ?? 'idle', screen: '', messages: await messagesHere(capture, session, told.messages ?? 0, told.skip ?? 0) }
+  if ((told.messages ?? 0) > 0) return { status: (await activityOf(capture, here.activity, session)) ?? 'idle', screen: '', messages: await messagesHere(capture, session, told.messages ?? 0, told.skip ?? 0) }
   if (told.sleep === true) {
     if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost puts Claude Code sessions to sleep, and ${id} is a Codex session.`)
     const running = await terminalHere(capture, session)
     if (running !== undefined) await askToSleep(running)
-    return { status: (await statusOf(roots.claudeHome, session)) ?? 'idle', screen: running === undefined ? '' : await readTerminal(running, 0) }
+    return { status: (await activityOf(capture, here.activity, session)) ?? 'idle', screen: running === undefined ? '' : await readTerminal(running, 0) }
   }
   const isRead = told.text === '' && told.keys.length === 0
   const address = isRead ? await terminalHere(capture, session) : ((await terminalHere(capture, session)) ?? (await terminalOf(capture, session, here)))
@@ -575,7 +577,7 @@ async function tellHere(capture: Capture, session: string, told: Tell, here: Mov
     await sendTo(address, tagged(told, sender))
     await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session)?.status === 'busy' || undefined, TURN_STARTS_MS, here.onRecordsChange)
   }
-  return { status: (await statusOf(roots.claudeHome, session)) ?? 'idle', screen: await readTerminal(address, told.lines), terminal: address }
+  return { status: (await activityOf(capture, here.activity, session)) ?? 'idle', screen: await readTerminal(address, told.lines), terminal: address }
 }
 
 export async function tell(capture: Capture, asked: string, told: Tell, here: MoveHere): Promise<Told> {
@@ -615,7 +617,7 @@ export function noteWaiting(capture: Capture, here: MoveHere): () => void {
   let reading = Promise.resolve()
   const read = async (): Promise<void> => {
     isAsked = false
-    const now = new Set((await recordedSessions(capture.roots.claudeHome)).filter(({ status }) => status === 'waiting').map(({ sessionId }) => sessionId))
+    const now = new Set((await recordedSessions(capture.roots.claudeHome)).filter((record) => here.activity.of(record) === 'waiting').map(({ sessionId }) => sessionId))
     const fresh = waiting === undefined ? [] : [...now].filter((session) => !waiting?.has(session))
     waiting = now
     if (fresh.length === 0) return
@@ -650,25 +652,25 @@ export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readon
     FORGET_MS,
   )
 
-export async function statusesHere(capture: Capture): Promise<Record<string, AgentStatus>> {
-  return Object.fromEntries((await recordedSessions(capture.roots.claudeHome)).map(({ sessionId, status }) => [sessionId, statusOfRecord(status)]))
-}
+export const statusesHere = async (capture: Capture, activity: Activity): Promise<Record<string, AgentStatus>> => activity.ofAll(await recordedSessions(capture.roots.claudeHome))
+
+export const activityOf = async (capture: Capture, activity: Activity, session: string): Promise<AgentStatus | undefined> => activity.of((await recordedSessions(capture.roots.claudeHome)).find((record) => record.sessionId === session))
 
 export const receiveList = (capture: Capture, asked: Extract<Delivered, { readonly t: 'list' }>, here: MoveHere): Promise<void> =>
-  answerOnce(capture.relay, here.answers, asked, async () => ({ t: 'listed', id: asked.id, to: asked.from.id, statuses: await statusesHere(capture) }), FORGET_MS)
+  answerOnce(capture.relay, here.answers, asked, async () => ({ t: 'listed', id: asked.id, to: asked.from.id, statuses: await statusesHere(capture, here.activity) }), FORGET_MS)
 
-export async function statusesElsewhere(capture: Capture): Promise<Record<string, AgentStatus>> {
+export async function statusesElsewhere(capture: Capture): Promise<Map<string, Readonly<Record<string, AgentStatus>>>> {
   const { relay, device } = capture
   const others = [...(await devicesOf(relay)).values()].filter((machine) => machine.id !== device.id && machine.connected && machine.removedAt === undefined)
   const answers = await Promise.all(
     others.map((machine) =>
       ask(relay, { t: 'list', id: crypto.randomUUID(), to: machine.id }, { signal: AbortSignal.timeout(LIST_MS), keepsWaiting: async () => false }).then(
-        (answer) => (answer.t === 'listed' ? answer.statuses : {}),
-        () => ({}),
+        (answer) => (answer.t === 'listed' ? [[machine.id, answer.statuses] as const] : []),
+        () => [],
       ),
     ),
   )
-  return Object.assign({}, ...answers) as Record<string, AgentStatus>
+  return new Map(answers.flat())
 }
 
 export async function openHere(capture: Capture, asked: string, here: MoveHere): Promise<{ readonly session: string; readonly terminal: string }> {
