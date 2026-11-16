@@ -2,6 +2,21 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.1] - 2026-11-16
+
+### Changed
+- anyhost takes about 31 MB beside Claude Code, where it rose to 324 MB and up to 1.55 GB after large uploads and stayed there. Large uploads, seals, compactions and journal rewrites run in a short process that returns all its memory when it ends, and a large transcript uploads 4 MiB at a time instead of whole.
+- Herdr opens straight to your sidebar, tabs and terminal. While it connected to its terminals, the tab bar said no session was open and a project's Board flashed before the terminal showed.
+- A session that sleeps holds no process. anyhost ran a process for every session a workspace listed, up to 300 on one Mac, which took 6.6 GB and every terminal macOS can open. Claude Code now runs directly in its terminal, and a session that sleeps closes it until you open it again, as Chrome discards a tab.
+- Opening a session shows Claude Code's own screen at once, never an anyhost screen in front of it.
+- `anyhost run` is gone.
+- A session that sleeps keeps its place in the tab bar, dim, and a click continues it. Picking a workspace starts only its newest session when none runs.
+- A Claude Code you start from the Herdr app's own new-tab menu is a session anyhost manages: it sleeps, archives when you close its tab, and moves to its workspace.
+
+### Fixed
+- Every session anyhost starts saves its transcript again. A program started from inside a Claude Code session passed that session's markers to herdr-core, and Claude Code saves no transcript for a session that carries them.
+- `anyhost doctor` says when herdr-core itself carries those markers, as one started from inside a Claude Code session does, so a `claude` typed into any of its shells saves no transcript, and says how to start it clean.
+
 ## [0.9.0] - 2026-11-15
 
 ### New
