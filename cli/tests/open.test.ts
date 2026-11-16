@@ -107,12 +107,14 @@ test('an open continues a session here from R2 while the machine that ran it is 
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
   laptop.child.kill('SIGKILL')
-  await until(() => !relay.isConnected(LAPTOP.id), 'the laptop going away', 60_000)
+  type Machines = { readonly machines: readonly { readonly id: string; readonly connected: boolean }[] }
+  const isLaptopGone = async (): Promise<boolean> => !((await (await fetch('http://localhost/machines', { unix: worker.socket })).json()) as Machines).machines.some(({ id, connected }) => id === LAPTOP.id && connected)
+  await until(isLaptopGone, 'the Pool counting the laptop gone', 60_000)
 
   const opened = await postTo(worker.socket, '/agents/open', { session: SESSION.slice(0, 8) })
   const again = await postTo(worker.socket, '/agents/open', { session: SESSION.slice(0, 8) })
 
-  expect(opened.status).toBe(200)
+  expect([opened.status, opened.body['message']]).toEqual([200, undefined])
   expect([opened.body['session'], opened.body['machine'], typeof opened.body['terminal']]).toEqual([SESSION, WORKER.name, 'string'])
   expect(again.body).toEqual(opened.body)
   expect(runsOn(worker.folder).map(({ session, command }) => ({ session, command: command.split(' ').slice(-3).join(' ') }))).toEqual([{ session: SESSION, command: `claude --resume ${SESSION}` }])
