@@ -624,8 +624,12 @@ export default class Anyhost extends View {
     if (view === "worktree") return this.renderWorktree(t);
     return this.renderInbox(t, cx)
       .on_mouse_move((e, cx) => {
+        if (this.pressed?.isMoving && this.pressed.isPinned) {
+          this.pressed = { ...this.pressed, atY: e.position.y };
+          return cx.notify();
+        }
         if (!isPastSlop(this.pressed, e)) return;
-        this.pressed = { ...this.pressed, isMoving: true };
+        this.pressed = { ...this.pressed, isMoving: true, atY: e.position.y };
         const { address, title } = this.pressed;
         if (address) setShared(DRAG_TAB, { tab: null, title, space: null, terminals: [address], overlay: null, lifted: false, from: "inbox" });
         this.redrawAll(cx);
@@ -2385,6 +2389,7 @@ export default class Anyhost extends View {
       ]),
     };
     const motion = this.motionOf(blocks, model);
+    const lifted = this.pressed?.isMoving && this.pressed.isPinned && this.pressed.downTop !== null ? this.pressed.key : null;
     const placedBlock = (id) =>
       div()
         .id(id)
@@ -2393,12 +2398,17 @@ export default class Anyhost extends View {
         .w_full()
         .h(motion.heights[id])
         .children([
-          ...blocks[id].map((item) => {
+          ...blocks[id]
+            .filter((item) => item.key !== lifted)
+            .map((item) => {
             const at = motion.layout.get(item.key);
             const isEntering = motion.isMoving && motion.before.get(item.key)?.block !== id;
             return this.placedAt(item.key, isEntering ? at.top - Math.min(item.height, MOTION_TRAVEL) : at.top, isEntering ? 0 : 1, motion.isMoving, item.el());
           }),
           ...[...this.departing].filter(([, gone]) => gone.block === id).map(([key, gone]) => this.placedAt(key, gone.top - Math.min(gone.height, MOTION_TRAVEL), 0, true, this.cardFor(ctx, model.byKey.get(key), ctx.mounted))),
+          ...blocks[id]
+            .filter((item) => item.key === lifted)
+            .map((item) => this.placedAt(item.key, Math.max(0, Math.min(motion.heights[id] - item.height, this.pressed.downTop + this.pressed.atY - this.pressed.downY)), 1, false, item.el())),
         ]);
     const stale = this.error !== null && this.readAt !== null ? [this.note(t, `Can't reach anyhost · last read ${since(this.readAt)}`, t.blocked)] : [];
     const isEmpty = sections.pinned.length + sections.active.length === 0 && shelves.length === 0;
@@ -2435,6 +2445,16 @@ export default class Anyhost extends View {
     this.isArriving = isMoving && entering > 0;
     this.placed = layout;
     return { layout, heights, before, isMoving };
+  }
+
+  liftedAt(el, from, area, dx, dy) {
+    return v_flex()
+      .absolute()
+      .left(from.x - area.x + dx)
+      .top(from.y - area.y + dy)
+      .w(from.width)
+      .h(from.height)
+      .child(el);
   }
 
   placedAt(key, top, opacity, isMoving, el) {
@@ -2801,7 +2821,7 @@ export default class Anyhost extends View {
       .when(canDrag, (el) =>
         el.on_mouse_down("left", (e) => {
           this.dropped = null;
-          this.pressed = { key: r.key, over: r.key, address: r.address, title: r.title, isPinned: isReordered, downX: e.position.x, downY: e.position.y, isMoving: false };
+          this.pressed = { key: r.key, over: r.key, address: r.address, title: r.title, isPinned: isReordered, downX: e.position.x, downY: e.position.y, downTop: this.placed?.get(r.key)?.top ?? null, atY: e.position.y, isMoving: false };
         }),
       )
       .on_click(() => {
@@ -3122,6 +3142,8 @@ export default class Anyhost extends View {
     if (isNarrow) return this.projectsRail(t, projects, filter);
     const mounted = new Set();
     this.mounted = mounted;
+    const press = this.pressed;
+    const liftedProject = press?.isMoving && press.from && this.listBounds ? projects.find((p) => p.key === press.key) : undefined;
     return v_flex()
       .id("anyhost-projects")
       .track_focus(this.keys)
@@ -3149,7 +3171,15 @@ export default class Anyhost extends View {
             this.redrawAll(cx);
           })
           .on_mouse_up("left", (_e, cx) => this.dropProject(cx))
-          .children(this.entries.map((entry) => this.partFor(entry.id, mounted, () => this.entryElement(t, entry)))),
+          .on_mouse_move((e, cx) => {
+            this.listBounds = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
+            const p = this.pressed;
+            if (!p || p.key === undefined) return;
+            this.pressed = { ...p, atY: e.position.y, isMoving: p.isMoving || isPastSlop(p, e) };
+            if (this.pressed.isMoving) this.redrawAll(cx);
+          })
+          .children(this.entries.map((entry) => this.partFor(entry.id, mounted, () => this.entryElement(t, entry))))
+          .when(Boolean(liftedProject), (el) => el.child(this.liftedAt(this.projectCard(t, liftedProject, pulse, filter.project === liftedProject?.key, true), this.pressed?.from, this.listBounds, 0, (this.pressed?.atY ?? 0) - (this.pressed?.downY ?? 0)))),
       );
   }
 
@@ -3243,7 +3273,7 @@ export default class Anyhost extends View {
       .child(this.counts(t, pulse.all));
   }
 
-  projectCard(t, p, pulse, isSelected) {
+  projectCard(t, p, pulse, isSelected, isGhost = false) {
     const id = `project:${p.key}`;
     const hovered = this.hovered === id;
     const canStart = Object.values(p.checkouts ?? {}).some((list) => list.length > 0);
@@ -3252,6 +3282,7 @@ export default class Anyhost extends View {
     return this.item(`ah-${id}`)
       .cursor_pointer()
       .map((el) => this.surface(el, t, { isSelected, isDragged }))
+      .when(isDragged && !isGhost && Boolean(pressed.from), (el) => el.opacity(0))
       .relative()
       .when(this.isCursorOn(p.key), (el) => el.child(this.ring(t)))
       .on_hover((on, cx) => {
@@ -3263,9 +3294,9 @@ export default class Anyhost extends View {
         }
         this.redrawAll(cx);
       })
-      .on_mouse_down("left", () => {
+      .on_mouse_down("left", (e) => {
         this.dropped = null;
-        if (p.key !== NONE) this.pressed = { key: p.key, over: p.key, isMoving: false };
+        if (p.key !== NONE) this.pressed = { key: p.key, over: p.key, downX: e.position.x, downY: e.position.y, atY: e.position.y, from: e.bounds ?? null, isMoving: false };
       })
       .when(Boolean(shared(DRAG_TAB)) && hovered, (el) => el.bg(t.selected).child(this.ring(t)))
       .on_mouse_up("left", (_e, cx) => (shared(DRAG_TAB) ? this.dropTabOn(p, null) : this.dropProject(cx)))
@@ -3276,7 +3307,7 @@ export default class Anyhost extends View {
       .on_mouse_down("right", () => this.projectMenu(p, pulse))
       .child(this.mark(t, p.name, false, p.key === NONE))
       .child(div().flex_1().min_w(0).truncate().text_size(UI.text.body).font_medium().child(p.name))
-      .child(shared(DRAG_TAB) && hovered ? this.moveHere(t) : hovered && canStart && p.key !== NONE ? this.iconButton(t, `ah-pen-${id}`, "square-pen", `New session in ${p.name}`, () => ask({ action: "startIn", project: p }), UI.height.inline) : this.counts(t, p));
+      .child(shared(DRAG_TAB) && hovered ? this.moveHere(t) : hovered && canStart && p.key !== NONE && !pressed?.isMoving ? this.iconButton(t, `ah-pen-${id}`, "square-pen", `New session in ${p.name}`, () => ask({ action: "startIn", project: p }), UI.height.inline) : this.counts(t, p));
   }
 
   worktreeRow(t, { id, project, worktree }, pulse, filter) {
@@ -5127,6 +5158,9 @@ export default class Anyhost extends View {
     const shownTabs = pills.map((pill) => pill.tab);
     const slots = isLoaded ? this.slotsOf(pills, this.tabsView.discarded) : [];
     const strip = this.stripLayout(slots);
+    const press = this.pressed;
+    const liftedSlot = press?.isMoving && press.from && this.barBounds ? strip.slots.find((slot) => slot.id === press.id) : undefined;
+    const lifted = liftedSlot ? { slot: liftedSlot, from: press.from } : null;
     return h_flex()
       .id("ah-tabs")
       .size_full()
@@ -5149,8 +5183,10 @@ export default class Anyhost extends View {
       .on_mouse_move((e, cx) => {
         this.pointerY = e.local_position.y;
         this.barBounds = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y, width: e.bounds.width, height: e.bounds.height };
+        this.pointerX = e.position.x;
         const p = this.pressed;
         if (isPastSlop(p, e)) this.startDrag(p, slots, work, cx);
+        else if (p?.isMoving && p.from) cx.notify();
       })
       .on_hover((on, cx) => {
         if (!on && this.pressed?.isMoving && this.pointerY > this.height / 2) this.liftOut(work, pills, cx);
@@ -5168,6 +5204,11 @@ export default class Anyhost extends View {
           .track_scroll(this.tabScroll)
           .when(isLoaded && strip.slots.length === 0, (el) => el.child(div().px(UI.space.sm).text_size(UI.text.caption).text_color(t.dim).child(project ? `No open sessions in ${project}` : "No open sessions")))
           .children(strip.slots.map((slot) => (slot.pill ? this.tabPill(t, slot, work, slots, shownTabs) : this.sessionPill(t, slot, slots)))),
+      )
+      .when(Boolean(lifted), (el) =>
+        el.child(
+          this.liftedAt(lifted?.slot.pill ? this.tabPill(t, lifted.slot, work, slots, shownTabs, true) : this.sessionPill(t, lifted?.slot, slots, true), lifted?.from, this.barBounds, (this.pointerX ?? 0) - (this.pressed?.downX ?? 0), 0),
+        ),
       )
       .child(
         h_flex()
@@ -5324,7 +5365,7 @@ export default class Anyhost extends View {
     return el.flex_1().min_w(TAB_LEAST).max_w(TAB_MOST).h(UI.height.control).overflow_hidden();
   }
 
-  sessionPill(t, slot, slots) {
+  sessionPill(t, slot, slots, isGhost = false) {
     const session = slot.discarded;
     const id = `discarded-${session.key}`;
     const isHovered = this.hovered === id;
@@ -5339,6 +5380,7 @@ export default class Anyhost extends View {
       .cursor_pointer()
       .when(!this.pressed?.isMoving, (el) => el.tooltip(session.isPinned ? `${session.title} · pinned` : `${session.title} · asleep, click to continue`))
       .map((el) => this.surface(el, t, { isDragged, hover: (s) => s.text_color(t.foreground) }))
+      .when(isDragged && !isGhost && Boolean(this.pressed.from), (el) => el.opacity(0))
       .on_hover((on, cx) => {
         if (on) this.hovered = id;
         else if (this.hovered === id) this.hovered = null;
@@ -5347,7 +5389,7 @@ export default class Anyhost extends View {
       })
       .on_mouse_down("left", (e, cx) => {
         cx.stop_propagation();
-        if (slot.isPinned) this.pressed = { id: slot.id, target: null, downX: e.position.x, downY: e.position.y, isMoving: false };
+        if (slot.isPinned) this.pressed = { id: slot.id, target: null, downX: e.position.x, downY: e.position.y, from: e.bounds ?? null, isMoving: false };
       })
       .on_mouse_up("left", () => {
         if (this.pressed?.isMoving) return;
@@ -5395,7 +5437,7 @@ export default class Anyhost extends View {
     return svg(iconPath(STATE[state].icon)).size(UI.icon.body).flex_none().text_color(this.stateColor(state));
   }
 
-  tabPill(t, slot, work, slots, shownTabs) {
+  tabPill(t, slot, work, slots, shownTabs, isGhost = false) {
     const { tab, program, sessions, state, isShown, isVisible } = slot.pill;
     const isHovered = this.hovered === tab.id;
     const isDragged = this.pressed?.isMoving === true && this.pressed.id === tab.id;
@@ -5413,6 +5455,7 @@ export default class Anyhost extends View {
       .when(!this.pressed?.isMoving, (el) => el.tooltip(tab.name))
       .text_color(isDragged || isShown || isVisible ? t.foreground : t.muted)
       .map((el) => this.surface(el, t, { isSelected: isShown, isDragged, hover: (s) => s.text_color(t.foreground) }))
+      .when(isDragged && !isGhost && Boolean(this.pressed.from), (el) => el.opacity(0))
       .on_hover((on, cx) => {
         if (on) this.hovered = tab.id;
         else if (this.hovered === tab.id) this.hovered = null;
@@ -5421,7 +5464,7 @@ export default class Anyhost extends View {
       })
       .on_mouse_down("left", (e, cx) => {
         cx.stop_propagation();
-        this.pressed = { id: tab.id, target: null, downX: e.position.x, downY: e.position.y, isMoving: false };
+        this.pressed = { id: tab.id, target: null, downX: e.position.x, downY: e.position.y, from: e.bounds ?? null, isMoving: false };
         if (e.click_count === 2) run("tab.rename", { id: tab.id });
       })
       .on_mouse_up("left", (_e, cx) => {

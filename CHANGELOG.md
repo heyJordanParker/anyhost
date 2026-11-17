@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.10] - 2026-11-17
+
+### Changed
+- A card, project or tab you drag lifts and follows the pointer along its list, over the empty place it left, while the others make room, as T3 Code's sidebar and Chrome's tab strip do, where it snapped from place to place and could lose its lifted look.
+
 ## [0.9.9] - 2026-11-17
 
 ### Changed
