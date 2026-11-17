@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isAlive } from '../src/claude.ts'
 import { filesUnder } from '../src/transcript.ts'
@@ -36,11 +36,24 @@ test("a program whose watcher hangs at its start names the stall in /status, bac
 
 test('a watcher whose program stopped reading ends quietly at its next change, as when its input closes', async () => {
   const folder = temporaryFolder()
-  const watcher = spawnForTest([process.execPath, '-e', WATCHER, JSON.stringify({ probe: join(folder, 'probe'), folders: [{ folder, depth: null }] })], { env: { ...process.env, BUN_BE_BUN: '1' }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
-  const reader = watcher.stdout.getReader()
+  const output = join(temporaryFolder(), 'output')
+  Bun.spawnSync(['mkfifo', output])
+  const reading = openSync(output, constants.O_RDONLY | constants.O_NONBLOCK)
+  const watcher = spawnForTest([process.execPath, '-e', WATCHER, JSON.stringify({ probe: join(folder, 'probe'), folders: [{ folder, depth: null }] })], { env: { ...process.env, BUN_BE_BUN: '1' }, stdin: 'pipe', stdout: Bun.file(output), stderr: 'pipe' })
+  const chunk = Buffer.alloc(4096)
   let printed = ''
-  while (!printed.includes('ready\n')) printed += new TextDecoder().decode((await reader.read()).value)
-  await reader.cancel()
+  while (!printed.includes('ready\n')) {
+    const read = (() => {
+      try {
+        return readSync(reading, chunk)
+      } catch {
+        return 0
+      }
+    })()
+    if (read === 0) await Bun.sleep(20)
+    printed += chunk.subarray(0, read).toString()
+  }
+  closeSync(reading)
 
   writeFileSync(join(folder, 'session.jsonl'), '{}\n')
 
