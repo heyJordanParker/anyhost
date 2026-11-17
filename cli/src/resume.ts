@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
-import { basesOf, checkoutOf, checkoutOfEntry, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordForkStarts, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession, type RecordHeader } from './capture.ts'
+import { basesOf, checkoutOf, checkoutOfEntry, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordForkStarts, recordSource, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession, type RecordHeader } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { claudeStart, resumeArgv, resumedOf, statusOf } from './claude.ts'
 import { cloneRemote } from './code.ts'
@@ -295,6 +295,7 @@ export async function restore(capture: Capture, id: string, options: { take: boo
   if (transcript !== undefined && session.tool === 'claude') recordForkStarts(db, transcript.path, new TextEncoder().encode(restoredText))
   for (const kept of before) await keepConflictedCopy(capture, id, kept, restoredText)
   await recordSummary(capture, id, session.tool, [restoredText], replayed.end, session.lastActivity)
+  recordSource(db, id, session.source)
   await writeIndex(capture)
   await rm(staging, { recursive: true, force: true })
   if (claim.previous !== undefined && !claim.told) markUntold(db, id, claim.previous.name)

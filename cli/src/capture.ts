@@ -1964,6 +1964,11 @@ export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: 
   return row.last_activity === '' || after.cwd !== row.cwd || repo !== row.repo || checkout.folder !== row.repo_folder
 }
 
+export function recordSource(db: Database, id: string, source: string): boolean {
+  if (source === '' || source === id) return false
+  return db.query("update sessions set source = ? where id = ? and source = ''").run(source, id).changes > 0
+}
+
 export async function recordFolder(db: Database, id: string, cwd: string): Promise<boolean> {
   const row = db.query<Pick<SessionRow, 'cwd'>, [string]>('select cwd from sessions where id = ?').get(id)
   if (row === null || cwd === '' || row.cwd === cwd) return false

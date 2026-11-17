@@ -115,6 +115,30 @@ test("a session's start, end, quit, turn start and end, permission prompt, folde
   expect(bodies.every(({ session, folder, at }) => session === 'test-session' && folder === '/test/plugins/anyhost' && !Number.isNaN(Date.parse(at)))).toBe(true)
 })
 
+test('a /clear tells the program, with each event of the new session, which session it continues from', async () => {
+  const tested = testMod(anyhost, { files: instance })
+  const posted: string[] = []
+  tested.fakes.process.spawn = () => held()
+  tested.fakes.http.fetch = async (url, init) => {
+    if (url.endsWith('/sessions/changed')) posted.push(textOf(init?.body ?? ''))
+    return { status: 200, ok: true, headers: {}, text: '{}' }
+  }
+
+  await tested.raise.onSessionStart({ source: 'startup' })
+  await tested.raise.onSessionEnd({ reason: 'clear' })
+  await tested.startSession({ source: 'clear', id: 'cleared-session' })
+  await tested.add({ type: Prompt, text: 'Start the next task' })
+  await tested.settle()
+
+  const bodies = posted.map((body) => JSON.parse(body) as { session: string; event: string; source: string })
+  expect(bodies.map(({ session, event, source }) => [session, event, source])).toEqual([
+    ['test-session', 'started', ''],
+    ['test-session', 'ended', ''],
+    ['cleared-session', 'started', 'test-session'],
+    ['cleared-session', 'turnStart', 'test-session'],
+  ])
+})
+
 test('a session this device holds, or no device claims, takes prompts', async () => {
   const { tested } = withHolder({})
 

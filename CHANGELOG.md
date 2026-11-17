@@ -10,6 +10,7 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 - A card counts only its open subagents, so a session whose subagents you archived no longer shows "1 subagent".
 - The keyboard cursor scrolls its card into view in the sidebar and the projects pane, with the smallest scroll, as a listbox does, and opening a shelf scrolls to its rows. Up, Down, j, k, Home, End and Page Up and Down reach every card of a long list.
 - While you drag a pin, no card under the pointer shows its hover buttons.
+- After a `/clear`, the new session's card names the session it came from ("fork of …"), on every machine, and the session you cleared stays whole with its own card.
 
 ## [0.9.11] - 2026-11-17
 

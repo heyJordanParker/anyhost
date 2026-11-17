@@ -3,7 +3,7 @@ import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { Activity, type Shown } from './activity.ts'
-import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, LoginNeeded, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
@@ -486,12 +486,20 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       isRewriting = rewrote
       queueFiles(new Map(again.map(([session, files]) => [session, new Set(files)])))
     })
+  const sourcesWaiting = new Map<string, string>()
+  const placeSource = (session: string): void => {
+    const source = sourcesWaiting.get(session)
+    if (source === undefined || capture.db.query('select 1 from sessions where id = ?').get(session) === null) return
+    sourcesWaiting.delete(session)
+    if (recordSource(capture.db, session, source)) sessionsChanged()
+  }
   const uploaded = (changed: Changed, upload: Promise<Set<string>>): readonly [Changed, Promise<Set<string>>] => [
     changed,
     upload.then((left) => {
       problems.clear(`upload ${changed.session}`)
       problems.clear('relay')
       capturedAt = new Date().toISOString()
+      placeSource(changed.session)
       sessionsChanged()
       return left
     }),
@@ -1174,8 +1182,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     readonly window?: string
     readonly terminals?: readonly string[]
     readonly event?: string
+    readonly source?: string
   }
-  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, skip = 0, sleep = false, place = 'focus', sender = '', apiToken, target = '', archived = true, settled = true, until, pinned = true, settleAfterDays, project = '', name, at = '', changes = [], window = '', terminals: onScreen = [], event = '' }: Asked): Promise<Response> => {
+  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, skip = 0, sleep = false, place = 'focus', sender = '', apiToken, target = '', archived = true, settled = true, until, pinned = true, settleAfterDays, project = '', name, at = '', changes = [], window = '', terminals: onScreen = [], event = '', source = '' }: Asked): Promise<Response> => {
     switch (pathname) {
       case '/connect': {
         if (connecting?.view.is === 'running') return Response.json(connecting.view)
@@ -1237,6 +1246,8 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
             sessionsChanged()
           })
         await recordFolder(capture.db, session, folder)
+        if (source !== '') sourcesWaiting.set(session, source)
+        placeSource(session)
         queueFiles(await changedFiles(capture, 0, session))
         const transcript = journalOf(capture.db, session) === undefined ? transcriptOf(capture.roots.claudeHome, session) : undefined
         if (transcript !== undefined) queue.add(session, 'claude', transcript)

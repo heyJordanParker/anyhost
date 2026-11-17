@@ -303,7 +303,7 @@ export const postTo = async (socket: string, path: string, body: object): Promis
   const answer = await fetch(`http://localhost${path}`, { unix: socket, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
   return { status: answer.status, body: (await answer.json()) as Record<string, unknown> }
 }
-export const hookOn = (socket: string, event: string, folder: string, session = SESSION): ReturnType<typeof postTo> => postTo(socket, '/sessions/changed', { session, folder, event, at: new Date().toISOString() })
+export const hookOn = (socket: string, event: string, folder: string, session = SESSION, source = ''): ReturnType<typeof postTo> => postTo(socket, '/sessions/changed', { session, folder, event, at: new Date().toISOString(), source })
 export async function stepsOf(socket: string, until: ReadonlySet<string> = new Set(['moved', 'failed']), read: readonly string[] = []): Promise<{ readonly steps: string[]; readonly last: Moved }> {
   const steps = [...read]
   for (const started = Date.now(); Date.now() - started < 30_000; await Bun.sleep(10)) {

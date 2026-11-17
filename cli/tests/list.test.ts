@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { statusOf } from '../src/claude.ts'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, hookOn, isUploaded, LAPTOP, machineFor, postTo, runningOn, serveOn, SESSION, spawnForTest, temporaryFolder, WORKER, workerOn } from './program.ts'
+import { anyhostOn, hookOn, isUploaded, LAPTOP, machineFor, OTHER_SESSION, postTo, runningOn, serveOn, SESSION, spawnForTest, temporaryFolder, WORKER, workerOn } from './program.ts'
 
 test('a session whose record says busy after its turn ended, as while its background agents run, lists its main agent idle with background work, and statusOf reads working', async () => {
   const relay = await memoryRelay()
@@ -86,6 +86,28 @@ test("a change Claude Code reports, a new session, a /rename and a /cd alike, re
 
   await hookOn(laptop.socket, 'moved', moved)
   expect((await session())?.cwd).toBe(moved)
+}, 60_000)
+
+test('a session a /clear started lists the session it continues from as its source, and keeps it', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 3600 })
+  await serveOn(laptop.env)
+  await until(() => relay.isConnected(LAPTOP.id), 'the laptop connecting')
+  const cwd = join(laptop.env['HOME'] ?? '', 'work')
+  mkdirSync(cwd, { recursive: true })
+  const transcript = join(laptop.env['HOME'] ?? '', '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","timestamp":"2026-11-14T10:00:00.000Z","message":{"role":"user","content":"Start the next task"}}\n`)
+  const sourceOf = async (): Promise<string | undefined> => ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; source: string }[] }).agents.find(({ id }) => id === SESSION)?.source
+
+  await hookOn(laptop.socket, 'started', cwd, SESSION, OTHER_SESSION)
+  await hookOn(laptop.socket, 'turnStart', cwd, SESSION, OTHER_SESSION)
+  await until(async () => (await sourceOf()) === OTHER_SESSION, 'the cleared session listing its source', 10_000)
+  appendFileSync(transcript, `{"type":"assistant","cwd":"${cwd}","sessionId":"${SESSION}","timestamp":"2026-11-14T10:01:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Started."}]}}\n`)
+  await hookOn(laptop.socket, 'turnEnd', cwd)
+  await until(() => isUploaded(relay, SESSION, 'Started.'), 'the reply uploaded', 10_000)
+
+  expect(await sourceOf()).toBe(OTHER_SESSION)
 }, 60_000)
 
 type Listed = { readonly version: string; readonly agents: readonly { readonly id: string; readonly archived: boolean }[] }
