@@ -2,6 +2,24 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.11] - 2026-11-17
+
+### Changed
+- The sidebar redraws only the cards that changed, so the tab bar's spinner and every drag run at the display's frame rate on a busy Mac, where each change redrew every card.
+- Every change you make, a pin, a reorder, a settle, an archive, a close, shows in every view in the same frame and never steps back, while anyhost saves it, as Replicache keeps unsaved changes over the list it reads. Pins no longer jump back to an older order after a session's state changes: a list read that started before your change no longer replaces it, and the tab bar and projects pane no longer replay changes the sidebar already shows.
+- A restarted anyhost lists your sessions at once from what it saved, with no wait on Cloudflare, and the sidebar shows no error while it restarts. A list that waited seconds for other machines' answers now shows at once and takes their states as they come.
+- Your settings follow you to every machine: open shelves, unfolded subagents, the Board's grouping, the worktree you picked, each workspace's mode, the Reopen list and slept tabs.
+- Every drag lands where its card is closest, so you can change your mind and drop a card back where it came from, which stuck on the place it first passed. Escape cancels a drag and gives the keyboard back to your terminal, and the rest of the list slides aside as you move.
+- Drag a worktree row to reorder a project's worktrees, on every machine. A project carries its worktrees with it, and a Board card lifts and follows the pointer too.
+- Cmd+Shift+Up and Down (Ctrl+Shift on Linux) move the selected pin, project or worktree. Every list and menu takes Home, End, Page Up and Down and Ctrl+N and P, and a menu jumps to an item by its first letter.
+- Every search field has a clear button.
+- A card's hover shows Pin, then Settle, and the pin mark beside the title is gone.
+- Updating anyhost never asks for your Cloudflare login or opens the installer again. anyhost keeps the login it was given, and the installer opens only for a machine that is not joined or whose login Cloudflare refused.
+- Opening, focusing, restoring a tab and closing a tab follow Herdr as it shows them, with no fixed waits, so a slow machine no longer gives up on them.
+- Cmd+P opens one palette, and Enter opens the session you picked.
+- All projects shows every project's tabs in one strip that stays put as you switch tabs.
+- Installing anyhost again after removing it switches the Herdr app to its layout again.
+
 ## [0.9.10] - 2026-11-17
 
 ### Changed
