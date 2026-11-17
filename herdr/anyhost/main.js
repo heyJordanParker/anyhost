@@ -2691,7 +2691,7 @@ export default class Anyhost extends View {
     });
     const gone = [...this.departing].map(([key, was]) => this.placedAt(key, was.y - Math.min(was.height, MOTION_TRAVEL), 0, UI.motion, this.cardFor(ctx, model.byKey.get(key), ctx.mounted)));
     const sizer = div().id("ah-content").flex_none().w_full().h(motion.contentHeight);
-    const before = isEmpty ? [sizer, this.empty(t, this.emptyLine(ctx.filter))] : [sizer];
+    const before = isEmpty ? [this.empty(t, this.emptyLine(ctx.filter))] : [sizer];
     this.childAt = new Map(placed.map((item, at) => [item.key, before.length + at]));
     const revealed = shelves.find((shelf) => shelf.id === this.revealing);
     if (revealed) this.listScroll.scroll_to_item(this.childAt.get(revealed.more > 0 ? `more-${revealed.id}` : (revealed.shown.at(-1)?.key ?? shelfStop(revealed.id))));
