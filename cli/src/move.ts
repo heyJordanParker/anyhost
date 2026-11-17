@@ -508,7 +508,14 @@ const labelledHere = async (session: string): Promise<string | undefined> => (hc
 
 async function claudeOf(capture: Capture, session: string): Promise<string[]> {
   const transcript = await newestTranscript(capture, session)
-  return transcript === undefined ? claudeStart(['claude', '--session-id', session], false) : claudeStart(resumeArgv(session, await resumedOf(transcript)), true)
+  if (transcript === undefined) throw new Error(`${session.slice(0, 8)} has no transcript on ${capture.device.name}, so anyhost resumes nothing and starts no new conversation in its place.`)
+  return claudeStart(resumeArgv(session, await resumedOf(transcript)), true)
+}
+
+const shellWord = (word: string): string => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`)
+
+export async function resumeInPlace(capture: Capture, session: string, address: string): Promise<void> {
+  await sendTo(address, `exec ${(await claudeOf(capture, session)).map(shellWord).join(' ')}`)
 }
 
 async function terminalHere(capture: Capture, session: string): Promise<string | undefined> {
@@ -687,7 +694,7 @@ export async function deleteAgent(capture: Capture, asked: string, here: MoveHer
     if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.7.3 there does not answer at all.`)
     throw error
   })
-  if (answer.t === 'offline') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, is offline, so delete it once ${holder.name} connects.`)
+  if (answer.t === 'offline') return await deleteHere(capture, session, here)
   if ('error' in answer) throw new Error(`${holder.name}: ${answer.error}`)
   return answer.session
 }
@@ -708,9 +715,13 @@ export const receiveDelete = (capture: Capture, asked: Extract<Delivered, { read
 async function deleteHere(capture: Capture, asked: string, here: MoveHere): Promise<string> {
   const { db, device, roots } = capture
   const session = await sessionOf(capture, asked)
+  if (journalOf(db, session)?.holder !== '') {
+    await restore(capture, session, { take: true, if: { gone: true }, checkouts: here.checkouts }).catch((error: unknown) => {
+      throw error instanceof HeldElsewhere ? new Error(`${error.holder.name} runs ${session.slice(0, 8)} and is connected, so delete it there.`) : error
+    })
+  }
   const journal = journalOf(db, session)
   if (journal === undefined) throw new Error(`${session.slice(0, 8)} has no files on ${device.name}.`)
-  if (journal.holder !== '') throw new Error(`${session.slice(0, 8)} continues on ${journal.holder}, so delete it there.`)
   await stopCopy(roots.claudeHome, session)
   const owned = db.query<{ path: string }, [string]>("select path from files where session = ? and sha256 != ''").all(session).map(({ path }) => path).filter((path) => {
     const owner = ownerOf(path, roots)

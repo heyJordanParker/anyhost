@@ -241,7 +241,7 @@ const CLAUDE_START = [
   '  $ENV{CLAUDE_CODE_RELAUNCH_HOME_TRUST} = "$$:$start" if defined $start && $start ne "";',
   '}',
   'exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n";',
-].join('\n')
+].join(' ')
 
 export const claudeStart = (argv: readonly string[], trustsHome: boolean): string[] => ['perl', '-e', CLAUDE_START, '--', environmentFile(), trustsHome ? '1' : '', ...argv]
 

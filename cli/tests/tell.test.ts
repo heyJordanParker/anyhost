@@ -92,6 +92,22 @@ test('anyhost tell to a session its machine holds in no live terminal opens one 
   expect(sentOn(worker.folder)).toEqual(['t1 And the hotel'])
 }, 90_000)
 
+test('a message to a session asleep on its own machine wakes that same conversation with claude --resume and never starts a new one', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  laptop.claude.kill('SIGKILL')
+  await laptop.claude.exited
+
+  const told = await anyhostOn(laptop.env, ['tell', SESSION.slice(0, 8), 'Wake up and report'])
+  const again = await anyhostOn(laptop.env, ['tell', SESSION.slice(0, 8), 'And once more'])
+
+  expect(told).toMatchObject({ code: 0 })
+  expect(again).toMatchObject({ code: 0 })
+  expect(runsOn(laptop.folder).map(({ session, command }) => ({ session, command: command.split(' ').slice(-3).join(' ') }))).toEqual([{ session: SESSION, command: `claude --resume ${SESSION}` }])
+  expect(runsOn(laptop.folder).some(({ command }) => command.includes('--session-id'))).toBe(false)
+  expect(sentOn(laptop.folder)).toEqual(['t0 Wake up and report', 't0 And once more'])
+}, 90_000)
+
 test("GET /agents lists what a session another machine runs does now, and an agent's message to it names the agent and the machine that sent it, so the agent it reaches answers it, and keys answer a prompt", async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)

@@ -104,7 +104,7 @@ export function agentTools(mod: Mod<AnyhostState>) {
     }),
     tool({
       name: 'start_agent',
-      description: `Start a new Claude Code agent on a machine, this one when machine is left out, in its checkout of the repository the folder is in, and type prompt into it as its first message. This agent becomes its parent: the prompt names this agent and its machine as its sender, so the new agent reports back with tell_agent when it is done or stuck, which wakes this agent, and list_agents lists it with children_of me. Answers the agent's id and machine. ${WAKES}`,
+      description: `Start a new Claude Code agent on a machine, this one when machine is left out, in its checkout of the repository the folder is in, and type prompt into it as its first message. It never reaches an agent that exists: to message one, find it with list_agents and use tell_agent, which wakes it wherever it sleeps, and when list_agents fails, call it again instead of starting an agent. This agent becomes its parent: the prompt names this agent and its machine as its sender, so the new agent reports back with tell_agent when it is done or stuck, which wakes this agent, and list_agents lists it with children_of me. Answers the agent's id and machine. ${WAKES}`,
       inputSchema: {
         type: 'object',
         properties: {

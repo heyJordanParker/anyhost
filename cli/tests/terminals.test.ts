@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { claudeStart, resumeArgv, resumedOf, startOf } from '../src/claude.ts'
 import type { Status } from '../src/serve.ts'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, coreEvent, coreSays, decoder, hookOn, LAPTOP, logOf, machineFor, OTHER_SESSION, runningOn, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn } from './program.ts'
+import { anyhostOn, coreEvent, coreSays, decoder, hookOn, LAPTOP, logOf, machineFor, OTHER_SESSION, runningOn, sentOn, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn } from './program.ts'
 
 const SHELL = ['/bin/zsh', '-l']
 const CLAUDE = ['claude']
@@ -111,26 +111,50 @@ test('an idle session no screen shows is discarded after the stop time, while on
   expect(Object.keys((await sharedIn(relay)).archived ?? {})).toEqual([])
 }, 60_000)
 
-test("a 0.9.0 terminal that holds no Claude Code, a kept shell or an asleep runner, is closed without archiving its session, and every other terminal stays", async () => {
+test("a 0.9.0 runner asleep, also one whose session runs elsewhere, is closed without archiving its session, and every other terminal, an awake runner too, stays", async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
-  const asleep = ['anyhost', 'run', '--asleep', '--session', OTHER_SESSION]
+  const runnerOf = (session: string): string[] => ['anyhost', 'run', '--asleep', '--session', session]
+  const runnerTerminal = (address: string, session: string, pid: number) => ({ ...terminalIn(address, ['sh', '-c', 'exec anyhost "$@"', ...runnerOf(session)], { 'anyhost.session': session }, runnerOf(session)), pid, foreground: { argv: runnerOf(session), pid } })
+  claudeIn(laptop, 't9', FOURTH_SESSION, 'idle')
+  const elsewhere = spawnForTest(['sleep', '600'])
+  const awake = spawnForTest(['sh', '-c', 'sleep 600 & echo $!; wait'])
+  const reader = awake.stdout.getReader()
+  let printed = ''
+  while (!printed.includes('\n')) printed += decoder.decode((await reader.read()).value)
+  const awakeClaude = Number(printed.trim())
+  writeFileSync(join(laptop.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions', `${awakeClaude}.json`), JSON.stringify({ pid: awakeClaude, sessionId: THIRD_SESSION, procStart: startOf(awakeClaude), kind: 'interactive', status: 'busy', statusUpdatedAt: Date.now() }))
   coreSays(laptop.folder, {
     seq: 1,
     terminals: [
-      terminalIn('t0', SHELL, { 'anyhost.session': SESSION }),
-      terminalIn('t1', ['sh', '-c', 'exec anyhost "$@"', ...asleep], { 'anyhost.session': OTHER_SESSION }, asleep),
+      runnerTerminal('t1', OTHER_SESSION, 4000),
       terminalIn('t2', SHELL, {}),
-      terminalIn('t3', CLAUDE, { 'anyhost.session': THIRD_SESSION }),
+      runnerTerminal('t3', THIRD_SESSION, awake.pid),
+      runnerTerminal('t4', FOURTH_SESSION, elsewhere.pid),
     ],
   })
 
   await serveOn(laptop.env)
-  await until(() => ['kill t0', 'kill t1'].every((call) => logOf(laptop.folder, 'calls.log').includes(call)), 'the program closing both leftovers', 15_000)
+  await until(() => ['kill t1', 'kill t4'].every((call) => logOf(laptop.folder, 'calls.log').includes(call)), 'the program closing the leftovers', 15_000)
   await Bun.sleep(1500)
 
-  expect(logOf(laptop.folder, 'calls.log').filter((line) => line.startsWith('kill'))).toEqual(['kill t0', 'kill t1'])
-  expect(logOf(laptop.folder, 'labels.log')).toEqual(['t0 anyhost.session=', 't1 anyhost.session='])
+  expect(logOf(laptop.folder, 'calls.log').filter((line) => line.startsWith('kill')).sort()).toEqual(['kill t1', 'kill t4'])
+  expect(logOf(laptop.folder, 'labels.log').sort()).toEqual(['t1 anyhost.session=', 't4 anyhost.session='])
+  expect(Object.keys((await sharedIn(relay)).archived ?? {})).toEqual([])
+}, 60_000)
+
+test("after a herdr-core restart gives a session's kept terminal a shell, the session resumes in that same terminal, so its tab and split stay, once, and a kept shell of a session this machine cannot resume is closed", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  laptop.claude.kill('SIGKILL')
+  await laptop.claude.exited
+  coreSays(laptop.folder, { seq: 1, terminals: [terminalIn('t0', SHELL, { 'anyhost.session': SESSION }), terminalIn('t1', SHELL, { 'anyhost.session': OTHER_SESSION }), terminalIn('t2', SHELL, {})] })
+
+  await until(() => logOf(laptop.folder, 'calls.log').includes('kill t1') && sentOn(laptop.folder).length > 0, 'the program resuming t0 and closing t1', 15_000)
+  await Bun.sleep(2000)
+
+  expect(sentOn(laptop.folder).map((line) => line.split(' ').slice(0, 2).concat(line.split(' ').slice(-2)).join(' '))).toEqual([`t0 exec --resume ${SESSION}`])
+  expect(logOf(laptop.folder, 'calls.log').filter((line) => line.startsWith('kill'))).toEqual(['kill t1'])
   expect(Object.keys((await sharedIn(relay)).archived ?? {})).toEqual([])
 }, 60_000)
 
@@ -155,9 +179,11 @@ test("a Claude Code the Herdr app runs as its terminal's own program gets its se
   expect(logOf(laptop.folder, 'labels.log')).toEqual([`t0 anyhost.session=${SESSION}`, `t0 anyhost.session=${OTHER_SESSION}`])
 }, 60_000)
 
-test("closing a session's pane or quitting its agent archives the session once, and an agent that crashes or a terminal the program closes archives nothing", async () => {
+test("closing a session's pane or quitting its agent archives the session once, and an agent that crashes, a terminal the program closes, a herdr-core stop and a computer shutdown archive nothing", async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
+  const STOPPED = '55555555-6666-7777-8888-999999999999'
+  const SHUT_DOWN = '66666666-7777-8888-9999-000000000000'
   coreSays(laptop.folder, {
     seq: 1,
     terminals: [
@@ -165,6 +191,8 @@ test("closing a session's pane or quitting its agent archives the session once, 
       terminalIn('t1', CLAUDE, { 'anyhost.session': OTHER_SESSION }),
       terminalIn('t2', CLAUDE, { 'anyhost.session': THIRD_SESSION }),
       terminalIn('t3', CLAUDE, { 'anyhost.session': FOURTH_SESSION }),
+      terminalIn('t4', CLAUDE, { 'anyhost.session': STOPPED }),
+      terminalIn('t5', CLAUDE, { 'anyhost.session': SHUT_DOWN }),
     ],
   })
   await serveOn(laptop.env)
@@ -173,6 +201,8 @@ test("closing a session's pane or quitting its agent archives the session once, 
   coreSays(
     laptop.folder,
     coreEvent('finished', 't3', { exit_code: 1, finished_ms: Date.now(), reason: 'exited', signal: null }),
+    coreEvent('finished', 't4', { exit_code: 0, finished_ms: Date.now(), reason: 'server_stop', signal: null }),
+    coreEvent('finished', 't5', { exit_code: 0, finished_ms: Date.now(), reason: 'host_shutdown', signal: null }),
     coreEvent('labels', 't2', { labels: { 'anyhost.session': '' } }),
     coreEvent('finished', 't2', { exit_code: 0, finished_ms: Date.now(), reason: 'killed', signal: null }),
     coreEvent('finished', 't1', { exit_code: 0, finished_ms: Date.now(), reason: 'exited', signal: null }),
@@ -185,6 +215,8 @@ test("closing a session's pane or quitting its agent archives the session once, 
   expect(new Set(archives.filter((at) => at !== undefined)).size).toBe(1)
   expect((await sharedIn(relay)).archived?.[THIRD_SESSION]).toBeUndefined()
   expect((await sharedIn(relay)).archived?.[FOURTH_SESSION]).toBeUndefined()
+  expect((await sharedIn(relay)).archived?.[STOPPED]).toBeUndefined()
+  expect((await sharedIn(relay)).archived?.[SHUT_DOWN]).toBeUndefined()
 }, 60_000)
 
 test("quitting a session inside Claude Code archives it, as closing its tab does, and a session end that is no quit, as a /clear's, archives nothing", async () => {

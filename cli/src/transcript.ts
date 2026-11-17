@@ -43,7 +43,7 @@ const textOf = async (argv: string[]): Promise<string> => {
   return text
 }
 
-async function familyOf(pid: number): Promise<number[]> {
+export async function familyOf(pid: number): Promise<number[]> {
   const children = new Map<number, number[]>()
   for (const line of (await textOf(['ps', '-A', '-o', 'pid=,ppid='])).split('\n')) {
     const [child, parent] = line.trim().split(/\s+/).map(Number)

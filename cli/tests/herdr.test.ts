@@ -50,11 +50,11 @@ test("a Herdr app set up by 0.9.0 runs its own Claude Code command through the l
   expect(run).not.toContain(RUNNER_WRAP_0_9_0)
 })
 
-test("the Herdr app's sidebar shows the inbox over the projects, split by a divider the person drags, and the rest of its layout as the app ships it", async () => {
+test("the Herdr app's sidebar shows the inbox over the projects, split by a divider the person drags, its panes wear anyhost's header, and the rest of its layout is as the app ships it", async () => {
   const herdr = join(temporaryFolder(), 'herdr-app')
   mkdirSync(join(herdr, 'layouts'), { recursive: true })
   const lists = { id: 'sidebar-lists', type: 'column', children: [{ id: 'spaces', type: 'block', content: { mod: 'spaces' } }, { id: 'agents', type: 'block', content: { mod: 'agents' } }] }
-  const tab = { id: 'main', type: 'block', min: 200, content: { tab: 'active' } }
+  const tab = { id: 'main', type: 'block', min: 200, content: { tab: 'active', pane: { gap: 8, header: { content: { mod: 'pane' }, height: 30, position: 'top', reveal: 'always' } } } }
   const main = { id: 'root', type: 'row', children: [{ id: 'sidebar', type: 'column', children: [{ id: 'brand', type: 'block' }, lists] }, { id: 'work', type: 'column', children: [{ id: 'tabs', type: 'block', size: { px: 30 }, content: { mod: 'tabs' } }, tab] }] }
   writeFileSync(join(herdr, 'layouts', 'main.json'), JSON.stringify(main))
 
@@ -80,7 +80,7 @@ test("the Herdr app's sidebar shows the inbox over the projects, split by a divi
         active: 'main',
         min: 200,
         children: [
-          { id: 'main', type: 'block', content: { tab: 'active' } },
+          { id: 'main', type: 'block', content: { tab: 'active', pane: { gap: 8, header: { content: { mod: 'anyhost', props: { view: 'pane' } }, height: 30, position: 'top', reveal: 'always' } } } },
           { id: 'tiles', type: 'row', children: [] },
           { id: 'board', type: 'block', content: { mod: 'anyhost', props: { view: 'board' } } },
         ],

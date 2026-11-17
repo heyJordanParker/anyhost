@@ -149,13 +149,21 @@ const PANES: readonly Node[] = [
   { id: 'agents', type: 'block', size: { weight: 2 }, min: 120, content: { mod: 'anyhost' } },
 ]
 
+type PaneLook = { readonly pane?: { readonly header?: Record<string, unknown> } & Record<string, unknown> } & Record<string, unknown>
+
+const withPaneHeader = (node: Node): Node => {
+  const content = node.content as PaneLook | undefined
+  if (content?.pane?.header === undefined) return node
+  return { ...node, content: { ...content, pane: { ...content.pane, header: { ...content.pane.header, content: { mod: 'anyhost', props: { view: 'pane' } } } } } }
+}
+
 const withSessions = (node: Node): Node => {
   if (node.id === 'sidebar-lists') return { id: node.id, type: 'column', children: [...PANES] }
   if (node.id === 'sidebar-footer') return { ...node, content: { mod: 'anyhost', props: { view: 'footer' } } }
   if (node.id === 'tabs') return { ...node, content: { mod: 'anyhost', props: { view: 'tabs' } } }
   if (node.id === 'main') {
     const { size, min, max, ...shown } = node
-    return { id: 'views', type: 'stack', active: 'main', ...(size === undefined ? {} : { size }), ...(min === undefined ? {} : { min }), ...(max === undefined ? {} : { max }), children: [shown, { id: 'tiles', type: 'row', children: [] }, { id: 'board', type: 'block', content: { mod: 'anyhost', props: { view: 'board' } } }] }
+    return { id: 'views', type: 'stack', active: 'main', ...(size === undefined ? {} : { size }), ...(min === undefined ? {} : { min }), ...(max === undefined ? {} : { max }), children: [withPaneHeader(shown),{ id: 'tiles', type: 'row', children: [] }, { id: 'board', type: 'block', content: { mod: 'anyhost', props: { view: 'board' } } }] }
   }
   return { ...node, ...(node.children === undefined ? {} : { children: node.children.map(withSessions) }) }
 }

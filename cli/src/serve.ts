@@ -10,13 +10,13 @@ import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine
 import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { activityOf, deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
+import { activityOf, deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type RelayState, type Written } from './relay.ts'
 import { HOOK_EVENTS, type AgentStatus, type HookEvent, type Routed } from '../../relay/protocol.ts'
 import { agentsOf, indexesIn, indexKeyOf, type ListRead } from './sessions.ts'
 import { archive, isArchived, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, type Organize } from './shared.ts'
 import { copyT3Marks } from './t3.ts'
-import { codexSessionOf, codexState, filesUnder, isCodexRun, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
+import { codexSessionOf, codexState, familyOf, filesUnder, isCodexRun, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
 
 const BACKUP_MS = Number(process.env['ANYHOST_BACKUP_MS'] ?? 60_000)
 const SWEEP_ALL_MS = 60 * 60_000
@@ -76,6 +76,7 @@ const LIST_FRESH_MS = 5000
 const LIST_WAIT_MS = 25_000
 const STOP_MS = Number(process.env['ANYHOST_STOP_MS'] ?? 8 * 60 * 60_000)
 const DISCARD_EVERY_MS = Math.min(30_000, STOP_MS / 4)
+const RESUME_IN_PLACE_MS = 60_000
 const SHOWN_EVERY_MS = 30_000
 const ROUTES = 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/archive, /agents/settle, /agents/snooze, /agents/visit, /agents/pin, /agents/delete, /agents/fork, /agents/show, /organize, /projects/name, /settings, /sessions/changed and /shown'
 
@@ -592,9 +593,23 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   let labelling = Promise.resolve()
   const labelNow = (): void => void (labelling = labelling.then(() => settle('labelled', labelOwnRuns)))
-  const isRunner = (terminal: Terminal): boolean => {
+  const isAsleepRunner = async (terminal: Terminal, record: { readonly pid: number } | undefined): Promise<boolean> => {
     const [program = '', command] = terminal.foreground?.argv ?? []
-    return basename(program) === 'anyhost' && command === 'run'
+    if (basename(program) !== 'anyhost' || command !== 'run' || terminal.foreground === null) return false
+    return record === undefined || !(await familyOf(terminal.foreground.pid)).includes(record.pid)
+  }
+  const resumedIn = new Map<string, number>()
+  const keepSessionIn = async (address: string, session: string): Promise<void> => {
+    if (Date.now() - (resumedIn.get(address) ?? 0) < RESUME_IN_PLACE_MS) return
+    const lastActivity = capture.db.query<{ last_activity: string }, [string]>('select last_activity from sessions where id = ?').get(session)?.last_activity ?? ''
+    const isHeldHere = (journalOf(capture.db, session)?.holder ?? '') === ''
+    const isGone = !isHeldHere || (lastActivity !== '' && isArchived(await sharedOf(relay), { id: session, lastActivity }))
+    if (isGone) return void (await killTerminal(address))
+    resumedIn.set(address, Date.now())
+    await resumeInPlace(capture, session, address).catch(async (error: unknown) => {
+      console.error(`${new Date().toISOString()} anyhost closes ${address}, as ${session.slice(0, 8)} could not resume in it: ${error instanceof Error ? error.message : String(error)}`)
+      await killTerminal(address)
+    })
   }
   const discardIdle = async (): Promise<void> => {
     const records = new Map((await recordedSessions(roots.claudeHome)).map((record) => [record.sessionId, record]))
@@ -603,7 +618,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       const session = sessionIn(address)
       if (!isHere(address) || session === '' || terminal.state !== 'live') continue
       const record = records.get(session)
-      if (isKeptShell(terminal) || (isRunner(terminal) && record === undefined)) {
+      if (isKeptShell(terminal)) {
+        await keepSessionIn(address, session)
+        continue
+      }
+      if (await isAsleepRunner(terminal, record)) {
         await killTerminal(address)
         continue
       }
@@ -620,7 +639,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     void settle('discard', discardIdle).finally(() => (isDiscarding = false))
   }
   setInterval(discardNow, DISCARD_EVERY_MS)
-  const isClosedByPerson = (terminal: Terminal | undefined): boolean => terminal !== undefined && (terminal.reason === 'killed' || terminal.exitCode === 0)
+  const isClosedByPerson = (terminal: Terminal | undefined): boolean => terminal !== undefined && (terminal.reason === 'killed' || (terminal.reason === 'exited' && terminal.exitCode === 0))
   const archiveClosed = (change: TerminalChange): void => {
     const session = sessionIn(change.address)
     if ((change.type !== 'finished' && change.type !== 'lost') || !isHere(change.address) || session === '' || !isClosedByPerson(terminals.get(change.address))) return

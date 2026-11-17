@@ -2,6 +2,27 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.8] - 2026-11-17
+
+### Changed
+- Restarting your computer or herdr-core keeps every tab and split, and each session continues in its own pane, as tmux-resurrect restores a layout.
+- A message to an agent wakes that same agent wherever it sleeps, and never starts a new one. While anyhost restarts, an agent's anyhost tools wait up to 10 s and then say to ask again, so no agent starts a duplicate of one it could not list.
+- Dragging a tab onto the work area splits it beside the pane you look at, on the side you dropped it.
+- Dragging a pinned tab reorders your pinned sessions in the tab bar and the sidebar alike, and a dragged project or pinned card moves the list under the pointer as you drag, as Linear's lists do.
+- A new pin or project order waits while anyhost restarts and is saved once it answers, where it was lost with an error.
+- Pane headers show the program, its folder and the split and zoom buttons, without the spinner and the close button.
+- State chips are filled and show how long again, as in 0.9.6 and T3 Code.
+- The project counts sit next to each other with no gaps, and All projects no longer turns red.
+- The inbox's section headers carry a rule, as T3 Code's do.
+- The selected card, project and tab are white with a thin ring, as T3 Code's selected row, so a card you hover never looks selected, and the shown tab joins its pane.
+- Closing a project's last tab keeps you in that project, on its start view, where it jumped to another project.
+- A pinned tab from another workspace shows its session's state, Needs you included, and a pane's header names its session.
+
+### Fixed
+- Deleting a session whose machine is offline, or that this machine never held, deletes it, where it said the session had no files.
+- Stopping herdr-core or shutting down your computer archives nothing, where it archived every session.
+- A 0.9.0 tab that asked you to type to continue a session that runs elsewhere closes by itself.
+
 ## [0.9.7] - 2026-11-17
 
 ### Changed

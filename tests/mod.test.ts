@@ -450,6 +450,17 @@ test('/move names the machine to move to, and shows why the program refused the 
   expect(moveToasts(tested)).toEqual([])
 })
 
+test("a tool call while the anyhost program restarts answers within Claude Code's tool deadline that the program is restarting, so an agent asks again instead of starting a new agent", async () => {
+  const tested = testMod(anyhost, {})
+  tested.fakes.process.spawn = () => Object.assign((async function* restarting(): AsyncGenerator<never, Ended> { await new Promise(() => {}); return { code: 0, signal: null } })(), { result: new Promise<Ended>(() => {}) }) as Subprocess
+  const started = Date.now()
+
+  const answer = JSON.stringify(await tested.callTool('list_agents', {}))
+
+  expect(Date.now() - started).toBeLessThan(15_000)
+  expect(answer).toContain('The anyhost program is restarting and did not answer /agents within 10 s. Ask again in a few seconds.')
+}, 30_000)
+
 const AGENT = { id: '3f9c2b1e-7a4d-4c55-9b0e-2d8f61a0c7e4', tool: 'claude', title: 'Checkout retry', firstPrompt: 'Make the checkout retry a declined card once', machine: 'devbox', holder: 'devbox', status: 'idle', lastActivity: '2026-11-10T14:02:00.000Z', repo: 'git@github.com:acme/shop.git', cwd: '/home/jordan/shop', entrypoint: 'cli', device: 'd1', archived: false, parent: '', source: '' }
 const MACHINES = { here: 'd0', machines: [{ id: 'd0', name: 'test-computer', connected: true, seenAt: '' }, { id: 'd1', name: 'devbox', connected: true, seenAt: '' }] }
 
