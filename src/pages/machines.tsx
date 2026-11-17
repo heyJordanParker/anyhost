@@ -31,6 +31,7 @@ export const initialState: AnyhostState = {
 
 const NEEDS_STEP = new Set(['unjoined', 'outdated'])
 const CONNECT_WAIT_MS = 15_000
+const READY_MS = 10_000
 export const FOLLOW_MS = 1000
 
 const programs = new WeakMap<object, Program>()
@@ -41,7 +42,19 @@ export class NoAnswer extends Error {}
 export async function askProgram<T>(mod: Mod<AnyhostState>, path: string, body?: object): Promise<T> {
   const program = programs.get(mod)
   if (program === undefined) throw new Error('The anyhost mod has not started its program yet.')
-  const { url, socketPath } = await program.ready()
+  const { url, socketPath } = await new Promise<Awaited<ReturnType<Program['ready']>>>((resolve, reject) => {
+    const timer = mod.after(READY_MS, () => reject(new NoAnswer(`The anyhost program is restarting and did not answer ${path} within ${READY_MS / 1000} s. Ask again in a few seconds.`)))
+    program.ready().then(
+      (ready) => {
+        timer.stop()
+        resolve(ready)
+      },
+      (error: unknown) => {
+        timer.stop()
+        reject(error)
+      },
+    )
+  })
   const answer = await http
     .fetch(`${url}${path}`, {
       ...(socketPath === undefined ? {} : { socketPath }),
