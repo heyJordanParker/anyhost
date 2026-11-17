@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.9] - 2026-11-17
+
+### Changed
+- A tab keeps its layout while its agents sleep. Opening a slept agent puts it back in its tab, beside the agents it shared a split with, and when the whole tab slept, opening any of its agents brings the whole tab back with the one you opened focused, as Chrome keeps a discarded tab's place.
+
 ## [0.9.8] - 2026-11-17
 
 ### Changed

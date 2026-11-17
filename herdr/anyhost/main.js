@@ -67,6 +67,9 @@ const TAB_LEAST = 96;
 const DRAG_SLOP = 4;
 const DROP_SETTLES_MS = 1000;
 const SPLIT_WAIT_MS = 5000;
+const TAB_LAYOUTS = "tabLayouts";
+const RESTORE_WAIT_MS = 60_000;
+const RESTORE_STEP_MS = 300;
 const SPLIT_PLACE = { left: "right", right: "right", up: "down", down: "down" };
 const SPLIT_ICON = { left: "panel-left", right: "panel-right", up: "panel-top", down: "panel-bottom" };
 const PANEL_SHARE = 0.45;
@@ -392,13 +395,31 @@ const sideOf = (at, size) =>
     ["up", at.y / size.height],
     ["down", 1 - at.y / size.height],
   ].reduce((a, b) => (b[1] < a[1] ? b : a))[0];
-const splitInto = (addresses, side) => {
-  const target = focused()?.pane;
-  if (addresses.includes(focused()?.terminal)) return;
+const splitInto = (addresses, side, target = focused()?.pane) => {
+  if (addresses.includes(panes().find((p) => p.pane === target)?.terminal)) return;
   if (!target) return notify({ title: "Pick a pane to split first", body: "Drop the tab on a tab's terminal to place it beside that terminal.", level: "warning" });
   for (const terminal of addresses) run("terminal.park", { terminal });
   setShared(SPLIT, { terminals: addresses, side, target, stage: "parked", until: Date.now() + SPLIT_WAIT_MS });
 };
+const LAYOUT_DOC = `printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"doc.get","params":{"name":"herdr-app"}}' | PATH="$HOME/.local/bin:$PATH" hc connect`;
+const readLayoutDoc = async () => {
+  const read = await exec("sh", ["-c", LAYOUT_DOC], { timeout: 10_000 });
+  if (read.code !== 0) throw new Error(read.stderr.trim() || `hc connect exited with ${read.code}`);
+  return JSON.parse(read.stdout.split("\n").find((line) => line.trim() !== "") ?? "{}").result?.value ?? {};
+};
+const sessionTree = (node, sessionAt) => {
+  if (!node) return null;
+  if (node.type === "block") {
+    const session = sessionAt.get(node.content?.terminal);
+    return session ? { session } : null;
+  }
+  const children = (node.children ?? []).map((child) => sessionTree(child, sessionAt)).filter(Boolean);
+  if (children.length < 2) return children[0] ?? null;
+  return { split: node.type === "column" ? "down" : "right", children };
+};
+const leavesOf = (tree) => (tree.session ? [tree.session] : tree.children.flatMap(leavesOf));
+const placementsOf = (tree) =>
+  tree.session ? [] : tree.children.flatMap((child, i) => [...(i === 0 ? [] : [{ session: leavesOf(child)[0], anchor: leavesOf(tree.children[i - 1])[0], side: tree.split }]), ...placementsOf(child)]);
 const stepSplit = () => {
   const split = shared(SPLIT);
   if (!split) return;
@@ -1500,6 +1521,7 @@ export default class Anyhost extends View {
     if (this.opening.has(r.key)) return;
     if (r.archived) this.archive(cx, r, false);
     if (r.deleted) this.change(cx, r.key, { deleted: false }, async () => undefined, "");
+    this.restoreTab(cx, r, on ?? "");
     this.launch(r, on ?? "", (at) => this.focusWhenShown(at, r.title));
   }
 
@@ -1809,6 +1831,7 @@ export default class Anyhost extends View {
       setShared(PULSE, { ...model.pulse, at: Date.now() });
     }
     this.publishDiscarded(model);
+    this.recordTabs(cx, model);
     this.sendOutbox(cx);
     const order = this.orderNow();
     const arrived = model.pulse.projects.filter((p) => p.key !== NONE && !order.includes(p.key)).map((p) => p.key);
@@ -2122,6 +2145,82 @@ export default class Anyhost extends View {
       const worktree = key && machine ? this.worktreeToShow(key, machine) : null;
       if (worktree) this.moveTerminal(x.address, { space: spaceOf(key, worktree.folder), tab });
     }
+  }
+
+  recordTabs(cx, model) {
+    const shape = panes().map((p) => `${p.tab}:${p.terminal}`).join(",");
+    const key = `${shape}|${model.rows.map((r) => `${r.key}:${r.address}:${r.section}`).join(",")}`;
+    if (key === this.tabsRecorded || this.isRecordingTabs) return;
+    this.isRecordingTabs = true;
+    cx.spawn(async () => {
+      try {
+        const doc = await readLayoutDoc();
+        const sessionAt = new Map(terminals().map((x) => [x.address, x.labels?.[SESSION_LABEL]]));
+        const isOpen = (session) => OPEN_SECTIONS.has(this.model?.byKey.get(session)?.section);
+        const awake = new Set(terminals().filter((x) => x.state === "live").map((x) => x.labels?.[SESSION_LABEL]));
+        const isAsleep = (session) => isOpen(session) && !awake.has(session);
+        const before = saved(TAB_LAYOUTS, {});
+        const next = {};
+        const tabs = (doc.spaces ?? []).flatMap((space) => space.tabs ?? []);
+        for (const tab of tabs) {
+          const tree = sessionTree(tab.root, sessionAt);
+          const now = tree ? leavesOf(tree) : [];
+          const old = before[tab.id];
+          const left = old ? leavesOf(old).filter((session) => !now.includes(session)) : [];
+          if (old && now.every((session) => leavesOf(old).includes(session)) && left.length > 0 && left.every(isAsleep)) next[tab.id] = old;
+          else if (now.length > 1) next[tab.id] = tree;
+        }
+        const claimed = new Set(Object.values(next).flatMap(leavesOf));
+        for (const [tab, tree] of Object.entries(before)) {
+          if (next[tab] || tabs.some((x) => x.id === tab)) continue;
+          const sessions = leavesOf(tree);
+          if (sessions.some((session) => claimed.has(session)) || sessions.filter(isOpen).length < 2) continue;
+          next[tab] = tree;
+        }
+        if (JSON.stringify(next) !== JSON.stringify(before)) save(TAB_LAYOUTS, next);
+        this.tabsRecorded = key;
+      } catch (error) {
+        console.error(`anyhost could not read the tab layouts: ${messageOf(error)}`);
+      } finally {
+        this.isRecordingTabs = false;
+      }
+    });
+  }
+
+  restoreTab(cx, r, on) {
+    if (on !== "") return;
+    const tree = Object.values(saved(TAB_LAYOUTS, {})).find((t) => leavesOf(t).includes(r.key));
+    if (!tree) return;
+    for (const session of leavesOf(tree)) {
+      const s = this.model?.byKey.get(session);
+      if (session !== r.key && s && !s.address && OPEN_SECTIONS.has(s.section) && !this.opening.has(session)) this.launch(s, "", () => {});
+    }
+    const isRunning = this.restoring !== null && this.restoring !== undefined;
+    this.restoring = { steps: placementsOf(tree), focus: r.key, until: Date.now() + RESTORE_WAIT_MS };
+    if (!isRunning) cx.timer.after(RESTORE_STEP_MS, (cx) => this.stepRestore(cx));
+  }
+
+  stepRestore(cx) {
+    const job = this.restoring;
+    if (!job || Date.now() > job.until) return void (this.restoring = null);
+    cx.timer.after(RESTORE_STEP_MS, (cx) => this.stepRestore(cx));
+    if (shared(SPLIT)) return;
+    const ps = panes();
+    const addressOf = (session) => terminals().find((x) => x.labels?.[SESSION_LABEL] === session && x.state === "live" && !String(x.address).includes("/"))?.address;
+    if (job.steps.length === 0) {
+      this.restoring = null;
+      const address = addressOf(job.focus);
+      return void (address && run("pane.focus", { terminal: address }));
+    }
+    const paneOf = (address) => (address ? ps.find((p) => p.terminal === address) : undefined);
+    const isPlaced = (s) => Boolean(paneOf(addressOf(s.anchor)) && paneOf(addressOf(s.session)));
+    const ready = job.steps.find((s) => isPlaced(s) && job.placed?.has(s));
+    job.placed = new Set(job.steps.filter(isPlaced));
+    if (!ready) return;
+    job.steps = job.steps.filter((s) => s !== ready);
+    const anchor = paneOf(addressOf(ready.anchor));
+    const placed = paneOf(addressOf(ready.session));
+    if (anchor.tab !== placed.tab) splitInto([placed.terminal], ready.side, anchor.pane);
   }
 
   publishDiscarded(model) {
