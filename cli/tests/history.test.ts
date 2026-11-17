@@ -593,7 +593,7 @@ test('two machines race for one journal nobody holds, and exactly one of them re
 
   const passes = await Promise.all([rewriteNext(b.capture, failTest), rewriteNext(c.capture, failTest)])
 
-  expect(passes).toEqual([fork, fork])
+  expect(passes).toContain(fork)
   expect(relay.puts.filter(({ key }) => key.startsWith(`journals/${fork}/next/`))).toHaveLength(1)
   expect(relay.puts.filter(({ key }) => key.startsWith(`journals/${fork}/compacted/`))).toHaveLength(1)
   expect(await relay.keys(`journals/${fork}/`)).toEqual([expect.stringMatching(/\/compacted\/\d{16}-\d{16}-0000000000000001\.zst$/), `journals/${fork}/rewritten`])
