@@ -86,20 +86,27 @@ export const anyhost = defineMod({
       if (holder.move !== undefined && MOVING.has(holder.move.step)) follow()
       return holder
     }
+    const clearedFrom = new Map<string, string>()
+    let ended = ''
     const changed =
       (event: HookEvent) =>
       (): Promise<void> => {
         const at = new Date().toISOString()
-        return askProgram(mod, '/sessions/changed', { session: sessions.current.id, folder: sessions.current.cwd, event, at }).then(
+        const session = sessions.current.id
+        return askProgram(mod, '/sessions/changed', { session, folder: sessions.current.cwd, event, at, source: clearedFrom.get(session) ?? '' }).then(
           () => undefined,
           (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: 'warning' })),
         )
       }
-    sessions.current.onSessionStart(async () => {
+    sessions.current.onSessionStart(async (started) => {
+      if (started.source === 'clear' && ended !== '' && ended !== started.session) clearedFrom.set(started.session, ended)
       await check()
       await changed('started')()
     })
-    sessions.current.onSessionEnd((ended) => changed(ended.reason === 'exit' ? 'quit' : 'ended')())
+    sessions.current.onSessionEnd((end) => {
+      ended = end.session
+      return changed(end.reason === 'exit' ? 'quit' : 'ended')()
+    })
     sessions.current.onTurnStart(changed('turnStart'))
     sessions.current.onTurnEnd(changed('turnEnd'))
     sessions.current.onElicitation(changed('asked'))
