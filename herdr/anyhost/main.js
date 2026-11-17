@@ -134,6 +134,7 @@ const UI = {
 };
 const MOTION_TRAVEL = 40;
 const FRAME_MS = 16;
+const INSTANT = { duration: 0 };
 const MOTION_MOST = 40;
 const FILTER_BODY_MOST = 460;
 const CARD_HEIGHT = UI.space.xs * 2 + UI.height.inline * 3;
@@ -396,14 +397,13 @@ const offsetsOf = (ids, sizes, sorted, gap) => {
 };
 
 class Drag {
-  constructor(id, at, { sortable = null, bounds = null, top = null, ...payload } = {}) {
+  constructor(id, at, { sortable = null, bounds = null, ...payload } = {}) {
     Object.assign(this, payload);
     this.id = id;
     this.down = at;
     this.at = at;
     this.sortable = sortable;
     this.bounds = bounds;
-    this.top = top;
     this.isMoving = false;
     this.isOutside = false;
   }
@@ -504,6 +504,10 @@ const sideOf = (at, size) =>
     ["up", at.y / size.height],
     ["down", 1 - at.y / size.height],
   ].reduce((a, b) => (b[1] < a[1] ? b : a))[0];
+const focusKeyOf = () => {
+  const at = focused();
+  return `${at?.space ?? ""}\0${at?.tab ?? ""}\0${at?.pane ?? ""}`;
+};
 const splitInto = (addresses, side, target = focused()?.pane) => {
   if (addresses.includes(panes().find((p) => p.pane === target)?.terminal)) return;
   if (!target) return notify({ title: "Pick a pane to split first", body: "Drop the tab on a tab's terminal to place it beside that terminal.", level: "warning" });
@@ -810,6 +814,8 @@ export default class Anyhost extends View {
   moveCursor(cx, key) {
     const was = this.cursor;
     this.cursor = key;
+    const at = this.childAt?.get(key);
+    if (at !== undefined) (this.kind === "projects" ? this.projectsScroll : this.listScroll).scroll_to_item(at);
     for (const each of [was, key]) {
       const view = this.partViews.get(each);
       if (view) cx.notify(view);
@@ -1448,7 +1454,7 @@ export default class Anyhost extends View {
     for (const r of rows) {
       const parent = r.session.parent ? rowByKey.get(r.session.parent) : undefined;
       r.isChild = Boolean(parent) && !parent.archived && !parent.deleted;
-      if (r.isChild) childrenOf.set(parent.key, [...(childrenOf.get(parent.key) ?? []), r]);
+      if (r.isChild && !r.archived && !r.deleted) childrenOf.set(parent.key, [...(childrenOf.get(parent.key) ?? []), r]);
     }
     const isShownKind = (r) => r.kind === "own" || filter.include.includes(r.kind);
     const passes = (r) =>
@@ -1779,7 +1785,10 @@ export default class Anyhost extends View {
     if (r.archived) this.archive(cx, r, false);
     if (r.deleted) this.change(cx, { [r.key]: { deleted: false } }, [], "");
     this.restoreTab(cx, r, on ?? "");
-    this.launch(r, on ?? "", (at) => this.focusWhenShown(at, r.title));
+    const from = focusKeyOf();
+    this.launch(r, on ?? "", (at) => {
+      if (focusKeyOf() === from) this.focusWhenShown(at, r.title);
+    });
   }
 
   launch(r, on, opened) {
@@ -2575,13 +2584,13 @@ export default class Anyhost extends View {
     }
     const held = this.frozen?.sections ?? shown.sectionKeys;
     const rowsOf = (keys) => keys.map((key) => model.byKey.get(key)).filter(Boolean);
-    const drag = this.pressed?.sortable ? this.pressed : null;
-    const placed = { pinned: rowsOf(drag ? movedTo(held.pinned, held.pinned.indexOf(drag.id), drag.target) : held.pinned), active: rowsOf(held.active) };
+    const placed = { pinned: rowsOf(held.pinned), active: rowsOf(held.active) };
     const mounted = new Set();
     const ctx = { t, shown: shown.terminal, model, filter, mounted };
     const shelves = this.shelvesOf(held, shown);
     const found = this.found;
     this.visible = found ?? [...placed.pinned, ...placed.active, ...shelves.visible];
+    if (found !== null) this.childAt = new Map(found.map((r, at) => [r.key, at]));
     const body = found !== null ? (found.length === 0 ? [this.empty(t, "No sessions found")] : found.map((r) => this.cardFor(ctx, r, mounted))) : this.listRows(ctx, placed, shelves);
     this.mounted = mounted;
     if (this.isArriving) cx.timer.after(FRAME_MS, (cx) => cx.notify());
@@ -2599,6 +2608,12 @@ export default class Anyhost extends View {
       .gap(1)
       .overflow_y_scrollbar()
       .track_scroll(this.listScroll)
+      .on_size_change((size, cx) => {
+        if (size.height === this.listHeight) return;
+        this.listHeight = size.height;
+        this.isToggling = true;
+        cx.notify();
+      })
       .on_hover((on, cx) => {
         this.isPointerIn = on;
         this.redrawList(cx);
@@ -2662,51 +2677,43 @@ export default class Anyhost extends View {
         ...(shelf.more > 0 ? [{ key: `more-${shelf.id}`, height: UI.height.row, el: () => this.more(t, `ah-more-${shelf.id}`, shelf.more, () => (this.shelfShown[shelf.id] = (this.shelfShown[shelf.id] ?? SHELF_FIRST) + SHELF_MORE)) }] : []),
       ]),
     };
-    const motion = this.motionOf(blocks, model);
-    const drag = this.pressed?.isMoving && this.pressed.sortable && this.pressed.top !== null ? this.pressed : null;
-    const lifted = drag?.id ?? null;
-    const placedBlock = (id) =>
-      div()
-        .id(id)
-        .relative()
-        .flex_none()
-        .w_full()
-        .h(motion.heights[id])
-        .children([
-          ...blocks[id]
-            .filter((item) => item.key !== lifted)
-            .map((item) => {
-            const at = motion.layout.get(item.key);
-            const isEntering = motion.isMoving && motion.before.get(item.key)?.block !== id;
-            return this.placedAt(item.key, isEntering ? at.top - Math.min(item.height, MOTION_TRAVEL) : at.top, isEntering ? 0 : 1, motion.isMoving, item.el());
-          }),
-          ...[...this.departing].filter(([, gone]) => gone.block === id).map(([key, gone]) => this.placedAt(key, gone.top - Math.min(gone.height, MOTION_TRAVEL), 0, true, this.cardFor(ctx, model.byKey.get(key), ctx.mounted))),
-          ...blocks[id]
-            .filter((item) => item.key === lifted)
-            .map((item) => this.placedAt(item.key, Math.max(0, Math.min(motion.heights[id] - item.height, drag.top + drag.shift)), 1, false, item.el())),
-        ]);
     const isEmpty = sections.pinned.length + sections.active.length === 0 && shelves.length === 0;
-    const list = [
-      placedBlock("ah-active"),
-      ...(isEmpty ? [this.empty(t, this.emptyLine(ctx.filter))] : []),
-      div().id("ah-push").flex_1().min_h(UI.space.sm),
-      placedBlock("ah-shelves"),
-    ];
-    this.listChildren = list.length;
-    return list;
+    const drag = this.pressed?.isMoving && this.pressed.sortable ? this.pressed : null;
+    const offsets = drag ? drag.offsets() : new Map();
+    const motion = this.motionOf(blocks, model);
+    const items = [...blocks["ah-active"], ...blocks["ah-shelves"]];
+    const placed = [...items.filter((item) => item.key !== drag?.id), ...items.filter((item) => item.key === drag?.id)];
+    const rows = placed.map((item) => {
+      const at = motion.layout.get(item.key);
+      if (item.key === drag?.id) return this.placedAt(item.key, at.y + drag.shift, 1, INSTANT, item.el());
+      const isEntering = motion.isMoving && motion.before.get(item.key)?.block !== at.block;
+      return this.placedAt(item.key, isEntering ? at.y - Math.min(item.height, MOTION_TRAVEL) : at.y + (offsets.get(item.key) ?? 0), isEntering ? 0 : 1, motion.isMoving ? UI.motion : INSTANT, item.el());
+    });
+    const gone = [...this.departing].map(([key, was]) => this.placedAt(key, was.y - Math.min(was.height, MOTION_TRAVEL), 0, UI.motion, this.cardFor(ctx, model.byKey.get(key), ctx.mounted)));
+    const sizer = div().id("ah-content").flex_none().w_full().h(motion.contentHeight);
+    const before = isEmpty ? [sizer, this.empty(t, this.emptyLine(ctx.filter))] : [sizer];
+    this.childAt = new Map(placed.map((item, at) => [item.key, before.length + at]));
+    const revealed = shelves.find((shelf) => shelf.id === this.revealing);
+    if (revealed) this.listScroll.scroll_to_item(this.childAt.get(revealed.more > 0 ? `more-${revealed.id}` : (revealed.shown.at(-1)?.key ?? shelfStop(revealed.id))));
+    this.revealing = null;
+    return [...before, ...rows, ...gone];
   }
 
   motionOf(blocks, model) {
     const layout = new Map();
     const heights = {};
     for (const [block, items] of Object.entries(blocks)) {
-      let y = 0;
+      let top = 0;
       for (const { key, height, r } of items) {
-        layout.set(key, { block, top: y, height, isCard: Boolean(r) });
-        y += height + 1;
+        layout.set(key, { block, top, height, isCard: Boolean(r) });
+        top += height + 1;
       }
-      heights[block] = Math.max(0, y - 1);
+      heights[block] = Math.max(0, top - 1);
     }
+    const inner = Math.max(0, (this.listHeight ?? 0) - UI.space.sm);
+    const push = Math.max(UI.space.sm, inner - heights["ah-active"] - heights["ah-shelves"] - 2);
+    const shelvesAt = heights["ah-active"] + 1 + push + 1;
+    for (const at of layout.values()) at.y = (at.block === "ah-shelves" ? shelvesAt : 0) + at.top;
     const before = this.placed ?? new Map();
     const now = Date.now();
     for (const [key, was] of before) if (!layout.has(key) && was.isCard && model.byKey.has(key) && !this.departing.has(key)) this.departing.set(key, { ...was, until: now + UI.motion.duration });
@@ -2717,7 +2724,7 @@ export default class Anyhost extends View {
     this.isToggling = false;
     this.isArriving = isMoving && entering > 0;
     this.placed = layout;
-    return { layout, heights, before, isMoving };
+    return { layout, before, isMoving, contentHeight: shelvesAt + heights["ah-shelves"] };
   }
 
   liftedAt(el, from, area, dx, dy) {
@@ -2729,9 +2736,8 @@ export default class Anyhost extends View {
       .child(el);
   }
 
-  placedAt(key, top, opacity, isMoving, el) {
-    const placed = div().id(`ah-at-${key}`).absolute().top(top).left(0).w_full().opacity(opacity).child(el);
-    return isMoving ? placed.transition("top", UI.motion).transition("opacity", UI.motion) : placed;
+  placedAt(key, top, opacity, policy, el) {
+    return div().id(`ah-at-${key}`).absolute().top(top).left(UI.space.sm).right(UI.space.sm).opacity(opacity).transition("top", policy).transition("opacity", policy).child(el);
   }
 
   item(id) {
@@ -2766,7 +2772,7 @@ export default class Anyhost extends View {
   toggleShelf(id, cx) {
     if (!this.opened.delete(id)) {
       this.opened.add(id);
-      this.listScroll.scroll_to_item(this.listChildren - 1);
+      this.revealing = id;
     }
     prefer("shelves", [...this.opened]);
     this.isToggling = true;
@@ -2886,7 +2892,7 @@ export default class Anyhost extends View {
   row(ctx, r, { withShelf = false } = {}) {
     const { t, shown, model } = ctx;
     const isShown = Boolean(r.address) && (r.address === shown || r.views.includes(shown));
-    const isHovered = this.hovered === r.key && !(this.pressed?.isMoving === true && this.pressed.id === r.key);
+    const isHovered = this.hovered === r.key && this.pressed?.isMoving !== true;
     const recedes = !isShown && (r.archived || r.deleted || r.isOffline || r.state === "idle" || r.section === "settled" || r.section === "snoozed");
     const opening = isOpening(r.key) && !r.address;
     const status = isHovered ? this.actions(t, r) : opening ? this.spinnerLabel(t, "Opening") : this.status(t, r);
@@ -3068,7 +3074,7 @@ export default class Anyhost extends View {
       .when(canDrag, (el) =>
         el.on_mouse_down("left", (e) => {
           this.dropped = null;
-          this.pressed = new Drag(r.key, e.position, { address: r.address, title: r.title, top: this.placed?.get(r.key)?.top ?? null, sortable: isReordered ? this.pinSortable() : null });
+          this.pressed = new Drag(r.key, e.position, { address: r.address, title: r.title, sortable: isReordered ? this.pinSortable() : null });
         }),
       )
       .on_click(() => {
@@ -3397,6 +3403,7 @@ export default class Anyhost extends View {
     const isLifted = (entry) => drag !== null && (drag.project === undefined ? entry.project.key === drag.id : entry.project.key === drag.project && worktreeIdOf(entry.worktree ?? {}) === drag.id);
     const offsetOf = (entry) => (offsets === null ? 0 : drag.project === undefined ? offsets.get(entry.project.key) : entry.project.key === drag.project && entry.worktree ? offsets.get(worktreeIdOf(entry.worktree)) : 0) ?? 0;
     const lifted = drag?.bounds && this.paneAt ? this.entries.filter(isLifted) : [];
+    this.childAt = new Map(this.entries.map((entry, at) => [entry.id, at]));
     return v_flex()
       .id("anyhost-projects")
       .relative()

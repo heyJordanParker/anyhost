@@ -7,7 +7,7 @@ import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, LoginNeeded, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
-import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
+import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, shownAt, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
 import { activityOf, deleteAgent, forkAgent, sessionOf, move, noteWaiting, receiveDelete, receiveFork, receiveList, receiveMove, receiveMoved, receiveReleased, receiveStart, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
@@ -632,7 +632,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       if (record === undefined || mover.activity.of(record) !== 'idle') continue
       const since = record.statusSince ?? now
       const isAsked = Number(terminal.labels[SLEEP_LABEL] ?? 0) > since
-      if (isAsked || (!isShown(terminal.labels, now) && now - since >= STOP_MS)) await stopCopy(roots.claudeHome, session)
+      if (isAsked || (!isShown(terminal.labels, now) && now - Math.max(since, shownAt(terminal.labels)) >= STOP_MS)) await stopCopy(roots.claudeHome, session)
     }
   }
   let isDiscarding = false
@@ -675,11 +675,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       await label(address, shownKey, String(now))
       labelledShown.set(address, now)
     }
-    for (const address of labelledShown.keys()) {
-      if (shown.has(address)) continue
-      await label(address, shownKey, '')
-      labelledShown.delete(address)
-    }
+    for (const address of labelledShown.keys()) if (!shown.has(address)) labelledShown.delete(address)
     const sessions = new Set(shown.values())
     for (const session of sessions) if (!shownSessions.has(session)) unvisited.add(session)
     shownSessions = sessions

@@ -2,6 +2,15 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.12] - 2026-11-17
+
+### Changed
+- A session you looked at stays awake for 8 hours from the last time a screen showed it, as T3 Code restarts its idle clock at each touch. A session idle since yesterday no longer goes to sleep the moment you look away from it.
+- A session that takes a while to open no longer takes the screen once it is ready if you clicked somewhere else meanwhile. It opens in its tab and leaves your focus where you put it.
+- A card counts only its open subagents, so a session whose subagents you archived no longer shows "1 subagent".
+- The keyboard cursor scrolls its card into view in the sidebar and the projects pane, with the smallest scroll, as a listbox does, and opening a shelf scrolls to its rows. Up, Down, j, k, Home, End and Page Up and Down reach every card of a long list.
+- While you drag a pin, no card under the pointer shows its hover buttons.
+
 ## [0.9.11] - 2026-11-17
 
 ### Changed

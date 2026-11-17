@@ -62,8 +62,9 @@ export async function killTerminal(address: string): Promise<void> {
 export const SHOWN_LABEL = 'anyhost.shown.'
 export const SHOWN_MS = 90_000
 
-export const isShown = (labels: Readonly<Record<string, string>>, now = Date.now()): boolean =>
-  Object.entries(labels).some(([key, value]) => key.startsWith(SHOWN_LABEL) && now - Number(value) < SHOWN_MS)
+export const shownAt = (labels: Readonly<Record<string, string>>): number =>
+  Math.max(0, ...Object.entries(labels).map(([key, value]) => (key.startsWith(SHOWN_LABEL) ? Number(value) || 0 : 0)))
+export const isShown = (labels: Readonly<Record<string, string>>, now = Date.now()): boolean => now - shownAt(labels) < SHOWN_MS
 
 const FOLLOW_FIRST_MS = 1000
 const FOLLOW_MOST_MS = 30_000
