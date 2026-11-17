@@ -37,14 +37,16 @@ test('a record that says shell, as while a background command or Monitor runs af
   expect([await statusOf(claudeHome, SESSION), await statusOf(claudeHome, handedOff)]).toEqual(['working', 'idle'])
 })
 
-test("one anyhost list carries this machine, every machine, and the status another machine reports for its session, so the sidebar reads all three in one call", async () => {
+test("one anyhost list carries this machine, every machine, and the status another machine reports for its session once that machine answered, so the sidebar reads all three in one call", async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
   laptop.status('busy')
 
-  const listed = await anyhostOn(worker.env, ['list', '--json', '--brief'])
-  const { here, machines, agents } = JSON.parse(listed.out) as { here: string; machines: { id: string; connected: boolean; herdr: string | null }[]; agents: { id: string; status: string }[] }
+  type Listed = { here: string; machines: { id: string; connected: boolean; herdr: string | null }[]; agents: { id: string; status: string }[] }
+  const listed = async (): Promise<Listed> => JSON.parse((await anyhostOn(worker.env, ['list', '--json', '--brief'])).out) as Listed
+  await until(async () => (await listed()).agents.find(({ id }) => id === SESSION)?.status === 'working', "the laptop's status reaching the worker")
+  const { here, machines, agents } = await listed()
 
   expect(here).toBe(WORKER.id)
   expect(machines.map(({ id, connected, herdr }) => ({ id, connected, herdr })).sort((a, b) => a.id.localeCompare(b.id))).toEqual([LAPTOP, WORKER].map(({ id }) => ({ id, connected: true, herdr: null })).sort((a, b) => a.id.localeCompare(b.id)))
@@ -86,7 +88,7 @@ test("a change Claude Code reports, a new session, a /rename and a /cd alike, re
   expect((await session())?.cwd).toBe(moved)
 }, 60_000)
 
-type Listed = { readonly agents: readonly { readonly id: string; readonly archived: boolean }[] }
+type Listed = { readonly version: string; readonly agents: readonly { readonly id: string; readonly archived: boolean }[] }
 const agentsOn = async (socket: string): Promise<Listed> => (await (await fetch('http://localhost/agents', { unix: socket })).json()) as Listed
 
 test('a list read after the first answers from memory, waiting on no relay read however slow the relay is', async () => {
@@ -116,6 +118,28 @@ test('an archive shows in the next list read from what the program wrote, waitin
 
   expect(listed.agents.find(({ id }) => id === SESSION)?.archived).toBe(true)
   expect(tookMs).toBeLessThan(500)
+}, 60_000)
+
+test("a restarted program answers its first list read from the list it gave before, while the relay answers nothing, then moves the version once it read the relay again", async () => {
+  const relay = await memoryRelay()
+  await runningOn(relay)
+  const worker = await workerOn(relay)
+  await until(async () => (await agentsOn(worker.socket)).agents.some(({ id }) => id === SESSION), "the worker listing the laptop's session")
+
+  worker.child.kill('SIGKILL')
+  await worker.child.exited
+  relay.stalled = true
+  await serveOn(worker.env)
+  const started = Date.now()
+  const kept = await agentsOn(worker.socket)
+  const tookMs = Date.now() - started
+
+  expect(kept.agents.map(({ id }) => id)).toContain(SESSION)
+  expect(tookMs).toBeLessThan(1000)
+  relay.stalled = false
+  const fresh = (await (await fetch(`http://localhost/agents?after=${encodeURIComponent(kept.version)}`, { unix: worker.socket })).json()) as Listed
+  expect(fresh.version).not.toBe(kept.version)
+  expect(fresh.agents.map(({ id }) => id)).toContain(SESSION)
 }, 60_000)
 
 test('a list read that waits with the version of a program since restarted answers at once, so the sidebar follows the new program without waiting out each read', async () => {

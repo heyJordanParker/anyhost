@@ -17,7 +17,7 @@ export const failTest: Problems = {
 }
 
 type Bucket = Awaited<ReturnType<Miniflare['getR2Bucket']>>
-type Asked = { readonly refused: readonly (readonly [number, Result])[]; readonly puts: readonly { readonly index: number; readonly key: string; readonly body: Uint8Array }[] }
+type Asked = { readonly ops: readonly Op[]; readonly refused: readonly (readonly [number, Result])[]; readonly puts: readonly { readonly index: number; readonly key: string; readonly body: Uint8Array }[] }
 type Front = {
   readonly headers: Record<string, string>
   readonly queued: (string | Uint8Array)[]
@@ -37,6 +37,7 @@ export type MemoryRelay = {
   readonly requests: (readonly Op[])[]
   refuse: (op: Op) => string | undefined
   before: (op: Op) => Promise<void> | undefined
+  holdAnswer: (op: Op) => Promise<void> | undefined
   delayMs: number
   stalled: boolean
   dropAnswers: number
@@ -170,7 +171,10 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       relay.unanswered -= 1
       return
     }
-    toMachine(front, asked.refused.length === 0 || results === undefined ? message : encodeMessage(ANSWER, { id: answer.id, results }, [bytes]))
+    const sent = asked.refused.length === 0 || results === undefined ? message : encodeMessage(ANSWER, { id: answer.id, results }, [bytes])
+    const held = asked.ops.map((op) => relay.holdAnswer(op)).filter((release) => release !== undefined)
+    if (held.length === 0) return toMachine(front, sent)
+    void Promise.all(held).then(() => toMachine(front, sent))
   }
   const request = async (front: ServerWebSocket<Front>, message: Uint8Array): Promise<void> => {
     const { header, bytes } = decodeMessage(message)
@@ -188,7 +192,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       else kept.push({ op, bytes: part })
       if (failure === undefined && op.op === 'put') puts.push({ index, key: op.key, body: part.slice() })
     }
-    front.data.asked.set(id, { refused, puts })
+    front.data.asked.set(id, { ops, refused, puts })
     atOnce += 1
     relay.mostAtOnce = Math.max(relay.mostAtOnce, atOnce)
     await Promise.all(ops.map((op) => relay.before(op)))
@@ -304,6 +308,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
     requests: [],
     refuse: () => undefined,
     before: () => undefined,
+  holdAnswer: () => undefined,
     delayMs: 0,
     stalled: false,
     dropAnswers: 0,

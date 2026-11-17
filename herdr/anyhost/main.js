@@ -4,14 +4,12 @@ import { agents, appHome, closeOverlay, exec, focused, hc, home, layout, machine
 import { createHash } from "crypto";
 
 const REFRESH_MS = 30_000;
-const OUTBOX_RETRY_MS = 5_000;
 const FOLLOW_MS = 1000;
-const FOLLOW_GAP_MS = 250;
+const FINISHED_KEPT_MS = 60_000;
 const TICK_MS = 30_000;
 const LONG_MS = 600_000;
 const FRESH_MS = 48 * 3_600_000;
 const FRESH_TICK_MS = 600_000;
-const LAUNCHED_MS = 60_000;
 const TEMP_ROOTS = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
 const SHELF_FIRST = 10;
 const SHELF_MORE = 25;
@@ -48,9 +46,6 @@ const WORKSPACE = { mode: "tabs", side: "left", ratio: 0.6, offset: 0, zoomed: n
 const ALL_WORK = "anyhost-all";
 const START_MOST = 8;
 const START_WIDTH = 560;
-const FOCUS_STEP_MS = 50;
-const FOCUS_WAIT_MS = 60_000;
-const OPENING_SHOWN_MS = 60_000;
 const SHAPES = [
   ["panel", "Side panel", `${OWN}/panel-right`],
   ["popup", "Popup", `${OWN}/picture-in-picture-2`],
@@ -59,17 +54,16 @@ const SHAPES = [
 ];
 const TABS_WIDTH = "anyhost.tabsWidth";
 const OPENING_SPACE = "anyhost.openingSpace";
-const OPENING_SPACE_MS = 15_000;
+const OPENING = "anyhost.opening";
 const DRAG_TAB = "anyhost.dragTab";
 const SPLIT = "anyhost.split";
 const TAB_MOST = 220;
 const TAB_LEAST = 96;
 const DRAG_SLOP = 4;
-const DROP_SETTLES_MS = 1000;
-const SPLIT_WAIT_MS = 5000;
+const PAGE_ROWS = 10;
+const OUTBOX = "anyhost.outbox";
+const PREFERENCES = "anyhost.preferences";
 const TAB_LAYOUTS = "tabLayouts";
-const RESTORE_WAIT_MS = 60_000;
-const RESTORE_STEP_MS = 300;
 const SPLIT_PLACE = { left: "right", right: "right", up: "down", down: "down" };
 const SPLIT_ICON = { left: "panel-left", right: "panel-right", up: "panel-top", down: "panel-bottom" };
 const PANEL_SHARE = 0.45;
@@ -80,9 +74,7 @@ const RATIO_MOST = 0.8;
 const RATIO_LEAST = 0.2;
 const SCROLL_WIDTH = 560;
 const TILE_WIDTH = 420;
-const BRANCH_FRESH_MS = 60_000;
 const CLOSED_MOST = 20;
-const CLOSE_SETTLES_MS = 3_000;
 const RETIRED = ["anyhost.scope", "anyhost.projectSpace", "anyhost.moving", "anyhost.menu", "anyhost.views", "anyhost.projectMachine"];
 const SESSION_LABEL = "anyhost.session";
 const VIEW_LABEL = "anyhost.view";
@@ -180,7 +172,8 @@ const TAG_COLORS = {
   red: ["#d44c47", "#df5452"],
 };
 
-const anyhost = async (args, timeout = 60_000, on = null) => {
+const COMMAND_MS = 60_000;
+const anyhost = async (args, timeout = COMMAND_MS, on = null) => {
   const r = await exec("sh", ["-c", ANYHOST, "anyhost", ...args], { timeout, on });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || `anyhost ${args[0]} exited with ${r.code}`);
   return r.stdout;
@@ -359,27 +352,143 @@ const save = (key, value) => {
   } catch {}
 };
 const filterOf = () => ({ ...NO_FILTER, ...shared(FILTER) });
-const pickedWorktrees = () => shared(PICKED_WORKTREE) ?? {};
+const pickedWorktrees = () => preference("pickedWorktree", {});
 const setFilter = (change) => {
   const before = filterOf();
   setShared(FILTER, { ...before, ...("project" in change && change.project !== before.project ? { worktree: null } : {}), ...change });
 };
 const markOpening = (key, worktree, title) => {
   const id = spaceOf(key, worktree.folder);
-  if (!spaces().some((sp) => sp.id === id || sp.id.endsWith(`/${id}`))) setShared(OPENING_SPACE, { id, until: Date.now() + OPENING_SPACE_MS, title });
+  if (!spaces().some((sp) => sp.id === id || sp.id.endsWith(`/${id}`))) setShared(OPENING_SPACE, { id, title });
 };
 const movedTo = (list, from, to) => {
   if (from < 0 || to < 0 || from === to || from >= list.length) return list;
   const rest = list.filter((_, at) => at !== from);
   return [...rest.slice(0, to), list[from], ...rest.slice(to)];
 };
-const isPastSlop = (p, e) => p !== null && p !== undefined && !p.isMoving && (Math.abs(e.position.x - p.downX) >= DRAG_SLOP || Math.abs(e.position.y - p.downY) >= DRAG_SLOP);
+const rovedTo = ({ keystroke }, at, count, { loop = false, letters = false } = {}) => {
+  if (count === 0) return null;
+  if (keystroke === "home") return 0;
+  if (keystroke === "end") return count - 1;
+  const step = { down: 1, up: -1, pagedown: PAGE_ROWS, pageup: -PAGE_ROWS, "ctrl-n": 1, "ctrl-p": -1, ...(letters ? { j: 1, k: -1 } : {}) }[keystroke];
+  if (step === undefined) return null;
+  if (at < 0) return step > 0 ? 0 : count - 1;
+  return loop ? (at + step + count) % count : Math.max(0, Math.min(count - 1, at + step));
+};
+const reorderStepOf = ({ key, modifiers }) => (modifiers.shift && !modifiers.alt && (modifiers.platform || modifiers.control) ? { up: -1, down: 1 }[key] : undefined);
+const startsOf = (sizes, gap) => {
+  let start = 0;
+  return sizes.map((size) => {
+    const at = start;
+    start += size + gap;
+    return at;
+  });
+};
+const landingOf = (sizes, from, shift, gap) => {
+  const centers = startsOf(sizes, gap).map((start, at) => start + sizes[at] / 2);
+  const dragged = centers[from] + shift;
+  return centers.reduce((closest, center, at) => (Math.abs(center - dragged) < Math.abs(centers[closest] - dragged) ? at : closest), from);
+};
+const offsetsOf = (ids, sizes, sorted, gap) => {
+  const rest = startsOf(sizes, gap);
+  const now = startsOf(sorted.map((id) => sizes[ids.indexOf(id)]), gap);
+  return new Map(ids.map((id, at) => [id, now[sorted.indexOf(id)] - rest[at]]));
+};
+
+class Drag {
+  constructor(id, at, { sortable = null, bounds = null, top = null, ...payload } = {}) {
+    Object.assign(this, payload);
+    this.id = id;
+    this.down = at;
+    this.at = at;
+    this.sortable = sortable;
+    this.bounds = bounds;
+    this.top = top;
+    this.isMoving = false;
+    this.isOutside = false;
+  }
+
+  get from() {
+    return this.sortable ? this.sortable.ids.indexOf(this.id) : -1;
+  }
+
+  get shift() {
+    return this.sortable?.axis === "x" ? this.at.x - this.down.x : this.at.y - this.down.y;
+  }
+
+  get target() {
+    if (!this.isMoving || this.isOutside || this.from < 0) return this.from;
+    return landingOf(this.sortable.sizes, this.from, this.shift, this.sortable.gap);
+  }
+
+  moveTo(at) {
+    this.at = at;
+    this.isOutside = false;
+    if (this.isMoving) return false;
+    this.isMoving = Math.abs(at.x - this.down.x) >= DRAG_SLOP || Math.abs(at.y - this.down.y) >= DRAG_SLOP;
+    return this.isMoving;
+  }
+
+  sorted() {
+    return movedTo(this.sortable.ids, this.from, this.target);
+  }
+
+  offsets() {
+    const { ids, sizes, gap } = this.sortable;
+    return offsetsOf(ids, sizes, this.sorted(), gap);
+  }
+}
 const orderWith = (order, shown) => {
   const isShown = new Set(shown);
   const placed = shown.filter((key) => order.includes(key));
   let slot = 0;
   return [...shown.filter((key) => !order.includes(key)), ...order.map((key) => (isShown.has(key) ? placed[slot++] : key))];
 };
+const outboxOf = () => shared(OUTBOX) ?? {};
+const queued = () => Object.entries(outboxOf()).sort(([, a], [, b]) => a.at - b.at);
+const unadopted = () => {
+  const adopted = new Set(shared(PULSE)?.adopted ?? []);
+  return queued().filter(([id]) => !adopted.has(id));
+};
+const enqueue = ({ changes = {}, ops = [], run = [] }) => {
+  const id = idOf();
+  setShared(OUTBOX, { ...outboxOf(), [id]: { at: Date.now(), changes, ops, run } });
+  return id;
+};
+const deadlineOf = (entry) => entry.run.reduce((total, step) => total + (step.timeout ?? COMMAND_MS), 0);
+const preferencesOf = () => shared(PREFERENCES) ?? {};
+const preference = (key, fallback) => preferencesOf()[key] ?? fallback;
+const prefer = (key, value) => {
+  if (JSON.stringify(preferencesOf()[key] ?? null) === JSON.stringify(value)) return;
+  setShared(PREFERENCES, { ...preferencesOf(), [key]: value });
+  const change = `pref:${key}`;
+  const outbox = outboxOf();
+  const unsent = Object.keys(outbox).filter((id) => outbox[id].done === undefined && !outbox[id].sent && change in outbox[id].changes);
+  if (unsent.length > 0) setShared(OUTBOX, Object.fromEntries(Object.entries(outbox).filter(([id]) => !unsent.includes(id))));
+  enqueue({ changes: { [change]: { value } }, run: [{ args: ["organize", JSON.stringify([{ op: "prefer", key, value }])] }] });
+};
+const openingOf = () => shared(OPENING) ?? {};
+const isOpening = (key) => openingOf()[key] === true;
+const markSessionOpening = (key, isNow) => {
+  if (isOpening(key) === isNow) return;
+  const { [key]: _was, ...rest } = openingOf();
+  setShared(OPENING, isNow ? { ...rest, [key]: true } : rest);
+};
+const settleQueued = (id, done) => {
+  const { [id]: entry, ...rest } = outboxOf();
+  if (entry) setShared(OUTBOX, done === null ? rest : { ...rest, [id]: { ...entry, done } });
+};
+const worktreeIdOf = (w) => `${w.machine}\0${w.folder}`;
+const worktreeOf = (id) => ({ machine: id.slice(0, id.indexOf("\0")), folder: id.slice(id.indexOf("\0") + 1) });
+const placeIn = (order, key) => (key === NONE ? Infinity : order.indexOf(key));
+const orderIn = (key, adopted) => unadopted().reduce((order, [, entry]) => entry.changes[key]?.order ?? order, adopted);
+const queueOrder = (key, now, shown, opOf) => {
+  const next = orderWith(now, shown);
+  if (next.join("\0") === now.join("\0")) return false;
+  enqueue({ changes: { [key]: { order: next } }, run: [{ args: ["organize", JSON.stringify([opOf(next)])] }] });
+  return true;
+};
+const pinsInOrder = () => orderIn("pins", (shared(PULSE)?.pinned ?? []).map((p) => p.key));
 const endTabDrag = (isDropped) => {
   const drag = shared(DRAG_TAB);
   if (!drag) return null;
@@ -399,7 +508,7 @@ const splitInto = (addresses, side, target = focused()?.pane) => {
   if (addresses.includes(panes().find((p) => p.pane === target)?.terminal)) return;
   if (!target) return notify({ title: "Pick a pane to split first", body: "Drop the tab on a tab's terminal to place it beside that terminal.", level: "warning" });
   for (const terminal of addresses) run("terminal.park", { terminal });
-  setShared(SPLIT, { terminals: addresses, side, target, stage: "parked", until: Date.now() + SPLIT_WAIT_MS });
+  setShared(SPLIT, { terminals: addresses, side, target, stage: "parked" });
 };
 const LAYOUT_DOC = `printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"doc.get","params":{"name":"herdr-app"}}' | PATH="$HOME/.local/bin:$PATH" hc connect`;
 const readLayoutDoc = async () => {
@@ -425,7 +534,8 @@ const stepSplit = () => {
   if (!split) return;
   const ps = panes();
   const target = ps.find((p) => p.pane === split.target);
-  if (Date.now() > split.until || !target) return setShared(SPLIT, null);
+  const live = new Set(terminals().map((x) => x.address));
+  if (!target || !split.terminals.every((terminal) => live.has(terminal))) return setShared(SPLIT, null);
   const placed = split.terminals.map((terminal) => ps.find((p) => p.terminal === terminal));
   if (split.stage === "parked") {
     if (placed.some(Boolean)) return;
@@ -465,9 +575,9 @@ const paletteChildOf = (groups, cursor) => {
 };
 const layoutOf = (on) => machines().find((m) => (m.name ?? "") === on)?.layout ?? "loading";
 const isLayoutLoaded = () => layoutOf("") !== "loading";
-const workspaceOf = (id) => ({ ...WORKSPACE, ...(shared(WORKSPACES) ?? {})[id ?? ""] });
+const workspaceOf = (id) => ({ ...WORKSPACE, ...preference("workspaces", {})[id ?? ""] });
 const changeWorkspace = (id, change) => {
-  if (id) setShared(WORKSPACES, { ...shared(WORKSPACES), [id]: { ...workspaceOf(id), ...change } });
+  if (id) prefer("workspaces", { ...preference("workspaces", {}), [id]: { ...workspaceOf(id), ...change } });
 };
 const spaceOfTerminal = (address) => {
   const tab = panes().find((p) => p.terminal === address)?.tab;
@@ -553,14 +663,22 @@ const neighbourOf = (rects, from, direction) => {
 };
 
 
+const LIST_PART = "#list";
+const HEAD_PART = "#head";
+const isSameValue = (a, b) => Object.is(a, b) || (Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => Object.is(x, b[i])));
+const isShallowSame = (a, b) => {
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => isSameValue(a[key], b[key]));
+};
+
 class Part extends View {
   init(props) {
     this.owner = props.owner;
     this.key = props.key;
   }
 
-  render() {
-    return this.owner.renderPart(this.key);
+  render(cx) {
+    return this.owner.renderPart(this.key, cx);
   }
 }
 
@@ -573,6 +691,9 @@ export default class Anyhost extends View {
     this.partViews = new Map();
     this.wanted = new Set();
     this.mounted = new Set();
+    this.pressed = null;
+    this.dropped = null;
+    this.dragKeys = cx.focus_handle();
     if (view === "projects") return this.initProjects(cx);
     if (view === "footer") return this.initFooter();
     if (view === "board") return this.initBoard(cx);
@@ -583,7 +704,7 @@ export default class Anyhost extends View {
     if (view === "tags") return this.initTags(cx);
     if (view === "new") return this.initNew(cx);
     if (view === "machines") return this.initMachines(cx);
-    if (view === "remove" || view === "confirm" || view === "present") return;
+    if (view === "remove" || view === "confirm" || view === "present" || view === "pane") return;
     if (view === "drop") return this.initDrop();
     if (view === "palette") return this.initPalette(cx);
     if (view === "tabs") return this.initTabs(cx);
@@ -624,15 +745,17 @@ export default class Anyhost extends View {
     if (view === "worktree") return this.renderWorktree(t);
     return this.renderInbox(t, cx)
       .on_mouse_move((e, cx) => {
-        if (this.pressed?.isMoving && this.pressed.isPinned) {
-          this.pressed = { ...this.pressed, atY: e.position.y };
-          return cx.notify();
+        const drag = this.pressed;
+        if (!drag) return;
+        if (drag.moveTo(e.position)) {
+          this.dragKeys.focus();
+          if (drag.address) setShared(DRAG_TAB, { tab: null, title: drag.title, space: null, terminals: [drag.address], overlay: null, lifted: false, from: "inbox" });
+          return this.redrawAll(cx);
         }
-        if (!isPastSlop(this.pressed, e)) return;
-        this.pressed = { ...this.pressed, isMoving: true, atY: e.position.y };
-        const { address, title } = this.pressed;
-        if (address) setShared(DRAG_TAB, { tab: null, title, space: null, terminals: [address], overlay: null, lifted: false, from: "inbox" });
-        this.redrawAll(cx);
+        if (drag.isMoving && drag.sortable) this.redrawList(cx);
+      })
+      .on_hover((on, cx) => {
+        if (!on) this.leaveDrag(cx, Boolean(this.pressed?.address));
       })
       .on_mouse_up("left", (_e, cx) => {
         endTabDrag(false);
@@ -640,21 +763,74 @@ export default class Anyhost extends View {
       });
   }
 
-  dragCardOver(key) {
-    const p = this.pressed;
-    if (!p?.isMoving || p.over === key) return;
-    this.pressed = { ...p, over: key };
-    this.act((cx) => this.redrawAll(cx));
+  dragCatcher() {
+    return div()
+      .id("ah-drag-keys")
+      .absolute()
+      .size(0)
+      .track_focus(this.dragKeys)
+      .on_key_down((e, cx) => {
+        if (e.key !== "escape") return;
+        cx.stop_propagation();
+        this.cancelDrag(cx);
+      });
+  }
+
+  cancelDrag(cx) {
+    const drag = this.pressed;
+    this.pressed = null;
+    if (drag?.isMoving) this.dropped = drag.id;
+    endTabDrag(false);
+    this.redrawAll(cx);
+  }
+
+  wasDragged(id) {
+    const was = this.pressed?.isMoving === true || this.dropped === id;
+    this.dropped = null;
+    return was;
+  }
+
+  leaveDrag(cx, isCarried) {
+    const drag = this.pressed;
+    if (!drag) return;
+    if (!drag.isMoving) {
+      this.pressed = null;
+      return;
+    }
+    if (!isCarried) return this.cancelDrag(cx);
+    drag.isOutside = true;
+    this.redrawAll(cx);
+  }
+
+  pinSortable() {
+    const ids = (this.frozen?.sections ?? this.shown?.sectionKeys)?.pinned ?? [];
+    return { ids, sizes: ids.map((key) => this.placed?.get(key)?.height ?? CARD_HEIGHT), gap: 1, axis: "y" };
+  }
+
+  moveCursor(cx, key) {
+    const was = this.cursor;
+    this.cursor = key;
+    for (const each of [was, key]) {
+      const view = this.partViews.get(each);
+      if (view) cx.notify(view);
+    }
+    this.redrawList(cx);
+  }
+
+  movePin(cx, r, step) {
+    const keys = this.shown?.sectionKeys.pinned ?? [];
+    const at = keys.indexOf(r.key);
+    if (at < 0 || at + step < 0 || at + step >= keys.length) return;
+    this.orderPins(cx, movedTo(keys, at, at + step));
+    this.redrawAll(cx);
   }
 
   dropCard(cx) {
-    const p = this.pressed;
+    const drag = this.pressed;
     this.pressed = null;
-    if (!p?.isMoving) return;
-    this.dropped = p.key;
-    if (!p.isPinned) return this.redrawAll(cx);
-    const keys = this.shown?.sectionKeys.pinned ?? [];
-    this.orderPins(cx, movedTo(keys, keys.indexOf(p.key), keys.indexOf(p.over)));
+    if (!drag?.isMoving) return;
+    this.dropped = drag.id;
+    if (drag.sortable && drag.target !== drag.from) this.orderPins(cx, drag.sorted());
     this.redrawAll(cx);
   }
 
@@ -670,7 +846,7 @@ export default class Anyhost extends View {
   sync(cx) {
     if (this.isDrawing) {
       this.isDrawing = false;
-      cx.notify();
+      this.redrawList(cx);
     }
     if (this.kind === "projects") return this.syncProjects(cx);
     if (this.kind === "footer") return this.syncFooter(cx);
@@ -679,10 +855,25 @@ export default class Anyhost extends View {
       this.pressed = null;
       this.redrawAll(cx);
     }
+    this.adoptOutbox(cx);
+    if (this.readPreferences()) {
+      this.placeParts(cx);
+      this.redrawAll(cx);
+    }
+    if (this.kind === "inbox" && this.listView === undefined) {
+      this.listView = cx.new(Part, { owner: this, key: LIST_PART });
+      this.headView = cx.new(Part, { owner: this, key: HEAD_PART });
+      cx.notify();
+    }
     const isRebuilt = this.rebuild();
-    if (this.placeParts(cx) || isRebuilt) this.redrawAll(cx);
+    const isPlaced = this.placeParts(cx);
+    if (isRebuilt || isPlaced) this.redrawChanged(cx, isPlaced);
     if (this.kind === "board") this.boardReconcile(cx);
-    else cx.timer.after(0, (cx) => this.reconcileWhenDue(cx));
+    else {
+      if (this.focusing || this.selecting) this.stepFocus();
+      if (this.restoring) this.stepRestore();
+      cx.timer.after(0, (cx) => this.reconcileWhenDue(cx));
+    }
   }
 
   partsOf() {
@@ -719,8 +910,70 @@ export default class Anyhost extends View {
   }
 
   redrawAll(cx) {
-    cx.notify();
+    this.redrawList(cx);
     for (const view of this.partViews.values()) cx.notify(view);
+  }
+
+  redrawList(cx) {
+    cx.notify();
+    if (this.listView) cx.notify(this.listView);
+    if (this.headView) cx.notify(this.headView);
+  }
+
+  redrawChanged(cx, isPlaced) {
+    const shown = this.kind === "inbox" ? this.shown : null;
+    if (shown === null) return this.redrawAll(cx);
+    const drawn = new Map();
+    for (const [key, view] of this.partViews) {
+      const r = shown.model.byKey.get(key);
+      const now = r ? this.drawnOf(shown, r) : null;
+      const was = this.drawn?.get(key);
+      drawn.set(key, now);
+      if (now === null || was == null || was.extra !== now.extra || !isShallowSame(was.row, now.row)) cx.notify(view);
+    }
+    this.drawn = drawn;
+    const listKey = this.listKeyOf(shown);
+    const headKey = JSON.stringify([shown.filterKey, shown.projectName, this.data?.tags]);
+    if (isPlaced || listKey !== this.listKey) {
+      this.listKey = listKey;
+      cx.notify();
+      if (this.listView) cx.notify(this.listView);
+    }
+    if (headKey !== this.headKey) {
+      this.headKey = headKey;
+      if (this.headView) cx.notify(this.headView);
+    }
+  }
+
+  drawnOf(shown, r) {
+    const { model, terminal } = shown;
+    const subs = this.subsOf(r, model);
+    const tags = r.tags.map((id) => this.data.tags[id]?.name ?? "");
+    const extra = JSON.stringify([
+      Boolean(r.address) && (r.address === terminal || r.views.includes(terminal)),
+      this.worktreeOf(r),
+      r.session.source ? (model.byKey.get(r.session.source)?.title ?? "") : "",
+      r.session.parent ? (model.byKey.get(r.session.parent)?.title ?? "") : "",
+      subs.isOpen,
+      subs.rows.map((row) => [row.id, row.title, row.state]),
+      tags,
+      this.data.stages.find((stage) => stage.id === r.stage)?.name ?? "",
+      this.found !== null,
+      isOpening(r.key),
+      this.unfolded?.has(r.key) ?? false,
+    ]);
+    return { row: r, extra };
+  }
+
+  listKeyOf(shown) {
+    const heights = Object.values(shown.sectionKeys)
+      .flat()
+      .filter((key) => this.unfolded?.has(key))
+      .map((key) => {
+        const r = shown.model.byKey.get(key);
+        return r ? `${key}:${this.subsOf(r, shown.model).rows.length}` : key;
+      });
+    return JSON.stringify([shown.sectionKeys, shown.filterKey, (this.found ?? []).map((r) => r.key), heights, this.arrived]);
   }
 
   runActs(cx, after) {
@@ -742,8 +995,10 @@ export default class Anyhost extends View {
     wake?.();
   }
 
-  renderPart(key) {
+  renderPart(key, cx) {
     const t = theme();
+    if (key === LIST_PART) return this.renderList(t, cx);
+    if (key === HEAD_PART) return this.renderHead(t);
     const part = this.partsOf()?.get(key);
     if (!part) return div();
     if (this.kind === "projects") return this.entryElement(t, part);
@@ -776,17 +1031,20 @@ export default class Anyhost extends View {
     this.data = null;
     this.dataVersion = 0;
     this.readAt = null;
-    this.error = null;
-    this.pending = new Map(Object.entries(saved("outbox", {})).map(([key, { changed }]) => [key, { ...changed, until: Infinity }]));
-    this.outboxRetryAt = 0;
-    this.launched = new Map();
+    this.retryWait = 0;
+    this.pending = new Map();
+    this.snapshot = null;
+    this.snapshotAt = 0;
+    this.outboxSeen = "";
+    this.adopted = [];
+    this.afterSent = new Map();
+    this.launched = new Set();
     this.pendingVersion = 0;
     this.refreshes = 0;
     this.applied = 0;
     this.signature = "";
     this.model = null;
     this.shown = null;
-    this.isRedrawDue = false;
     this.isTaking = false;
     this.isFollowing = false;
     this.changedAt = shared(CHANGED) ?? 0;
@@ -794,63 +1052,63 @@ export default class Anyhost extends View {
     this.branches = new Map(saved("branches", []));
     this.branchesVersion = 0;
     this.branchesReading = false;
-    const cached = saved("listed", null);
-    if (cached?.listed) {
-      this.apply(cached.listed, 0, cached.readAt ?? null);
-      this.rebuild();
-      this.placeParts(cx);
-    }
+    cx.spawn(async (cx) => {
+      const cached = saved("listed", null);
+      if (!cached?.listed || this.data !== null) return;
+      await this.take(cx, cached.listed, 0, cached.askedAt ?? 0, cached.readAt ?? null);
+      cx.notify();
+    });
     this.runActs(cx, (cx) => this.redrawCard(cx, null));
     cx.timer.every(TICK_MS, (cx) => this.redrawAll(cx));
     this.follow(cx, isPolled);
   }
 
   follow(cx, isPolled) {
-    if (!isPolled()) return cx.timer.after(FOLLOW_MS, (cx) => this.follow(cx, isPolled));
+    if (!isPolled()) {
+      return cx.timer.after(FOLLOW_MS, (cx) => this.follow(cx, isPolled));
+    }
     const asked = ++this.refreshes;
     const askedAt = Date.now();
-    const wait = this.isFollowing ? ["--wait", String(this.version)] : [];
+    const wait = this.isFollowing && this.version !== undefined ? ["--wait", String(this.version)] : [];
     cx.spawn(async (cx) => {
       try {
         const listed = await anyhost(["list", "--json", "--brief", ...wait]);
         this.isFollowing = true;
-        if (asked >= this.applied) {
-          this.error = null;
-          await this.take(cx, listed, asked);
-        }
+        this.retryWait = 0;
+        if (asked >= this.applied) await this.take(cx, listed, asked, askedAt);
       } catch (error) {
         this.isFollowing = false;
-        this.error = messageOf(error);
-        this.dataVersion++;
+        this.retryWait = Math.min(this.retryWait * 2 || FOLLOW_MS, REFRESH_MS);
+        console.error(`anyhost could not read the sessions, and reads again in ${this.retryWait / 1000} s: ${messageOf(error)}`);
       }
       cx.notify();
-      cx.timer.after(this.isFollowing ? Math.max(0, FOLLOW_GAP_MS - (Date.now() - askedAt)) : REFRESH_MS, (cx) => this.follow(cx, isPolled));
+      cx.timer.after(this.isFollowing ? 0 : this.retryWait, (cx) => this.follow(cx, isPolled));
     });
   }
 
   refresh(cx) {
     const asked = ++this.refreshes;
+    const askedAt = Date.now();
     cx.spawn(async (cx) => {
       try {
         const listed = await anyhost(["list", "--json", "--brief"]);
         if (asked < this.applied) return;
-        this.error = null;
-        await this.take(cx, listed, asked);
+        await this.take(cx, listed, asked, askedAt);
       } catch (error) {
-        this.error = messageOf(error);
-        this.dataVersion++;
+        console.error(`anyhost could not read the sessions: ${messageOf(error)}`);
       }
       cx.notify();
     });
   }
 
-  async take(cx, listed, asked) {
-    const readAt = Date.now();
-    if (!this.apply(listed, asked, readAt)) return;
+  async take(cx, listed, asked, askedAt, readAt = Date.now()) {
+    const isNew = this.apply(listed, asked, askedAt, readAt);
+    this.adoptOutbox(cx);
+    if (!isNew) return;
     this.isTaking = true;
     try {
       await nextTask(cx);
-      save("listed", { listed, readAt });
+      save("listed", { listed, readAt, askedAt });
       await nextTask(cx);
       const steps = this.cardSteps();
       while (!steps.next().done) await nextTask(cx);
@@ -859,17 +1117,17 @@ export default class Anyhost extends View {
     }
   }
 
-  apply(listed, asked, readAt) {
+  apply(listed, asked, askedAt, readAt) {
     this.applied = Math.max(this.applied, asked);
-    const before = this.pending.size;
-    for (const [key, change] of this.pending) if (asked > change.until) this.pending.delete(key);
-    if (this.pending.size !== before) this.pendingVersion++;
     this.readAt = readAt;
+    this.snapshotAt = Math.max(this.snapshotAt, askedAt);
     if (listed === this.listed && this.data !== null) return false;
-    const { here = "", machines: devices = [], agents: sessions, settleAfterDays = null, projectNames = {}, projectOrder = [], pinOrder = [], lastMachine, tags = {}, stages = [], version } = JSON.parse(listed);
+    const { here = "", machines: devices = [], agents: sessions, settleAfterDays = null, projectNames = {}, projectOrder = [], pinOrder = [], lastMachine, tags = {}, stages = [], worktreeOrder = {}, preferences = {}, version } = JSON.parse(listed);
     this.version = version;
     this.listed = listed;
-    this.data = { here, devices, sessions, settleAfterDays, projectNames, projectOrder, pinOrder, lastMachine, tags, stages };
+    this.snapshot = { here, devices, sessions, settleAfterDays, projectNames, projectOrder, pinOrder, lastMachine, tags, stages, worktreeOrder, preferences };
+    this.data = this.snapshot;
+    this.outboxSeen = "";
     this.devices = new Map(devices.map((d) => [d.name, d]));
     this.dataVersion++;
     return true;
@@ -921,7 +1179,7 @@ export default class Anyhost extends View {
     const work = this.kind === "board" ? this.workNow() : null;
     const isStart = work?.mode === "start";
     const opening = shared(OPENING_SPACE);
-    const openingTitle = isStart && opening && opening.until > Date.now() && opening.id === work.workspace?.id ? opening.title : null;
+    const openingTitle = isStart && opening && opening.id === work.workspace?.id ? opening.title : null;
     const signature = `${this.signatureOf(live, filter)}|${isStart}|${openingTitle}`;
     if (signature === this.signature) return false;
     this.signature = signature;
@@ -993,55 +1251,125 @@ export default class Anyhost extends View {
   }
 
   orderProjects(cx, shown) {
-    const next = orderWith(this.orderNow(), shown);
-    if (next.join("\0") === this.orderNow().join("\0")) return;
-    this.keep(cx, "order", { order: next }, [{ op: "orderProjects", projects: next }]);
+    this.adoptOutbox(cx);
+    if (queueOrder("order", this.orderNow(), shown, (projects) => ({ op: "orderProjects", projects }))) this.adoptOutbox(cx);
   }
 
   pinOrderNow() {
     return this.pending.get("pins")?.order ?? this.data?.pinOrder ?? [];
   }
 
-  orderPins(cx, shown) {
-    const next = orderWith(this.pinOrderNow(), shown);
-    if (next.join("\0") === this.pinOrderNow().join("\0")) return;
-    this.frozen = null;
-    this.keep(cx, "pins", { order: next }, [{ op: "orderPins", sessions: next }]);
+  worktreeOrderNow(key) {
+    return this.pending.get(`worktrees:${key}`)?.order ?? (this.data?.worktreeOrder?.[key] ?? []).map(worktreeIdOf);
   }
 
-  keep(cx, key, changed, ops) {
-    save("outbox", { ...saved("outbox", {}), [key]: { changed, ops } });
-    this.pending.set(key, { ...changed, until: Infinity });
-    this.pendingVersion++;
-    this.outboxRetryAt = 0;
-    this.redrawCard(cx, key);
+  orderPins(cx, shown) {
+    this.adoptOutbox(cx);
+    if (!queueOrder("pins", this.pinOrderNow(), shown, (sessions) => ({ op: "orderPins", sessions }))) return;
+    this.frozen = null;
+    this.adoptOutbox(cx);
+  }
+
+  adoptOutbox(cx) {
+    const outbox = shared(OUTBOX) ?? null;
+    const seen = `${this.snapshotAt}|${JSON.stringify(outbox)}`;
+    if (seen === this.outboxSeen) return false;
+    this.outboxSeen = seen;
+    const pending = new Map();
+    let tags = { ...this.snapshot?.tags };
+    let stages = this.snapshot?.stages ?? [];
+    const entries = queued();
+    for (const [, entry] of entries) {
+      if (entry.done !== undefined && entry.done <= this.snapshotAt) continue;
+      for (const [key, fields] of Object.entries(entry.changes)) pending.set(key, { ...pending.get(key), ...fields });
+      for (const op of entry.ops) {
+        if (op.op === "defineTag") tags = { ...tags, [op.id]: { name: op.name, color: op.color } };
+        if (op.op === "dropTag") delete tags[op.id];
+        if (op.op === "defineStages") stages = op.stages;
+      }
+    }
+    if (this.snapshot) {
+      const preferences = { ...this.snapshot.preferences };
+      for (const [key, fields] of pending) if (key.startsWith("pref:")) preferences[key.slice(5)] = fields.value;
+      const kept = Object.fromEntries(Object.entries(preferences).filter(([, value]) => value !== null));
+      if (JSON.stringify(kept) !== JSON.stringify(preferencesOf())) setShared(PREFERENCES, kept);
+    }
+    const adopted = entries.map(([id]) => id);
+    const isChanged = JSON.stringify([...pending]) !== JSON.stringify([...this.pending]) || adopted.join() !== this.adopted.join();
+    this.pending = pending;
+    this.adopted = adopted;
+    if (isChanged) this.pendingVersion++;
+    if (this.snapshot && (JSON.stringify(tags) !== JSON.stringify(this.data.tags) || stages !== this.data.stages)) {
+      this.data = { ...this.snapshot, tags, stages };
+      this.dataVersion++;
+    }
+    this.movePreferencesHere();
+    this.collectOutbox();
     this.sendOutbox(cx);
+    if (isChanged) this.redrawCard(cx, null);
+    return isChanged;
+  }
+
+  readPreferences() {
+    const seen = JSON.stringify(this.kind === "board" ? [preference("groupBy", "stage")] : [preference("shelves", []), preference("unfolded", []), preference("closed", [])]);
+    if (seen === this.preferencesSeen) return false;
+    const isFirst = this.preferencesSeen === undefined;
+    this.preferencesSeen = seen;
+    if (this.kind === "board") this.groupBy = preference("groupBy", "stage");
+    else {
+      this.opened = new Set(preference("shelves", []));
+      this.unfolded = new Set(preference("unfolded", []));
+      this.closed = preference("closed", []);
+    }
+    return !isFirst;
+  }
+
+  movePreferencesHere() {
+    if (this.snapshot === null || this.isMoved) return;
+    this.isMoved = true;
+    const local = this.kind === "board" ? [["groupBy", "groupBy"]] : [["shelves", "shelves"], ["unfolded", "unfolded"], ["closed", "closed"], ["tabOrder", this.hereKey("tabOrder")], [TAB_LAYOUTS, this.hereKey(TAB_LAYOUTS)]];
+    for (const [stored, key] of local) {
+      const value = saved(stored, null);
+      if (value !== null && this.snapshot.preferences[key] === undefined) prefer(key, value);
+      try {
+        localStorage.removeItem(stored);
+      } catch {}
+    }
+    if (this.kind === "board") return;
+    for (const [stored, key] of [[WORKSPACES, "workspaces"], [PICKED_WORKTREE, "pickedWorktree"]]) {
+      const value = shared(stored);
+      if (value != null && this.snapshot.preferences[key] === undefined) prefer(key, value);
+      if (value != null) setShared(stored, null);
+    }
+  }
+
+  collectOutbox() {
+    const now = Date.now();
+    const outbox = outboxOf();
+    const kept = Object.fromEntries(Object.entries(outbox).filter(([, entry]) => entry.done === undefined || now - entry.done < FINISHED_KEPT_MS));
+    if (Object.keys(kept).length !== Object.keys(outbox).length) setShared(OUTBOX, kept);
   }
 
   sendOutbox(cx) {
-    const outbox = saved("outbox", {});
-    if (this.isSending || Date.now() < this.outboxRetryAt || Object.keys(outbox).length === 0) return;
-    this.isSending = true;
-    cx.spawn(async (cx) => {
-      try {
-        await anyhost(["organize", JSON.stringify(Object.values(outbox).flatMap((entry) => entry.ops))]);
-        const now = saved("outbox", {});
-        for (const [key, entry] of Object.entries(outbox)) {
-          if (JSON.stringify(now[key]) !== JSON.stringify(entry)) continue;
-          delete now[key];
-          const pending = this.pending.get(key);
-          if (pending) pending.until = this.refreshes;
+    const now = Date.now();
+    for (const [id, entry] of queued()) {
+      if (entry.done !== undefined || (entry.sent !== undefined && now - entry.sent < deadlineOf(entry))) continue;
+      setShared(OUTBOX, { ...outboxOf(), [id]: { ...entry, sent: now } });
+      cx.spawn(async (cx) => {
+        try {
+          for (const step of entry.run) await anyhost(step.args, step.timeout, step.on ?? null);
+          settleQueued(id, Date.now());
+          this.afterSent.get(id)?.done?.();
+        } catch (error) {
+          settleQueued(id, null);
+          notify({ title: this.afterSent.get(id)?.failed ?? "anyhost could not change it", body: messageOf(error), level: "error" });
         }
-        save("outbox", now);
+        this.afterSent.delete(id);
         this.changedAt = Date.now();
         setShared(CHANGED, this.changedAt);
         this.refresh(cx);
-      } catch {
-        this.outboxRetryAt = Date.now() + OUTBOX_RETRY_MS;
-        cx.timer.after(OUTBOX_RETRY_MS, (cx) => this.sendOutbox(cx));
-      }
-      this.isSending = false;
-    });
+      });
+    }
   }
 
   cardsNow() {
@@ -1190,6 +1518,7 @@ export default class Anyhost extends View {
 
   worktreesOf(p) {
     const here = this.hereName();
+    const order = this.worktreeOrderNow(p.key);
     const byFolder = new Map();
     for (const r of p.rows) {
       const at = `${r.machine}\0${r.checkout}`;
@@ -1204,7 +1533,7 @@ export default class Anyhost extends View {
         const on = this.onOf(w.machine);
         return { machine: w.machine, folder: w.folder, key: p.key, id: on === null ? null : placedSpace(on, spaceOf(p.key, w.folder)), branch: read?.branch ?? w.folder.split("/").pop(), isMain: read?.isMain ?? false, isGone: read?.isGone ?? false, ...this.countsOf(w.rows), newest: w.newest };
       })
-      .sort((a, b) => (b.machine === here) - (a.machine === here) || b.isMain - a.isMain || b.newest - a.newest);
+      .sort((a, b) => placeIn(order, worktreeIdOf(a)) - placeIn(order, worktreeIdOf(b)) || (b.machine === here) - (a.machine === here) || b.isMain - a.isMain || b.newest - a.newest);
   }
 
   workspacesOf(rows) {
@@ -1242,30 +1571,15 @@ export default class Anyhost extends View {
       return { key: p.key, name: p.name, defaultName: p.defaultName, isNamed: p.isNamed, ...this.countsOf(p.rows), worktrees: p.key === NONE ? [] : this.worktreesOf(p), machines: onMachines, checkouts, newest: p.newest };
     });
     const order = this.orderNow();
-    const placeOf = (p) => (p.key === NONE ? Infinity : order.indexOf(p.key));
-    listed.sort((a, b) => placeOf(a) - placeOf(b) || b.newest - a.newest);
-    return { here, error: this.error, readAt: this.readAt, all: { ...this.countsOf(counted), overall: rows.filter((r) => !r.isOffline && isRunning(r.state)).length + kidsWorking, machines: machinesListed }, projects: listed, workspaces: this.workspacesOf(rows), sessions: Object.fromEntries(rows.filter((r) => r.address).map((r) => [r.key, { state: r.state, pinned: r.pinned, title: r.title }])), pinned: this.pinnedOf(rows.filter((r) => r.section === "pinned")).map((r) => ({ key: r.key, title: r.title, harness: r.harness, state: r.state, space: this.onOf(r.machine) === null ? null : placedSpace(this.onOf(r.machine), r.space) })), known: [...new Map(rows.filter((r) => !r.deleted && r.projectKey !== TEMPORARY).map((r) => [r.projectKey, { key: r.projectKey, name: r.projectName }])).values()] };
+    listed.sort((a, b) => placeIn(order, a.key) - placeIn(order, b.key) || b.newest - a.newest);
+    return { here, adopted: this.adopted, projectOrder: order, pinOrder: this.pinOrderNow(), all: { ...this.countsOf(counted), overall: rows.filter((r) => !r.isOffline && isRunning(r.state)).length + kidsWorking, machines: machinesListed }, projects: listed, workspaces: this.workspacesOf(rows), sessions: Object.fromEntries(rows.filter((r) => r.address).map((r) => [r.key, { state: r.state, pinned: r.pinned, title: r.title }])), pinned: this.pinnedOf(rows.filter((r) => r.section === "pinned")).map((r) => ({ key: r.key, title: r.title, harness: r.harness, state: r.state, space: this.onOf(r.machine) === null ? null : placedSpace(this.onOf(r.machine), r.space) })), known: [...new Map(rows.filter((r) => !r.deleted && r.projectKey !== TEMPORARY).map((r) => [r.projectKey, { key: r.projectKey, name: r.projectName }])).values()] };
   }
 
 
-  change(cx, key, changed, work, failed) {
-    const entry = { ...this.pending.get(key), ...changed, until: Infinity };
-    this.pending.set(key, entry);
-    this.pendingVersion++;
-    cx.spawn(async (cx) => {
-      try {
-        await work();
-        if (this.pending.get(key) === entry) entry.until = this.refreshes;
-      } catch (error) {
-        this.dropChange(key, changed);
-        this.redraw(cx);
-        notify({ title: failed, body: messageOf(error), level: "error" });
-      }
-      this.changedAt = Date.now();
-      setShared(CHANGED, this.changedAt);
-      this.refresh(cx);
-    });
-    this.redrawCard(cx, key);
+  change(cx, changes, run, failed, done, ops = []) {
+    const id = enqueue({ changes, ops, run: run.map((step) => (Array.isArray(step) ? { args: step } : step)) });
+    this.afterSent.set(id, { failed, done });
+    this.adoptOutbox(cx);
   }
 
   redraw(cx) {
@@ -1276,36 +1590,19 @@ export default class Anyhost extends View {
 
   redrawCard(cx, key) {
     this.rebuild();
-    this.placeParts(cx);
-    cx.notify();
+    this.redrawChanged(cx, this.placeParts(cx));
     const view = key === null ? undefined : this.partViews.get(key);
     if (view) cx.notify(view);
-    if (this.isRedrawDue) return;
-    this.isRedrawDue = true;
-    cx.timer.after(FRAME_MS, (cx) => {
-      this.isRedrawDue = false;
-      this.redrawAll(cx);
-    });
-  }
-
-  dropChange(key, changed) {
-    const current = this.pending.get(key);
-    if (current === undefined) return;
-    const next = { ...current };
-    for (const field of Object.keys(changed)) if (next[field] === changed[field]) delete next[field];
-    this.pending.set(key, next);
-    this.pendingVersion++;
   }
 
   archive(cx, r, archived, isClosed = false) {
     if (r.archived === archived) return;
     this.frozen = null;
     this.closed = archived && (isClosed || Boolean(r.address)) ? [r.key, ...this.closed.filter((key) => key !== r.key)].slice(0, CLOSED_MOST) : this.closed.filter((key) => key !== r.key || archived);
-    save("closed", this.closed);
-    this.change(cx, r.key, { archived }, async () => {
-      await anyhost(["archive", r.key, ...(archived ? [] : ["--undo"])]);
+    prefer("closed", this.closed);
+    this.change(cx, { [r.key]: { archived } }, [["archive", r.key, ...(archived ? [] : ["--undo"])]], archived ? "anyhost could not archive it" : "anyhost could not restore it", () => {
       if (archived) notify({ title: `Archived ${r.title.slice(0, 50)}`, body: isClosed ? "Click to reopen it." : "Click to undo.", level: "info", action: { name: `anyhost.restore-${r.key.slice(0, 8)}` } });
-    }, archived ? "anyhost could not archive it" : "anyhost could not restore it");
+    });
   }
 
   restore(cx, r) {
@@ -1361,7 +1658,7 @@ export default class Anyhost extends View {
   }
 
   visit(cx, r, at, failed) {
-    this.change(cx, r.key, { visitedAt: at }, () => anyhost(["visit", r.key, "--at", at]), failed);
+    this.change(cx, { [r.key]: { visitedAt: at } }, [["visit", r.key, "--at", at]], failed);
   }
 
   markUnread(cx, r) {
@@ -1390,19 +1687,13 @@ export default class Anyhost extends View {
   pin(cx, r, snoozedUntil = "") {
     this.frozen = null;
     const restored = isFuture(snoozedUntil) ? snoozedUntil : "";
-    this.change(cx, r.key, { pinned: new Date().toISOString(), settled: false, snoozedUntil: restored }, async () => {
-      await anyhost(["pin", r.key]);
-      if (restored) await anyhost(["snooze", r.key, restored]);
-    }, "anyhost could not pin it");
+    this.change(cx, { [r.key]: { pinned: new Date().toISOString(), settled: false, snoozedUntil: restored } }, [["pin", r.key], ...(restored ? [["snooze", r.key, restored]] : [])], "anyhost could not pin it");
   }
 
   unpin(cx, r) {
     this.frozen = null;
     this.undone.set(r.key, { snoozedUntil: r.snoozedUntil });
-    this.change(cx, r.key, { pinned: "" }, async () => {
-      await anyhost(["pin", r.key, "--undo"]);
-      this.undoToast("Unpinned", r, "repin");
-    }, "anyhost could not unpin it");
+    this.change(cx, { [r.key]: { pinned: "" } }, [["pin", r.key, "--undo"]], "anyhost could not unpin it", () => this.undoToast("Unpinned", r, "repin"));
   }
 
   toggleSettle(cx, r) {
@@ -1413,32 +1704,24 @@ export default class Anyhost extends View {
   settle(cx, r) {
     this.frozen = null;
     this.undone.set(r.key, { pinned: r.pinned, snoozedUntil: r.snoozedUntil });
-    this.change(cx, r.key, { settled: true, settledAt: new Date().toISOString(), pinned: "", snoozedUntil: "" }, async () => {
-      await anyhost(["settle", r.key]);
-      this.undoToast("Settled", r, "unsettle");
-    }, "anyhost could not settle it");
+    this.change(cx, { [r.key]: { settled: true, settledAt: new Date().toISOString(), pinned: "", snoozedUntil: "" } }, [["settle", r.key]], "anyhost could not settle it", () => this.undoToast("Settled", r, "unsettle"));
   }
 
   unsettle(cx, r, { pinned = false, snoozedUntil = "" } = {}) {
     this.frozen = null;
     const restored = isFuture(snoozedUntil) ? snoozedUntil : "";
-    this.change(cx, r.key, { settled: false, ...(pinned ? { pinned: new Date().toISOString() } : {}), ...(restored ? { snoozedUntil: restored } : {}) }, async () => {
-      await anyhost(["settle", r.key, "--undo"]);
-      if (pinned) await anyhost(["pin", r.key]);
-      if (restored) await anyhost(["snooze", r.key, restored]);
-    }, "anyhost could not unsettle it");
+    this.change(cx, { [r.key]: { settled: false, ...(pinned ? { pinned: new Date().toISOString() } : {}), ...(restored ? { snoozedUntil: restored } : {}) } }, [["settle", r.key, "--undo"], ...(pinned ? [["pin", r.key]] : []), ...(restored ? [["snooze", r.key, restored]] : [])], "anyhost could not unsettle it");
   }
 
   snooze(cx, r, until) {
     this.frozen = null;
-    this.change(cx, r.key, { snoozedUntil: until ?? "" }, async () => {
-      await anyhost(["snooze", r.key, ...(until ? [until] : ["--undo"])]);
+    this.change(cx, { [r.key]: { snoozedUntil: until ?? "" } }, [["snooze", r.key, ...(until ? [until] : ["--undo"])]], until ? "anyhost could not snooze it" : "anyhost could not wake it", () => {
       if (until) notify({ title: `Snoozed ${r.title.slice(0, 50)}`, body: `It comes back ${wakeAtOf(until)}. Click to undo.`, level: "info", action: { name: `anyhost.wake-${r.key.slice(0, 8)}` } });
-    }, until ? "anyhost could not snooze it" : "anyhost could not wake it");
+    });
   }
 
   nameProject(cx, key, name) {
-    this.change(cx, `name:${key}`, { name }, () => anyhost(["project-name", key, ...(name === null ? ["--undo"] : [name])]), "anyhost could not rename the project");
+    this.change(cx, { [`name:${key}`]: { name } }, [["project-name", key, ...(name === null ? ["--undo"] : [name])]], "anyhost could not rename the project");
   }
 
   openSettings() {
@@ -1462,37 +1745,9 @@ export default class Anyhost extends View {
       setShared(UNDO, { at: Date.now(), changes: undo });
       notify({ title: changes.some((c) => c.op === "dropTag") ? "Deleted the tag" : "Deleted the stage", body: "Click to undo.", level: "info", action: { name: "anyhost.undo" } });
     }
-    for (const [key, changed] of optimistic) {
-      this.pending.set(key, { ...this.pending.get(key), ...changed, until: Infinity });
-    }
-    if (this.data) {
-      const tags = { ...this.data.tags };
-      let stages = this.data.stages;
-      for (const change of changes) {
-        if (change.op === "defineTag") tags[change.id] = { name: change.name, color: change.color };
-        if (change.op === "dropTag") delete tags[change.id];
-        if (change.op === "defineStages") stages = change.stages;
-      }
-      this.data = { ...this.data, tags, stages };
-      this.dataVersion++;
-    }
-    this.pendingVersion++;
-    cx.spawn(async (cx) => {
-      try {
-        await anyhost(["organize", JSON.stringify(changes)]);
-        for (const [key] of optimistic) {
-          const entry = this.pending.get(key);
-          if (entry) entry.until = this.refreshes;
-        }
-      } catch (error) {
-        for (const [key, changed] of optimistic) this.dropChange(key, changed);
-        this.redraw(cx);
-        notify({ title: "anyhost could not change it", body: messageOf(error), level: "error" });
-      }
-      this.changedAt = Date.now();
-      setShared(CHANGED, this.changedAt);
-      this.refresh(cx);
-    });
+    const fields = {};
+    for (const [key, changed] of optimistic) fields[key] = { ...fields[key], ...changed };
+    this.change(cx, fields, [["organize", JSON.stringify(changes)]], "anyhost could not change it", undefined, changes);
     this.redraw(cx);
   }
 
@@ -1500,11 +1755,8 @@ export default class Anyhost extends View {
     const holder = this.deviceOf(r.machine);
     const on = holder && holder.id !== this.data.here ? this.onOf(r.machine) : null;
     this.frozen = null;
-    this.change(cx, r.key, { deleted: true }, async () => {
-      if (holder && holder.id !== this.data.here && on === null) throw new Error(`${holder.name} holds it, and the Herdr app does not reach ${holder.name}.`);
-      await anyhost(["delete", r.key], LONG_MS, on || null);
-      notify({ title: `Deleted ${r.title.slice(0, 50)}`, body: "Click to undo.", level: "info", action: { name: `anyhost.open-${r.key.slice(0, 8)}` } });
-    }, "anyhost could not delete it");
+    if (holder && holder.id !== this.data.here && on === null) return notify({ title: "anyhost could not delete it", body: `${holder.name} holds it, and the Herdr app does not reach ${holder.name}.`, level: "error" });
+    this.change(cx, { [r.key]: { deleted: true } }, [{ args: ["delete", r.key], timeout: LONG_MS, on: on || null }], "anyhost could not delete it", () => notify({ title: `Deleted ${r.title.slice(0, 50)}`, body: "Click to undo.", level: "info", action: { name: `anyhost.open-${r.key.slice(0, 8)}` } }));
   }
 
   confirmDelete(r) {
@@ -1522,19 +1774,22 @@ export default class Anyhost extends View {
     const id = on === null ? null : placedSpace(on, r.space);
     if (workspaceOf(id).mode === "board") changeWorkspace(id, { mode: "tabs" });
     if (r.address) return this.focusSession(r.address, r);
-    if (this.opening.has(r.key)) return;
+    if (isOpening(r.key)) return;
+    this.restoring = null;
     if (r.archived) this.archive(cx, r, false);
-    if (r.deleted) this.change(cx, r.key, { deleted: false }, async () => undefined, "");
+    if (r.deleted) this.change(cx, { [r.key]: { deleted: false } }, [], "");
     this.restoreTab(cx, r, on ?? "");
     this.launch(r, on ?? "", (at) => this.focusWhenShown(at, r.title));
   }
 
   launch(r, on, opened) {
-    this.opening.set(r.key, Date.now());
+    markSessionOpening(r.key, true);
     this.terminalFor(r, on)
       .then(opened)
       .catch((error) => {
-        this.opening.delete(r.key);
+        markSessionOpening(r.key, false);
+        this.selecting = null;
+        setShared(OPENING_SPACE, null);
         notify({ title: `anyhost could not open ${r.title.slice(0, 40)}`, body: messageOf(error), level: "error" });
       });
   }
@@ -1549,7 +1804,7 @@ export default class Anyhost extends View {
 
   openedAt(terminal, on) {
     const at = on ? `${on}/${terminal}` : terminal;
-    this.launched.set(at, Date.now());
+    this.launched.add(at);
     return at;
   }
 
@@ -1580,7 +1835,7 @@ export default class Anyhost extends View {
 
   peek(r) {
     if (r.address) return run("terminal.peek", { terminal: r.address });
-    if (this.opening.has(r.key)) return;
+    if (isOpening(r.key)) return;
     this.launch(r, this.onOf(r.machine) ?? "", (at) => run("terminal.peek", { terminal: at }));
   }
 
@@ -1590,7 +1845,7 @@ export default class Anyhost extends View {
       return this.open(r, cx);
     }
     if (r.address) return this.showIn(r, r.address, shape);
-    if (this.opening.has(r.key)) return;
+    if (isOpening(r.key)) return;
     this.launch(r, this.onOf(r.machine) ?? "", (at) => this.showIn(r, at, shape));
   }
 
@@ -1601,7 +1856,7 @@ export default class Anyhost extends View {
     if (this.presented && this.presented.shape !== shape) closeOverlay(this.presented.id);
     const id = openOverlay({ kind: "window", key: `anyhost-${shape}`, ...placed, layout: { type: "column", children: [bar, { type: "block", content: { terminal: address } }] } });
     this.presented = { id, shape, key: r.key };
-    this.opening.delete(r.key);
+    markSessionOpening(r.key, false);
   }
 
   closePresented() {
@@ -1614,7 +1869,7 @@ export default class Anyhost extends View {
     if (!at?.pane) return;
     const split = (terminal) => run("pane.split", { pane: at.pane, direction, argv: ["sh", "-c", VIEW, "view", r.key, terminal] });
     if (r.address) return split(r.address);
-    if (!this.opening.has(r.key)) this.launch(r, this.onOf(r.machine) ?? "", split);
+    if (!isOpening(r.key)) this.launch(r, this.onOf(r.machine) ?? "", split);
   }
 
   moveTab({ terminals: addresses, key, worktree, name }) {
@@ -1651,7 +1906,7 @@ export default class Anyhost extends View {
 
   showWorkspace(key, worktree) {
     this.selecting = null;
-    setShared(PICKED_WORKTREE, { ...pickedWorktrees(), [key]: worktree });
+    prefer("pickedWorktree", { ...pickedWorktrees(), [key]: worktree });
     const on = this.onOf(worktree.machine);
     const id = spaceOf(key, worktree.folder);
     const space = on === null ? null : placedSpace(on, id);
@@ -1666,9 +1921,9 @@ export default class Anyhost extends View {
     if (layoutState === "unavailable") return notify({ title: `The Herdr app does not reach ${this.placeOf(worktree.machine)} now`, body: "Its workspaces open once it answers again.", level: "warning" });
     const held = this.fillWorkspace(key, worktree);
     const newest = [...held].sort(byRecent)[0];
-    this.selecting = { space, until: Date.now() + OPENING_SPACE_MS };
-    setShared(OPENING_SPACE, { id, until: this.selecting.until, title: newest?.title ?? "a terminal" });
-    if (held.some((r) => r.address || this.opening.has(r.key))) return;
+    this.selecting = { space };
+    setShared(OPENING_SPACE, { id, title: newest?.title ?? "a terminal" });
+    if (held.some((r) => r.address || isOpening(r.key))) return;
     if (newest) return this.launch(newest, on, (at) => this.focusWhenShown(at, newest.title));
     void hc(["run", "--bg", "--keep", "--no-parent", "--json", ...(on ? ["--on", on] : []), "--cwd", worktree.folder, "--label", `herdr.space=${id}`, "--", "sh", "-c", 'exec "${SHELL:-/bin/sh}" -l']);
   }
@@ -1703,7 +1958,7 @@ export default class Anyhost extends View {
     const on = pulse.all.machines.find((m) => m.name === chosen)?.on ?? null;
     const name = p?.name ?? where.split("/").pop();
     notify({ title: `Starting a session in ${name}`, body: `On ${pulse.all.machines.find((m) => m.name === chosen)?.place ?? chosen}, in ${tildeOf(where, pulse.all.machines.find((m) => m.name === chosen)?.home ?? "")}.`, level: "info", timeout: 3000 });
-    if (on !== null) this.selecting = { space: placedSpace(on, spaceOf(p?.key ?? NONE, where)), until: Date.now() + 15_000 };
+    if (on !== null) this.selecting = { space: placedSpace(on, spaceOf(p?.key ?? NONE, where)) };
     this.startAt(cx, chosen, where, on, `anyhost could not start a session in ${name}`);
   }
 
@@ -1714,6 +1969,7 @@ export default class Anyhost extends View {
         this.refresh(cx);
         if (on !== null) this.focusOpened(JSON.parse(await anyhost(["open", session, "--json"], LONG_MS, on || null)).terminal, on);
       } catch (error) {
+        this.selecting = null;
         notify({ title: failure, body: messageOf(error), level: "error" });
       }
     });
@@ -1724,8 +1980,8 @@ export default class Anyhost extends View {
   }
 
   focusWhenShown(address, title) {
-    this.focusing = { address, title, until: Date.now() + FOCUS_WAIT_MS };
-    this.act((cx) => this.stepFocus(cx));
+    this.focusing = { address, title };
+    this.act(() => this.stepFocus());
   }
 
   newSession() {
@@ -1742,17 +1998,13 @@ export default class Anyhost extends View {
     this.keys = cx.focus_handle();
     this.search = InputState.new({ placeholder: "Search" });
     this.found = null;
-    this.search.on("change", (_e, cx) => {
-      this.found = this.foundOf(this.model);
-      this.placeParts(cx);
-      this.redrawAll(cx);
-    });
+    this.search.on("change", (_e, cx) => this.searched(cx));
     this.search.on("focus", () => void (this.isSearching = true));
     this.search.on("blur", () => void (this.isSearching = false));
-    this.opened = new Set(saved("shelves", []));
+    this.opened = new Set(preference("shelves", []));
     this.listScroll = ScrollHandle.new();
     this.departing = new Map();
-    this.unfolded = new Set(saved("unfolded", []));
+    this.unfolded = new Set(preference("unfolded", []));
     this.shelfShown = {};
     this.frozen = null;
     this.isPointerIn = false;
@@ -1763,10 +2015,9 @@ export default class Anyhost extends View {
     this.window = idOf();
     this.reported = null;
     this.reportedAt = 0;
-    this.closed = saved("closed", []);
+    this.closed = preference("closed", []);
     this.undone = new Map();
     this.moves = new Map(saved("moves", []));
-    this.opening = new Map();
     this.wasOpen = null;
     this.focusing = null;
     this.selecting = null;
@@ -1867,9 +2118,10 @@ export default class Anyhost extends View {
     this.nameTabs(model);
     this.nameSpaces(model);
     this.stepMoves(live);
-    this.stepFocus(cx);
-    for (const [key, at] of this.opening) if (model.byKey.get(key)?.address || Date.now() - at > OPENING_SHOWN_MS) this.opening.delete(key);
-    for (const [address, at] of this.launched) if (Date.now() - at > LAUNCHED_MS) this.launched.delete(address);
+    this.stepFocus();
+    for (const key of Object.keys(openingOf())) if (model.byKey.get(key)?.address || !model.byKey.has(key)) markSessionOpening(key, false);
+    const programs = new Map(live.all.map((x) => [x.address, x.program]));
+    for (const address of this.launched) if (!programs.has(address) || !programs.get(address)?.shell) this.launched.delete(address);
   }
 
   perform(asked, cx) {
@@ -1878,8 +2130,6 @@ export default class Anyhost extends View {
     if (asked.action === "startIn") return this.startIn(asked.project, cx, { machine: asked.machine ?? null, folder: asked.folder ?? null });
     if (asked.action === "startFolder") return this.startFolder(asked.machine, asked.folder, cx);
     if (asked.action === "organize") return this.organize(cx, asked.changes, asked.optimistic ?? []);
-    if (asked.action === "orderProjects") return this.orderProjects(cx, asked.order);
-    if (asked.action === "orderPins") return this.orderPins(cx, asked.order);
     if (asked.action === "board") return this.openBoard(asked.project ?? null);
     if (asked.action === "newHere") return this.newHere(cx);
     if (asked.action === "readProject") return (this.model?.rows ?? []).filter((r) => r.projectKey === asked.project.key && (!asked.worktree || sameWorktree(asked.worktree, { machine: r.machine, folder: r.checkout })) && r.isUnread && !r.archived).forEach((r) => this.markRead(cx, r));
@@ -1935,7 +2185,7 @@ export default class Anyhost extends View {
         const added = await exec("git", ["-C", origin.folder, "worktree", "add", ...(exists ? [folder, branch] : ["-b", branch, folder, "HEAD"])], { on: on || null, timeout: LONG_MS });
         if (added.code !== 0) throw new Error((added.stderr || added.stdout).trim());
         const worktree = { machine: origin.machine, folder };
-        setShared(PICKED_WORKTREE, { ...pickedWorktrees(), [project.key]: worktree });
+        prefer("pickedWorktree", { ...pickedWorktrees(), [project.key]: worktree });
         setFilter({ project: project.key, worktree });
         this.startIn(project, cx, worktree);
       } catch (error) {
@@ -2063,30 +2313,24 @@ export default class Anyhost extends View {
     }
   }
 
-  stepFocus(cx) {
+  stepFocus() {
     const waiting = this.focusing;
     const landed = waiting ? panes().find((p) => p.terminal === waiting.address) : undefined;
+    const isLive = waiting !== null && terminals().some((x) => x.address === waiting.address && x.state === "live");
+    if (isLive) waiting.wasLive = true;
     if (landed) {
       this.focusing = null;
       const space = spaces().find((sp) => sp.tabs.some((x) => x.id === landed.tab))?.id;
       if (space && space !== focused()?.space) run("space.select", { id: space });
       this.focusSession(waiting.address);
-    } else if (waiting && Date.now() > waiting.until) {
+    } else if (waiting?.wasLive && !isLive) {
       this.focusing = null;
-      notify({ title: `Herdr has not shown ${waiting.title.slice(0, 40)}`, body: `Its terminal ${waiting.address} runs, and no pane showed it within ${FOCUS_WAIT_MS / 1000} s.`, level: "error" });
-    } else if (waiting && !this.focusStep) {
-      this.focusStep = true;
-      cx.timer.after(FOCUS_STEP_MS, (cx) => {
-        this.focusStep = false;
-        this.stepFocus(cx);
-      });
+      notify({ title: `${waiting.title.slice(0, 40)} ended before Herdr showed it`, body: `Its terminal ${waiting.address} is gone.`, level: "error" });
     }
-    if (this.selecting) {
-      if (spaces().some((sp) => sp.id === this.selecting.space)) {
-        run("space.select", { id: this.selecting.space });
-        this.selecting = null;
-      } else if (Date.now() > this.selecting.until) this.selecting = null;
-      if (this.selecting === null) setShared(OPENING_SPACE, null);
+    if (this.selecting && spaces().some((sp) => sp.id === this.selecting.space)) {
+      run("space.select", { id: this.selecting.space });
+      this.selecting = null;
+      setShared(OPENING_SPACE, null);
     }
   }
 
@@ -2094,7 +2338,9 @@ export default class Anyhost extends View {
     if (this.branchesReading) return;
     const isLooking = window()?.active === true;
     const worktrees = new Map(model.rows.filter((r) => !r.deleted && r.kind === "own" && r.projectKey !== NONE && this.onOf(r.machine) !== null).map((r) => [`${r.machine}\0${r.checkout}`, { machine: r.machine, folder: r.checkout }]));
-    const due = [...worktrees].filter(([at]) => !this.branches.has(at) || (isLooking && Date.now() - this.branches.get(at).at > BRANCH_FRESH_MS));
+    const isBack = isLooking && !this.wasLooking;
+    this.wasLooking = isLooking;
+    const due = [...worktrees].filter(([at]) => !this.branches.has(at) || isBack);
     if (due.length === 0) return;
     this.branchesReading = true;
     cx.spawn(async (cx) => {
@@ -2163,7 +2409,7 @@ export default class Anyhost extends View {
         const isOpen = (session) => OPEN_SECTIONS.has(this.model?.byKey.get(session)?.section);
         const awake = new Set(terminals().filter((x) => x.state === "live").map((x) => x.labels?.[SESSION_LABEL]));
         const isAsleep = (session) => isOpen(session) && !awake.has(session);
-        const before = saved(TAB_LAYOUTS, {});
+        const before = preference(this.hereKey(TAB_LAYOUTS), {});
         const next = {};
         const tabs = (doc.spaces ?? []).flatMap((space) => space.tabs ?? []);
         for (const tab of tabs) {
@@ -2181,7 +2427,7 @@ export default class Anyhost extends View {
           if (sessions.some((session) => claimed.has(session)) || sessions.filter(isOpen).length < 2) continue;
           next[tab] = tree;
         }
-        if (JSON.stringify(next) !== JSON.stringify(before)) save(TAB_LAYOUTS, next);
+        if (JSON.stringify(next) !== JSON.stringify(before)) prefer(this.hereKey(TAB_LAYOUTS), next);
         this.tabsRecorded = key;
       } catch (error) {
         console.error(`anyhost could not read the tab layouts: ${messageOf(error)}`);
@@ -2193,22 +2439,18 @@ export default class Anyhost extends View {
 
   restoreTab(cx, r, on) {
     if (on !== "") return;
-    const tree = Object.values(saved(TAB_LAYOUTS, {})).find((t) => leavesOf(t).includes(r.key));
+    const tree = Object.values(preference(this.hereKey(TAB_LAYOUTS), {})).find((t) => leavesOf(t).includes(r.key));
     if (!tree) return;
     for (const session of leavesOf(tree)) {
       const s = this.model?.byKey.get(session);
-      if (session !== r.key && s && !s.address && OPEN_SECTIONS.has(s.section) && !this.opening.has(session)) this.launch(s, "", () => {});
+      if (session !== r.key && s && !s.address && OPEN_SECTIONS.has(s.section) && !isOpening(session)) this.launch(s, "", () => {});
     }
-    const isRunning = this.restoring !== null && this.restoring !== undefined;
-    this.restoring = { steps: placementsOf(tree), focus: r.key, until: Date.now() + RESTORE_WAIT_MS };
-    if (!isRunning) cx.timer.after(RESTORE_STEP_MS, (cx) => this.stepRestore(cx));
+    this.restoring = { steps: placementsOf(tree), focus: r.key };
   }
 
-  stepRestore(cx) {
+  stepRestore() {
     const job = this.restoring;
-    if (!job || Date.now() > job.until) return void (this.restoring = null);
-    cx.timer.after(RESTORE_STEP_MS, (cx) => this.stepRestore(cx));
-    if (shared(SPLIT)) return;
+    if (!job || shared(SPLIT)) return;
     const ps = panes();
     const addressOf = (session) => terminals().find((x) => x.labels?.[SESSION_LABEL] === session && x.state === "live" && !String(x.address).includes("/"))?.address;
     if (job.steps.length === 0) {
@@ -2227,6 +2469,10 @@ export default class Anyhost extends View {
     if (anchor.tab !== placed.tab) splitInto([placed.terminal], ready.side, anchor.pane);
   }
 
+  hereKey(key) {
+    return `${key}@${this.data.here}`;
+  }
+
   publishDiscarded(model) {
     const open = new Map();
     for (const r of model.rows) {
@@ -2237,7 +2483,7 @@ export default class Anyhost extends View {
     }
     const ps = panes();
     const sessionAt = new Map(terminals().map((x) => [x.address, x.labels?.[SESSION_LABEL]]));
-    const orders = saved("tabOrder", {});
+    const orders = preference(this.hereKey("tabOrder"), {});
     const next = { ...orders };
     const discarded = {};
     for (const space of spaces()) {
@@ -2254,7 +2500,7 @@ export default class Anyhost extends View {
         else if (!r.address) (discarded[space.id] ??= []).push([key, r.title, r.harness, after]);
       }
     }
-    if (JSON.stringify(next) !== JSON.stringify(orders)) save("tabOrder", next);
+    if (JSON.stringify(next) !== JSON.stringify(orders)) prefer(this.hereKey("tabOrder"), next);
     const written = JSON.stringify(discarded);
     if (written === this.discardedWritten) return;
     this.discardedWritten = written;
@@ -2294,6 +2540,12 @@ export default class Anyhost extends View {
     };
   }
 
+  searched(cx) {
+    this.found = this.foundOf(this.model);
+    this.placeParts(cx);
+    this.redrawAll(cx);
+  }
+
   foundOf(model) {
     const query = this.search.value().trim().toLowerCase();
     if (query === "" || !model) return null;
@@ -2301,10 +2553,21 @@ export default class Anyhost extends View {
   }
 
   renderInbox(t, cx) {
+    if (this.shown?.isNarrow) return this.rail(t, this.shown.railed);
+    return this.frameOf(t, this.headView ?? this.renderHead(t), this.listView ?? this.renderList(t, cx));
+  }
+
+  renderHead(t) {
     const shown = this.shown;
-    if (shown === null) return this.frameOf(t, [this.searchBar(t, filterOf(), null)], [this.empty(t, this.error === null ? "Reading your sessions…" : "anyhost could not read your sessions yet. It tries again every 30 seconds.")]);
+    const filter = shown?.filter ?? filterOf();
+    const projectName = shown?.projectName ?? null;
+    return v_flex().flex_none().child(this.searchBar(t, filter, projectName)).children(shown === null ? [] : this.filterChips(t, filter, projectName));
+  }
+
+  renderList(t, cx) {
+    const shown = this.shown;
+    if (shown === null || shown.isNarrow) return this.listFrame(t, [this.empty(t, "Reading your sessions…")], []);
     const { model, filter } = shown;
-    if (shown.isNarrow) return this.rail(t, shown.railed);
     const isHolding = this.isPointerIn || this.keys.is_focused();
     if (!isHolding || this.frozen?.view !== shown.filterKey) {
       this.frozen = isHolding ? { view: shown.filterKey, sections: shown.sectionKeys } : null;
@@ -2312,9 +2575,8 @@ export default class Anyhost extends View {
     }
     const held = this.frozen?.sections ?? shown.sectionKeys;
     const rowsOf = (keys) => keys.map((key) => model.byKey.get(key)).filter(Boolean);
-    const pinned = rowsOf(held.pinned);
-    const dragged = this.pressed?.isMoving ? this.pressed : null;
-    const placed = { pinned: dragged ? movedTo(pinned, pinned.findIndex((r) => r.key === dragged.key), pinned.findIndex((r) => r.key === dragged.over)) : pinned, active: rowsOf(held.active) };
+    const drag = this.pressed?.sortable ? this.pressed : null;
+    const placed = { pinned: rowsOf(drag ? movedTo(held.pinned, held.pinned.indexOf(drag.id), drag.target) : held.pinned), active: rowsOf(held.active) };
     const mounted = new Set();
     const ctx = { t, shown: shown.terminal, model, filter, mounted };
     const shelves = this.shelvesOf(held, shown);
@@ -2324,15 +2586,33 @@ export default class Anyhost extends View {
     this.mounted = mounted;
     if (this.isArriving) cx.timer.after(FRAME_MS, (cx) => cx.notify());
     if (this.departing.size > 0) cx.timer.after(UI.motion.duration + FRAME_MS, (cx) => cx.notify());
-    const hover = (el) =>
-      el.on_hover((on, cx) => {
-        this.isPointerIn = on;
-        cx.notify();
-      });
-    return this.frameOf(t, [this.searchBar(t, filter, shown.projectName), ...this.filterChips(t, filter, shown.projectName)], body, hover, found === null && this.arrived > 0 ? [this.arrivals(t, this.arrived)] : []);
+    return this.listFrame(t, body, found === null && this.arrived > 0 ? [this.arrivals(t, this.arrived)] : []);
   }
 
-  frameOf(t, head, body, decorate = (el) => el, over = []) {
+  listFrame(t, body, over) {
+    const list = v_flex()
+      .id("ah-list")
+      .flex_1()
+      .min_h(0)
+      .px(UI.space.sm)
+      .pb(UI.space.sm)
+      .gap(1)
+      .overflow_y_scrollbar()
+      .track_scroll(this.listScroll)
+      .on_hover((on, cx) => {
+        this.isPointerIn = on;
+        this.redrawList(cx);
+      })
+      .children(body);
+    return v_flex()
+      .relative()
+      .size_full()
+      .min_h(0)
+      .child(list)
+      .children(over.map((el) => h_flex().absolute().top(UI.space.xs).left(0).right(0).justify_center().child(el)));
+  }
+
+  frameOf(t, head, list) {
     return v_flex()
       .id("anyhost")
       .track_focus(this.keys)
@@ -2344,15 +2624,9 @@ export default class Anyhost extends View {
       .border_t(1)
       .border_color(t.border)
       .text_color(t.foreground)
-      .children(head)
-      .child(
-        v_flex()
-          .relative()
-          .flex_1()
-          .min_h(0)
-          .child(decorate(v_flex().id("ah-list").flex_1().min_h(0).px(UI.space.sm).pb(UI.space.sm).gap(1).overflow_y_scrollbar().track_scroll(this.listScroll)).children(body))
-          .children(over.map((el) => h_flex().absolute().top(UI.space.xs).left(0).right(0).justify_center().child(el))),
-      );
+      .child(head)
+      .child(v_flex().flex_1().min_h(0).child(list))
+      .when(this.pressed?.isMoving === true, (el) => el.child(this.dragCatcher()));
   }
 
   shelvesOf(held, { model, filter, onScreen }) {
@@ -2389,7 +2663,8 @@ export default class Anyhost extends View {
       ]),
     };
     const motion = this.motionOf(blocks, model);
-    const lifted = this.pressed?.isMoving && this.pressed.isPinned && this.pressed.downTop !== null ? this.pressed.key : null;
+    const drag = this.pressed?.isMoving && this.pressed.sortable && this.pressed.top !== null ? this.pressed : null;
+    const lifted = drag?.id ?? null;
     const placedBlock = (id) =>
       div()
         .id(id)
@@ -2408,12 +2683,10 @@ export default class Anyhost extends View {
           ...[...this.departing].filter(([, gone]) => gone.block === id).map(([key, gone]) => this.placedAt(key, gone.top - Math.min(gone.height, MOTION_TRAVEL), 0, true, this.cardFor(ctx, model.byKey.get(key), ctx.mounted))),
           ...blocks[id]
             .filter((item) => item.key === lifted)
-            .map((item) => this.placedAt(item.key, Math.max(0, Math.min(motion.heights[id] - item.height, this.pressed.downTop + this.pressed.atY - this.pressed.downY)), 1, false, item.el())),
+            .map((item) => this.placedAt(item.key, Math.max(0, Math.min(motion.heights[id] - item.height, drag.top + drag.shift)), 1, false, item.el())),
         ]);
-    const stale = this.error !== null && this.readAt !== null ? [this.note(t, `Can't reach anyhost · last read ${since(this.readAt)}`, t.blocked)] : [];
     const isEmpty = sections.pinned.length + sections.active.length === 0 && shelves.length === 0;
     const list = [
-      ...stale,
       placedBlock("ah-active"),
       ...(isEmpty ? [this.empty(t, this.emptyLine(ctx.filter))] : []),
       div().id("ah-push").flex_1().min_h(UI.space.sm),
@@ -2453,7 +2726,6 @@ export default class Anyhost extends View {
       .left(from.x - area.x + dx)
       .top(from.y - area.y + dy)
       .w(from.width)
-      .h(from.height)
       .child(el);
   }
 
@@ -2496,9 +2768,9 @@ export default class Anyhost extends View {
       this.opened.add(id);
       this.listScroll.scroll_to_item(this.listChildren - 1);
     }
-    save("shelves", [...this.opened]);
+    prefer("shelves", [...this.opened]);
     this.isToggling = true;
-    cx.notify();
+    this.redrawList(cx);
   }
 
   shelf(t, { id, label, count, isOpen }) {
@@ -2534,7 +2806,7 @@ export default class Anyhost extends View {
           .items_center()
           .rounded(UI.radius.control)
           .hover((s) => s.bg(t.hover))
-          .child(this.searchField(t, this.search)),
+          .child(this.searchField(t, this.search, (cx) => this.searched(cx))),
       )
       .child(
         h_flex()
@@ -2614,9 +2886,9 @@ export default class Anyhost extends View {
   row(ctx, r, { withShelf = false } = {}) {
     const { t, shown, model } = ctx;
     const isShown = Boolean(r.address) && (r.address === shown || r.views.includes(shown));
-    const isHovered = this.hovered === r.key;
+    const isHovered = this.hovered === r.key && !(this.pressed?.isMoving === true && this.pressed.id === r.key);
     const recedes = !isShown && (r.archived || r.deleted || r.isOffline || r.state === "idle" || r.section === "settled" || r.section === "snoozed");
-    const opening = this.opening?.has(r.key) && !r.address;
+    const opening = isOpening(r.key) && !r.address;
     const status = isHovered ? this.actions(t, r) : opening ? this.spinnerLabel(t, "Opening") : this.status(t, r);
     const frame = this.frame(t, r, isShown);
     const worktree = this.worktreeOf(r);
@@ -2651,7 +2923,6 @@ export default class Anyhost extends View {
               .items_center()
               .child(this.harnessIcon(t, r))
               .child(div().min_w(0).truncate().text_size(UI.text.body).when(r.isUnread, (el) => el.font_semibold()).when(!recedes && !r.isUnread, (el) => el.font_medium()).text_color(recedes ? t.muted : t.foreground).child(r.title))
-              .when(r.pinned && !r.archived && !r.deleted, (line) => line.child(this.pinMark(t, r)))
               .child(div().flex_1()),
           )
           .child(
@@ -2740,30 +3011,6 @@ export default class Anyhost extends View {
       .child(wakeLabelOf(r.snoozedUntil));
   }
 
-  pinMark(t, r) {
-    const isOver = this.pinHovered === r.key;
-    return div()
-      .id(`ah-pin-${r.key}`)
-      .size(UI.icon.body)
-      .flex()
-      .flex_none()
-      .items_center()
-      .justify_center()
-      .rounded(UI.radius.pill)
-      .text_color(isOver ? t.foreground : t.dim)
-      .cursor_pointer()
-      .tooltip("Unpin")
-      .on_hover((on, cx) => {
-        this.pinHovered = on ? r.key : this.pinHovered === r.key ? null : this.pinHovered;
-        cx.notify();
-      })
-      .on_click((_e, cx) => {
-        cx.stop_propagation();
-        this.act((cx) => this.unpin(cx, r));
-      })
-      .child(svg(iconPath(isOver ? "pin-off" : "pin")).size(UI.icon.small));
-  }
-
   actions(t, r) {
     if (r.deleted) return this.textButton(t, `ah-restore-${r.key}`, "Restore", () => this.act((cx) => this.open(r, cx)));
     if (r.archived)
@@ -2775,8 +3022,9 @@ export default class Anyhost extends View {
         .child(this.iconButton(t, `ah-delete-${r.key}`, `${OWN}/trash`, "Delete", () => this.confirmDelete(r), UI.height.inline));
     if (r.section === "snoozed") return this.iconButton(t, `ah-unsnooze-${r.key}`, `${OWN}/alarm-clock-off`, "Wake now", () => this.act((cx) => this.snooze(cx, r, null)), UI.height.inline);
     if (r.section === "settled") return this.iconButton(t, `ah-unsettle-${r.key}`, `${OWN}/undo-2`, "Unsettle", () => this.act((cx) => this.unsettle(cx, r)), UI.height.inline);
-    if (isRunning(r.state) || r.state === "blocked") return this.status(t, r);
-    return this.iconButton(t, `ah-settle-${r.key}`, "check", "Settle", () => this.act((cx) => this.settle(cx, r)), UI.height.inline);
+    const pin = this.iconButton(t, `ah-pin-${r.key}`, r.pinned ? "pin-off" : "pin", r.pinned ? "Unpin" : "Pin", () => this.act((cx) => this.togglePin(cx, r)), UI.height.inline);
+    const settle = isRunning(r.state) || r.state === "blocked" ? this.status(t, r) : this.iconButton(t, `ah-settle-${r.key}`, "check", "Settle", () => this.act((cx) => this.settle(cx, r)), UI.height.inline);
+    return h_flex().flex_none().gap(UI.space.xs).items_center().child(pin).child(settle);
   }
 
   textButton(t, id, label, onClick) {
@@ -2803,7 +3051,7 @@ export default class Anyhost extends View {
   frame(t, r, isShown) {
     const isReordered = r.section === "pinned" && this.found === null;
     const canDrag = isReordered || Boolean(r.address);
-    const isDragged = this.pressed?.isMoving === true && this.pressed.key === r.key;
+    const isDragged = this.pressed?.isMoving === true && this.pressed.id === r.key;
     return v_flex()
       .id(`ah-${r.key}`)
       .flex_none()
@@ -2815,17 +3063,16 @@ export default class Anyhost extends View {
       .on_hover((on, cx) => {
         if (on) this.hovered = r.key;
         else if (this.hovered === r.key) this.hovered = null;
-        if (on && isReordered) this.dragCardOver(r.key);
         cx.notify();
       })
       .when(canDrag, (el) =>
         el.on_mouse_down("left", (e) => {
           this.dropped = null;
-          this.pressed = { key: r.key, over: r.key, address: r.address, title: r.title, isPinned: isReordered, downX: e.position.x, downY: e.position.y, downTop: this.placed?.get(r.key)?.top ?? null, atY: e.position.y, isMoving: false };
+          this.pressed = new Drag(r.key, e.position, { address: r.address, title: r.title, top: this.placed?.get(r.key)?.top ?? null, sortable: isReordered ? this.pinSortable() : null });
         }),
       )
       .on_click(() => {
-        if (this.pressed?.isMoving || this.dropped === r.key) return void (this.dropped = null);
+        if (this.wasDragged(r.key)) return;
         this.act((cx) => this.open(r, cx));
       })
       .on_mouse_down("right", () => this.menu(r));
@@ -2855,9 +3102,8 @@ export default class Anyhost extends View {
       .on_click((_e, cx) => {
         cx.stop_propagation();
         if (!this.unfolded.delete(r.key)) this.unfolded.add(r.key);
-        save("unfolded", [...this.unfolded]);
-        cx.notify();
-        this.act(() => undefined);
+        prefer("unfolded", [...this.unfolded]);
+        this.act((cx) => this.redrawList(cx));
       })
       .child(svg(`${ICON}/chevron-${subs.isOpen ? "down" : "right"}.svg`).size(UI.icon.small).flex_none())
       .child(`${subs.rows.length} ${subs.rows.length === 1 ? "subagent" : "subagents"}${subs.working > 0 ? ` · ${subs.working} working` : ""}`);
@@ -2924,24 +3170,17 @@ export default class Anyhost extends View {
   key(e, cx) {
     if (e.key === "escape" && this.search.value() !== "") {
       this.search.set_value("");
-      this.found = null;
-      return this.redrawAll(cx);
+      return this.searched(cx);
     }
     if (this.visible === undefined || this.isSearching) return;
     const at = this.visible.findIndex((r) => r.key === this.cursor);
     const r = this.visible[at] ?? null;
-    const move = (step) => {
-      const next = this.visible[Math.max(0, Math.min(this.visible.length - 1, (at < 0 ? (step > 0 ? -1 : this.visible.length) : at) + step))];
-      this.cursor = next?.key ?? null;
-      this.redrawAll(cx);
-    };
-    if (e.key === "j" || e.key === "down") return move(1);
-    if (e.key === "k" || e.key === "up") return move(-1);
+    const step = reorderStepOf(e);
+    if (step) return r?.section === "pinned" && this.found === null ? this.movePin(cx, r, step) : undefined;
+    const roved = rovedTo(e, at, this.visible.length, { letters: true });
+    if (roved !== null) return this.moveCursor(cx, this.visible[roved].key);
     if (e.key === "/") return this.search.focus();
-    if (e.key === "escape") {
-      this.cursor = null;
-      return this.redrawAll(cx);
-    }
+    if (e.key === "escape") return this.moveCursor(cx, null);
     const target = r ?? this.model?.rows.find((row) => row.address && (row.address === this.live?.shown || row.views.includes(this.live?.shown)));
     if (r?.shelf && (e.key === "enter" || e.key === "space")) return this.toggleShelf(r.shelf, cx);
     if (e.keystroke === "cmd-shift-s" && target?.session && !target.archived && !target.deleted) return this.toggleSettle(cx, target);
@@ -2982,7 +3221,7 @@ export default class Anyhost extends View {
       .on_click((_e, cx) => {
         this.frozen = null;
         this.listScroll.scroll_to_item(0);
-        cx.notify();
+        this.redrawList(cx);
       })
       .child(svg(iconPath(`${OWN}/chevron-up`)).size(UI.icon.small))
       .child(`${count} new`);
@@ -3004,7 +3243,7 @@ export default class Anyhost extends View {
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click((_e, cx) => {
         onClick();
-        cx.notify();
+        this.redrawList(cx);
       })
       .child(svg(iconPath(icon)).size(UI.icon.body).flex_none())
       .child(label);
@@ -3064,9 +3303,13 @@ export default class Anyhost extends View {
       .child(svg(iconPath(icon)).size(size === UI.height.inline ? UI.icon.small : UI.icon.body));
   }
 
+  hueFor(name) {
+    return hueOf(name || "~")[this.isDark ? 1 : 0];
+  }
+
   mark(t, name, dim = false, isFolder = false) {
     if (isFolder) return div().size(UI.icon.lead).flex_none().flex().items_center().justify_center().text_color(t.dim).child(svg(`${ICON}/folder.svg`).size(UI.icon.body));
-    const hue = hueOf(name || "~")[this.isDark ? 1 : 0];
+    const hue = this.hueFor(name);
     return div()
       .size(UI.icon.lead)
       .flex_none()
@@ -3122,18 +3365,25 @@ export default class Anyhost extends View {
     const filter = filterOf();
     const isHolding = this.isPointerIn || this.keys.is_focused();
     const isNarrow = narrow();
-    const moving = this.pressed?.isMoving && this.pressed.over !== NONE ? this.pressed : null;
-    const key = `${pulse?.at ?? ""}|${JSON.stringify(filter)}|${isHolding}|${isNarrow}|${this.order?.join("\0")}|${moving ? `${moving.key}>${moving.over}` : ""}`;
+    const outbox = JSON.stringify(outboxOf());
+    const key = `${pulse?.at ?? ""}|${JSON.stringify(filter)}|${isHolding}|${isNarrow}|${this.order?.join("\0")}|${outbox}`;
     if (key === this.projectsKey) return false;
     this.projectsKey = key;
     if (!pulse) return false;
-    if (!isHolding || this.order === null) this.order = pulse.projects.map((p) => p.key);
+    const order = orderIn("order", pulse.projectOrder);
+    const shown = [...pulse.projects].sort((a, b) => placeIn(order, a.key) - placeIn(order, b.key));
+    if (!isHolding || this.order === null) this.order = shown.map((p) => p.key);
     const byKey = new Map(pulse.projects.map((p) => [p.key, p]));
-    const order = moving ? movedTo(this.order, this.order.indexOf(moving.key), this.order.indexOf(moving.over)) : this.order;
-    const projects = [...order.map((key) => byKey.get(key)).filter(Boolean), ...pulse.projects.filter((p) => !order.includes(p.key))];
-    this.entries = projects.flatMap((p) => [{ id: p.key, project: p, worktree: null }, ...(p.worktrees.length > 1 ? p.worktrees : []).map((w) => ({ id: `${p.key}\0${w.machine}\0${w.folder}`, project: p, worktree: w }))]);
+    const projects = [...this.order.map((key) => byKey.get(key)).filter(Boolean), ...pulse.projects.filter((p) => !this.order.includes(p.key))];
+    this.entries = projects.flatMap((p) => [{ id: p.key, project: p, worktree: null }, ...(p.worktrees.length > 1 ? this.worktreesShown(p) : []).map((w) => ({ id: `${p.key}\0${worktreeIdOf(w)}`, project: p, worktree: w }))]);
     this.projectsView = { pulse, filter, projects, isNarrow, byId: new Map(this.entries.map((entry) => [entry.id, entry])) };
     return true;
+  }
+
+  worktreesShown(p) {
+    const ids = orderIn(`worktrees:${p.key}`, p.worktrees.map(worktreeIdOf));
+    const byId = new Map(p.worktrees.map((w) => [worktreeIdOf(w), w]));
+    return [...ids.map((id) => byId.get(id)).filter(Boolean), ...p.worktrees.filter((w) => !ids.includes(worktreeIdOf(w)))];
   }
 
   renderProjects(t) {
@@ -3142,10 +3392,14 @@ export default class Anyhost extends View {
     if (isNarrow) return this.projectsRail(t, projects, filter);
     const mounted = new Set();
     this.mounted = mounted;
-    const press = this.pressed;
-    const liftedProject = press?.isMoving && press.from && this.listBounds ? projects.find((p) => p.key === press.key) : undefined;
+    const drag = this.pressed?.isMoving ? this.pressed : null;
+    const offsets = drag?.sortable ? drag.offsets() : null;
+    const isLifted = (entry) => drag !== null && (drag.project === undefined ? entry.project.key === drag.id : entry.project.key === drag.project && worktreeIdOf(entry.worktree ?? {}) === drag.id);
+    const offsetOf = (entry) => (offsets === null ? 0 : drag.project === undefined ? offsets.get(entry.project.key) : entry.project.key === drag.project && entry.worktree ? offsets.get(worktreeIdOf(entry.worktree)) : 0) ?? 0;
+    const lifted = drag?.bounds && this.paneAt ? this.entries.filter(isLifted) : [];
     return v_flex()
       .id("anyhost-projects")
+      .relative()
       .track_focus(this.keys)
       .on_key_down((e, cx) => this.projectKey(e, cx))
       .size_full()
@@ -3154,6 +3408,20 @@ export default class Anyhost extends View {
       .border_t(1)
       .border_color(t.border)
       .text_color(t.foreground)
+      .on_mouse_move((e, cx) => {
+        this.paneAt = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
+        const drag = this.pressed;
+        if (!drag) return;
+        if (drag.moveTo(e.position)) {
+          this.dragKeys.focus();
+          return this.redrawAll(cx);
+        }
+        if (drag.isMoving) cx.notify();
+      })
+      .on_hover((on, cx) => {
+        if (!on) this.leaveDrag(cx, false);
+      })
+      .on_mouse_up("left", (_e, cx) => this.dropProject(cx))
       .child(div().px(UI.space.sm).pt(UI.space.sm).flex_none().child(this.allCard(t, pulse, filter.project === null)))
       .child(
         v_flex()
@@ -3167,34 +3435,71 @@ export default class Anyhost extends View {
           .track_scroll(this.projectsScroll)
           .on_hover((on, cx) => {
             this.isPointerIn = on;
-            if (!on) this.pressed = null;
             this.redrawAll(cx);
           })
-          .on_mouse_up("left", (_e, cx) => this.dropProject(cx))
-          .on_mouse_move((e, cx) => {
-            this.listBounds = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
-            const p = this.pressed;
-            if (!p || p.key === undefined) return;
-            this.pressed = { ...p, atY: e.position.y, isMoving: p.isMoving || isPastSlop(p, e) };
-            if (this.pressed.isMoving) this.redrawAll(cx);
-          })
-          .children(this.entries.map((entry) => this.partFor(entry.id, mounted, () => this.entryElement(t, entry))))
-          .when(Boolean(liftedProject), (el) => el.child(this.liftedAt(this.projectCard(t, liftedProject, pulse, filter.project === liftedProject?.key, true), this.pressed?.from, this.listBounds, 0, (this.pressed?.atY ?? 0) - (this.pressed?.downY ?? 0)))),
-      );
+          .children(this.entries.map((entry) => this.slide(v_flex().id(`ah-at-${entry.id}`).flex_none().opacity(isLifted(entry) ? 0 : 1).child(this.partFor(entry.id, mounted, () => this.entryElement(t, entry))), "y", offsetOf(entry), drag !== null))),
+      )
+      .when(lifted.length > 0, (el) => el.child(this.liftedAt(lifted.length === 1 ? this.entryElement(t, lifted[0], true) : v_flex().gap(1).rounded(UI.radius.control).bg(t.raised).shadow_md().cursor_grabbing().children(lifted.map((entry) => this.entryElement(t, entry))), drag.bounds, this.paneAt, 0, drag.shift)))
+      .when(drag !== null, (el) => el.child(this.dragCatcher()));
   }
 
-  entryElement(t, entry) {
+  slide(el, axis, offset, isSliding) {
+    const edge = axis === "x" ? "left" : "top";
+    const moved = el.relative()[edge](offset);
+    return isSliding ? moved.transition(edge, UI.motion) : moved;
+  }
+
+  entryElement(t, entry, isGhost = false) {
     const { pulse, filter } = this.projectsView;
-    if (entry.worktree) return this.worktreeRow(t, entry, pulse, filter);
-    return this.projectCard(t, entry.project, pulse, filter.project === entry.project.key && (filter.worktree === null || entry.project.worktrees.length < 2));
+    if (entry.worktree) return this.worktreeRow(t, entry, pulse, filter, isGhost);
+    return this.projectCard(t, entry.project, pulse, filter.project === entry.project.key && (filter.worktree === null || entry.project.worktrees.length < 2), isGhost);
+  }
+
+  projectSortable() {
+    const ids = this.entries.filter((entry) => !entry.worktree).map((entry) => entry.id);
+    const heightOf = (key) => this.entries.filter((entry) => entry.project.key === key).reduce((sum, entry, at) => sum + (at > 0 ? 1 : 0) + (entry.worktree ? UI.height.control : UI.height.row), 0);
+    return { ids, sizes: ids.map(heightOf), gap: 1, axis: "y" };
+  }
+
+  worktreeSortable(p) {
+    const ids = this.worktreesShown(p).map(worktreeIdOf);
+    return { ids, sizes: ids.map(() => UI.height.control), gap: 1, axis: "y" };
+  }
+
+  reorderProjects(order) {
+    this.order = order;
+    queueOrder("order", orderIn("order", this.projectsView?.pulse.projectOrder ?? []), order.filter((key) => key !== NONE), (projects) => ({ op: "orderProjects", projects }));
+  }
+
+  reorderWorktrees(key, order) {
+    const p = this.projectsView?.pulse.projects.find((each) => each.key === key);
+    if (p) queueOrder(`worktrees:${key}`, orderIn(`worktrees:${key}`, p.worktrees.map(worktreeIdOf)), order, (ids) => ({ op: "orderWorktrees", project: key, worktrees: ids.map(worktreeOf) }));
+  }
+
+  moveEntry(cx, entry, step) {
+    const ids = entry.worktree ? this.worktreesShown(entry.project).map(worktreeIdOf) : this.entries.filter((each) => !each.worktree).map((each) => each.id);
+    const at = ids.indexOf(entry.worktree ? worktreeIdOf(entry.worktree) : entry.id);
+    if (at < 0 || entry.id === NONE || ids[at + step] === undefined || ids[at + step] === NONE) return;
+    if (entry.worktree) this.reorderWorktrees(entry.project.key, movedTo(ids, at, at + step));
+    else this.reorderProjects(movedTo(ids, at, at + step));
+    this.refreshProjects();
+    this.placeParts(cx);
+    const shown = this.entries.findIndex((each) => each.id === entry.id);
+    if (shown >= 0) this.projectsScroll.scroll_to_item(shown);
   }
 
   projectKey(e, cx) {
     const at = this.entries.findIndex((entry) => entry.id === this.cursor);
-    if (e.key === "j" || e.key === "down") this.cursor = this.entries[Math.min(this.entries.length - 1, at + 1)]?.id ?? null;
-    if (e.key === "k" || e.key === "up") this.cursor = at <= 0 ? ALL : this.entries[at - 1].id;
-    const shown = this.entries.findIndex((entry) => entry.id === this.cursor);
-    if (shown >= 0 && shown !== at) this.projectsScroll.scroll_to_item(shown);
+    const step = reorderStepOf(e);
+    if (step) {
+      if (at >= 0) this.moveEntry(cx, this.entries[at], step);
+      return this.redrawAll(cx);
+    }
+    const roved = rovedTo(e, this.cursor === ALL ? 0 : at < 0 ? -1 : at + 1, this.entries.length + 1, { letters: true });
+    if (roved !== null) {
+      if (roved > 0) this.projectsScroll.scroll_to_item(roved - 1);
+      return this.moveCursor(cx, roved === 0 ? ALL : this.entries[roved - 1].id);
+    }
     const entry = this.entries[at] ?? null;
     if (e.key === "enter" && entry) this.pickEntry(entry);
     if (e.key === "enter" && !entry) setFilter({ project: null });
@@ -3257,13 +3562,11 @@ export default class Anyhost extends View {
   }
 
   allCard(t, pulse, isSelected) {
-    const isStale = pulse.error !== null && pulse.readAt !== null;
     return this.item("ah-project-all")
       .cursor_pointer()
       .map((el) => this.surface(el, t, { isSelected }))
       .relative()
       .when(this.isCursorOn(ALL), (el) => el.child(this.ring(t)))
-      .when(isStale, (el) => el.tooltip(`Can't reach anyhost · counts from ${since(pulse.readAt)}`))
       .on_click(() => {
         this.cursor = null;
         setFilter({ project: null });
@@ -3277,40 +3580,34 @@ export default class Anyhost extends View {
     const id = `project:${p.key}`;
     const hovered = this.hovered === id;
     const canStart = Object.values(p.checkouts ?? {}).some((list) => list.length > 0);
-    const pressed = this.pressed;
-    const isDragged = pressed?.isMoving === true && pressed.key === p.key;
+    const isMoving = this.pressed?.isMoving === true;
     return this.item(`ah-${id}`)
       .cursor_pointer()
-      .map((el) => this.surface(el, t, { isSelected, isDragged }))
-      .when(isDragged && !isGhost && Boolean(pressed.from), (el) => el.opacity(0))
+      .map((el) => this.surface(el, t, { isSelected, isDragged: isGhost }))
       .relative()
       .when(this.isCursorOn(p.key), (el) => el.child(this.ring(t)))
       .on_hover((on, cx) => {
         if (on) this.hovered = id;
         else if (this.hovered === id) this.hovered = null;
-        if (on && this.pressed !== null && (this.pressed.key !== p.key || this.pressed.isMoving)) {
-          this.pressed = { ...this.pressed, over: p.key, isMoving: true };
-          this.act(() => {});
-        }
         this.redrawAll(cx);
       })
       .on_mouse_down("left", (e) => {
         this.dropped = null;
-        if (p.key !== NONE) this.pressed = { key: p.key, over: p.key, downX: e.position.x, downY: e.position.y, atY: e.position.y, from: e.bounds ?? null, isMoving: false };
+        if (p.key !== NONE) this.pressed = new Drag(p.key, e.position, { bounds: e.bounds ?? null, sortable: this.projectSortable() });
       })
       .when(Boolean(shared(DRAG_TAB)) && hovered, (el) => el.bg(t.selected).child(this.ring(t)))
-      .on_mouse_up("left", (_e, cx) => (shared(DRAG_TAB) ? this.dropTabOn(p, null) : this.dropProject(cx)))
+      .on_mouse_up("left", () => shared(DRAG_TAB) && this.dropTabOn(p, null))
       .on_click(() => {
-        if (this.pressed?.isMoving || this.dropped === p.key) return void (this.dropped = null);
+        if (this.wasDragged(p.key)) return;
         this.pickProject(p);
       })
       .on_mouse_down("right", () => this.projectMenu(p, pulse))
       .child(this.mark(t, p.name, false, p.key === NONE))
       .child(div().flex_1().min_w(0).truncate().text_size(UI.text.body).font_medium().child(p.name))
-      .child(shared(DRAG_TAB) && hovered ? this.moveHere(t) : hovered && canStart && p.key !== NONE && !pressed?.isMoving ? this.iconButton(t, `ah-pen-${id}`, "square-pen", `New session in ${p.name}`, () => ask({ action: "startIn", project: p }), UI.height.inline) : this.counts(t, p));
+      .child(shared(DRAG_TAB) && hovered ? this.moveHere(t) : hovered && canStart && p.key !== NONE && !isMoving ? this.iconButton(t, `ah-pen-${id}`, "square-pen", `New session in ${p.name}`, () => ask({ action: "startIn", project: p }), UI.height.inline) : this.counts(t, p));
   }
 
-  worktreeRow(t, { id, project, worktree }, pulse, filter) {
+  worktreeRow(t, { id, project, worktree }, pulse, filter, isGhost = false) {
     const rowId = `worktree:${hex12(`${worktree.machine}\0${worktree.folder}`)}`;
     const hovered = this.hovered === rowId;
     const isSelected = sameWorktree(filter.worktree, worktree);
@@ -3320,19 +3617,25 @@ export default class Anyhost extends View {
       .h(UI.height.control)
       .pl(UI.space.sm + UI.icon.lead + UI.space.sm)
       .cursor_pointer()
-      .map((el) => this.surface(el, t, { isSelected }))
+      .map((el) => this.surface(el, t, { isSelected, isDragged: isGhost }))
       .relative()
       .when(this.isCursorOn(id), (el) => el.child(this.ring(t)))
-      .tooltip(worktree.isGone ? `${worktree.folder} is gone` : worktree.folder)
+      .when(!this.pressed?.isMoving, (el) => el.tooltip(worktree.isGone ? `${worktree.folder} is gone` : worktree.folder))
       .on_hover((on, cx) => {
         if (on) this.hovered = rowId;
         else if (this.hovered === rowId) this.hovered = null;
-        if (on && this.pressed?.isMoving) this.pressed = { ...this.pressed, over: project.key };
         this.redrawAll(cx);
+      })
+      .on_mouse_down("left", (e) => {
+        this.dropped = null;
+        this.pressed = new Drag(worktreeIdOf(worktree), e.position, { project: project.key, bounds: e.bounds ?? null, sortable: this.worktreeSortable(project) });
       })
       .when(Boolean(shared(DRAG_TAB)) && hovered, (el) => el.bg(t.selected).child(this.ring(t)))
       .on_mouse_up("left", () => shared(DRAG_TAB) && this.dropTabOn(project, worktree))
-      .on_click(() => this.pickWorktree(project, worktree))
+      .on_click(() => {
+        if (this.wasDragged(worktreeIdOf(worktree))) return;
+        this.pickWorktree(project, worktree);
+      })
       .on_mouse_down("right", () => this.projectMenu(project, pulse, worktree))
       .child(svg(`${ICON}/git-branch.svg`).size(UI.icon.small).flex_none().text_color(isSelected ? t.foreground : t.dim))
       .child(div().flex_shrink(1).min_w(0).truncate().text_size(UI.text.body).text_color(isSelected ? t.foreground : worktree.isGone ? t.dim : t.muted).child(worktree.branch))
@@ -3359,13 +3662,13 @@ export default class Anyhost extends View {
   }
 
   dropProject(cx) {
-    const pressed = this.pressed;
+    const drag = this.pressed;
     this.pressed = null;
-    if (pressed?.isMoving) this.dropped = pressed.key;
-    if (pressed?.isMoving && pressed.over !== pressed.key && pressed.over !== NONE) {
-      const order = movedTo(this.order, this.order.indexOf(pressed.key), this.order.indexOf(pressed.over));
-      this.order = order;
-      ask({ action: "orderProjects", order: order.filter((key) => key !== NONE) });
+    if (!drag?.isMoving) return;
+    this.dropped = drag.id;
+    if (drag.target !== drag.from) {
+      if (drag.project === undefined) this.reorderProjects(drag.sorted());
+      else this.reorderWorktrees(drag.project, drag.sorted());
       this.refreshProjects();
       this.placeParts(cx);
     }
@@ -3443,14 +3746,11 @@ export default class Anyhost extends View {
 
 
   initBoard(cx) {
-    this.dragging = null;
     this.over = null;
-    this.dropped = null;
     this.hovered = null;
     this.renaming = null;
     this.board = null;
-    this.groupBy = saved("groupBy", "stage");
-    this.opening = new Map();
+    this.groupBy = preference("groupBy", "stage");
     this.isAdding = false;
     this.adding = InputState.new({ placeholder: "Stage name" });
     this.adding.on("submit", (_e, cx) => {
@@ -3547,12 +3847,12 @@ export default class Anyhost extends View {
   }
 
   askOpen(r, shape) {
-    if (!r.address) this.opening.set(r.key, Date.now());
+    if (!r.address) markSessionOpening(r.key, true);
     ask({ action: "present", key: r.key, shape });
   }
 
   isAskedOpen(r) {
-    return !r.address && Date.now() - (this.opening.get(r.key) ?? 0) < OPENING_SHOWN_MS;
+    return !r.address && isOpening(r.key);
   }
 
   boardReconcile(cx) {
@@ -3574,16 +3874,28 @@ export default class Anyhost extends View {
     const projectName = board.name;
     const mounted = new Set();
     this.mounted = mounted;
+    const drag = this.pressed?.isMoving ? this.pressed : null;
+    const lifted = drag?.bounds && this.paneAt ? model.byKey.get(drag.id) : undefined;
     return v_flex()
       .id("ah-board")
+      .relative()
       .size_full()
       .bg(t.background)
       .text_color(t.foreground)
-      .on_mouse_up("left", (_e, cx) => {
-        this.dragging = null;
-        this.over = null;
-        this.redrawAll(cx);
+      .on_mouse_move((e, cx) => {
+        this.paneAt = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
+        const drag = this.pressed;
+        if (!drag) return;
+        if (drag.moveTo(e.position)) {
+          this.dragKeys.focus();
+          return this.redrawAll(cx);
+        }
+        if (drag.isMoving) cx.notify();
       })
+      .on_hover((on, cx) => {
+        if (!on) this.leaveDrag(cx, false);
+      })
+      .on_mouse_up("left", (_e, cx) => this.dropOnStage(cx))
       .child(
         h_flex()
           .h(UI.height.row + UI.space.sm)
@@ -3601,7 +3913,7 @@ export default class Anyhost extends View {
               ["state", "State"],
             ].map(([id, label]) => this.choice(t, `ah-group-${id}`, label, this.groupBy === id, () => {
               this.groupBy = id;
-              save("groupBy", id);
+              prefer("groupBy", id);
               this.act(() => undefined);
             })),
           ),
@@ -3633,11 +3945,53 @@ export default class Anyhost extends View {
                 ),
             ),
           ),
-      );
+      )
+      .when(Boolean(lifted), (el) => el.child(this.liftedAt(this.boardCard(t, lifted, false, true), drag.bounds, this.paneAt, drag.at.x - drag.down.x, drag.at.y - drag.down.y)))
+      .when(drag !== null, (el) => el.child(this.dragCatcher()));
   }
 
-  searchField(t, state) {
-    return h_flex().flex_1().min_w(0).h_full().gap(UI.space.sm).items_center().text_color(t.dim).child(svg(`${ICON}/search.svg`).size(UI.icon.body).flex_none()).child(Input.new(state).flex_1().h_full().text_size(UI.text.body).text_color(t.foreground));
+  dropOnStage(cx) {
+    const drag = this.pressed;
+    const over = this.over;
+    this.pressed = null;
+    this.over = null;
+    if (!drag?.isMoving) return;
+    this.dropped = drag.id;
+    const r = this.board?.model.byKey.get(drag.id);
+    if (r && over !== null && r.stage !== over && this.data.stages.some((stage) => stage.id === over)) this.organize(cx, [{ op: "stageSession", session: drag.id, stage: over }], [[drag.id, { stage: over }]]);
+    this.redrawAll(cx);
+  }
+
+  searchField(t, state, cleared) {
+    const clear = div()
+      .id("ah-search-clear")
+      .size(UI.height.inline)
+      .flex()
+      .flex_none()
+      .items_center()
+      .justify_center()
+      .rounded(UI.radius.pill)
+      .text_color(t.dim)
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("Clear the search")
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        state.set_value("");
+        state.focus();
+        cleared(cx);
+      })
+      .child(svg(iconPath(`${OWN}/circle-x`)).size(UI.icon.body));
+    return h_flex()
+      .flex_1()
+      .min_w(0)
+      .h_full()
+      .gap(UI.space.sm)
+      .items_center()
+      .text_color(t.dim)
+      .child(svg(`${ICON}/search.svg`).size(UI.icon.body).flex_none())
+      .child(Input.new(state).flex_1().h_full().text_size(UI.text.body).text_color(t.foreground))
+      .when(state.value() !== "", (el) => el.child(clear));
   }
 
   input(t, state) {
@@ -3666,7 +4020,7 @@ export default class Anyhost extends View {
   }
 
   column(t, column, model, mounted) {
-    const isOver = this.dragging !== null && this.over === column.id && column.isStage;
+    const isOver = this.pressed?.isMoving === true && this.over === column.id && column.isStage;
     const stages = this.data.stages;
     const at = stages.findIndex((s) => s.id === column.id);
     const isNamed = column.isStage && column.id !== "";
@@ -3715,19 +4069,9 @@ export default class Anyhost extends View {
       .bg(isOver ? t.selected : t.surface)
       .on_hover((on, cx) => {
         if (on) this.hovered = `col:${column.id}`;
-        if (on && this.dragging !== null) this.over = column.id;
+        if (on && this.pressed?.isMoving) this.over = column.id;
+        if (!on && this.over === column.id) this.over = null;
         cx.notify();
-      })
-      .on_mouse_up("left", (_e, cx) => {
-        const key = this.dragging;
-        this.dragging = null;
-        this.over = null;
-        const r = key ? model.byKey.get(key) : undefined;
-        if (r && column.isStage && r.stage !== column.id) {
-          this.dropped = key;
-          this.organize(cx, [{ op: "stageSession", session: key, stage: column.id }], [[key, { stage: column.id }]]);
-        }
-        this.redrawAll(cx);
       })
       .child(header)
       .child(
@@ -3738,13 +4082,13 @@ export default class Anyhost extends View {
           .gap(UI.space.sm)
           .overflow_y_scrollbar()
           .children(column.cards.map((r) => this.cardFor({ t }, r, mounted)))
-          .when(column.cards.length === 0 && column.isStage, (el) => el.child(this.empty(t, this.dragging !== null ? "Drop it here" : "Drag a card here"))),
+          .when(column.cards.length === 0 && column.isStage, (el) => el.child(this.empty(t, this.pressed?.isMoving ? "Drop it here" : "Drag a card here"))),
       );
   }
 
-  boardCard(t, r, isDraggable) {
+  boardCard(t, r, isDraggable, isGhost = false) {
     const tags = r.tags.map((id) => this.data.tags[id]).filter(Boolean);
-    const isDragged = this.dragging === r.key;
+    const isDragged = !isGhost && this.pressed?.isMoving === true && this.pressed.id === r.key;
     return v_flex()
       .id(`ah-card-${r.key}`)
       .p(UI.space.md)
@@ -3753,20 +4097,18 @@ export default class Anyhost extends View {
       .rounded(UI.radius.panel)
       .bg(t.background)
       .border_1()
-      .border_color(isDragged ? t.accent : t.border)
-      .opacity(isDragged ? 0.5 : 1)
+      .border_color(isGhost ? t.accent : t.border)
+      .when(isGhost, (el) => el.shadow_lg().cursor_grabbing())
+      .opacity(isDragged ? 0.4 : 1)
       .cursor_pointer()
       .hover((s) => s.border_color(t.input))
-      .on_mouse_down("left", (_e, cx) => {
+      .on_mouse_down("left", (e) => {
         this.dropped = null;
-        if (!isDraggable) return;
-        this.dragging = r.key;
-        cx.notify();
-        this.act(() => undefined);
+        if (isDraggable) this.pressed = new Drag(r.key, e.position, { bounds: e.bounds ?? null });
       })
       .on_click(() =>
         this.act(() => {
-          if (this.dropped === r.key) return void (this.dropped = null);
+          if (this.wasDragged(r.key)) return;
           this.askOpen(r, "panel");
         }),
       )
@@ -3976,10 +4318,12 @@ export default class Anyhost extends View {
     const inSub = opened !== null && this.subAt != null;
     const list = (inSub ? opened.sub : items).filter((item) => !item.disabled);
     const at = list.findIndex((item) => item.id === (inSub ? this.subAt : this.at));
-    const move = (step) => list[at < 0 ? (step > 0 ? 0 : list.length - 1) : (at + step + list.length) % list.length]?.id ?? null;
-    if (e.key === "down" || e.key === "up") {
-      if (inSub) this.subAt = move(e.key === "down" ? 1 : -1);
-      else this.at = move(e.key === "down" ? 1 : -1);
+    const typed = e.key_char && e.key_char.trim() !== "" && !e.modifiers.control && !e.modifiers.platform ? e.key_char.toLowerCase() : null;
+    const roved = typed === null ? rovedTo(e, at, list.length, { loop: true }) : [...list.slice(at + 1), ...list.slice(0, at + 1)].findIndex((item) => item.label.toLowerCase().startsWith(typed));
+    const next = typed === null ? list[roved ?? -1] : [...list.slice(at + 1), ...list.slice(0, at + 1)][roved];
+    if (next) {
+      if (inSub) this.subAt = next.id;
+      else this.at = next.id;
     }
     const current = inSub ? opened.sub.find((item) => item.id === this.subAt) : items.find((item) => item.id === this.at);
     const firstSub = (item) => item?.sub?.find((sub) => !sub.disabled)?.id ?? null;
@@ -4169,7 +4513,7 @@ export default class Anyhost extends View {
     this.day = field("YYYY-MM-DD", dayOf(initial));
     this.clock = field("HH:MM", timeOf(initial));
     this.amount = field("2", "2");
-    cx.timer.after(120, () => this.day.focus());
+    cx.timer.after(0, () => this.day.focus());
   }
 
   submitSnooze(cx) {
@@ -4230,7 +4574,7 @@ export default class Anyhost extends View {
     this.name = InputState.new({ placeholder: project.defaultName });
     this.name.set_value(project.name);
     this.name.on("submit", () => this.saveName(this.name.value()));
-    cx.timer.after(120, () => this.name.focus());
+    cx.timer.after(0, () => this.name.focus());
   }
 
   saveName(text) {
@@ -4525,7 +4869,7 @@ export default class Anyhost extends View {
       const ordered = [...(current ? [current] : []), ...list.filter((project) => project !== current).sort((a, b) => b.newest - a.newest)];
       return ordered.flatMap((project) => (project.checkouts[this.machine] ?? []).map((folder, n) => ({ project, folder, isFirst: n === 0, isCurrent: project === current })));
     };
-    cx.timer.after(120, () => this.handle.focus());
+    cx.timer.after(0, () => this.handle.focus());
   }
 
   renderNew(t) {
@@ -4543,9 +4887,11 @@ export default class Anyhost extends View {
       .id("ah-new")
       .track_focus(this.handle)
       .on_key_down((e, cx) => {
-        if (e.key === "down") this.cursorAt = Math.min(choices.length - 1, this.cursorAt + 1);
-        if (e.key === "up") this.cursorAt = Math.max(0, this.cursorAt - 1);
-        if (e.key === "down" || e.key === "up") this.newScroll.scroll_to_item(this.cursorAt);
+        const roved = rovedTo(e, this.cursorAt, choices.length);
+        if (roved !== null) {
+          this.cursorAt = roved;
+          this.newScroll.scroll_to_item(roved);
+        }
         if (e.key === "enter" && choices[this.cursorAt]) pick(choices[this.cursorAt]);
         if (e.key === "escape") closeOverlay(p.overlay);
         cx.notify();
@@ -4735,7 +5081,7 @@ export default class Anyhost extends View {
   initWorktree(cx) {
     this.branch = InputState.new({ placeholder: "Branch name" });
     this.branch.on("submit", () => this.createWorktree());
-    cx.timer.after(120, () => this.branch.focus());
+    cx.timer.after(0, () => this.branch.focus());
   }
 
   createWorktree() {
@@ -4801,13 +5147,15 @@ export default class Anyhost extends View {
     this.palette = props();
     this.query = InputState.new({ placeholder: "Search sessions, projects and actions" });
     this.groups = this.paletteGroups();
-    this.query.on("change", (_e, cx) => {
-      this.cursorAt = 0;
-      this.groups = this.paletteGroups();
-      cx.notify();
-    });
+    this.query.on("change", (_e, cx) => this.paletteSearched(cx));
     this.query.on("submit", () => this.groups.flatMap(([, rows]) => rows)[this.cursorAt]?.run());
-    cx.timer.after(120, () => this.query.focus());
+    cx.timer.after(0, () => this.query.focus());
+  }
+
+  paletteSearched(cx) {
+    this.cursorAt = 0;
+    this.groups = this.paletteGroups();
+    cx.notify();
   }
 
   paletteGroups() {
@@ -4872,8 +5220,9 @@ export default class Anyhost extends View {
     this.height = 0;
     this.pointerY = 0;
     this.barBounds = null;
-    this.dropped = null;
-    this.closing = new Map();
+    this.widths = new Map();
+    this.closing = new Set();
+    this.leaving = new Set();
     this.revealedAt = shared(REVEAL)?.at ?? Date.now();
     this.tabsKey = "";
     this.placing = null;
@@ -4934,18 +5283,13 @@ export default class Anyhost extends View {
     stepSplit();
     const drag = shared(DRAG_TAB);
     if (drag?.from === "inbox" && !drag.overlay && work.mode === "tabs") this.openDrop(drag, false, cx);
-    if (this.pressed?.isMoving && this.pressed.isTab && !shared(DRAG_TAB)) {
+    if (this.pressed?.isMoving && this.tabsView?.pills.some((pill) => pill.tab.id === this.pressed.id) && !shared(DRAG_TAB)) {
       this.pressed = null;
-      cx.notify();
-    }
-    const dropped = this.dropped;
-    if (dropped && Date.now() > dropped.until) {
-      this.dropped = null;
       cx.notify();
     }
     const tree = layout();
     const width = this.tilesWidth();
-    const key = `${work.mode}|${work.id}|${work.terminals.join(",")}|${JSON.stringify(work.settings)}|${scrollShown(width)}:${Math.floor(width / TILE_WIDTH)}|${find(tree, "views")?.active}|${tileTerminals(tree).join(",")}|${this.focusTarget ?? ""}|${shared(REVEAL)?.at ?? 0}|${spaces().reduce((sum, sp) => sum + sp.tabs.length, 0)}|${panes().length}|${isLayoutLoaded()}|${(shared(PULSE)?.pinned ?? []).map((p) => `${p.key}:${p.state}`).join(",")}|${(work.space?.tabs ?? []).map((tab) => tab.id).join(",")}`;
+    const key = `${work.mode}|${work.id}|${work.terminals.join(",")}|${JSON.stringify(work.settings)}|${scrollShown(width)}:${Math.floor(width / TILE_WIDTH)}|${find(tree, "views")?.active}|${tileTerminals(tree).join(",")}|${this.focusTarget ?? ""}|${shared(REVEAL)?.at ?? 0}|${spaces().reduce((sum, sp) => sum + sp.tabs.length, 0)}|${panes().length}|${isLayoutLoaded()}|${(shared(PULSE)?.pinned ?? []).map((p) => `${p.key}:${p.state}`).join(",")}|${pinsInOrder().join(",")}|${(work.space?.tabs ?? []).map((tab) => tab.id).join(",")}`;
     if (key !== this.tabsKey) {
       this.tabsKey = key;
       this.tabsReconcile(cx);
@@ -4957,32 +5301,45 @@ export default class Anyhost extends View {
     const root = layout();
     const tiles = tileTerminals(root);
     const tabIds = new Set(spaces().flatMap((sp) => sp.tabs.map((x) => x.id)));
-    for (const [id, at] of this.closing) if (!tabIds.has(id) || Date.now() - at > CLOSE_SETTLES_MS * 3) this.closing.delete(id);
+    const archived = new Map(queued().flatMap(([, entry]) => Object.entries(entry.changes).filter(([, fields]) => "archived" in fields).map(([key, fields]) => [key, fields.archived])));
+    const archiving = new Set([...archived].filter(([, isArchived]) => isArchived).map(([key]) => key));
     const ps = panes();
     const sessionAt = new Map(terminals().map((x) => [x.address, x.labels?.[SESSION_LABEL]]));
     const focusedTab = work.list.find((c) => c.terminal === work.focused)?.tab ?? null;
     const visible = new Set(work.list.filter((c) => tiles.includes(c.terminal)).map((c) => c.tab));
     const known = shared(PULSE)?.sessions ?? {};
-    const pills = (work.space?.tabs ?? []).map((tab) => {
-      const inTab = ps.filter((p) => p.tab === tab.id);
-      const sessions = [...new Set(inTab.map((p) => sessionAt.get(p.terminal)).filter(Boolean))];
-      const ofSessions = Object.keys(STATE).find((state) => sessions.some((key) => known[key]?.state === state));
-      return {
-        tab,
-        program: inTab.find((p) => p.program?.agent)?.program ?? inTab[0]?.program,
-        sessions,
-        isPinned: sessions.some((key) => known[key]?.pinned),
-        state: ofSessions ?? (tab.status === "blocked" || tab.status === "working" || tab.status === "done" ? tab.status : null),
-        isShown: work.mode === "tabs" ? tab.active : TILED.has(work.mode) ? tab.id === focusedTab : false,
-        isVisible: TILED.has(work.mode) && visible.has(tab.id),
-      };
-    });
-    const tabbed = new Set(pills.flatMap((pill) => pill.sessions));
     const isAll = filterOf().project === null;
+    const groups = isAll ? this.spacesInOrder() : [work.space].filter(Boolean);
+    const pills = groups.flatMap((space) =>
+      space.tabs.map((tab) => {
+        const inTab = ps.filter((p) => p.tab === tab.id);
+        const sessions = [...new Set(inTab.map((p) => sessionAt.get(p.terminal)).filter(Boolean))];
+        const ofSessions = Object.keys(STATE).find((state) => sessions.some((key) => known[key]?.state === state));
+        const isHere = space.id === work.id;
+        return {
+          tab,
+          space: space.id,
+          program: inTab.find((p) => p.program?.agent)?.program ?? inTab[0]?.program,
+          sessions,
+          isPinned: sessions.some((key) => known[key]?.pinned),
+          state: ofSessions ?? (tab.status === "blocked" || tab.status === "working" || tab.status === "done" ? tab.status : null),
+          isShown: isHere && (work.mode === "tabs" ? tab.active : TILED.has(work.mode) ? tab.id === focusedTab : false),
+          isVisible: isHere && TILED.has(work.mode) && visible.has(tab.id),
+        };
+      }),
+    );
+    const tabbed = new Set(pills.flatMap((pill) => pill.sessions));
     const pinnedAway = (shared(PULSE)?.pinned ?? []).filter((p) => !tabbed.has(p.key) && (isAll || p.space === work.id)).map((p) => ({ ...p, after: "", isPinned: true }));
     const away = new Set(pinnedAway.map((p) => p.key));
-    const discarded = [...pinnedAway, ...(shared(DISCARDED)?.[work.id ?? ""] ?? []).map(([key, title, harness, after]) => ({ key, title, harness, after })).filter((session) => !away.has(session.key))];
-    const active = this.slotsOf(pills.filter((pill) => !this.closing.has(pill.tab.id)), discarded).findIndex((at) => at.pill?.isShown);
+    const asleep = groups.flatMap((space) => (shared(DISCARDED)?.[space.id] ?? []).map(([key, title, harness, after]) => ({ key, title, harness, after, space: space.id })));
+    const discarded = [...pinnedAway, ...asleep.filter((session) => !away.has(session.key))];
+    for (const pill of pills) if (pill.sessions.some((key) => archiving.has(key))) this.closing.delete(pill.tab.id);
+    for (const id of this.closing) if (!tabIds.has(id)) this.closing.delete(id);
+    const isLeaving = (pill) => this.closing.has(pill.tab.id) || (pill.sessions.length > 0 && pill.sessions.every((key) => archiving.has(key)));
+    this.leaving = new Set(pills.filter(isLeaving).map((pill) => pill.tab.id));
+    const slots = this.slotsOf(pills.filter((pill) => !isLeaving(pill)), discarded);
+    const at = slots.findIndex((slot) => slot.pill?.isShown);
+    const active = at < 0 || !isAll ? at : at + slots.slice(0, at + 1).filter((slot, i) => this.startsGroup(slots, i)).length;
     if (active >= 0 && active !== this.shownIndex) this.tabScroll.scroll_to_item(active);
     this.shownIndex = active;
     const w = window();
@@ -4997,13 +5354,33 @@ export default class Anyhost extends View {
       lights: w?.platform === "macos" && w.titlebar === "none" && !w.fullscreen && root?.traffic_lights ? Math.max(UI.space.sm, root.traffic_lights[0] + 64 - (sidebar?.hidden ? 0 : (sidebar?.size?.px ?? 0))) : UI.space.sm,
       hasViews: Boolean(find(root, "views")),
       hasButtons: Boolean(w?.buttons),
-      project: work.workspace?.name ?? (work.workspace?.key ? (shared(PULSE)?.known.find((p) => p.key === work.workspace.key)?.name ?? projectNameOf(work.workspace.key)) : null),
+      project: isAll ? null : (work.workspace?.name ?? (work.workspace?.key ? (shared(PULSE)?.known.find((p) => p.key === work.workspace.key)?.name ?? projectNameOf(work.workspace.key)) : null)),
+      isAll,
+      labels: isAll ? Object.fromEntries(groups.map((space) => [space.id, this.groupName(space)])) : {},
       panels: { files: Boolean(panel) && !panel.hidden && panelBody === "files", changes: Boolean(panel) && !panel.hidden && panelBody === "changes" },
     };
-    const signature = JSON.stringify([this.tabsView.isLoaded, pills.map((pill) => [pill.tab.id, pill.tab.name, pill.tab.index, pill.program?.icon ?? null, pill.program?.tint ?? null, pill.sessions, pill.state, pill.isPinned, pill.isShown, pill.isVisible]), discarded, work.mode, work.id, work.settings, work.focused, work.terminals, this.tabsView.lights, this.tabsView.hasViews, this.tabsView.hasButtons, this.tabsView.project, this.tabsView.panels]);
+    const signature = JSON.stringify([this.tabsView.isLoaded, pills.map((pill) => [pill.tab.id, pill.space, pill.tab.name, pill.tab.index, pill.program?.icon ?? null, pill.program?.tint ?? null, pill.sessions, pill.state, pill.isPinned, pill.isShown, pill.isVisible]), discarded, work.mode, work.id, work.settings, work.focused, work.terminals, this.tabsView.lights, this.tabsView.hasViews, this.tabsView.hasButtons, this.tabsView.project, this.tabsView.labels, this.tabsView.panels, pinsInOrder()]);
     if (signature === this.tabsSignature) return false;
     this.tabsSignature = signature;
     return true;
+  }
+
+  spacesInOrder() {
+    const rank = new Map((shared(PULSE)?.projects ?? []).flatMap((p) => p.worktrees.map((w) => w.id)).map((id, i) => [id, i]));
+    return spaces()
+      .filter((space) => space.tabs.length > 0)
+      .sort((a, b) => (rank.get(a.id) ?? rank.size) - (rank.get(b.id) ?? rank.size));
+  }
+
+  groupName(space) {
+    const project = (shared(PULSE)?.projects ?? []).find((p) => p.worktrees.some((w) => w.id === space.id));
+    if (!project) return space.name;
+    const branch = project.worktrees.find((w) => w.id === space.id)?.branch;
+    return project.worktrees.length > 1 && branch ? `${project.name} · ${branch}` : project.name;
+  }
+
+  startsGroup(slots, i) {
+    return !slots[i].isPinned && slots[i].lane !== slots[i - 1]?.lane;
   }
 
   tabsReconcile(cx) {
@@ -5035,7 +5412,7 @@ export default class Anyhost extends View {
   }
 
   pinTabsFirst(work) {
-    const pinned = (shared(PULSE)?.pinned ?? []).map((p) => p.key);
+    const pinned = pinsInOrder();
     const sessionAt = new Map(terminals().map((x) => [x.address, x.labels?.[SESSION_LABEL]]));
     const ps = panes();
     const rankOf = (tab) => Math.min(...ps.filter((p) => p.tab === tab.id).map((p) => pinned.indexOf(sessionAt.get(p.terminal))).filter((at) => at >= 0));
@@ -5153,14 +5530,14 @@ export default class Anyhost extends View {
   }
 
   renderTabs(t) {
-    const { isLoaded, work, lights, hasViews, hasButtons, project, panels } = this.tabsView;
-    const pills = this.tabsView.pills.filter((pill) => !this.closing.has(pill.tab.id));
-    const shownTabs = pills.map((pill) => pill.tab);
+    const { isLoaded, work, lights, hasViews, hasButtons, project, isAll, labels, panels } = this.tabsView;
+    const pills = this.tabsView.pills.filter((pill) => !this.leaving.has(pill.tab.id));
+    const tabsIn = (space) => pills.filter((pill) => pill.space === space).map((pill) => pill.tab);
     const slots = isLoaded ? this.slotsOf(pills, this.tabsView.discarded) : [];
-    const strip = this.stripLayout(slots);
-    const press = this.pressed;
-    const liftedSlot = press?.isMoving && press.from && this.barBounds ? strip.slots.find((slot) => slot.id === press.id) : undefined;
-    const lifted = liftedSlot ? { slot: liftedSlot, from: press.from } : null;
+    const drag = this.pressed?.isMoving ? this.pressed : null;
+    const offsets = drag?.sortable ? drag.offsets() : new Map();
+    const lifted = drag?.bounds && this.barBounds ? slots.find((slot) => slot.id === drag.id) : undefined;
+    const slotOf = (slot, isGhost = false) => (slot.pill ? this.tabPill(t, slot, work, tabsIn(slot.pill.space), isGhost) : this.sessionPill(t, slot, isGhost));
     return h_flex()
       .id("ah-tabs")
       .size_full()
@@ -5183,15 +5560,17 @@ export default class Anyhost extends View {
       .on_mouse_move((e, cx) => {
         this.pointerY = e.local_position.y;
         this.barBounds = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y, width: e.bounds.width, height: e.bounds.height };
-        this.pointerX = e.position.x;
-        const p = this.pressed;
-        if (isPastSlop(p, e)) this.startDrag(p, slots, work, cx);
-        else if (p?.isMoving && p.from) cx.notify();
+        const drag = this.pressed;
+        if (!drag) return;
+        if (drag.moveTo(e.position)) this.startDrag(drag, slots);
+        cx.notify();
       })
       .on_hover((on, cx) => {
-        if (!on && this.pressed?.isMoving && this.pointerY > this.height / 2) this.liftOut(work, pills, cx);
+        if (on) return;
+        if (this.pressed?.isMoving && this.pointerY > this.height / 2) this.liftOut(work, pills, cx);
+        this.leaveDrag(cx, Boolean(shared(DRAG_TAB)));
       })
-      .on_mouse_up("left", (_e, cx) => this.releaseTab(strip, cx))
+      .on_mouse_up("left", (_e, cx) => this.releaseTab(slots, cx))
       .child(
         h_flex()
           .id("ah-tab-list")
@@ -5202,14 +5581,11 @@ export default class Anyhost extends View {
           .items_center()
           .overflow_x_scroll()
           .track_scroll(this.tabScroll)
-          .when(isLoaded && strip.slots.length === 0, (el) => el.child(div().px(UI.space.sm).text_size(UI.text.caption).text_color(t.dim).child(project ? `No open sessions in ${project}` : "No open sessions")))
-          .children(strip.slots.map((slot) => (slot.pill ? this.tabPill(t, slot, work, slots, shownTabs) : this.sessionPill(t, slot, slots)))),
+          .when(isLoaded && slots.length === 0, (el) => el.child(div().px(UI.space.sm).text_size(UI.text.caption).text_color(t.dim).child(project ? `No open sessions in ${project}` : "No open sessions")))
+          .children(slots.flatMap((slot, i) => [...(isAll && this.startsGroup(slots, i) ? [this.chip(t, labels[slot.lane] ?? "", this.hueFor(labels[slot.lane]))] : []), this.slide(slotOf(slot), "x", offsets.get(slot.id) ?? 0, drag !== null)])),
       )
-      .when(Boolean(lifted), (el) =>
-        el.child(
-          this.liftedAt(lifted?.slot.pill ? this.tabPill(t, lifted.slot, work, slots, shownTabs, true) : this.sessionPill(t, lifted?.slot, slots, true), lifted?.from, this.barBounds, (this.pointerX ?? 0) - (this.pressed?.downX ?? 0), 0),
-        ),
-      )
+      .when(Boolean(lifted), (el) => el.child(this.liftedAt(slotOf(lifted, true), drag.bounds, this.barBounds, drag.shift, 0)))
+      .when(drag !== null, (el) => el.child(this.dragCatcher()))
       .child(
         h_flex()
           .id("ah-tab-tools")
@@ -5230,49 +5606,41 @@ export default class Anyhost extends View {
   }
 
   slotsOf(pills, discarded) {
-    const order = (shared(PULSE)?.pinned ?? []).map((p) => p.key);
+    const order = pinsInOrder();
     const rankOf = (keys) => Math.min(...keys.map((key) => order.indexOf(key)).filter((at) => at >= 0));
     const pinned = [
-      ...pills.filter((pill) => pill.isPinned).map((pill) => ({ id: pill.tab.id, pill, isPinned: true, rank: rankOf(pill.sessions) })),
-      ...discarded.filter((session) => session.isPinned).map((session) => ({ id: session.key, discarded: session, isPinned: true, rank: rankOf([session.key]) })),
+      ...pills.filter((pill) => pill.isPinned).map((pill) => ({ id: pill.tab.id, pill, isPinned: true, lane: "pinned", rank: rankOf(pill.sessions) })),
+      ...discarded.filter((session) => session.isPinned).map((session) => ({ id: session.key, discarded: session, isPinned: true, lane: "pinned", rank: rankOf([session.key]) })),
     ].sort((a, b) => a.rank - b.rank);
-    const rest = stripOf(pills.filter((pill) => !pill.isPinned), discarded.filter((session) => !session.isPinned)).map((slot) => ({ ...slot, id: slot.pill ? slot.pill.tab.id : slot.discarded.key, isPinned: false }));
-    return [...pinned, ...rest];
+    const rest = pills.filter((pill) => !pill.isPinned);
+    const asleep = discarded.filter((session) => !session.isPinned);
+    const lanes = [...new Set([...rest.map((pill) => pill.space), ...asleep.map((session) => session.space)])];
+    const grouped = lanes.flatMap((lane) =>
+      stripOf(
+        rest.filter((pill) => pill.space === lane),
+        asleep.filter((session) => session.space === lane),
+      ).map((slot) => ({ ...slot, id: slot.pill ? slot.pill.tab.id : slot.discarded.key, isPinned: false, lane })),
+    );
+    return [...pinned, ...grouped];
   }
 
-  stripLayout(slots) {
-    const p = this.pressed?.isMoving ? this.pressed : this.dropped;
-    const from = p ? slots.findIndex((slot) => slot.id === p.id) : -1;
-    if (from < 0 || p.target === null || slots[p.target]?.isPinned !== slots[from].isPinned) return { slots, target: null };
-    return { slots: movedTo(slots, from, p.target), target: p.target };
-  }
-
-  startDrag(p, slots, work, cx) {
-    const at = slots.findIndex((slot) => slot.id === p.id);
-    const slot = slots[at];
+  startDrag(drag, slots) {
+    const slot = slots.find((each) => each.id === drag.id);
     if (!slot) return;
-    if (slot.pill) setShared(DRAG_TAB, { tab: slot.id, title: slot.pill.tab.name, space: work.space?.id ?? null, terminals: panes().filter((x) => x.tab === slot.id && x.terminal).map((x) => x.terminal), overlay: null, lifted: false });
-    this.pressed = { ...p, isMoving: true, isTab: Boolean(slot.pill), target: at };
-    cx.notify();
-  }
-
-  dragOver(id, slots, cx) {
-    const p = this.pressed;
-    if (!p?.isMoving || p.id === id) return;
-    const target = slots.findIndex((slot) => slot.id === id);
-    const from = slots.findIndex((slot) => slot.id === p.id);
-    if (target < 0 || from < 0 || target === p.target || slots[target].isPinned !== slots[from].isPinned) return;
-    this.pressed = { ...p, target };
-    cx.notify();
+    const lane = slots.filter((each) => each.lane === slot.lane);
+    drag.sortable = { ids: lane.map((each) => each.id), sizes: lane.map((each) => this.widths.get(each.id) ?? TAB_LEAST), gap: UI.space.xs, axis: "x" };
+    this.dragKeys.focus();
+    if (slot.pill) setShared(DRAG_TAB, { tab: slot.id, title: slot.pill.tab.name, space: slot.pill.space, terminals: panes().filter((x) => x.tab === slot.id && x.terminal).map((x) => x.terminal), overlay: null, lifted: false });
   }
 
   liftOut(work, pills, cx) {
     const drag = shared(DRAG_TAB);
     if (!drag || drag.overlay || this.barBounds === null || (work.mode !== "tabs" && work.mode !== "start")) return;
-    const at = pills.findIndex((x) => x.tab.id === drag.tab);
-    const neighbour = pills[at + 1] ?? pills[at - 1];
-    if (at < 0 || !neighbour) return;
-    const lifted = pills[at].tab.active;
+    const here = pills.filter((pill) => pill.space === work.id);
+    const at = here.findIndex((x) => x.tab.id === drag.tab);
+    const neighbour = here[at + 1] ?? here[at - 1];
+    if (at >= 0 && !neighbour) return;
+    const lifted = at >= 0 && here[at].tab.active;
     if (lifted) run("tab.select", { id: neighbour.tab.id });
     this.openDrop(drag, lifted, cx);
   }
@@ -5286,17 +5654,19 @@ export default class Anyhost extends View {
     cx.notify();
   }
 
-  releaseTab(strip, cx) {
-    const pressed = this.pressed;
+  releaseTab(slots, cx) {
+    const drag = this.pressed;
     this.pressed = null;
-    if (!pressed?.isMoving) return;
+    if (!drag?.isMoving) return;
+    this.dropped = drag.id;
     endTabDrag(true);
-    const moved = strip.slots.find((slot) => slot.id === pressed.id);
-    if (strip.target !== null && moved) {
-      const pinned = new Set((shared(PULSE)?.pinned ?? []).map((p) => p.key));
-      if (moved.isPinned) ask({ action: "orderPins", order: strip.slots.filter((slot) => slot.isPinned).flatMap((slot) => (slot.pill ? slot.pill.sessions.filter((key) => pinned.has(key)) : [slot.discarded.key])) });
-      else if (moved.pill) run("tab.move", { id: moved.id, index: strip.slots.filter((slot) => slot.pill).findIndex((slot) => slot.id === moved.id) + 1 });
-      this.dropped = { id: pressed.id, target: strip.target, until: Date.now() + DROP_SETTLES_MS };
+    const moved = slots.find((slot) => slot.id === drag.id);
+    if (moved && drag.sortable && drag.target !== drag.from) {
+      const order = drag.sorted().map((id) => slots.find((slot) => slot.id === id));
+      const pinned = new Set(pinsInOrder());
+      if (moved.isPinned) queueOrder("pins", orderIn("pins", shared(PULSE)?.pinOrder ?? []), order.flatMap((slot) => (slot.pill ? slot.pill.sessions.filter((key) => pinned.has(key)) : [slot.discarded.key])), (sessions) => ({ op: "orderPins", sessions }));
+      else if (moved.pill) run("tab.move", { id: moved.id, index: order.filter((slot) => slot.pill?.space === moved.pill.space).indexOf(moved) + 1 });
+      this.refreshTabs(this.workNow());
     }
     cx.notify();
   }
@@ -5307,7 +5677,7 @@ export default class Anyhost extends View {
     if (isRunning(pill.state) || pill.state === "blocked") return ask({ action: "closeTabs", tabs: [tab.id] });
     const at = shownTabs.findIndex((x) => x.id === tab.id);
     const next = shownTabs[at + 1] ?? shownTabs[at - 1];
-    this.closing.set(tab.id, Date.now());
+    this.closing.add(tab.id);
     if (tab.active && next) run("tab.select", { id: next.id });
     ask({ action: "closeTabs", tabs: [tab.id] });
     cx.notify();
@@ -5365,12 +5735,13 @@ export default class Anyhost extends View {
     return el.flex_1().min_w(TAB_LEAST).max_w(TAB_MOST).h(UI.height.control).overflow_hidden();
   }
 
-  sessionPill(t, slot, slots, isGhost = false) {
+  sessionPill(t, slot, isGhost = false) {
     const session = slot.discarded;
     const id = `discarded-${session.key}`;
     const isHovered = this.hovered === id;
     const isDragged = this.pressed?.isMoving === true && this.pressed.id === slot.id;
     return this.tabSized(h_flex().id(`ah-tab-${id}`))
+      .on_size_change((size) => this.widths.set(slot.id, size.width))
       .px(UI.space.sm)
       .gap(UI.space.sm)
       .items_center()
@@ -5380,19 +5751,19 @@ export default class Anyhost extends View {
       .cursor_pointer()
       .when(!this.pressed?.isMoving, (el) => el.tooltip(session.isPinned ? `${session.title} · pinned` : `${session.title} · asleep, click to continue`))
       .map((el) => this.surface(el, t, { isDragged, hover: (s) => s.text_color(t.foreground) }))
-      .when(isDragged && !isGhost && Boolean(this.pressed.from), (el) => el.opacity(0))
+      .when(isDragged && !isGhost, (el) => el.opacity(0))
       .on_hover((on, cx) => {
         if (on) this.hovered = id;
         else if (this.hovered === id) this.hovered = null;
-        if (on) this.dragOver(slot.id, slots, cx);
         cx.notify();
       })
       .on_mouse_down("left", (e, cx) => {
         cx.stop_propagation();
-        if (slot.isPinned) this.pressed = { id: slot.id, target: null, downX: e.position.x, downY: e.position.y, from: e.bounds ?? null, isMoving: false };
+        this.dropped = null;
+        if (slot.isPinned) this.pressed = new Drag(slot.id, e.position, { bounds: e.bounds ?? null });
       })
       .on_mouse_up("left", () => {
-        if (this.pressed?.isMoving) return;
+        if (this.wasDragged(slot.id)) return;
         this.pressed = null;
         ask({ action: "open", key: session.key });
       })
@@ -5406,7 +5777,7 @@ export default class Anyhost extends View {
       })
       .child(this.stateLead(session.state) ?? this.harnessIcon(t, session))
       .child(div().flex_1().min_w(0).truncate().child(session.title))
-      .child(this.tabEnd(t, id, session.isPinned, isHovered, "Archive", () => ask({ action: "archive", key: session.key })));
+      .child(this.tabEnd(t, id, session.isPinned, isHovered && !isDragged, "Archive", () => ask({ action: "archive", key: session.key })));
   }
 
   tabEnd(t, id, isPinned, isShown, label, onClose) {
@@ -5437,7 +5808,7 @@ export default class Anyhost extends View {
     return svg(iconPath(STATE[state].icon)).size(UI.icon.body).flex_none().text_color(this.stateColor(state));
   }
 
-  tabPill(t, slot, work, slots, shownTabs, isGhost = false) {
+  tabPill(t, slot, work, shownTabs, isGhost = false) {
     const { tab, program, sessions, state, isShown, isVisible } = slot.pill;
     const isHovered = this.hovered === tab.id;
     const isDragged = this.pressed?.isMoving === true && this.pressed.id === tab.id;
@@ -5446,6 +5817,7 @@ export default class Anyhost extends View {
       this.stateLead(state) ??
       (!program?.icon ? null : program.tint ? svg(program.icon).size(UI.icon.body).flex_none().text_color(t.muted) : image(program.icon).size(UI.icon.body).flex_none());
     return this.tabSized(h_flex().id(`ah-tab-${tab.id}`))
+      .on_size_change((size) => this.widths.set(slot.id, size.width))
       .px(UI.space.sm)
       .gap(UI.space.sm)
       .items_center()
@@ -5455,21 +5827,25 @@ export default class Anyhost extends View {
       .when(!this.pressed?.isMoving, (el) => el.tooltip(tab.name))
       .text_color(isDragged || isShown || isVisible ? t.foreground : t.muted)
       .map((el) => this.surface(el, t, { isSelected: isShown, isDragged, hover: (s) => s.text_color(t.foreground) }))
-      .when(isDragged && !isGhost && Boolean(this.pressed.from), (el) => el.opacity(0))
+      .when(isDragged && !isGhost, (el) => el.opacity(0))
       .on_hover((on, cx) => {
         if (on) this.hovered = tab.id;
         else if (this.hovered === tab.id) this.hovered = null;
-        if (on) this.dragOver(tab.id, slots, cx);
         cx.notify();
       })
       .on_mouse_down("left", (e, cx) => {
         cx.stop_propagation();
-        this.pressed = { id: tab.id, target: null, downX: e.position.x, downY: e.position.y, from: e.bounds ?? null, isMoving: false };
+        this.dropped = null;
+        this.pressed = new Drag(tab.id, e.position, { bounds: e.bounds ?? null });
         if (e.click_count === 2) run("tab.rename", { id: tab.id });
       })
       .on_mouse_up("left", (_e, cx) => {
-        if (this.pressed?.isMoving) return;
+        if (this.wasDragged(tab.id)) return;
         this.pressed = null;
+        if (slot.pill.space !== work.id) {
+          run("space.select", { id: slot.pill.space });
+          return run("tab.select", { id: tab.id });
+        }
         if (TILED.has(work.mode)) {
           this.want(work, work.list.find((c) => c.tab === tab.id)?.terminal);
           return cx.notify();
@@ -5485,7 +5861,7 @@ export default class Anyhost extends View {
         cx.stop_propagation();
         const tabActions = { tab: tab.id, others: shownTabs.filter((x) => x.id !== tab.id).map((x) => x.id), right: shownTabs.slice(i + 1).map((x) => x.id) };
         if (sessions.length > 0) return ask({ action: "menu", key: sessions[0], tabActions });
-        openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: tab.id, space: work.space?.id } } });
+        openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: tab.id, space: slot.pill.space } } });
       })
       .when(lead !== null, (el) => el.child(lead))
       .child(div().flex_1().min_w(0).truncate().child(tab.name))
@@ -5631,9 +6007,11 @@ export default class Anyhost extends View {
       .bg(t.popover)
       .text_color(t.foreground)
       .on_key_down((e, cx) => {
-        if (e.key === "down") this.cursorAt = Math.min(count - 1, this.cursorAt + 1);
-        if (e.key === "up") this.cursorAt = Math.max(0, this.cursorAt - 1);
-        if (e.key === "down" || e.key === "up") this.paletteScroll.scroll_to_item(paletteChildOf(groups, this.cursorAt));
+        const roved = rovedTo(e, this.cursorAt, count);
+        if (roved !== null) {
+          this.cursorAt = roved;
+          this.paletteScroll.scroll_to_item(paletteChildOf(groups, roved));
+        }
         if (e.key === "escape") closeOverlay(p.overlay);
         cx.notify();
       })
@@ -5646,7 +6024,7 @@ export default class Anyhost extends View {
           .items_center()
           .border_b(1)
           .border_color(t.border)
-          .child(this.searchField(t, this.query)),
+          .child(this.searchField(t, this.query, (cx) => this.paletteSearched(cx))),
       )
       .child(
         v_flex()

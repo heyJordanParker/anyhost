@@ -9,7 +9,7 @@ import { isOlder, MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Lis
 import { claimsOf, followHolders, type Holders } from './claims.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type DataFolder, type Device, type MachineRoots } from './device.ts'
-import type { Call, RanOf, Relay } from './relay.ts'
+import type { Call, RanOf, Read, ReadsKept, Relay } from './relay.ts'
 import { Replay } from './sessions.ts'
 import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, namedIn, namesFork, ownerOf, parentOf, piecesFrom, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
 
@@ -128,10 +128,24 @@ export function openDatabase(folder = stateFolder()): Database {
   return db
 }
 
+export const readsKeptIn = (db: Database): ReadsKept => ({
+  reads: () =>
+    db
+      .query<{ key: string; status: number; etag: string; bytes: Uint8Array }, []>('select key, status, etag, bytes from relay_reads')
+      .all()
+      .map(({ key, status, etag, bytes }): [string, Read] => [key, status === 404 ? { status: 404 } : { status: 200, etag, size: bytes.length, bytes }]),
+  keep: (key, read) => void db.run('insert or replace into relay_reads (key, status, etag, bytes) values (?, ?, ?, ?)', [key, read.status, 'etag' in read ? read.etag : '', 'bytes' in read ? read.bytes : new Uint8Array()]),
+})
+
+export const keptAnswer = <T>(db: Database, name: string): { readonly last: T | undefined; readonly keep: (value: T) => void } => {
+  const row = db.query<{ json: string }, [string]>('select json from kept_answers where name = ?').get(name)
+  return { last: row === null ? undefined : (JSON.parse(row.json) as T), keep: (value) => void db.run('insert or replace into kept_answers (name, json) values (?, ?)', [name, JSON.stringify(value)]) }
+}
+
 const versionOf = (db: Database): number => db.query<{ user_version: number }, []>('pragma user_version').get()?.user_version ?? 0
 
 function startOver(db: Database): void {
-  for (const table of ['files', 'sessions', 'journals', 'line_offsets', 'holders', 'holders_changed', 'chunks', 'rewrites', 'borrowed_claims']) db.run(`drop table if exists ${table}`)
+  for (const table of ['files', 'sessions', 'journals', 'line_offsets', 'holders', 'holders_changed', 'chunks', 'rewrites', 'borrowed_claims', 'relay_reads', 'kept_answers']) db.run(`drop table if exists ${table}`)
   for (const folder of ['code', 'spool', 'bases']) rmSync(join(dirname(db.filename), folder), { recursive: true, force: true })
   db.run(`pragma user_version = ${OLDEST_SCHEMA}`)
 }
@@ -155,6 +169,8 @@ function makeTables(db: Database): void {
   db.run('create table if not exists chunks (name text primary key)')
   db.run("create table if not exists rewrites (session text primary key, done integer not null default 0, at integer not null default 0, ops integer not null default 0, failure text not null default '')")
   db.run('create table if not exists borrowed_claims (session text primary key)')
+  db.run("create table if not exists relay_reads (key text primary key, status integer not null, etag text not null default '', bytes blob not null default x'')")
+  db.run('create table if not exists kept_answers (name text primary key, json text not null)')
   db.run('insert into holders_changed (changed) select 0 where not exists (select 1 from holders_changed)')
   db.transaction(() => {
     for (const migration of MIGRATIONS.flat()) {
@@ -1967,15 +1983,22 @@ function indexOf(db: Database): IndexedSession[] {
 
 const indexKey = (device: Device): string => `sessions/${device.id}/index.json`
 
+const indexedIn = (answer: Read | undefined): IndexedSession[] => (answer !== undefined && 'bytes' in answer ? (JSON.parse(new TextDecoder().decode(answer.bytes)) as IndexedSession[]) : [])
+
 function keptIndexOf(capture: Capture): Promise<readonly IndexedSession[]> {
-  capture.keptIndex ??= capture.relay.runOne({ op: 'get', key: indexKey(capture.device) }).then(
-    (answer) => ('bytes' in answer ? (JSON.parse(new TextDecoder().decode(answer.bytes)) as IndexedSession[]) : []),
+  const key = indexKey(capture.device)
+  const [kept] = capture.relay.cached([key])
+  const isReading = capture.keptIndex !== undefined
+  capture.keptIndex ??= capture.relay.read([key]).then(
+    ([answer]) => indexedIn(answer),
     (error: unknown) => {
       capture.keptIndex = undefined
       throw error
     },
   )
-  return capture.keptIndex
+  if (kept === undefined) return capture.keptIndex
+  if (!isReading) capture.keptIndex.catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not read this machine's index in R2: ${error instanceof Error ? error.message : String(error)}`))
+  return Promise.resolve(indexedIn(kept))
 }
 
 export async function relistSessions(capture: Capture): Promise<number> {

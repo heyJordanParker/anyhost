@@ -40,6 +40,35 @@ test('a request whose answer the dropped socket lost goes again on the next sock
   expect(journalOf(capture.db, SESSION)?.end).toBeGreaterThan(0)
 })
 
+test('a read the relay answers after this machine wrote the same object keeps the write, so the list never steps back to what another machine wrote before it', async () => {
+  const relay = await memoryRelay()
+  const here = relay.connect(device, roots('/home/ada'))
+  const there = relay.connect({ id: 'device-b', name: 'anyhost-b', os: 'linux', arch: 'arm64' }, roots('/home/bob'))
+  await Promise.all([welcomed(here), welcomed(there)])
+  const key = 'shared.json'
+  const bytesOf = (text: string): Uint8Array => new TextEncoder().encode(text)
+  const textOf = (read: unknown): string => new TextDecoder().decode((read as { readonly bytes: Uint8Array }).bytes)
+  await here.runOne({ op: 'put', key, bytes: bytesOf('{"pinOrder":["a","b"]}') })
+  await here.read([key])
+  await there.runOne({ op: 'put', key, bytes: bytesOf('{"pinOrder":["b","a"]}') })
+  let release = (): void => undefined
+  let isHeld = false
+  relay.holdAnswer = (op) => {
+    if (op.op !== 'get' || op.key !== key) return undefined
+    isHeld = true
+    return new Promise<void>((resolve) => (release = resolve))
+  }
+  const reading = here.read([key])
+  await until(() => isHeld, 'The relay answering the read')
+  relay.holdAnswer = () => undefined
+  await here.runOne({ op: 'put', key, bytes: bytesOf('{"pinOrder":["a","b","c"]}') })
+  release()
+
+  const [answer] = await reading
+  expect(textOf(answer)).toBe('{"pinOrder":["a","b","c"]}')
+  expect(textOf(here.cached([key])[0])).toBe('{"pinOrder":["a","b","c"]}')
+})
+
 test('a machine with the id of a connected machine and another name, as a clone has, is refused with the fix', async () => {
   const relay = await memoryRelay()
   const token = await relay.join(device, roots('/home/ada'))

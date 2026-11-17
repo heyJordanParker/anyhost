@@ -656,15 +656,15 @@ test('a cf run that needs no person and never exits is stopped at its limit, whi
   }
 })
 
-test('logs cf in when nobody is, showing the person the link and code cf prints', async () => {
+test('with cf logged in nowhere, the setup logs anyhost in to a login of its own, showing the person the link and code cf prints', async () => {
   const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, loggedIn: false })
   await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
-  expect(cloudflare.cfRuns.map(({ args }) => args.join(' '))).toEqual(['auth whoami', 'auth login', 'auth whoami'])
+  expect(cloudflare.cfRuns.map(({ args }) => args.join(' '))).toEqual(['auth whoami', 'auth login --no-use-keyring', 'auth whoami'])
   expect(cloudflare.said).toContain('To authorize cf, please visit: https://dash.cloudflare.com/oauth2/device/verify and enter the code: MQxTn4fA.')
 })
 
-test('a login cf keeps encrypted logs cf in to a folder of anyhost\'s own for the setup, and deletes it after', async () => {
-  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, keyring: true })
+test('a login cf keeps encrypted logs anyhost in once to a login of its own, which the next setup and every relay update reuse with no prompt', async () => {
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, keyring: true, relay: RELAY_VERSION - 1 })
   await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
   const own = { XDG_CONFIG_HOME: stateFile('connect'), CLOUDFLARE_AUTH_USE_KEYRING: undefined }
   expect(cloudflare.cfRuns).toEqual([
@@ -674,8 +674,15 @@ test('a login cf keeps encrypted logs cf in to a folder of anyhost\'s own for th
   ])
   expect(cloudflare.said).toContain('To authorize cf, please visit: https://dash.cloudflare.com/oauth2/device/verify and enter the code: MQxTn4fA.')
   expect(storedToken()).toBe('token-of-macbook')
-  expect(existsSync(stateFile('connect'))).toBe(false)
   expect(JSON.parse(readFileSync(cloudflare.loginFile, 'utf8'))).toEqual({ oauth_token: 'fresh' })
+
+  cloudflare.cfRuns.length = 0
+  await connectCloudflare(cloudflare.progress, DEVICE, NAMES, cloudflare.cloudflare)
+  const worker = cloudflare.workers.get(NAMES.worker)
+  if (worker !== undefined) worker.relay = RELAY_VERSION - 1
+  await updateRelay(NAMES, cloudflare.cloudflare)
+  expect(cloudflare.cfRuns.filter(({ args }) => args[1] === 'login')).toEqual([])
+  expect(cloudflare.workers.get(NAMES.worker)?.relay).toBe(RELAY_VERSION)
 })
 
 test.each([RELAY_VERSION, RELAY_VERSION + 1])('setup on an account whose relay answers relay %d sets only a new setup code, uploads no module, and joins at the first try while the Pool is busy', async (version) => {
@@ -820,12 +827,13 @@ test('updateRelay uploads nothing over a relay as new as this program\'s or newe
   expect(cloudflare.calls.filter((call) => call.startsWith('PUT') || call.startsWith('POST'))).toEqual([])
 })
 
-test('updateRelay asks nothing: with cf logged out, or no relay to update, it fails and logs nobody in', async () => {
+test('updateRelay asks nothing: with no login anyhost can use, or no relay to update, it fails and logs nobody in', async () => {
+  const noLogin = 'This machine keeps no Cloudflare login anyhost can use. Connect Cloudflare logs in once, and anyhost keeps that login for every update.'
   const loggedOut = standIn({ r2: true, subdomain: 'parker-labs', loggedIn: false })
-  await expect(updateRelay(NAMES, loggedOut.cloudflare)).rejects.toThrow('cf is logged in to no Cloudflare account on this machine. Connect Cloudflare logs it in.')
+  await expect(updateRelay(NAMES, loggedOut.cloudflare)).rejects.toThrow(noLogin)
   expect(loggedOut.cfRuns.map(({ args }) => args.join(' '))).toEqual(['auth whoami'])
   const keyring = standIn({ r2: true, subdomain: 'parker-labs', keyring: true })
-  await expect(updateRelay(NAMES, keyring.cloudflare)).rejects.toThrow('which anyhost cannot read with no one watching')
+  await expect(updateRelay(NAMES, keyring.cloudflare)).rejects.toThrow(noLogin)
   expect(keyring.cfRuns.map(({ args }) => args.join(' '))).toEqual(['auth whoami'])
   const none = standIn()
   await expect(updateRelay(NAMES, none.cloudflare)).rejects.toThrow('0 accounts of your Cloudflare login hold the Worker anyhost-test-connect, so anyhost updates none. Connect Cloudflare deploys it.')
@@ -1117,7 +1125,8 @@ test('a running program whose relay update failed loses the relay update problem
   await until(async () => (await statusOn(socket)).updateProblem !== undefined, 'the failed update in /status', 30_000)
   const failed = await statusOn(socket)
   expect(failed.relay.state).toBe('outdated')
-  expect(failed.updateProblem).toEndWith('relay update: Error: cf is logged in to no Cloudflare account on this machine. Connect Cloudflare logs it in.')
+  expect(failed.updateProblem).toEndWith('relay update: Error: This machine keeps no Cloudflare login anyhost can use. Connect Cloudflare logs in once, and anyhost keeps that login for every update.')
+  expect(failed.needsLogin).toBe(true)
 
   const worker = cloudflare.workers.get(NAMES.worker)
   if (worker !== undefined) worker.protocol = PROTOCOL_VERSION

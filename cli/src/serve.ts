@@ -3,9 +3,9 @@ import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { Activity, type Shown } from './activity.ts'
-import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, resumeCopy, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
-import { connectForStep, join as joinRelay, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
+import { connectForStep, join as joinRelay, LoginNeeded, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
 import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { PLACES, type Place } from './herdr.ts'
@@ -71,12 +71,13 @@ process.stdin.on('end', end).resume()
 const WATCHER_MS = 10_000
 const RUNNING_MS = 2000
 const STATUSES_FRESH_MS = 10_000
-const STATUSES_KEPT_MS = 120_000
 const LIST_FRESH_MS = 5000
 const LIST_WAIT_MS = 25_000
 const STOP_MS = Number(process.env['ANYHOST_STOP_MS'] ?? 8 * 60 * 60_000)
 const DISCARD_EVERY_MS = Math.min(30_000, STOP_MS / 4)
 const RESUME_IN_PLACE_MS = 60_000
+const UPDATE_FIRST_MS = 60_000
+const UPDATE_MOST_MS = 60 * 60_000
 const SHOWN_EVERY_MS = 30_000
 const ROUTES = 'anyhost serves GET /status, /machines, /agents and /claims/<session>, POST /connect, /connect/account, /connect/r2, /join, /machines/add, /machines/invite, /machines/remove, /move, /move/keep, /new, /agents/tell, /agents/open, /agents/archive, /agents/settle, /agents/snooze, /agents/visit, /agents/pin, /agents/delete, /agents/fork, /agents/show, /organize, /projects/name, /settings, /sessions/changed and /shown'
 
@@ -120,6 +121,7 @@ export type Status = {
   readonly journalGaps: readonly string[]
   readonly rewritten?: { readonly done: number; readonly journals: number; readonly olderMachines: readonly string[] }
   readonly updateProblem?: string
+  readonly needsLogin?: true
   readonly coreProblem?: string
   readonly connecting?: Connecting
   readonly joining?: { readonly is: 'running' } | { readonly is: 'failed'; readonly error: string }
@@ -364,18 +366,19 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   if (running !== undefined) throw new Error(`The anyhost program of ${running.device.name} already answers at ${socket}, so this one does not start. Two programs on one state folder would both write its database.`)
   rmSync(join(stateFolder(), 'compact'), { recursive: true, force: true })
   const roots = rootsHere()
+  const db = openDatabase()
   const relay = connectRelay({
     login: relayLogin,
     forget: forgetRelayLogin,
     device,
     roots,
     isPatient: true,
+    readsKept: readsKeptIn(db),
     onOlderProgram: (message) => {
       console.error(`${new Date().toISOString()} ${message} So anyhost exits, and its service starts it again from the anyhost cmod links.`)
       process.exit(1)
     },
   })
-  const db = openDatabase()
   let release = (_session: string, _holder: string): void => undefined
   const capture = openCapture(relay, device, roots, {
     db,
@@ -871,25 +874,39 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     listing = listOnce().finally(() => (listing = undefined))
     return listing
   }
+  let updateAt = 0
+  let updateWait = UPDATE_FIRST_MS
+  let isLoginNeeded = false
+  const updateDone = (): void => {
+    problems.clear('relay update')
+    updateAt = 0
+    updateWait = UPDATE_FIRST_MS
+    isLoginNeeded = false
+  }
   const joined = (): void => {
     joining = undefined
-    problems.clear('relay update')
+    updateDone()
     relay.reconnect()
   }
   let connecting: ConnectRun | undefined
-  let isUpdateTried = false
   const keepRelayCurrent = async (): Promise<void> => {
     const { state } = relay
-    if (isUpdateTried || !(state.is === 'outdated' || (state.is === 'connected' && needsUpload(state.welcome)))) return
-    isUpdateTried = true
-    await settle('relay update', async () => {
+    if (Date.now() < updateAt || !(state.is === 'outdated' || (state.is === 'connected' && needsUpload(state.welcome)))) return
+    updateAt = Infinity
+    try {
       await updateRelay(names, cloudflare)
+      updateDone()
       relay.reconnect()
-    })
+    } catch (error) {
+      problems.set('relay update', error)
+      isLoginNeeded = error instanceof LoginNeeded
+      updateAt = Date.now() + updateWait
+      updateWait = Math.min(updateWait * 2, UPDATE_MOST_MS)
+    }
   }
   relay.on('welcome', (welcome) => {
     if (needsUpload(welcome)) void keepRelayCurrent()
-    else problems.clear('relay update')
+    else updateDone()
   })
   const queueFiles = (files: ReadonlyMap<string, ReadonlySet<string>>): void => {
     for (const [session, paths] of files) {
@@ -997,6 +1014,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       journalGaps: [...current].filter(([key]) => key.startsWith('journal ')).map(([, line]) => line),
       ...(rewritten === undefined ? {} : { rewritten }),
       ...(updateProblem === undefined ? {} : { updateProblem }),
+      ...(isLoginNeeded ? { needsLogin: true } : {}),
       ...(coreProblem === undefined ? {} : { coreProblem }),
       ...(connecting === undefined ? {} : { connecting: connecting.view }),
       ...(joining === undefined ? {} : { joining }),
@@ -1006,28 +1024,35 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const machinesListed = async () => {
     const [devices, shared, reached] = await Promise.all([devicesOf(relay), sharedOf(relay), hcPath() === undefined ? [] : machinesReached()])
     const machines = [...devices.values()].filter((device) => device.removedAt === undefined)
-    return { shared, devices, machines: machines.map((machine) => ({ ...machine, herdr: reachedAt(reached, shared.reach[machine.id])?.name ?? null })) }
+    return { devices: [...devices.values()], machines: machines.map((machine) => ({ ...machine, herdr: reachedAt(reached, shared.reach[machine.id])?.name ?? null })) }
   }
   const readFailed = (what: string) => (error: unknown) => console.error(`${new Date().toISOString()} anyhost could not read ${what}: ${error instanceof Error ? error.message : String(error)}`)
-  const revalidating = <T,>(read: () => Promise<T>, what: string, signatureOf: (value: T) => string): (() => Promise<T>) => {
-    let kept: { readonly value: T; readonly at: number } | undefined
+  type Revalidated<T> = { readonly last?: T | undefined; readonly keep?: (value: T) => void; readonly unknown?: T }
+  const revalidating = <T,>(read: () => Promise<T>, what: string, signatureOf: (value: T) => string, { last, keep = () => undefined, unknown }: Revalidated<T> = {}): (() => Promise<T>) => {
+    let kept: { readonly value: T; readonly at: number } | undefined = last === undefined ? undefined : { value: last, at: 0 }
     let reading: Promise<T> | undefined
     const again = (): Promise<T> =>
       (reading ??= read()
         .then((value) => {
           const isChanged = kept !== undefined && signatureOf(kept.value) !== signatureOf(value)
+          if (kept === undefined || isChanged) keep(value)
           kept = { value, at: Date.now() }
           if (isChanged) sessionsChanged()
           return value
         })
         .finally(() => (reading = undefined)))
     return async () => {
-      if (kept === undefined || Date.now() - kept.at > STATUSES_KEPT_MS) return await again()
+      if (kept === undefined && unknown !== undefined) {
+        again().catch(readFailed(what))
+        return unknown
+      }
+      if (kept === undefined) return await again()
       if (Date.now() - kept.at > STATUSES_FRESH_MS) again().catch(readFailed(what))
       return kept.value
     }
   }
-  const machinesForList = revalidating(machinesListed, 'the machines', ({ machines }) => JSON.stringify(machines))
+  const machinesKept = keptAnswer<Awaited<ReturnType<typeof machinesListed>>>(db, 'machines')
+  const machinesForList = revalidating(machinesListed, 'the machines', ({ devices, machines }) => JSON.stringify([devices, machines]), { last: machinesKept.last, keep: machinesKept.keep })
   const othersStatuses = new Map<string, { readonly shown: Shown; readonly at: number }>()
   const statusesOfOthers = revalidating(
     async () => {
@@ -1039,6 +1064,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     },
     "the other machines' sessions",
     (answered) => JSON.stringify([...answered]),
+    { unknown: new Map() },
   )
   const statusesElsewhereNow = async (): Promise<Shown> => {
     await statusesOfOthers()
@@ -1072,8 +1098,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (relay.cached(keys).some((read) => read === undefined)) await readList(keys)
     else if (Date.now() - listReadAt > LIST_FRESH_MS) readList(keys).catch(readFailed('the session lists'))
     const [shared, ...indexes] = relay.cached(keys)
-    return { devices, indexes: indexesIn(others, indexes), shared: sharedIn(shared) }
+    return { devices, indexes: indexesIn(others, indexes), shared: sharedIn(shared), holders: capture.holders.known() }
   }
+  relay.on('claimed', () => sessionsChanged())
+  relay.on('welcome', () => void capture.holders.current().then(sessionsChanged, readFailed('which machine holds each session')))
   const heardFrom = new Set<string>()
   const tellOthers = (message: (to: string) => Routed): void =>
     void machinesForList()
@@ -1105,6 +1133,12 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     sessionsChanged()
   })
   const failed = (status: number, error: unknown): Response => Response.json({ message: error instanceof Error ? error.message : String(error) }, { status })
+  const listNow = async (): Promise<object> => {
+    const version = sessionsVersion()
+    const [elsewhere, here, { devices, machines }] = await Promise.all([statusesElsewhereNow(), statusesHere(capture, mover.activity), machinesForList()])
+    const known = new Map(devices.map((machine) => [machine.id, machine]))
+    return { ...(await agentsOf(capture, { statuses: { ...elsewhere.statuses, ...here.statuses }, since: { ...elsewhere.since, ...here.since }, background: [...elsewhere.background, ...here.background] }, sessionTerminals(), await listOf(known))), here: device.id, machines, version }
+  }
   const throughRelay = async (work: () => Promise<unknown>): Promise<Response> => {
     const { state } = relay
     if (state.is === 'unjoined' || state.is === 'refused' || state.is === 'outdated') return failed(503, state.message)
@@ -1330,7 +1364,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       if (request.method === 'GET' && pathname === '/status') return Response.json(statusOf())
       if (request.method === 'GET' && pathname === '/machines')
         return await throughRelay(async () => {
-          const [{ machines, shared }, candidates] = await Promise.all([machinesListed(), candidatesOf()])
+          const [{ machines }, shared, candidates] = await Promise.all([machinesListed(), sharedOf(relay), candidatesOf()])
           const joined = new Set([...machines.map(({ name }) => name), ...Object.values(shared.reach)])
           for (const machine of machines) if (machine.connected && shared.reach[machine.id] !== undefined) adding.delete(shared.reach[machine.id] ?? '')
           return {
@@ -1343,11 +1377,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       if (request.method === 'GET' && pathname === '/agents') {
         const after = new URL(request.url).searchParams.get('after')
         if (after !== null) await changedAfter(after)
-        return await throughRelay(async () => {
-          const version = sessionsVersion()
-          const [elsewhere, here, { devices, machines }] = await Promise.all([statusesElsewhereNow(), statusesHere(capture, mover.activity), machinesForList()])
-          return { ...(await agentsOf(capture, { statuses: { ...elsewhere.statuses, ...here.statuses }, since: { ...elsewhere.since, ...here.since }, background: [...elsewhere.background, ...here.background] }, sessionTerminals(), await listOf(devices))), here: device.id, machines, version }
-        })
+        return await throughRelay(listNow)
       }
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]
       if (request.method === 'GET' && claim !== undefined) return Response.json(holderOf(claim))

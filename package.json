@@ -18,6 +18,6 @@
     "src"
   ],
   "dependencies": {
-    "@cmodjs/core": "^6.0.1"
+    "@cmodjs/core": "^6.2.1"
   }
 }

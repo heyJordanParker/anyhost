@@ -6,7 +6,7 @@ import type { Device as Machine } from '../../relay/protocol.ts'
 type Account = { readonly id: string; readonly name: string }
 type Connecting = { readonly is: 'running' | 'joined' | 'failed'; readonly lines: readonly string[]; readonly accounts?: readonly Account[]; readonly r2Page?: string; readonly error?: string }
 type Joining = { readonly is: 'running' } | { readonly is: 'failed'; readonly error: string }
-type Status = { readonly relay: { readonly state: string; readonly message: string }; readonly connecting?: Connecting; readonly joining?: Joining }
+type Status = { readonly relay: { readonly state: string; readonly message: string }; readonly connecting?: Connecting; readonly joining?: Joining; readonly needsLogin?: true }
 type JoinedRelay = { readonly url: string }
 type Candidate = { readonly target: string; readonly os: string; readonly online: boolean }
 type Machines = { readonly here: string; readonly machines: readonly Machine[]; readonly candidates: readonly Candidate[]; readonly adding: readonly { readonly target: string; readonly error?: string }[] }
@@ -29,7 +29,6 @@ export const initialState: AnyhostState = {
   memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null },
 }
 
-const NEEDS_STEP = new Set(['unjoined', 'outdated'])
 const CONNECT_WAIT_MS = 15_000
 const READY_MS = 10_000
 export const FOLLOW_MS = 1000
@@ -106,9 +105,10 @@ async function needsStep(mod: Mod<AnyhostState>): Promise<boolean> {
   const started = Date.now()
   for (;;) {
     const status = await askProgram<Status>(mod, '/status').catch((error: unknown) => {
-      if (error instanceof NoAnswer && Date.now() - started < CONNECT_WAIT_MS) return undefined
+      if (error instanceof NoAnswer) return Date.now() - started < CONNECT_WAIT_MS ? undefined : null
       throw error
     })
+    if (status === null) return false
     if (status === undefined) {
       await pause(mod, 250)
       continue
@@ -124,7 +124,7 @@ async function needsStep(mod: Mod<AnyhostState>): Promise<boolean> {
     const isRemoved = relay.state === 'unjoined'
     mod.state.memory.connecting = isRemoved && connecting?.is === 'joined' ? null : (connecting ?? null)
     if (isRemoved && mod.state.memory.joined !== null && 'url' in mod.state.memory.joined) mod.state.memory.joined = null
-    return NEEDS_STEP.has(relay.state)
+    return isRemoved || (relay.state === 'outdated' && (status.needsLogin === true || connecting?.is === 'joined'))
   }
 }
 

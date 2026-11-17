@@ -19,7 +19,11 @@ export type Shared = {
   readonly tagged: Readonly<Record<string, readonly string[]>>
   readonly stages: readonly Stage[]
   readonly staged: Readonly<Record<string, string>>
+  readonly worktreeOrder: Readonly<Record<string, readonly Worktree[]>>
+  readonly preferences: Readonly<Record<string, unknown>>
 }
+
+export type Worktree = { readonly machine: string; readonly folder: string }
 
 export type Tag = { readonly name: string; readonly color: string }
 export type Stage = { readonly id: string; readonly name: string }
@@ -31,11 +35,13 @@ export type Organize =
   | { readonly op: 'stageSession'; readonly session: string; readonly stage: string }
   | { readonly op: 'orderProjects'; readonly projects: readonly string[] }
   | { readonly op: 'orderPins'; readonly sessions: readonly string[] }
+  | { readonly op: 'orderWorktrees'; readonly project: string; readonly worktrees: readonly Worktree[] }
+  | { readonly op: 'prefer'; readonly key: string; readonly value: unknown }
 
 export const SHARED_KEY = 'shared.json'
 const DAY_MS = 86_400_000
 export const SETTLE_MOST_DAYS = 90
-const EMPTY: Shared = { archived: {}, settled: {}, snoozed: {}, settleAfterDays: 7, projectNames: {}, projectOrder: [], visited: {}, lastMachine: '', reach: {}, parents: {}, pinned: {}, pinOrder: [], tags: {}, tagged: {}, stages: [], staged: {} }
+const EMPTY: Shared = { archived: {}, settled: {}, snoozed: {}, settleAfterDays: 7, projectNames: {}, projectOrder: [], visited: {}, lastMachine: '', reach: {}, parents: {}, pinned: {}, pinOrder: [], tags: {}, tagged: {}, stages: [], staged: {}, worktreeOrder: {}, preferences: {} }
 
 const decodedOnce = new WeakMap<Read, Shared>()
 
@@ -140,6 +146,11 @@ function organized(shared: Shared, change: Organize): Shared {
     case 'orderPins':
       if (new Set(change.sessions).size !== change.sessions.length) throw new Error('The pin order names each session once.')
       return { ...shared, pinOrder: change.sessions }
+    case 'orderWorktrees':
+      if (new Set(change.worktrees.map(({ machine, folder }) => `${machine}\0${folder}`)).size !== change.worktrees.length) throw new Error('The worktree order names each worktree once.')
+      return { ...shared, worktreeOrder: { ...shared.worktreeOrder, [change.project]: change.worktrees } }
+    case 'prefer':
+      return { ...shared, preferences: change.value === null ? without(shared.preferences, change.key) : { ...shared.preferences, [change.key]: change.value } }
   }
 }
 

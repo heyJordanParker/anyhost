@@ -1,4 +1,4 @@
-import { rmSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { COMPATIBILITY_DATE, PROTOCOL_VERSION, RELAY_VERSION, type Health, type JoinRequest, type Joined, type Refusal } from '../../relay/protocol.ts'
 import relayModule from '../../relay/dist/relay.js' with { type: 'text' }
@@ -106,27 +106,26 @@ function readableToken(who: WhoAmI, apiToken: string | undefined): (() => Promis
 
 const ownLoginFolder = (): string => joinPath(stateFolder(), 'connect')
 
+export class LoginNeeded extends Error {}
+
 async function loginOf(cloudflare: Cloudflare, progress?: Progress, apiToken = process.env['CLOUDFLARE_API_TOKEN']): Promise<Login> {
   const say = progress?.say ?? logLine
   say('Checking your Cloudflare login')
   const env: CfEnvironment = apiToken === undefined ? {} : { CLOUDFLARE_API_TOKEN: apiToken }
-  let who = await whoami(cloudflare, env)
-  if (!who.authenticated) {
-    if (progress === undefined) throw new Error('cf is logged in to no Cloudflare account on this machine. Connect Cloudflare logs it in.')
-    say('Log in to Cloudflare: approve cf on the page that opens, or open the link below on any device.')
-    await cloudflare.cf(['auth', 'login'], env, say)
-    who = await whoami(cloudflare, env)
-    if (!who.authenticated) throw new Error('cf is still logged in to no Cloudflare account. Approve cf on Cloudflare\'s page, then connect again.')
-  }
-  const token = readableToken(who, apiToken)
+  const who = await whoami(cloudflare, env)
+  const token = who.authenticated ? readableToken(who, apiToken) : undefined
   if (token !== undefined) return { env, accounts: who.accounts ?? [], token, say }
-  if (progress === undefined) throw new Error(`cf keeps its login encrypted (${who.authSource ?? 'no source'}), which anyhost cannot read with no one watching. Connect Cloudflare logs cf in for the update.`)
   const ownEnv: CfEnvironment = { XDG_CONFIG_HOME: ownLoginFolder(), CLOUDFLARE_AUTH_USE_KEYRING: undefined }
-  say('cf keeps your login encrypted, where anyhost cannot read it, so cf logs in once more for this setup alone. Approve it on the page that opens, or open the link below on any device.')
+  const kept = existsSync(ownLoginFolder()) ? await whoami(cloudflare, ownEnv) : undefined
+  const keptToken = kept?.authenticated === true ? readableToken(kept, undefined) : undefined
+  if (kept !== undefined && keptToken !== undefined) return { env: ownEnv, accounts: kept.accounts ?? [], token: keptToken, say }
+  if (progress === undefined) throw new LoginNeeded('This machine keeps no Cloudflare login anyhost can use. Connect Cloudflare logs in once, and anyhost keeps that login for every update.')
+  mkdirSync(ownLoginFolder(), { recursive: true, mode: 0o700 })
+  say('Log in to Cloudflare: approve cf on the page that opens, or open the link below on any device. anyhost keeps this login, so it asks only if Cloudflare refuses it.')
   await cloudflare.cf(['auth', 'login', '--no-use-keyring'], ownEnv, say)
   const own = await whoami(cloudflare, ownEnv)
-  const ownToken = readableToken(own, undefined)
-  if (!own.authenticated || ownToken === undefined) throw new Error(`cf's login for this setup left no token anyhost can read: ${own.authSource ?? 'no login'}.`)
+  const ownToken = own.authenticated ? readableToken(own, undefined) : undefined
+  if (ownToken === undefined) throw new Error(`cf's login left no token anyhost can read: ${own.authSource ?? 'no login'}. Approve cf on Cloudflare's page, then connect again.`)
   return { env: ownEnv, accounts: own.accounts ?? [], token: ownToken, say }
 }
 
@@ -170,11 +169,13 @@ async function call<T>(cloudflare: Cloudflare, login: Login, method: string, pat
     const envelope = jsonOf<Envelope<T> | null>(await answer.text())
     return { status: answer.status, envelope: typeof envelope?.success === 'boolean' ? envelope : undefined }
   }
+  const isRefused = ({ status, envelope }: { readonly status: number; readonly envelope: Envelope<T> | undefined }): boolean => status === 401 || (envelope !== undefined && hasError(envelope, INVALID_TOKEN))
   let answer = await send()
-  if (answer.status === 401 || (answer.envelope !== undefined && hasError(answer.envelope, INVALID_TOKEN))) {
+  if (isRefused(answer)) {
     await cloudflare.cf(['auth', 'whoami'], login.env)
     answer = await send()
   }
+  if (isRefused(answer)) throw new LoginNeeded(`Cloudflare refused anyhost's login for ${method} ${path} with ${answer.status}. Connect Cloudflare logs in again.`)
   if (answer.envelope === undefined) throw new Error(`Cloudflare answered ${method} ${path} with ${answer.status} and no API answer.`)
   return { ...answer.envelope, status: answer.status }
 }
@@ -329,34 +330,30 @@ async function turnOn(cloudflare: Cloudflare, login: Login, account: Account, na
 }
 
 export async function connectCloudflare(progress: Progress, device: Device, names: RelayNames = RELAY, cloudflare: Cloudflare = CLOUDFLARE, apiToken?: string): Promise<void> {
-  try {
-    const login = await loginOf(cloudflare, progress, apiToken)
-    if (login.accounts.length === 0) throw new Error('Your Cloudflare login reaches no account.')
-    const { readable, holding } = await accountsHolding(cloudflare, login, names.worker)
-    if (readable.length === 0) throw new Error('Your Cloudflare login may read the Workers of none of its accounts. Log cf in to an account where you may deploy Workers, then connect again.')
-    const choices = holding.length === 0 ? readable : holding
-    const [only, ...more] = choices
-    const account = only !== undefined && more.length === 0 ? only : await progress.pickAccount(choices)
-    const url = await relayUrlOf(cloudflare, login, account, names.worker)
-    const setupCode = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url')
-    const isFirst = holding.length === 0
-    if (isFirst) await deploy(cloudflare, login, account, { worker: names.worker, bucket: await firstBucketOf(cloudflare, login, account, names.bucket, device.id) }, true, setupCode, progress)
-    await turnOn(cloudflare, login, account, names, url)
-    if (!isFirst) {
-      const health = await healthAt(cloudflare, url, login.say, ROUTE_LIMIT_MS)
-      if (needsUpload(health)) await deploy(cloudflare, login, account, { worker: names.worker, bucket: health.bucket }, false, setupCode, progress)
-      else {
-        login.say(`${url} runs relay ${health.relay} at protocol ${health.protocol}, which needs no upload of this anyhost's, so anyhost gives it a new setup code and uploads nothing`)
-        const secret = { name: 'SETUP_CODE_SHA256', text: sha256(setupCode), type: 'secret_text' }
-        resultOf(await call(cloudflare, login, 'PUT', `/accounts/${account.id}/workers/scripts/${names.worker}/secrets`, { json: secret }), `Setting the setup code of the Worker ${names.worker}`)
-      }
+  const login = await loginOf(cloudflare, progress, apiToken)
+  if (login.accounts.length === 0) throw new Error('Your Cloudflare login reaches no account.')
+  const { readable, holding } = await accountsHolding(cloudflare, login, names.worker)
+  if (readable.length === 0) throw new Error('Your Cloudflare login may read the Workers of none of its accounts. Log cf in to an account where you may deploy Workers, then connect again.')
+  const choices = holding.length === 0 ? readable : holding
+  const [only, ...more] = choices
+  const account = only !== undefined && more.length === 0 ? only : await progress.pickAccount(choices)
+  const url = await relayUrlOf(cloudflare, login, account, names.worker)
+  const setupCode = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url')
+  const isFirst = holding.length === 0
+  if (isFirst) await deploy(cloudflare, login, account, { worker: names.worker, bucket: await firstBucketOf(cloudflare, login, account, names.bucket, device.id) }, true, setupCode, progress)
+  await turnOn(cloudflare, login, account, names, url)
+  if (!isFirst) {
+    const health = await healthAt(cloudflare, url, login.say, ROUTE_LIMIT_MS)
+    if (needsUpload(health)) await deploy(cloudflare, login, account, { worker: names.worker, bucket: health.bucket }, false, setupCode, progress)
+    else {
+      login.say(`${url} runs relay ${health.relay} at protocol ${health.protocol}, which needs no upload of this anyhost's, so anyhost gives it a new setup code and uploads nothing`)
+      const secret = { name: 'SETUP_CODE_SHA256', text: sha256(setupCode), type: 'secret_text' }
+      resultOf(await call(cloudflare, login, 'PUT', `/accounts/${account.id}/workers/scripts/${names.worker}/secrets`, { json: secret }), `Setting the setup code of the Worker ${names.worker}`)
     }
-    login.say(`Joining ${url} once it takes the new setup code, for up to ${SECRET_LIMIT_MS / 60_000} minutes`)
-    await exchangeCode(url, setupCode, device, cloudflare, login.say, SECRET_LIMIT_MS)
-    login.say(`Joined this machine to ${url}`)
-  } finally {
-    rmSync(ownLoginFolder(), { recursive: true, force: true })
   }
+  login.say(`Joining ${url} once it takes the new setup code, for up to ${SECRET_LIMIT_MS / 60_000} minutes`)
+  await exchangeCode(url, setupCode, device, cloudflare, login.say, SECRET_LIMIT_MS)
+  login.say(`Joined this machine to ${url}`)
 }
 
 export type Connecting = {

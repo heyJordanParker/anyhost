@@ -210,3 +210,22 @@ test("an uninstall takes out the pane, the layout, the keys and the Claude Code 
   expect(jsonOf(join(herdr, 'keys.json'))).toEqual({ global: keys.global, 'layout:anyhost': { 'cmd-w': 'files.open' } })
   expect(jsonOf(join(herdr, 'programs.json'))).toEqual({ programs: { claude: { name: 'Claude' } } })
 })
+
+test('an install after an uninstall switches the Herdr app to the anyhost layout again', async () => {
+  const home = temporaryFolder()
+  const { herdr, record } = herdrHomeIn(home)
+  mkdirSync(join(herdr, 'layouts'), { recursive: true })
+  writeFileSync(join(herdr, 'layouts', 'main.json'), JSON.stringify({ id: 'root', type: 'row', children: [] }))
+  const switches = join(home, 'switches')
+  script(join(home, 'bin', 'herdr-app'), `#!/bin/sh\necho "$*" >> ${switches}\n`)
+  const path = process.env['PATH']
+  process.env['PATH'] = `${join(home, 'bin')}:${path ?? ''}`
+  onTestFinished(() => void (process.env['PATH'] = path))
+  await installHerdr(record, herdr)
+
+  await uninstallHerdr(record, herdr)
+  await installHerdr(record, herdr)
+
+  expect(readFileSync(switches, 'utf8').trim().split('\n')).toEqual(['do layout.switch --name anyhost', 'do layout.switch --name anyhost'])
+  expect((jsonOf(record) as { switched: boolean }).switched).toBe(true)
+})

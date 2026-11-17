@@ -174,12 +174,12 @@ function withProgram(answers: Record<string, Answer[]>) {
 
 const relayIs = (state: string): Answer => ({ body: { relay: { state, message: '' } } })
 
-test('the Step is left to do on a machine not joined or on a relay too old, and done once joined', async () => {
-  for (const state of ['unjoined', 'outdated']) {
-    const { mod } = withProgram({ 'GET /status': [relayIs(state)] })
+test('the Step is left to do on a machine not joined or whose Cloudflare login was refused, and done once joined or while anyhost updates its relay itself', async () => {
+  for (const status of [relayIs('unjoined'), { body: { relay: { state: 'outdated', message: '' }, needsLogin: true } }]) {
+    const { mod } = withProgram({ 'GET /status': [status] })
     expect(await connectStep.isDone(await mod())).toBe(false)
   }
-  for (const state of ['connected', 'offline', 'refused']) {
+  for (const state of ['connected', 'offline', 'refused', 'outdated']) {
     const { mod } = withProgram({ 'GET /status': [relayIs(state)] })
     expect(await connectStep.isDone(await mod())).toBe(true)
   }

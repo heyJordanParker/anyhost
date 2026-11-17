@@ -83,7 +83,9 @@ export type RelayOptions = {
   readonly roots: Roots
   readonly isPatient: boolean
   readonly onOlderProgram?: (message: string) => void
+  readonly readsKept?: ReadsKept
 }
+export type ReadsKept = { readonly reads: () => Iterable<readonly [string, Read]>; readonly keep: (key: string, read: Read) => void }
 
 class Refused extends Error {}
 
@@ -416,8 +418,16 @@ export function connectRelay(options: RelayOptions): Relay {
     return found === 'missing' ? undefined : found
   }
 
-  const known = new Map<string, Read>()
+  const known = new Map<string, Read>(options.readsKept?.reads() ?? [])
+  const writes = new Map<string, number>()
+  const reading = new Map<string, number>()
+  const know = (key: string, read: Read): void => {
+    known.set(key, read)
+    options.readsKept?.keep(key, read)
+  }
   const read = (keys: readonly string[]): Promise<Read[]> => {
+    const writesBefore = keys.map((key) => writes.get(key) ?? 0)
+    for (const key of keys) reading.set(key, (reading.get(key) ?? 0) + 1)
     const answers = run(keys.map((key): Call => {
       const kept = known.get(key)
       return { op: 'get', key, ...(kept === undefined || !('etag' in kept) ? {} : { if: { noneMatch: kept.etag } }) }
@@ -425,19 +435,26 @@ export function connectRelay(options: RelayOptions): Relay {
     return Promise.all(
       answers.map(async (answer, at): Promise<Read> => {
         const key = keys[at] ?? ''
-        const result = (await answer) as RanOf<'get'>
+        const result = (await answer.finally(() => {
+          const left = (reading.get(key) ?? 1) - 1
+          if (left === 0) reading.delete(key)
+          else reading.set(key, left)
+        })) as RanOf<'get'>
         const kept = known.get(key)
+        const isOutrun = (writes.get(key) ?? 0) !== writesBefore[at]
+        if (isOutrun && kept !== undefined) return kept
         if (result.status === 304 && kept !== undefined && 'etag' in kept) return kept
         if (result.status === 304) throw new Error(`The relay answered that ${key} did not change, and anyhost has no copy of it.`)
         if (kept?.status === 404 && result.status === 404) return kept
-        known.set(key, result)
+        if (!isOutrun) know(key, result)
         return result
       }),
     )
   }
   const keptWrite = (call: Call, ran: Ran): Ran => {
     if (call.op !== 'put' || ran.status !== 200 || !('etag' in ran)) return ran
-    if (known.has(call.key)) known.set(call.key, { status: 200, etag: ran.etag, size: call.bytes.length, bytes: call.bytes })
+    if (known.has(call.key) || reading.has(call.key)) writes.set(call.key, (writes.get(call.key) ?? 0) + 1)
+    if (known.has(call.key)) know(call.key, { status: 200, etag: ran.etag, size: call.bytes.length, bytes: call.bytes })
     emit('written', { key: call.key, etag: ran.etag })
     return ran
   }

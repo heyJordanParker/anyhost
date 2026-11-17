@@ -143,3 +143,24 @@ test('a session archived during its turn keeps working, and its copy here stops 
   await until(() => laptop.claude.signalCode !== null, 'the copy stopping once its turn ended')
   expect([archived.status, duringTurn, laptop.claude.signalCode]).toEqual([200, null, 'SIGTERM'])
 }, 60_000)
+
+test('a worktree order and a preference one machine sets reach every machine through the shared list, and a null preference drops it', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+  type Listed = { readonly worktreeOrder: Record<string, { machine: string; folder: string }[]>; readonly preferences: Record<string, unknown> }
+  const listedOn = async (): Promise<Listed> => (await (await fetch('http://localhost/agents', { unix: worker.socket })).json()) as Listed
+  const worktrees = [{ machine: 'worker', folder: '/home/a/trip-b' }, { machine: 'laptop', folder: '/Users/a/trip' }]
+  const asked = (changes: object[]) => anyhostOn(laptop.env, ['organize', JSON.stringify(changes)])
+
+  const ordered = await asked([{ op: 'orderWorktrees', project: 'acme/trip', worktrees }, { op: 'prefer', key: 'shelves', value: ['working'] }])
+  await until(async () => (await listedOn()).preferences['shelves'] !== undefined, 'the worker reading the preference')
+  const there = await listedOn()
+  const twice = await asked([{ op: 'orderWorktrees', project: 'acme/trip', worktrees: [worktrees[0], worktrees[0]] }])
+  const dropped = await asked([{ op: 'prefer', key: 'shelves', value: null }])
+  await until(async () => (await listedOn()).preferences['shelves'] === undefined, 'the worker reading the dropped preference')
+
+  expect([ordered.code, dropped.code]).toEqual([0, 0])
+  expect(there).toMatchObject({ worktreeOrder: { 'acme/trip': worktrees }, preferences: { shelves: ['working'] } })
+  expect([twice.code, twice.err]).toEqual([1, expect.stringContaining('The worktree order names each worktree once.')])
+}, 90_000)

@@ -190,6 +190,7 @@ export async function uninstallHerdr(record: string, home = herdrHome()): Promis
   await removeLayout(home, was)
   await unbindKeys(home, was)
   await restoreClaude(home, was)
+  if (existsSync(record)) await writeFile(record, `${JSON.stringify({ ...was, switched: false }, null, 2)}\n`)
 }
 
 async function placeLayout(home: string, was: Installed): Promise<string | undefined> {
