@@ -1853,12 +1853,19 @@ async function unheldNext(capture: Capture, now: number): Promise<NextRewrite | 
   for (const [session, isRewritten] of capture.journalsInR2.isRewritten) {
     if (isRewritten || captured.has(session) || tried.has(session)) continue
     const holder = holders.get(session)
+    const claim: NextRewrite['claim'] = holder === undefined ? { op: 'claim', session, take: false } : fleet.removed.has(holder) ? { op: 'claim', session, take: true, if: { gone: true } } : undefined
+    if (holder !== device.id && claim === undefined) continue
+    if (await isRewrittenSince(capture, session)) continue
     const tool = db.query<{ tool: Tool }, [string]>('select tool from sessions where id = ?').get(session)?.tool
-    if (holder === device.id) return { session, tool }
-    if (holder === undefined) return { session, tool, claim: { op: 'claim', session, take: false } }
-    if (fleet.removed.has(holder)) return { session, tool, claim: { op: 'claim', session, take: true, if: { gone: true } } }
+    return { session, tool, ...(claim === undefined ? {} : { claim }) }
   }
   return undefined
+}
+
+async function isRewrittenSince(capture: Capture, session: string): Promise<boolean> {
+  const isRewritten = (await capture.relay.list(rewrittenKey(session))).some(({ key }) => key === rewrittenKey(session))
+  if (isRewritten) capture.journalsInR2.isRewritten.set(session, true)
+  return isRewritten
 }
 
 export async function rewriteNext(capture: Capture, problems: Problems, now = Date.now()): Promise<string | undefined> {

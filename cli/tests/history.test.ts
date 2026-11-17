@@ -602,6 +602,23 @@ test('two machines race for one journal nobody holds, and exactly one of them re
   expect(await Promise.all([rewriteNext(b.capture, failTest), rewriteNext(c.capture, failTest)])).toEqual([undefined, undefined])
 }, 60_000)
 
+test('a machine whose listing of R2 predates another machine\'s rewrite of a journal leaves that journal alone, with no claim', async () => {
+  const relay = await memoryRelay()
+  const { fork } = await oldFormOn(relay, join(temporaryFolder(), 'home'))
+  const [b, c] = [captureOn(server, relay), captureOn(third, relay)]
+  await b.capture.relay.runOne({ op: 'claim', session: fork, take: false })
+  const whileHeld = await rewriteNext(c.capture, failTest)
+  const rewritten = await rewriteNext(b.capture, failTest)
+  await b.capture.relay.runOne({ op: 'forget', session: fork })
+  const putsBefore = relay.puts.length
+
+  const afterward = await rewriteNext(c.capture, failTest)
+
+  expect([whileHeld, rewritten, afterward]).toEqual([undefined, fork, undefined])
+  expect((await relay.claims()).has(fork)).toBe(false)
+  expect(relay.puts.length).toBe(putsBefore)
+}, 60_000)
+
 test('an open on the same machine during a rewrite of a journal it borrowed keeps that machine its claim after the rewrite, and the journal still replays byte for byte', async () => {
   const relay = await memoryRelay()
   const home = join(temporaryFolder(), 'home')
