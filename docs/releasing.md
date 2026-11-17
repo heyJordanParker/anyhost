@@ -4,7 +4,7 @@ A push to `main` that raises the version releases it. The [CI workflow](../.gith
 
 ## Release a version
 
-1. Raise `version` in `.claude-plugin/plugin.json`. The `anyhost` program prints the same version, because it reads that file when it is built. On a machine whose anyhost is `cmod link`ed to this checkout, run `cmod setup .` right after: cmod's link watch installs the program at the new version, while its setup record stays at the old one until setup runs, and the relay refuses the older program anyhost last connected with (4426), so the service restarts in a loop until then.
+1. Raise `version` in `.claude-plugin/plugin.json`, in the release commit alone, which is pushed right away, as `npm version` and `cargo release` raise it. The relay refuses an anyhost older than the newest one a machine connected with, so a linked checkout that ran an unreleased version leaves the machine refused once it is unlinked. The `anyhost` program prints the same version, because it reads that file when it is built. On a machine whose anyhost is `cmod link`ed to this checkout, run `cmod setup .` right after: cmod's link watch installs the program at the new version, while its setup record stays at the old one until setup runs, and the relay refuses the older program anyhost last connected with (4426), so the service restarts in a loop until then.
 2. Add a `## [<version>] - <date>` section to `CHANGELOG.md` with what changed for the people who use anyhost. `cmod publish` refuses a version without one.
 3. Run, in this order, then commit:
 

@@ -14,9 +14,9 @@ const FOURTH_SESSION = '44444444-5555-6666-7777-888888888888'
 
 type Machine = Awaited<ReturnType<typeof machineFor>>
 
-const claudeIn = (machine: Machine, address: string, session: string, status: string): Subprocess => {
+const claudeIn = (machine: Machine, address: string, session: string, status: string, statusUpdatedAt = Date.now() - 10_000): Subprocess => {
   const copy = spawnForTest(['sleep', '600'])
-  writeFileSync(join(machine.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions', `${copy.pid}.json`), JSON.stringify({ pid: copy.pid, sessionId: session, procStart: startOf(copy.pid), kind: 'interactive', status, statusUpdatedAt: Date.now() - 10_000 }))
+  writeFileSync(join(machine.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions', `${copy.pid}.json`), JSON.stringify({ pid: copy.pid, sessionId: session, procStart: startOf(copy.pid), kind: 'interactive', status, statusUpdatedAt }))
   mkdirSync(join(machine.folder, 'terminals'), { recursive: true })
   writeFileSync(join(machine.folder, 'terminals', address), `${session} ${copy.pid}\n`)
   return copy
@@ -109,6 +109,23 @@ test('an idle session no screen shows is discarded after the stop time, while on
   await until(() => hasEnded(shown), 'Sleep ending the shown session', 10_000)
   expect(logOf(laptop.folder, 'labels.log')).toContain('t0 anyhost.session=')
   expect(Object.keys((await sharedIn(relay)).archived ?? {})).toEqual([])
+}, 60_000)
+
+test('an idle session counts its stop time from the last time a screen showed it, so one idle for an hour that a screen showed 100 s ago stays', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const anHourAgo = Date.now() - 3_600_000
+  const seen = claudeIn(laptop, 't0', OTHER_SESSION, 'idle', anHourAgo)
+  const unseen = claudeIn(laptop, 't1', SESSION, 'idle', anHourAgo)
+  coreSays(laptop.folder, {
+    seq: 1,
+    terminals: [terminalIn('t0', CLAUDE, { 'anyhost.session': OTHER_SESSION, 'anyhost.shown.device-desktop': String(Date.now() - 100_000) }), terminalIn('t1', CLAUDE, { 'anyhost.session': SESSION })],
+  })
+
+  await serveOn({ ...laptop.env, ANYHOST_STOP_MS: '120000' })
+  await until(() => hasEnded(unseen), 'the unseen idle session ending', 15_000)
+
+  expect(hasEnded(seen)).toBe(false)
 }, 60_000)
 
 test("a 0.9.0 runner asleep, also one whose session runs elsewhere, is closed without archiving its session, and every other terminal, an awake runner too, stays", async () => {
@@ -247,7 +264,7 @@ test('a Codex started in a terminal is labelled with the session of the rollout 
   await until(async () => (await sharedIn(relay)).archived?.[THIRD_SESSION]?.archived === true, 'the closed Codex session archiving', 15_000)
 }, 60_000)
 
-test('a terminal two windows show stays shown while either shows it, and a session is marked read once', async () => {
+test('a terminal two windows show stays shown while either shows it, keeps the time a screen last showed it, and a session is marked read once', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
   coreSays(laptop.folder, { seq: 1, terminals: [terminalIn('t0', CLAUDE, { 'anyhost.session': SESSION })] })
@@ -262,11 +279,11 @@ test('a terminal two windows show stays shown while either shows it, and a sessi
   await Bun.sleep(1000)
   const whileOneShows = shownLabels()
   await anyhostOn(laptop.env, ['shown', 'window-b'])
-  await until(() => shownLabels().length > whileOneShows.length, 'the label leaving the terminal no window shows')
+  await Bun.sleep(1000)
 
   expect([first.code, second.code]).toEqual([0, 0])
   expect(whileOneShows).toEqual([expect.stringMatching(new RegExp(`^t0 anyhost\\.shown\\.${LAPTOP.id}=\\d+$`))])
-  expect(shownLabels().at(-1)).toBe(`t0 anyhost.shown.${LAPTOP.id}=`)
+  expect(shownLabels()).toEqual(whileOneShows)
   const visits = relay.puts.filter(({ key }) => key === 'shared.json').map(({ body }) => (JSON.parse(decoder.decode(body)) as { visited?: Record<string, string> }).visited?.[SESSION])
   expect(new Set(visits.filter((at) => at !== undefined)).size).toBe(1)
 }, 60_000)
