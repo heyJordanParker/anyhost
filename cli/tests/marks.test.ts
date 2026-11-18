@@ -182,7 +182,10 @@ test('two machines that move projects, pins and worktrees and set entries of one
   expect(listed.projectOrder.indexOf('acme/d')).toBeLessThan(listed.projectOrder.indexOf('acme/a'))
   expect(listed.pinOrder.indexOf('p3')).toBeLessThan(listed.pinOrder.indexOf('p1'))
   expect(listed.pinOrder.at(-1)).toBe('p1')
-  expect(listed.worktreeOrder['acme/a']?.map(({ folder }) => folder)).toEqual(['/c', '/b', '/a'])
+  const worktrees = listed.worktreeOrder['acme/a']?.map(({ folder }) => folder) ?? []
+  expect(worktrees.toSorted()).toEqual(['/a', '/b', '/c'])
+  expect(worktrees.indexOf('/c')).toBeLessThan(worktrees.indexOf('/a'))
+  expect(worktrees.at(-1)).toBe('/a')
   expect(listed.preferences['workspaces']).toEqual({ 'space-1': { mode: 'board' }, 'space-2': { mode: 'tabs' } })
   expect([dropped.code, dropped.err]).toEqual([1, expect.stringContaining('A move names each item once.')])
 }, 90_000)

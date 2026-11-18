@@ -26,7 +26,7 @@ const LOCK_STALE_MS = 10_000
 const LOCK_WAITS_MS = [200, 400, 800, 1600, 3200, 4000]
 
 type MoveStep = 'waiting' | 'uploading' | 'moving' | 'moved' | 'failed'
-export type Moving = { readonly session: string; readonly to: string; step: MoveStep; line: string; readonly keeping: AbortController; handedAt: number }
+export type Moving = { readonly session: string; readonly to: string; readonly wanted: string; step: MoveStep; line: string; readonly keeping: AbortController; handedAt: number }
 export type MoveHere = {
   readonly moves: Map<string, Moving>
   readonly placing: Map<string, Promise<void>>
@@ -274,7 +274,7 @@ async function drainTo(capture: Capture, session: string, target: DeviceRef, her
   if (running !== undefined && !isFinal(running)) return running
   const { relay, roots } = capture
   const id = session.slice(0, 8)
-  const moving: Moving = { session, to: target.name, step: 'waiting', line: '', keeping: new AbortController(), handedAt: 0 }
+  const moving: Moving = { session, to: target.name, wanted: target.id, step: 'waiting', line: '', keeping: new AbortController(), handedAt: 0 }
   here.moves.set(session, moving)
   const say = (step: MoveStep, line: string): void => sayOn(moving, step, line)
   const { signal } = moving.keeping
@@ -335,8 +335,9 @@ async function reconcile(capture: Capture, session: string, here: MoveHere): Pro
   const isPaused = pausedSessions().includes(session)
   const isHere = (id: string): boolean => id === '' || id === device.id
   const id = session.slice(0, 8)
+  if (moving !== undefined && !isFinal(moving) && moving.step !== 'moving' && placement.wanted !== moving.wanted) moving.keeping.abort()
   if (placement.device === device.id && !isHere(placement.wanted)) {
-    if (moving !== undefined && !isFinal(moving)) return
+    if (moving !== undefined && (!isFinal(moving) || (moving.wanted === placement.wanted && moving.keeping.signal.aborted))) return
     const target = (await devicesOf(relay)).get(placement.wanted)
     if (target === undefined || !target.connected || target.removedAt !== undefined) return await want(relay, session, '', { error: `${target?.name ?? placement.wanted} is offline`, if: placement.wanted })
     await drainTo(capture, session, target, here)
