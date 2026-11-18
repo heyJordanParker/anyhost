@@ -242,9 +242,9 @@ export function openCapture(
   })
   const capture: Capture = {
     ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, readsCode, compactLagMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
-    holders: followHolders(relay, db, (changes) => {
-      void releaseTaken(capture, changes).catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not stop capturing the sessions another machine took: ${String(error)}`))
+    holders: followHolders(relay, db, async (changes) => {
       onPlaced(changes)
+      await releaseTaken(capture, changes).catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not stop capturing the sessions another machine took: ${String(error)}`))
     }),
     fleet: UNREAD_FLEET, journalsInR2: { readAt: 0, isRewritten: new Map() }, dataFolders: [], lastIndex: '',
   }

@@ -1024,10 +1024,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     await settle('herdr machines', () => keepHerdrReaching(relay, device))
   }
   const shownMove = ({ to, step, line }: Moving): Pick<Moving, 'to' | 'step' | 'line'> => ({ to, step, line })
-  const holderOf = (session: string): { machine?: string; problem?: string; untold?: string; move?: Pick<Moving, 'to' | 'step' | 'line'> } => {
+  const holderOf = async (session: string): Promise<{ machine?: string; problem?: string; untold?: string; move?: Pick<Moving, 'to' | 'step' | 'line'> }> => {
+    const { state } = relay
+    if (state.is === 'connected') await capture.holders.current()
     const moving = moves.get(session)
     const move = moving === undefined ? {} : { move: shownMove(moving) }
-    const { state } = relay
     if (state.is === 'refused' || state.is === 'outdated') return { problem: state.message, ...move }
     const holder = journalOf(capture.db, session)?.holder ?? ''
     const untold = untoldOf(capture.db, session)
@@ -1421,7 +1422,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         return await throughRelay(listNow)
       }
       const claim = /^\/claims\/([\w-]+)$/.exec(pathname)?.[1]
-      if (request.method === 'GET' && claim !== undefined) return Response.json(holderOf(claim))
+      if (request.method === 'GET' && claim !== undefined) return Response.json(await holderOf(claim))
       if (request.method !== 'POST') return failed(404, `${ROUTES}, not ${request.method} ${pathname}.`)
       const body = await request.json().catch((error: unknown) => new Error(`anyhost takes a JSON object at POST ${pathname}, and this body is none: ${error instanceof Error ? error.message : String(error)}`))
       if (body instanceof Error) return failed(400, body)

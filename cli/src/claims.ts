@@ -40,9 +40,9 @@ const placementIn = ({ device, wanted, spec, error }: HolderRow): Placement => (
   ...(error === '' ? {} : { error }),
 })
 
-export function followHolders(relay: Relay, db: Database, onChanged: (changes: readonly Claimed[]) => void = () => undefined): Holders {
+export function followHolders(relay: Relay, db: Database, onChanged: (changes: readonly Claimed[]) => Promise<void> = async () => undefined): Holders {
   const changedHere = (): number => db.query<{ changed: number }, []>('select changed from holders_changed').get()?.changed ?? 0
-  const apply = (changes: readonly Claimed[]): void => {
+  const apply = async (changes: readonly Claimed[]): Promise<void> => {
     db.transaction(() => {
       for (const { session, device, wanted, spec, error = '', changed } of changes) {
         if (device === '' && wanted === '' && spec === undefined && error === '') db.query('delete from holders where session = ?').run(session)
@@ -57,7 +57,7 @@ export function followHolders(relay: Relay, db: Database, onChanged: (changes: r
         db.query('update holders_changed set changed = ?').run(changed)
       }
     })()
-    if (changes.length > 0) onChanged(changes)
+    if (changes.length > 0) await onChanged(changes)
   }
   const startAgain = (): void =>
     db.transaction(() => {
@@ -72,7 +72,7 @@ export function followHolders(relay: Relay, db: Database, onChanged: (changes: r
         startAgain()
         continue
       }
-      apply(changes)
+      await apply(changes)
       if (changes.length < MAX_KEYS) return
     }
   }
@@ -98,7 +98,7 @@ export function followHolders(relay: Relay, db: Database, onChanged: (changes: r
   relay.on('claimed', (claimed) => {
     const since = changedHere()
     if (claimed.changed <= since) return
-    if (claimed.changed === since + 1 && reading === undefined) apply([claimed])
+    if (claimed.changed === since + 1 && reading === undefined) void apply([claimed]).catch(readFailed)
     else void catchUp().catch(readFailed)
   })
   const known = (): ReadonlyMap<string, string> => new Map(db.query<{ session: string; device: string }, []>("select session, device from holders where device != ''").all().map(({ session, device }) => [session, device]))
