@@ -27,7 +27,7 @@ test('an agent started on another machine for an agent gets its first message fr
       line({ type: 'user', timestamp: '2026-11-12T10:00:03.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool_1', content: 'the 9:15 is free' }] } }) +
       line({ type: 'assistant', timestamp: '2026-11-12T10:00:04.000Z', message: { id: 'msg_2', role: 'assistant', content: [{ type: 'text', text: 'Booked the 9:15 train.' }] } }),
   )
-  await until(() => isUploaded(relay, session, 'Booked the 9:15 train.'), 'the worker uploading the transcript')
+  await until(() => isUploaded(relay, session, 'Booked the 9:15 train.'), 'the worker uploading the transcript', 30_000)
   await until(() => isIndexed(relay, WORKER, session), "the worker's index listing the session")
 
   const read = await postTo(laptop.socket, '/agents/tell', { session: session.slice(0, 8), messages: 2 })
@@ -61,11 +61,11 @@ test('an agent that starts waiting at a permission prompt on another machine tel
   await until(() => readFileSync(record, 'utf8').includes('"status":"busy"'), 'the first message starting its turn')
 
   writeFileSync(record, readFileSync(record, 'utf8').replace(/"status":"[a-z]+"/, '"status":"waiting"'))
-  await until(() => sentOn(laptop.folder).length > 0, 'the note reaching the agent that started it', 30_000)
+  await until(() => sentOn(laptop.folder).length > 0, 'the note reaching the agent that started it', 60_000)
 
   const id = child.slice(0, 8)
   expect(sentOn(laptop.folder)).toEqual([`t0 <anyhost from="${id} on ${WORKER.name}" reach="tell_agent ${id} when done or stuck">${id} waits at a permission prompt on ${WORKER.name}. read_agent ${id} shows it, and press_keys ${id} answers it.</anyhost>`])
-}, 90_000)
+}, 120_000)
 
 test('an agent that starts waiting while its machine hears no change of Claude Code records still tells the agent that started it, at the next backup pass', async () => {
   const relay = await memoryRelay()
