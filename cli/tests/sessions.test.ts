@@ -904,13 +904,13 @@ test('a restore over a turn only this machine holds, as one a sleeping machine t
   expect(readFileSync(transcript, 'utf8')).not.toContain('Kept going here')
 })
 
-test('a machine offline during a takeover learns it in its next welcome, before it captures, and the session opened says so once', async () => {
+test('a machine offline during a takeover reads the new holder as it connects again, and the session opened says so once', async () => {
   const { relay, session, old, state, taker } = await takenOver(true)
   expect(journalOf(old.capture.db, session)?.holder).toBe('')
   expect([untoldOf(taker.capture.db, session), untoldOf(taker.capture.db, session)]).toEqual(['mac', 'mac'])
 
   const back = captureOn(mac, relay, old.roots.home, state)
-  await until(() => back.capture.relay.state.is === 'connected')
+  await until(() => journalOf(back.capture.db, session)?.holder === 'server', 'the machine reading the new holder')
   expect(journalOf(back.capture.db, session)).toMatchObject({ holder: 'server', stopped: expect.stringContaining('server took the session') })
 })
 

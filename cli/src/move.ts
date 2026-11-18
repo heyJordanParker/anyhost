@@ -1,11 +1,11 @@
 import { mkdir, readFile, readlink, realpath, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
-import type { AgentStatus, Delivered, Device, Message, Offline, Routed } from '../../relay/protocol.ts'
+import type { AgentStatus, Delivered, DeviceRef, Message, Offline, Routed } from '../../relay/protocol.ts'
 import type { Activity, Shown } from './activity.ts'
 import { captureAgainFrom, chainOf, changedFiles, checkoutOf, checkoutOfEntry, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
-import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
-import { claudeStart, pauseCopy, recordedSessions, resumeArgv, resumedOf, resumeCopy, run, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
+import { claimsOf, HeldElsewhere, takeClaim, type Placement } from './claims.ts'
+import { claudeStart, pauseCopy, pausedSessions, recordedSessions, resumeArgv, resumedOf, resumeCopy, run, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
 import { devicesOf, otherMachine } from './device.ts'
 import { askToSleep, hcPath, labelledTerminals, openTerminal, pressKeys, readTerminal, sendTo } from './hc.ts'
 import { showTerminal, type Place } from './herdr.ts'
@@ -13,7 +13,7 @@ import type { Relay } from './relay.ts'
 import { cloneMissing, localFolder, restore } from './resume.ts'
 import { agentsOf, titleOfPrompt } from './sessions.ts'
 import { sharedOf } from './shared.ts'
-import { FORK_VERSION, forkedTranscript, lastFolderOf, lastMessageIn, messagesOf, ownerOf, transcriptOf, type Tool } from './transcript.ts'
+import { FORK_VERSION, forkedTranscript, lastFolderOf, lastMessageIn, lastTurnOf, messagesOf, ownerOf, transcriptOf, transcriptTailOf, type Tool } from './transcript.ts'
 
 const RUNNING_MS = 60_000
 const IDLE_SETTLES_MS = 2000
@@ -22,70 +22,64 @@ const CONNECTED_MS = 10_000
 const TELL_MS = 25_000
 const TURN_STARTS_MS = 10_000
 const LIST_MS = 5000
-const FORGET_MS = 120_000
 const LOCK_STALE_MS = 10_000
 const LOCK_WAITS_MS = [200, 400, 800, 1600, 3200, 4000]
 
 type MoveStep = 'waiting' | 'uploading' | 'moving' | 'moved' | 'failed'
-export type Moving = { readonly session: string; readonly to: string; step: MoveStep; line: string; readonly keep: () => boolean }
+export type Moving = { readonly session: string; readonly to: string; step: MoveStep; line: string; readonly keeping: AbortController; handedAt: number }
 export type MoveHere = {
   readonly moves: Map<string, Moving>
-  readonly answers: Map<string, Reply | undefined>
+  readonly placing: Map<string, Promise<void>>
+  readonly placed: Set<(session: string) => void>
   readonly problems: Problems
   readonly checkouts: string
   readonly queue: (session: string, tool: Tool, path: string) => void
   readonly flush: (session: string, signal: AbortSignal, onRelay: (isConnected: boolean) => void) => Promise<void>
   readonly onRecordsChange: OnRecordsChange
   readonly opening: Map<string, Promise<string>>
+  readonly touched: Map<string, number>
   readonly activity: Activity
+  readonly onStatusElsewhere: (machine: string, session: string, status: AgentStatus) => void
 }
 
-type Reply = Extract<Routed, { readonly t: 'moved' | 'started' | 'told' | 'listed' | 'deleted' | 'forked' }>
-const ANSWER = { move: 'moved', start: 'started', tell: 'told', list: 'listed', delete: 'deleted', fork: 'forked' } as const
+type Reply = Extract<Routed, { readonly t: 'told' | 'listed' | 'deleted' | 'forked' }>
+const ANSWER = { tell: 'told', list: 'listed', delete: 'deleted', fork: 'forked' } as const
 type Asked = Extract<Routed, { readonly t: keyof typeof ANSWER }>
 type AnswerTo<A extends Asked> = Extract<Delivered, { readonly t: (typeof ANSWER)[A['t']] }> | Offline
+
+type MoveSpec = { readonly kind: 'move'; readonly trusted: boolean }
+type StartSpec = { readonly kind: 'start'; readonly from: DeviceRef; readonly repo: string; readonly branch: string; readonly folder: string; readonly trusted: boolean; readonly prompt: string; readonly sender: string }
+type Spec = MoveSpec | StartSpec
+const specOf = ({ spec }: Placement): Spec | undefined => spec as Spec | undefined
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 const reasonOf = (error: unknown): string => messageOf(error).replace(/\.+$/, '')
 const stamp = (): string => new Date().toISOString()
+const isFinal = (moving: Moving | undefined): boolean => moving === undefined || moving.step === 'moved' || moving.step === 'failed'
 
-async function ask<A extends Asked>(
-  relay: Relay,
-  message: A,
-  { signal, keepsWaiting }: { readonly signal?: AbortSignal; readonly keepsWaiting: () => Promise<boolean> },
-): Promise<AnswerTo<A>> {
-  const offline: Offline = { t: 'offline', id: message.id, to: message.to }
-  signal?.throwIfAborted()
-  const listed = (await devicesOf(relay)).get(message.to)
-  const isUp = (now: Device | undefined): now is Device => now !== undefined && now.removedAt === undefined && now.connected
-  if (!isUp(listed)) return offline
-  const isGone = (now: Device | undefined): boolean => !isUp(now)
-  signal?.throwIfAborted()
-  const answered = new AbortController()
-  const until = signal === undefined ? answered.signal : AbortSignal.any([signal, answered.signal])
+async function ask<A extends Asked>(relay: Relay, message: A, signal: AbortSignal): Promise<AnswerTo<A>> {
+  signal.throwIfAborted()
   const stops: (() => void)[] = []
   try {
     return await new Promise<AnswerTo<A>>((resolve, reject) => {
-      const atOffline = async (): Promise<void> => {
-        if (!until.aborted && !(await keepsWaiting())) resolve(offline)
-      }
       stops.push(
         relay.on(ANSWER[message.t], (answer) => (answer.id === message.id ? resolve(answer as AnswerTo<A>) : undefined)),
-        relay.on('offline', (answer) => (answer.id === message.id ? void atOffline().catch(reject) : undefined)),
+        relay.on('offline', (answer) => (answer.id === message.id ? resolve(answer) : undefined)),
       )
-      until.addEventListener('abort', () => reject(until.reason), { once: true })
-      if (!relay.send(message)) return reject(new Error(`This machine is not connected to the relay at ${relay.url}, so anyhost sent nothing.`))
-      void (async () => {
-        while (await sleep(CONNECTED_MS, true, { signal: until }).catch(() => false)) {
-          if (isGone((await devicesOf(relay)).get(message.to))) await atOffline()
-          else if (!until.aborted) relay.send(message)
-        }
-      })().catch(reject)
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      if (!relay.send(message)) reject(new Error(`This machine is not connected to the relay at ${relay.url}, so anyhost sent nothing.`))
     })
   } finally {
     for (const stop of stops) stop()
-    answered.abort()
   }
+}
+
+const replyTo = (relay: Relay, asked: { readonly from: { readonly name: string } }, reply: Reply): void => {
+  if (!relay.send(reply)) console.error(`${stamp()} anyhost sent ${asked.from.name} no answer, as this machine is not connected to the relay.`)
+}
+
+async function want(relay: Relay, session: string, device: string, { spec, error, if: wanted }: { readonly spec?: Spec; readonly error?: string; readonly if?: string } = {}): Promise<void> {
+  await relay.runOne({ op: 'want', session, device, ...(spec === undefined ? {} : { spec }), ...(error === undefined ? {} : { error }), ...(wanted === undefined ? {} : { if: { wanted } }) })
 }
 
 type Config = { readonly projects?: Record<string, { readonly hasTrustDialogAccepted?: boolean } | undefined> }
@@ -105,7 +99,9 @@ async function fileOf(path: string): Promise<string> {
 }
 const isTrusted = (config: Config, records: readonly string[]): boolean => records.some((record) => config.projects?.[record]?.hasTrustDialogAccepted === true)
 
-async function trustRecordsOf(cwd: string): Promise<readonly [string, ...string[]]> {
+type TrustRecords = readonly [string, ...string[]]
+
+async function trustRecordsOf(cwd: string): Promise<TrustRecords> {
   const folder = await realpath(cwd)
   const [top, common]: (string | undefined)[] = await run(['git', '-C', folder, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir']).then(
     (printed) => Promise.all(printed.trim().split('\n').map((path) => realpath(path))),
@@ -148,8 +144,13 @@ async function lockedConfig<T>(file: string, work: () => Promise<T>): Promise<T>
   }
 }
 
-async function trustHere(capture: Capture, cwd: string, because: string): Promise<void> {
-  const records = await trustRecordsOf(cwd)
+async function trustToWrite(capture: Capture, cwd: string): Promise<TrustRecords | undefined> {
+  const [records, found] = await Promise.all([trustRecordsOf(cwd), configAt(configOf(capture)).catch(() => undefined)])
+  return found !== undefined && isTrusted(found, records) ? undefined : records
+}
+
+async function trustHere(capture: Capture, records: TrustRecords | undefined, because: string): Promise<void> {
+  if (records === undefined) return
   const [key] = records
   const config = configOf(capture)
   const isWritten = await lockedConfig(config, async () => {
@@ -237,209 +238,231 @@ export async function move(capture: Capture, asked: string, machine: string, her
   if (tool !== 'claude') throw new Error(`anyhost moves Claude Code sessions, and ${session.slice(0, 8)} is a Codex session.`)
   const target = await otherMachine(relay, device, machine, 'The session runs here already.')
   const running = here.moves.get(session)
-  if (running !== undefined && running.step !== 'moved' && running.step !== 'failed') throw new Error(`This session is moving to ${running.to} already.`)
+  if (running !== undefined && !isFinal(running)) throw new Error(`This session is moving to ${running.to} already.`)
+  if (!target.connected) throw new Error(`${machine} is offline, so the session keeps running here.`)
+  const cwd = workingFolderOf(db, session)
+  const trusted = cwd !== '' && (await trusts(capture, cwd).catch((error: unknown) => {
+    throw new Error(`anyhost could not move the session to ${machine}: ${reasonOf(error)}. It keeps running here.`)
+  }))
+  await want(relay, session, target.id, { spec: { kind: 'move', trusted } })
+  return await drainTo(capture, session, target, here)
+}
 
+export async function keepHere(capture: Capture, session: string, here: MoveHere): Promise<boolean> {
+  const moving = here.moves.get(session)
+  if (moving === undefined || isFinal(moving)) return false
+  moving.keeping.abort()
+  await want(capture.relay, session, capture.device.id)
+  return true
+}
+
+async function resumedHere(capture: Capture, session: string, here: MoveHere, line: string): Promise<string> {
+  if (!pausedSessions().includes(session) || (await resumeCopy(capture.roots.claudeHome, session)) > 0) return line
+  return await openHere(capture, session, here).then(
+    () => line,
+    (error: unknown) => `${line} anyhost could not open it here again: ${messageOf(error)}`,
+  )
+}
+
+const sayOn = (moving: Moving | undefined, step: MoveStep, line: string): void => {
+  if (moving !== undefined) Object.assign(moving, { step, line })
+  console.error(`${stamp()} ${line}`)
+}
+
+async function drainTo(capture: Capture, session: string, target: DeviceRef, here: MoveHere): Promise<Moving> {
+  const running = here.moves.get(session)
+  if (running !== undefined && !isFinal(running)) return running
+  const { relay, roots } = capture
   const id = session.slice(0, 8)
-  const isBusy = ((await recordOf(capture, session))?.status ?? 'idle') !== 'idle'
-  const keeping = new AbortController()
-  const kept = new Error(`Kept ${id} here, so it does not move to ${machine}.`)
-  const keep = (): boolean => {
-    if (keeping.signal.aborted) return false
-    keeping.abort(kept)
-    return true
-  }
-  const moving: Moving = { session, to: machine, step: 'waiting', line: '', keep }
+  const moving: Moving = { session, to: target.name, step: 'waiting', line: '', keeping: new AbortController(), handedAt: 0 }
   here.moves.set(session, moving)
-  const say = (step: MoveStep, line: string): void => {
-    Object.assign(moving, { step, line })
-    if (step === 'moved' || step === 'failed') keeping.abort()
-    console.error(`${stamp()} ${line}`)
-  }
+  const say = (step: MoveStep, line: string): void => sayOn(moving, step, line)
+  const { signal } = moving.keeping
+  const tool = journalOf(capture.db, session)?.tool ?? 'claude'
+  const isBusy = ((await recordOf(capture, session))?.status ?? 'idle') !== 'idle'
   if (isBusy) say('waiting', `Waiting for ${id} to finish its turn.`)
   else say('uploading', `Uploading ${id}.`)
-  const { claudeHome } = capture.roots
-  let isPausing = false
-  let paused = 0
-  let isAsked = false
-  const resumed = async (line: string): Promise<string> => {
-    if (!isPausing || (await resumeCopy(claudeHome, session)) > 0 || paused === 0) return line
-    return await openHere(capture, session, here).then(
-      () => line,
-      (error: unknown) => `${line} anyhost could not open it here again: ${messageOf(error)}`,
-    )
-  }
-  const takenOver = async (holder: string): Promise<void> => {
-    if (isPausing) await stopCopy(claudeHome, session).catch((error: unknown) => console.error(`${stamp()} anyhost could not stop the paused copy of ${session}: ${messageOf(error)}`))
-    say('failed', `${holder} took ${id} over during the move, so it continues there.`)
-  }
-  const fail = async (line: string): Promise<void> => {
-    const holder = journalOf(db, session)?.holder ?? ''
-    if (holder !== '' && !(isAsked && holder === machine)) return await takenOver(holder)
-    if (!isAsked) return say('failed', await resumed(line))
-    try {
-      await takeClaim(relay, session, { take: true })
-      await continueHere(capture, session, tool, here)
-      say('failed', await resumed(line))
-    } catch (error) {
-      say('failed', `${line} anyhost could not take it back here: ${messageOf(error)}`)
-    }
-  }
-  const untilIdle = (signal: AbortSignal): Promise<void> => untilSettledIdle(capture, session, here, signal)
-  const keepsWaiting = async (): Promise<boolean> => {
-    if ((await claimsOf(relay, session)).get(session)?.id !== target.id) return false
-    const line = `${machine} took ${id} and does not answer. Keep it here takes the session back.`
-    if (!keeping.signal.aborted && moving.line !== line) say('moving', line)
-    return true
-  }
   void (async () => {
-    const { signal } = keeping
     if (isBusy) {
-      await untilIdle(signal)
+      await untilSettledIdle(capture, session, here, signal)
       say('uploading', `Uploading ${id}.`)
     }
     const uploading = (isConnected: boolean): void => say('uploading', isConnected ? `Uploading ${id}.` : `Uploading ${id} once the relay at ${relay.url} connects.`)
     await upload(capture, session, tool, here, signal, uploading)
     for (;;) {
-      await untilIdle(signal)
+      await untilSettledIdle(capture, session, here, signal)
       signal.throwIfAborted()
-      isPausing = true
-      paused = await pauseCopy(claudeHome, session)
-      if (isIdleIn(await recordedSessions(claudeHome), session)) break
-      await resumeCopy(claudeHome, session)
-      isPausing = false
+      await pauseCopy(roots.claudeHome, session)
+      if (isIdleIn(await recordedSessions(roots.claudeHome), session)) break
+      await resumeCopy(roots.claudeHome, session)
     }
     await upload(capture, session, tool, here, signal, uploading)
     signal.throwIfAborted()
-    say('moving', `Paused ${id} here and sealed it. ${machine} restores it.`)
-    const cwd = workingFolderOf(db, session)
-    const trusted = cwd !== '' && (await trusts(capture, cwd))
-    signal.throwIfAborted()
-    const { at: claimedAt } = await takeClaim(relay, session, { take: false })
-    signal.throwIfAborted()
-    const started = Date.now()
-    isAsked = true
-    const answer = await ask(relay, { t: 'move', id: moveId(session), to: target.id, session, trusted, claimedAt, command: ['claude'] }, { signal, keepsWaiting })
-    keeping.abort()
-    if (answer.t === 'offline') return await fail(`${machine} is offline, so the session keeps running here.`)
-    if ('error' in answer) return await fail(`${machine} could not take the session: ${reasonOf(answer.error)}. It keeps running here.`)
-    const restored = `${machine} restored ${id} in ${((Date.now() - started) / 1000).toFixed(1)} s and runs it.`
-    say('moved', await stopCopy(claudeHome, session).then(() => restored, (error: unknown) => `${restored} anyhost could not end its paused copy here: ${messageOf(error)}`))
-  })().catch((error: unknown) => {
-    if (error instanceof HeldElsewhere) return takenOver(error.holder.name)
-    if (error !== kept) return fail(`anyhost could not move the session to ${machine}: ${reasonOf(error)}. It keeps running here.`)
-    return fail(isAsked ? `${machine} did not answer, so the session keeps running here.` : kept.message)
+    const forgot = await relay.runOne({ op: 'forget', session })
+    if (forgot.status === 409 && forgot.holder.id !== target.id) throw new HeldElsewhere(forgot.holder)
+    moving.handedAt = Date.now()
+    say('moving', `Paused ${id} here and sealed it. ${target.name} restores it.`)
+    await placeSession(capture, session, here)
+  })().catch(async (error: unknown) => {
+    const holder = error instanceof HeldElsewhere ? error.holder.name : (journalOf(capture.db, session)?.holder ?? '')
+    if (holder !== '') {
+      await want(relay, session, '', { if: target.id }).catch((failure: unknown) => console.error(`${stamp()} anyhost could not drop the move of ${session}: ${messageOf(failure)}`))
+      await stopCopy(roots.claudeHome, session).catch((failure: unknown) => console.error(`${stamp()} anyhost could not stop the paused copy of ${session}: ${messageOf(failure)}`))
+      return say('failed', `${holder} took ${id} over during the move, so it continues there.`)
+    }
+    const isKept = signal.aborted
+    if (!isKept) await want(relay, session, '', { error: reasonOf(error), if: target.id }).catch((failure: unknown) => console.error(`${stamp()} anyhost could not drop the move of ${session}: ${messageOf(failure)}`))
+    const line = isKept ? `Kept ${id} here, so it does not move to ${target.name}.` : `anyhost could not move the session to ${target.name}: ${reasonOf(error)}. It keeps running here.`
+    say('failed', await resumedHere(capture, session, here, line))
   })
   return moving
 }
 
-const moveId = (session: string): string => `${session}/${crypto.randomUUID()}`
+export function placeSession(capture: Capture, session: string, here: MoveHere): Promise<void> {
+  for (const placed of here.placed) placed(session)
+  const next = (here.placing.get(session) ?? Promise.resolve()).then(() => reconcile(capture, session, here)).catch((error: unknown) => console.error(`${stamp()} anyhost could not place ${session}: ${messageOf(error)}`))
+  here.placing.set(session, next)
+  void next.finally(() => {
+    if (here.placing.get(session) === next) here.placing.delete(session)
+  })
+  return next
+}
 
-export async function receiveMoved(capture: Capture, answer: Extract<Delivered, { readonly t: 'moved' }>, here: MoveHere): Promise<void> {
-  const session = answer.id.split('/')[0] ?? ''
-  const journal = journalOf(capture.db, session)
-  if (!('error' in answer) || here.moves.has(session) || journal === undefined) return
-  if ((await claimsOf(capture.relay, session)).get(session)?.id !== answer.from.id) return
-  here.moves.set(session, { session, to: capture.device.name, step: 'moving', line: '', keep: () => false })
+async function reconcile(capture: Capture, session: string, here: MoveHere): Promise<void> {
+  const { relay, device, roots } = capture
+  const placement = capture.holders.placementOf(session)
+  const moving = here.moves.get(session)
+  const isPaused = pausedSessions().includes(session)
+  const isHere = (id: string): boolean => id === '' || id === device.id
+  const id = session.slice(0, 8)
+  if (placement.device === device.id && !isHere(placement.wanted)) {
+    if (moving !== undefined && !isFinal(moving)) return
+    const target = (await devicesOf(relay)).get(placement.wanted)
+    if (target === undefined || !target.connected || target.removedAt !== undefined) return await want(relay, session, '', { error: `${target?.name ?? placement.wanted} is offline`, if: placement.wanted })
+    await drainTo(capture, session, target, here)
+    return
+  }
+  if (!isPaused) {
+    if (placement.wanted === device.id) await placeWanted(capture, session, placement, here)
+    return
+  }
+  if (moving !== undefined && !isFinal(moving) && moving.step !== 'moving') return
+  const to = moving?.to ?? 'The other machine'
+  if (!isHere(placement.device) && placement.wanted === '') {
+    await stopCopy(roots.claudeHome, session)
+    const took = moving === undefined || moving.handedAt === 0 ? '' : ` in ${((Date.now() - moving.handedAt) / 1000).toFixed(1)} s`
+    here.onStatusElsewhere(placement.device, session, 'idle')
+    return sayOn(moving, 'moved', `${(await devicesOf(relay)).get(placement.device)?.name ?? placement.device} restored ${id}${took} and runs it.`)
+  }
+  if (!isHere(placement.wanted)) {
+    if (!isHere(placement.device)) sayOn(moving, 'moving', `${to} took ${id} and restores it. Keep it here takes the session back.`)
+    return
+  }
+  const isTaken = !isHere(placement.device)
+  const line = isTaken
+    ? `${to} did not answer, so the session keeps running here.`
+    : placement.error === undefined
+      ? `Kept ${id} here, so it does not move to ${to}.`
+      : `${to} could not take the session: ${reasonOf(placement.error)}. It keeps running here.`
   try {
-    await takeClaim(capture.relay, session, { take: true })
-    await continueHere(capture, session, journal.tool, here)
-    await openHere(capture, session, here)
-    console.error(`${stamp()} ${answer.from.name} could not take ${session} in a move this program forgot, so ${capture.device.name} took it back and runs it: ${reasonOf(answer.error)}.`)
+    if (placement.device !== device.id) {
+      await takeClaim(relay, session, isTaken ? { take: true, if: { gone: true } } : { take: false })
+      await continueHere(capture, session, journalOf(capture.db, session)?.tool ?? 'claude', here)
+    }
+    sayOn(moving, 'failed', await resumedHere(capture, session, here, line))
+    if (placement.wanted !== '' || placement.error !== undefined) await want(relay, session, '', { if: placement.wanted })
   } catch (error) {
-    console.error(`${stamp()} ${answer.from.name} could not take ${session} in a move this program forgot, and ${capture.device.name} could not take it back: ${messageOf(error)}`)
-  } finally {
-    here.moves.delete(session)
+    if (!(error instanceof HeldElsewhere)) sayOn(moving, 'failed', `${line} anyhost could not take it back here: ${messageOf(error)}`)
   }
 }
 
-async function answerOnce(relay: Relay, known: Map<string, Reply | undefined>, asked: { readonly id: string; readonly from: { readonly name: string } }, work: () => Promise<Reply>, forgetMs = Infinity): Promise<void> {
-  const answer = (reply: Reply): void => {
-    if (!relay.send(reply)) console.error(`${stamp()} anyhost sent ${asked.from.name} no answer, as this machine is not connected to the relay.`)
+async function placeWanted(capture: Capture, session: string, placement: Placement, here: MoveHere): Promise<void> {
+  const { relay, device, roots } = capture
+  const spec = specOf(placement)
+  try {
+    if (placement.device !== device.id || (await statusOf(roots.claudeHome, session)) === undefined) {
+      if (spec?.kind === 'start') await startSession(capture, session, spec, here)
+      else await takeSession(capture, session, spec?.trusted ?? false, here)
+    }
+    await want(relay, session, '', { if: device.id })
+  } catch (error) {
+    if (error instanceof HeldElsewhere) return
+    console.error(`${stamp()} ${device.name} could not place ${session} here: ${messageOf(error)}`)
+    await Promise.all(relay.run([{ op: 'forget', session }, { op: 'want', session, device: '', error: messageOf(error), if: { wanted: device.id } }]))
   }
-  if (known.has(asked.id)) {
-    const before = known.get(asked.id)
-    if (before === undefined) return
-    console.error(`${stamp()} ${asked.from.name} asked again for its answer, as it may have missed it, so anyhost sends it again.`)
-    return answer(before)
-  }
-  known.set(asked.id, undefined)
-  const reply = await work()
-  known.set(asked.id, reply)
-  if (Number.isFinite(forgetMs)) setTimeout(() => known.delete(asked.id), forgetMs).unref()
-  answer(reply)
 }
 
-export const receiveMove = (capture: Capture, asked: Extract<Delivered, { readonly t: 'move' }>, here: MoveHere): Promise<void> =>
-  answerOnce(capture.relay, here.answers, asked, () => takeSession(capture, asked, here))
-
-async function takeSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'move' }>, here: MoveHere): Promise<Reply> {
+async function takeSession(capture: Capture, session: string, trusted: boolean, here: MoveHere): Promise<void> {
   const { device, roots } = capture
   let isOpened = false
   try {
-    if ((await statusOf(roots.claudeHome, asked.session)) !== undefined && (await claimsOf(capture.relay, asked.session)).get(asked.session)?.id === device.id) {
-      console.error(`${stamp()} ${asked.from.name} asked again for its move of ${asked.session}, which ${device.name} holds and runs, so anyhost answers that it moved.`)
-      return { t: 'moved', id: asked.id, to: asked.from.id }
-    }
-    console.error(`${stamp()} ${asked.from.name} moves ${asked.session} here.`)
-    await stopCopy(roots.claudeHome, asked.session)
-    const { session, cwd } = await restore(capture, asked.session, { take: true, if: { at: asked.claimedAt }, checkouts: here.checkouts, isMove: true })
-    if (asked.trusted) await trustHere(capture, cwd, `${asked.from.name} trusts the session's folder there`)
-    await openTerminal(cwd, session.id, await claudeOf(capture, session.id), await checkoutAt(cwd))
+    console.error(`${stamp()} ${device.name} takes ${session} over.`)
+    await stopCopy(roots.claudeHome, session)
+    const { session: listed, cwd } = await restore(capture, session, { take: true, if: { gone: true }, checkouts: here.checkouts, isMove: true })
+    if (trusted) await trustHere(capture, await trustToWrite(capture, cwd), "the machine it moved from trusts the session's folder")
+    const [tail, checkout] = await Promise.all([newestTail(capture, listed.id), checkoutAt(capture, listed.id, cwd)])
+    await openTerminal(cwd, listed.id, claudeOf(capture, listed.id, tail), checkout)
     isOpened = true
-    const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session.id), RUNNING_MS, here.onRecordsChange)
-    if (running === undefined) throw new Error(`Claude Code listed the session ${session.id.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start`)
-    await takeClaim(capture.relay, session.id, { take: false }).catch((error: unknown) => {
-      throw error instanceof HeldElsewhere ? new Error(`${error.holder.name} took the session back`) : error
-    })
-    console.error(`${stamp()} ${device.name} runs ${session.id} in a terminal of herdr-core in ${cwd}.`)
-    return { t: 'moved', id: asked.id, to: asked.from.id }
+    const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === listed.id), RUNNING_MS, here.onRecordsChange)
+    if (running === undefined) throw new Error(`Claude Code listed the session ${listed.id.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start`)
+    console.error(`${stamp()} ${device.name} runs ${listed.id} in a terminal of herdr-core in ${cwd}.`)
   } catch (error) {
-    console.error(`${stamp()} ${device.name} could not take ${asked.session} from ${asked.from.name}: ${messageOf(error)}`)
-    if (isOpened) await stopCopy(roots.claudeHome, asked.session).catch((failure: unknown) => console.error(`${stamp()} ${device.name} could not stop the copy it started of ${asked.session}: ${messageOf(failure)}`))
-    return { t: 'moved', id: asked.id, to: asked.from.id, error: messageOf(error) }
+    if (isOpened) await stopCopy(roots.claudeHome, session).catch((failure: unknown) => console.error(`${stamp()} ${device.name} could not stop the copy it started of ${session}: ${messageOf(failure)}`))
+    throw error
   }
 }
 
 export async function startNew(capture: Capture, machine: string, cwd: string, prompt: string, here: MoveHere, parent = ''): Promise<string> {
-  if (machine === '' || machine === capture.device.name) return await startIn(capture, cwd, prompt, here, { session: parent, machine: capture.device.name })
-  const target = await otherMachine(capture.relay, capture.device, machine, 'Run claude here.')
+  const { relay, device, holders } = capture
+  if (machine === '' || machine === device.name) return await startIn(capture, cwd, prompt, here, { session: parent, machine: device.name })
+  const target = await otherMachine(relay, device, machine, 'Run claude here.')
+  if (!target.connected) throw new Error(`${machine} is offline, so no session starts there.`)
   const { repo, folder: inside } = await checkoutOf(cwd)
   const branch = repo === '' ? '' : (await run(['git', '-C', cwd, 'branch', '--show-current'])).trim()
-  const trusted = await trusts(capture, cwd)
-  const answer = await ask(
-    capture.relay,
-    { t: 'start', id: crypto.randomUUID(), to: target.id, repo, branch, folder: repo === '' ? cwd : inside, trusted, prompt, sender: parent },
-    { keepsWaiting: async () => false },
-  )
-  if (answer.t === 'offline') throw new Error(`${machine} went offline before it answered. anyhost list shows whether a session started there.`)
-  if ('error' in answer) throw new Error(`${machine} could not start a session: ${reasonOf(answer.error)}.`)
-  return answer.session
+  const spec: StartSpec = { kind: 'start', from: { id: device.id, name: device.name }, repo, branch, folder: repo === '' ? cwd : inside, trusted: await trusts(capture, cwd), prompt, sender: parent }
+  const session = crypto.randomUUID()
+  return await new Promise<string>((resolve, reject) => {
+    const stop = (): void => {
+      here.placed.delete(placed)
+      clearInterval(watching)
+    }
+    const placed = (changed: string): void => {
+      const now = holders.placementOf(changed)
+      if (changed !== session || now.wanted !== '') return
+      stop()
+      if (now.error !== undefined) reject(new Error(`${machine} could not start a session: ${reasonOf(now.error)}.`))
+      else if (now.device === target.id) resolve(session)
+      else reject(new Error(`The start of a session on ${machine} was called off.`))
+    }
+    const watching = setInterval(() => {
+      void devicesOf(relay).then(async (devices) => {
+        if (devices.get(target.id)?.connected === true || !here.placed.has(placed)) return
+        stop()
+        await want(relay, session, '', { if: target.id })
+        reject(new Error(`${machine} went offline before it answered. anyhost list shows whether a session started there.`))
+      }, () => undefined)
+    }, CONNECTED_MS)
+    here.placed.add(placed)
+    want(relay, session, target.id, { spec }).catch((error: unknown) => {
+      stop()
+      reject(error)
+    })
+  })
 }
 
-export const receiveStart = (capture: Capture, asked: Extract<Delivered, { readonly t: 'start' }>, here: MoveHere): Promise<void> =>
-  answerOnce(capture.relay, here.answers, asked, () => startSession(capture, asked, here))
-
-async function startSession(capture: Capture, asked: Extract<Delivered, { readonly t: 'start' }>, here: MoveHere): Promise<Reply> {
+async function startSession(capture: Capture, session: string, spec: StartSpec, here: MoveHere): Promise<void> {
   const { relay, roots, device } = capture
-  try {
-    if ((await statusOf(roots.claudeHome, asked.id)) !== undefined || (await labelledTerminals(asked.id)).length > 0) {
-      console.error(`${stamp()} ${asked.from.name} asked again for the session ${asked.id} it started here, which runs, so anyhost answers that it started.`)
-      return { t: 'started', id: asked.id, to: asked.from.id, session: asked.id }
-    }
-    const writer = (await devicesOf(relay)).get(asked.from.id)?.roots
-    if (writer === undefined) throw new Error(`the relay knows no machine ${asked.from.name}`)
-    const place = asked.repo === '' ? { repo: '', repoFolder: '', cwd: asked.folder } : { repo: asked.repo, repoFolder: asked.folder, cwd: '' }
-    const cwd = await localFolder(capture, place, writer, here.checkouts)
-    await cloneMissing(place, cwd, roots.home, asked.branch)
-    await mkdir(cwd, { recursive: true })
-    if (asked.trusted) await trustHere(capture, cwd, `${asked.from.name} trusts the session's folder there`)
-    const session = await startIn(capture, cwd, asked.prompt, here, { session: asked.sender ?? '', machine: asked.from.name }, asked.id)
-    console.error(`${stamp()} ${device.name} started ${session} in ${cwd} for ${asked.from.name}.`)
-    return { t: 'started', id: asked.id, to: asked.from.id, session }
-  } catch (error) {
-    console.error(`${stamp()} ${device.name} could not start a session for ${asked.from.name}: ${messageOf(error)}`)
-    return { t: 'started', id: asked.id, to: asked.from.id, error: messageOf(error) }
-  }
+  if ((await statusOf(roots.claudeHome, session)) !== undefined || (await labelledTerminals(session)).length > 0) return
+  const writer = (await devicesOf(relay)).get(spec.from.id)?.roots
+  if (writer === undefined) throw new Error(`the relay knows no machine ${spec.from.name}`)
+  const place = spec.repo === '' ? { repo: '', repoFolder: '', cwd: spec.folder } : { repo: spec.repo, repoFolder: spec.folder, cwd: '' }
+  const cwd = await localFolder(capture, place, writer, here.checkouts)
+  await cloneMissing(place, cwd, roots.home, spec.branch)
+  await mkdir(cwd, { recursive: true })
+  if (spec.trusted) await trustHere(capture, await trustToWrite(capture, cwd), `${spec.from.name} trusts the session's folder there`)
+  await takeClaim(relay, session, { take: false })
+  await startIn(capture, cwd, spec.prompt, here, { session: spec.sender, machine: spec.from.name }, session)
+  console.error(`${stamp()} ${device.name} started ${session} in ${cwd} for ${spec.from.name}.`)
 }
 
 async function startIn(capture: Capture, cwd: string, prompt: string, here: MoveHere, parent: { readonly session: string; readonly machine: string }, session: string = crypto.randomUUID()): Promise<string> {
@@ -451,8 +474,8 @@ async function startIn(capture: Capture, cwd: string, prompt: string, here: Move
   }
   let isOpened = false
   try {
-    const isTrusted = await trusts(capture, cwd)
-    await openTerminal(cwd, session, claudeStart(['claude', '--session-id', session], false), await checkoutAt(cwd))
+    const [isTrusted, checkout] = await Promise.all([trusts(capture, cwd), checkoutAt(capture, session, cwd)])
+    await openTerminal(cwd, session, claudeStart(['claude', '--session-id', session], false), checkout)
     isOpened = true
     const running = whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session), isTrusted ? RUNNING_MS : TRUST_ANSWER_MS, here.onRecordsChange)
     if (!isTrusted) {
@@ -486,8 +509,9 @@ async function newestTranscript(capture: Capture, session: string): Promise<stri
   return found.sort((a, b) => b.at - a.at)[0]?.path
 }
 
-async function checkoutAt(cwd: string): Promise<string> {
-  const { repo, folder } = await checkoutOf(cwd)
+async function checkoutAt(capture: Capture, session: string, cwd: string): Promise<string> {
+  const row = capture.db.query<{ cwd: string; repo: string; repo_folder: string }, [string]>('select cwd, repo, repo_folder from sessions where id = ?').get(session)
+  const { repo, folder } = row?.cwd === cwd ? { repo: row.repo, folder: row.repo_folder } : await checkoutOf(cwd)
   return repo === '' ? '' : checkoutOfEntry({ cwd, repo, repoFolder: folder }, '')
 }
 
@@ -506,62 +530,87 @@ const tagged = (told: Tell, machine: string): string => {
 
 const labelledHere = async (session: string): Promise<string | undefined> => (hcPath() === undefined ? undefined : (await labelledTerminals(session))[0])
 
-async function claudeOf(capture: Capture, session: string): Promise<string[]> {
+async function newestTail(capture: Capture, session: string): Promise<string | undefined> {
   const transcript = await newestTranscript(capture, session)
-  if (transcript === undefined) throw new Error(`${session.slice(0, 8)} has no transcript on ${capture.device.name}, so anyhost resumes nothing and starts no new conversation in its place.`)
-  return claudeStart(resumeArgv(session, await resumedOf(transcript)), true)
+  return transcript === undefined ? undefined : await transcriptTailOf(transcript)
+}
+
+function claudeOf(capture: Capture, session: string, tail: string | undefined): string[] {
+  if (tail === undefined) throw new Error(`${session.slice(0, 8)} has no transcript on ${capture.device.name}, so anyhost resumes nothing and starts no new conversation in its place.`)
+  return claudeStart(resumeArgv(session, resumedOf(tail)), true)
 }
 
 const shellWord = (word: string): string => (/^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`)
 
 export async function resumeInPlace(capture: Capture, session: string, address: string): Promise<void> {
-  await sendTo(address, `exec ${(await claudeOf(capture, session)).map(shellWord).join(' ')}`)
+  await sendTo(address, `exec ${claudeOf(capture, session, await newestTail(capture, session)).map(shellWord).join(' ')}`)
+}
+
+class RunsOutside extends Error {
+  constructor(capture: Capture, session: string) {
+    super(`${session.slice(0, 8)} runs on ${capture.device.name} outside herdr-core, as in tmux, so anyhost cannot type into it or read it, and leaves it where the person runs it. Opening it in the Herdr app moves it into herdr-core.`)
+  }
 }
 
 async function terminalHere(capture: Capture, session: string): Promise<string | undefined> {
   const address = await labelledHere(session)
   if (address !== undefined) return address
   if ((await statusOf(capture.roots.claudeHome, session)) === undefined) return undefined
-  throw new Error(`${session.slice(0, 8)} runs on ${capture.device.name} outside herdr-core, as in tmux, so anyhost cannot type into it or read it, and leaves it where the person runs it. Opening it in the Herdr app moves it into herdr-core.`)
+  throw new RunsOutside(capture, session)
 }
 
-function terminalOf(capture: Capture, session: string, here: MoveHere): Promise<string> {
+function terminalOf(capture: Capture, session: string, here: MoveHere, { movesCopy }: { readonly movesCopy: boolean }): Promise<string> {
+  here.touched.set(session, Date.now())
   const opening = here.opening.get(session)
-  if (opening !== undefined) return opening
-  const opened = placeInTerminal(capture, session, here).finally(() => here.opening.delete(session))
+  const movedLater = (error: unknown): Promise<string> => {
+    if (error instanceof RunsOutside) return terminalOf(capture, session, here, { movesCopy })
+    throw error
+  }
+  if (opening !== undefined) return movesCopy ? opening.catch(movedLater) : opening
+  const opened = placeInTerminal(capture, session, here, movesCopy).finally(() => here.opening.delete(session))
   here.opening.set(session, opened)
   return opened
 }
 
-async function placeInTerminal(capture: Capture, session: string, here: MoveHere): Promise<string> {
-  const ran = await terminalHere(capture, session).catch(() => undefined)
-  if (ran !== undefined) return ran
-  const cwd = await placeHere(capture, session, here)
-  return await openTerminal(cwd, session, await claudeOf(capture, session), await checkoutAt(cwd))
+type LastRun = { readonly tail: string | undefined; readonly cwd: string; readonly trust: TrustRecords | undefined }
+
+async function lastRunHere(capture: Capture, session: string): Promise<LastRun> {
+  const tail = await newestTail(capture, session)
+  const known = tail === undefined ? '' : lastFolderOf(tail) || workingFolderOf(capture.db, session)
+  const cwd = known !== '' && (await stat(known).then((found) => found.isDirectory(), () => false)) ? known : ''
+  return { tail, cwd, trust: cwd === '' ? undefined : await trustToWrite(capture, cwd) }
 }
 
-async function placeHere(capture: Capture, session: string, here: MoveHere): Promise<string> {
+async function placeInTerminal(capture: Capture, session: string, here: MoveHere, movesCopy: boolean): Promise<string> {
+  const reading = Promise.all([statusOf(capture.roots.claudeHome, session), lastRunHere(capture, session)])
+  const ran = await labelledHere(session).catch(() => undefined)
+  if (ran !== undefined) {
+    void reading.catch(() => undefined)
+    return ran
+  }
+  const [status, run] = await reading
+  if (status !== undefined && !movesCopy) throw new RunsOutside(capture, session)
+  const placed = await placeHere(capture, session, here, status, run)
+  const argv = claudeOf(capture, session, placed.tail)
+  const [checkout] = await Promise.all([checkoutAt(capture, session, placed.cwd), trustHere(capture, placed.trust, 'the session ran there')])
+  return await openTerminal(placed.cwd, session, argv, checkout)
+}
+
+async function placeHere(capture: Capture, session: string, here: MoveHere, status: AgentStatus | undefined, read: LastRun): Promise<LastRun> {
   const { db, roots } = capture
   const id = session.slice(0, 8)
   if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost runs Claude Code sessions in herdr-core, and ${id} is a Codex session.`)
-  if ((await statusOf(roots.claudeHome, session)) !== undefined) {
+  if (status !== undefined) {
     await untilSettledIdle(capture, session, here)
     await stopCopy(roots.claudeHome, session)
   }
-  const transcript = await newestTranscript(capture, session)
+  const run = status === undefined ? read : await lastRunHere(capture, session)
   const holder = capture.holders.known().get(session)
-  const known = transcript === undefined ? '' : (await lastFolderOf(transcript)) || workingFolderOf(db, session)
-  const isHeld = transcript !== undefined && (holder === undefined || holder === capture.device.id)
-  const isThere = known !== '' && (await stat(known).then((found) => found.isDirectory(), () => false))
-  const restored = async (): Promise<string> => {
-    const placed = await restore(capture, session, { take: true, if: { gone: true }, checkouts: here.checkouts }).catch((error: unknown) => {
-      throw error instanceof HeldElsewhere ? new Error(`${error.holder.name} runs ${id} and is connected, so ${id} opens there and not on ${capture.device.name}.`) : error
-    })
-    return placed.cwd
-  }
-  if (!isHeld || !isThere) return await restored()
-  await trustHere(capture, known, 'the session ran there')
-  return known
+  if (run.tail !== undefined && run.cwd !== '' && (holder === undefined || holder === capture.device.id)) return run
+  const placed = await restore(capture, session, { take: true, if: { gone: true }, checkouts: here.checkouts }).catch((error: unknown) => {
+    throw error instanceof HeldElsewhere ? new Error(`${error.holder.name} runs ${id} and is connected, so ${id} opens there and not on ${capture.device.name}.`) : error
+  })
+  return { tail: await newestTail(capture, session), cwd: placed.cwd, trust: undefined }
 }
 
 async function tellHere(capture: Capture, session: string, told: Tell, here: MoveHere, sender = capture.device.name): Promise<Omit<Told, 'machine' | 'session'>> {
@@ -577,7 +626,8 @@ async function tellHere(capture: Capture, session: string, told: Tell, here: Mov
     return { status: (await activityOf(capture, here.activity, session)) ?? 'idle', screen: running === undefined ? '' : await readTerminal(running, 0) }
   }
   const isRead = told.text === '' && told.keys.length === 0
-  const address = isRead ? await terminalHere(capture, session) : ((await terminalHere(capture, session)) ?? (await terminalOf(capture, session, here)))
+  if (!isRead) here.touched.set(session, Date.now())
+  const address = isRead ? await terminalHere(capture, session) : await terminalOf(capture, session, here, { movesCopy: false })
   if (address === undefined) throw new Error(`${id} runs in no terminal of herdr-core on ${device.name}. Tell it something to start it again.`)
   if (told.keys.length > 0) await pressKeys(address, told.keys)
   if (told.text !== '') {
@@ -592,12 +642,13 @@ export async function tell(capture: Capture, asked: string, told: Tell, here: Mo
   const session = await sessionOf(capture, asked)
   const holder = (await claimsOf(relay, session)).get(session)
   if (holder === undefined || holder.id === device.id) return { machine: device.name, session, ...(await tellHere(capture, session, told, here)) }
-  const answer = await ask(relay, { t: 'tell', id: crypto.randomUUID(), to: holder.id, session, ...told }, { signal: AbortSignal.timeout(TELL_MS), keepsWaiting: async () => false }).catch((error: unknown) => {
+  const answer = await ask(relay, { t: 'tell', id: crypto.randomUUID(), to: holder.id, session, ...told }, AbortSignal.timeout(TELL_MS)).catch((error: unknown) => {
     if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.4.0 there does not answer at all.`)
     throw error
   })
   if (answer.t === 'offline') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, is offline. open_agent continues it on another machine.`)
   if ('error' in answer) throw new Error(`${holder.name}: ${answer.error}`)
+  here.onStatusElsewhere(holder.id, session, answer.status)
   return { machine: holder.name, session, status: answer.status, screen: answer.screen, ...(answer.messages === undefined ? {} : { messages: answer.messages }), ...(answer.terminal === undefined ? {} : { terminal: answer.terminal }) }
 }
 
@@ -605,7 +656,7 @@ export async function showAgent(capture: Capture, asked: string, place: Place, h
   const session = await sessionOf(capture, asked)
   const holder = (await claimsOf(capture.relay, session)).get(session)
   if (holder === undefined || holder.id === capture.device.id) {
-    const terminal = await terminalOf(capture, session, here)
+    const terminal = await terminalOf(capture, session, here, { movesCopy: true })
     await showTerminal(session, terminal, place)
     return { session, machine: capture.device.name, terminal }
   }
@@ -646,32 +697,33 @@ export function noteWaiting(capture: Capture, here: MoveHere): () => void {
   return readAgain
 }
 
-export const receiveTell = (capture: Capture, asked: Extract<Delivered, { readonly t: 'tell' }>, here: MoveHere): Promise<void> =>
-  answerOnce(
+export const receiveTell = async (capture: Capture, asked: Extract<Delivered, { readonly t: 'tell' }>, here: MoveHere): Promise<void> =>
+  replyTo(
     capture.relay,
-    here.answers,
     asked,
-    () =>
-      tellHere(capture, asked.session, asked, here, asked.from.name).then(
-        ({ status, screen, messages, terminal }): Reply => ({ t: 'told', id: asked.id, to: asked.from.id, status, screen, ...(messages === undefined ? {} : { messages }), ...(terminal === undefined ? {} : { terminal }) }),
-        (error: unknown): Reply => ({ t: 'told', id: asked.id, to: asked.from.id, error: messageOf(error) }),
-      ),
-    FORGET_MS,
+    await tellHere(capture, asked.session, asked, here, asked.from.name).then(
+      ({ status, screen, messages, terminal }): Reply => ({ t: 'told', id: asked.id, to: asked.from.id, status, screen, ...(messages === undefined ? {} : { messages }), ...(terminal === undefined ? {} : { terminal }) }),
+      (error: unknown): Reply => ({ t: 'told', id: asked.id, to: asked.from.id, error: messageOf(error) }),
+    ),
   )
 
-export const statusesHere = async (capture: Capture, activity: Activity): Promise<Shown> => activity.shownOf(await recordedSessions(capture.roots.claudeHome))
+export const statusesHere = async (capture: Capture, activity: Activity): Promise<Shown> =>
+  activity.shownOf(await recordedSessions(capture.roots.claudeHome), async (session) => {
+    const transcript = await newestTranscript(capture, session)
+    return transcript === undefined ? undefined : await lastTurnOf(transcript)
+  })
 
 export const activityOf = async (capture: Capture, activity: Activity, session: string): Promise<AgentStatus | undefined> => activity.of((await recordedSessions(capture.roots.claudeHome)).find((record) => record.sessionId === session))
 
-export const receiveList = (capture: Capture, asked: Extract<Delivered, { readonly t: 'list' }>, here: MoveHere): Promise<void> =>
-  answerOnce(capture.relay, here.answers, asked, async () => ({ t: 'listed', id: asked.id, to: asked.from.id, ...(await statusesHere(capture, here.activity)) }), FORGET_MS)
+export const receiveList = async (capture: Capture, asked: Extract<Delivered, { readonly t: 'list' }>, here: MoveHere): Promise<void> =>
+  replyTo(capture.relay, asked, { t: 'listed', id: asked.id, to: asked.from.id, ...(await statusesHere(capture, here.activity)) })
 
 export async function statusesElsewhere(capture: Capture): Promise<Map<string, Shown>> {
   const { relay, device } = capture
   const others = [...(await devicesOf(relay)).values()].filter((machine) => machine.id !== device.id && machine.connected && machine.removedAt === undefined)
   const answers = await Promise.all(
     others.map((machine) =>
-      ask(relay, { t: 'list', id: crypto.randomUUID(), to: machine.id }, { signal: AbortSignal.timeout(LIST_MS), keepsWaiting: async () => false }).then(
+      ask(relay, { t: 'list', id: crypto.randomUUID(), to: machine.id }, AbortSignal.timeout(LIST_MS)).then(
         (answer) => (answer.t === 'listed' ? [[machine.id, { statuses: { ...answer.statuses }, since: { ...answer.since }, background: [...(answer.background ?? [])] }] as const] : []),
         () => [],
       ),
@@ -682,7 +734,7 @@ export async function statusesElsewhere(capture: Capture): Promise<Map<string, S
 
 export async function openHere(capture: Capture, asked: string, here: MoveHere): Promise<{ readonly session: string; readonly terminal: string }> {
   const session = await sessionOf(capture, asked)
-  return { session, terminal: await terminalOf(capture, session, here) }
+  return { session, terminal: await terminalOf(capture, session, here, { movesCopy: true }) }
 }
 
 export async function deleteAgent(capture: Capture, asked: string, here: MoveHere): Promise<string> {
@@ -690,7 +742,7 @@ export async function deleteAgent(capture: Capture, asked: string, here: MoveHer
   const session = await sessionOf(capture, asked)
   const holder = (await claimsOf(relay, session)).get(session)
   if (holder === undefined || holder.id === device.id) return await deleteHere(capture, session, here)
-  const answer = await ask(relay, { t: 'delete', id: crypto.randomUUID(), to: holder.id, session }, { signal: AbortSignal.timeout(TELL_MS), keepsWaiting: async () => false }).catch((error: unknown) => {
+  const answer = await ask(relay, { t: 'delete', id: crypto.randomUUID(), to: holder.id, session }, AbortSignal.timeout(TELL_MS)).catch((error: unknown) => {
     if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.7.3 there does not answer at all.`)
     throw error
   })
@@ -699,17 +751,14 @@ export async function deleteAgent(capture: Capture, asked: string, here: MoveHer
   return answer.session
 }
 
-export const receiveDelete = (capture: Capture, asked: Extract<Delivered, { readonly t: 'delete' }>, here: MoveHere): Promise<void> =>
-  answerOnce(
+export const receiveDelete = async (capture: Capture, asked: Extract<Delivered, { readonly t: 'delete' }>, here: MoveHere): Promise<void> =>
+  replyTo(
     capture.relay,
-    here.answers,
     asked,
-    () =>
-      deleteHere(capture, asked.session, here).then(
-        (session): Reply => ({ t: 'deleted', id: asked.id, to: asked.from.id, session }),
-        (error: unknown): Reply => ({ t: 'deleted', id: asked.id, to: asked.from.id, error: messageOf(error) }),
-      ),
-    FORGET_MS,
+    await deleteHere(capture, asked.session, here).then(
+      (session): Reply => ({ t: 'deleted', id: asked.id, to: asked.from.id, session }),
+      (error: unknown): Reply => ({ t: 'deleted', id: asked.id, to: asked.from.id, error: messageOf(error) }),
+    ),
   )
 
 async function deleteHere(capture: Capture, asked: string, here: MoveHere): Promise<string> {
@@ -741,7 +790,7 @@ export async function forkAgent(capture: Capture, asked: string, message: string
   const source = await sessionOf(capture, asked)
   const holder = (await claimsOf(relay, source)).get(source)
   if (holder === undefined || holder.id === device.id) return { session: await forkHere(capture, source, message, here), machine: device.name }
-  const answer = await ask(relay, { t: 'fork', id: crypto.randomUUID(), to: holder.id, session: source, message }, { signal: AbortSignal.timeout(TELL_MS), keepsWaiting: async () => false }).catch((error: unknown) => {
+  const answer = await ask(relay, { t: 'fork', id: crypto.randomUUID(), to: holder.id, session: source, message }, AbortSignal.timeout(TELL_MS)).catch((error: unknown) => {
     if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${source.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.9.0 there does not answer at all.`)
     throw error
   })
@@ -750,17 +799,14 @@ export async function forkAgent(capture: Capture, asked: string, message: string
   return { session: answer.session, machine: holder.name }
 }
 
-export const receiveFork = (capture: Capture, asked: Extract<Delivered, { readonly t: 'fork' }>, here: MoveHere): Promise<void> =>
-  answerOnce(
+export const receiveFork = async (capture: Capture, asked: Extract<Delivered, { readonly t: 'fork' }>, here: MoveHere): Promise<void> =>
+  replyTo(
     capture.relay,
-    here.answers,
     asked,
-    () =>
-      forkHere(capture, asked.session, asked.message, here).then(
-        (session): Reply => ({ t: 'forked', id: asked.id, to: asked.from.id, session }),
-        (error: unknown): Reply => ({ t: 'forked', id: asked.id, to: asked.from.id, error: messageOf(error) }),
-      ),
-    FORGET_MS,
+    await forkHere(capture, asked.session, asked.message, here).then(
+      (session): Reply => ({ t: 'forked', id: asked.id, to: asked.from.id, session }),
+      (error: unknown): Reply => ({ t: 'forked', id: asked.id, to: asked.from.id, error: messageOf(error) }),
+    ),
   )
 
 async function forkHere(capture: Capture, source: string, message: string, here: MoveHere): Promise<string> {
@@ -786,11 +832,11 @@ async function forkHere(capture: Capture, source: string, message: string, here:
 }
 
 export async function receiveReleased(capture: Capture, session: string, holder: string, here: MoveHere): Promise<void> {
-  const moving = here.moves.get(session)
-  if (moving !== undefined && moving.step !== 'moved' && moving.step !== 'failed') return
-  const { db, device, roots } = capture
+  if (!isFinal(here.moves.get(session)) || pausedSessions().includes(session)) return
+  const { device, roots } = capture
   await whenSessions(roots.claudeHome, (sessions) => (sessions.find((entry) => entry.sessionId === session)?.status === 'busy' ? undefined : true), Infinity, here.onRecordsChange)
-  if ((journalOf(db, session)?.holder ?? '') === '') return
+  const held = capture.holders.known().get(session)
+  if (held === undefined || held === device.id) return
   await stopCopy(roots.claudeHome, session).then(
     () => console.error(`${stamp()} ${holder} took ${session} over, so ${device.name} stopped its copy here.`),
     (error: unknown) => console.error(`${stamp()} ${holder} took ${session} over, and ${device.name} could not stop its copy: ${messageOf(error)}`),

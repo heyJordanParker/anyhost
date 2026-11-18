@@ -31,7 +31,6 @@ import {
   type Op,
   type Refusal,
   type TakeCondition,
-  type Released,
   type Result,
   type Roots,
   type Welcome,
@@ -67,10 +66,9 @@ const SCHEMA = `
 create table if not exists devices (id text primary key, name text not null, os text not null, arch text not null,
   roots text not null, token_sha256 text unique, joined_at integer not null, seen_at integer not null, removed_at integer, program text not null default '');
 create table if not exists invites (code_sha256 text primary key, made_by text, expires_at integer, used_by text, used_at integer);
-create table if not exists claims (session text primary key, device text not null, at integer not null, changed integer not null default 0);
-create table if not exists waiting (id integer primary key, device text not null, session text not null, taker text not null, message text not null, at integer not null);
-create index if not exists waiting_by_session on waiting (session, taker);
-create index if not exists waiting_by_device on waiting (device);
+create table if not exists claims (session text primary key, device text not null, changed integer not null default 0,
+  wanted text not null default '', spec text not null default '', error text not null default '');
+drop table if exists waiting;
 create table if not exists meta (key text primary key, value text not null);`
 
 const CHANGES = `
@@ -79,7 +77,6 @@ insert into meta (key, value) select 'changed', coalesce(max(changed), 0) from c
 
 const IMPORT_READS = 50
 const HEAVY_ROWS = 100
-const HEARD_MS = 1000
 const INVITE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 const encoder = new TextEncoder()
@@ -107,7 +104,16 @@ async function sha256(text: string): Promise<string> {
 }
 
 const randomBytes = (size: number): Uint8Array => crypto.getRandomValues(new Uint8Array(size))
-const hearingKey = (holder: string, session: string, taker: string): string => JSON.stringify([holder, session, taker])
+type ClaimRow = { session: string; device: string; changed: number; wanted: string; spec: string; error: string }
+const claimedOf = ({ session, device, changed, wanted, spec, error }: ClaimRow): Claimed => ({
+  t: 'claimed',
+  changed,
+  session,
+  device,
+  wanted,
+  ...(spec === '' ? {} : { spec: JSON.parse(spec) as Readonly<Record<string, unknown>> }),
+  ...(error === '' ? {} : { error }),
+})
 const base64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
 
 function inviteCode(): string {
@@ -173,7 +179,6 @@ export class Pool extends DurableObject<Env> {
   readonly #sql: Sql
   readonly #writes = new Map<string, Set<Promise<void>>>()
   readonly #heardAt = new WeakMap<WebSocket, number>()
-  readonly #hearing = new Map<string, Set<() => void>>()
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -184,10 +189,13 @@ export class Pool extends DurableObject<Env> {
 
   async #start(): Promise<void> {
     this.#sql.exec(SCHEMA)
-    if (this.#sql.exec("select name from pragma_table_info('claims') where name = 'changed'").toArray().length === 0) {
+    const claimColumns = new Set(this.#sql.exec<{ name: string }>("select name from pragma_table_info('claims')").toArray().map(({ name }) => name))
+    if (!claimColumns.has('changed')) {
       this.#sql.exec('alter table claims add column changed integer not null default 0')
       this.#sql.exec('update claims set changed = rowid')
     }
+    for (const column of ['wanted', 'spec', 'error']) if (!claimColumns.has(column)) this.#sql.exec(`alter table claims add column ${column} text not null default ''`)
+    if (claimColumns.has('at')) this.#sql.exec('alter table claims drop column at')
     if (this.#sql.exec("select name from pragma_table_info('devices') where name = 'program'").toArray().length === 0) {
       this.#sql.exec("alter table devices add column program text not null default ''")
     }
@@ -235,9 +243,9 @@ export class Pool extends DurableObject<Env> {
       return true
     })
     await importEach('claims/', (session, record) => {
-      const { device, at } = record
-      if (!isText(device) || !isText(at) || Number.isNaN(Date.parse(at))) return false
-      if (this.#sql.exec('select session from claims where session = ?', session).toArray().length === 0) this.#setHolder(session, device, Date.parse(at))
+      const { device } = record
+      if (!isText(device)) return false
+      if (this.#sql.exec('select session from claims where session = ?', session).toArray().length === 0) this.#writeClaim(session, { device })
       return true
     })
     for (let at = 0; at < imported.length; at += MAX_KEYS) await this.env.BUCKET.delete(imported.slice(at, at + MAX_KEYS))
@@ -260,17 +268,20 @@ export class Pool extends DurableObject<Env> {
     return row === undefined ? undefined : { id: row.id, name: row.name ?? row.id }
   }
 
-  #setHolder(session: string, device: string, at: number): void {
+  #writeClaim(session: string, change: Partial<Pick<ClaimRow, 'device' | 'wanted' | 'spec' | 'error'>>): void {
     const changed = Number(this.#sql.exec<{ value: string }>("update meta set value = value + 1 where key = 'changed' returning value").toArray()[0]?.value)
+    const before = this.#sql.exec<ClaimRow>('select * from claims where session = ?', session).toArray()[0] ?? { session, device: '', changed, wanted: '', spec: '', error: '' }
+    const row: ClaimRow = { ...before, ...change, changed }
     this.#sql.exec(
-      'insert into claims (session, device, at, changed) values (?, ?, ?, ?) on conflict (session) do update set device = excluded.device, at = excluded.at, changed = excluded.changed',
+      'insert into claims (session, device, changed, wanted, spec, error) values (?, ?, ?, ?, ?, ?) on conflict (session) do update set device = excluded.device, changed = excluded.changed, wanted = excluded.wanted, spec = excluded.spec, error = excluded.error',
       session,
-      device,
-      at,
+      row.device,
       changed,
+      row.wanted,
+      row.spec,
+      row.error,
     )
-    const claimed: Claimed = { t: 'claimed', changed, session, device }
-    this.#deliver('every machine', JSON.stringify(claimed), this.ctx.getWebSockets())
+    this.#deliver('every machine', JSON.stringify(claimedOf(row)), this.ctx.getWebSockets())
   }
 
   #liveOtherThan(id: string, name: string): string | undefined {
@@ -284,7 +295,7 @@ export class Pool extends DurableObject<Env> {
   #startWrite(device: DeviceRef, session: string): { readonly holder: DeviceRef } | { readonly done: () => void } {
     const held = this.#holderOf(session)
     if (held !== undefined && held.id !== device.id) return { holder: held }
-    if (held === undefined) this.#setHolder(session, device.id, Date.now())
+    if (held === undefined) this.#writeClaim(session, { device: device.id })
     const writes = this.#writes.get(session) ?? new Set()
     this.#writes.set(session, writes)
     let done = (): void => undefined
@@ -300,12 +311,14 @@ export class Pool extends DurableObject<Env> {
   }
 
   #isLive(socket: WebSocket): boolean {
+    if (socket.readyState !== WebSocket.OPEN) return false
     const pingedAt = this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0
     const { connectedAt } = socket.deserializeAttachment() as Attachment
     return Date.now() - Math.max(this.#heardAt.get(socket) ?? 0, pingedAt, connectedAt) <= LIVE_MS
   }
 
   #deliver(device: string, message: string | Uint8Array, sockets = this.ctx.getWebSockets(device)): boolean {
+    for (const socket of sockets.filter((socket) => !this.#isLive(socket))) socket.close(1000, `The relay heard nothing on this socket for ${LIVE_MS / 1000} seconds`)
     const live = sockets.filter((socket) => this.#isLive(socket))
     for (const socket of live) {
       try {
@@ -395,13 +408,13 @@ export class Pool extends DurableObject<Env> {
     this.#sql.exec('update devices set name = ?, roots = ?, seen_at = ? where id = ?', name, JSON.stringify(roots), now, row.id)
     this.ctx.acceptWebSocket(server, [row.id])
     server.serializeAttachment({ device: row.id, name, origin: new URL(request.url).origin, connectedAt: now } satisfies Attachment)
-    const waiting = this.#sql.exec<{ message: string }>('select message from waiting where device = ? order by id', row.id).toArray()
-    const welcome: Welcome = { t: 'welcome', ...healthOf(this.env), device: { id: row.id, name }, waiting: waiting.map(({ message }) => JSON.parse(message) as Released), changed: this.#changed() }
+    const welcome: Welcome = { t: 'welcome', ...healthOf(this.env), device: { id: row.id, name }, changed: this.#changed() }
     server.send(JSON.stringify(welcome))
     return opened
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    if (ws.readyState !== WebSocket.OPEN) return
     this.#heardAt.set(ws, Date.now())
     if (typeof message === 'string') return this.#control(ws, message)
     const bytes = new Uint8Array(message)
@@ -429,12 +442,7 @@ export class Pool extends DurableObject<Env> {
     const own = ws.deserializeAttachment() as Attachment
     const from = { id: own.device, name: own.name }
     const { t, to } = message
-    if (t === 'welcome' || t === 'released' || t === 'offline' || t === 'invalid') return invalid(`Only the relay sends ${t}.`)
-    if (t === 'heard') {
-      const { session } = message
-      if (!isText(session) || !isText(to)) return invalid('A heard names the session of the released it answers, and in to the machine that took it.')
-      return this.#heard(own.device, session, to)
-    }
+    if (t === 'welcome' || t === 'claimed' || t === 'offline' || t === 'invalid') return invalid(`Only the relay sends ${t}.`)
     if (!isText(to)) return invalid(`A ${t} message names the machine it goes to in to.`)
     if (!this.#deliver(to, JSON.stringify({ ...message, from }))) ws.send(JSON.stringify({ t: 'offline', ...('id' in message ? { id: message['id'] } : {}), to }))
   }
@@ -536,8 +544,19 @@ export class Pool extends DurableObject<Env> {
       case 'claim': {
         if (!isText(op.session) || typeof op.take !== 'boolean') return invalid('A claim names its session and whether it takes it from another machine.')
         const condition: unknown = op.if
-        if (condition !== undefined && !(isRecord(condition) && (isText(condition['at']) || condition['gone'] === true))) return invalid('A claim\'s if is {"at":"<the at of the claim it takes>"} or {"gone":true}.')
+        if (condition !== undefined && !(isRecord(condition) && condition['gone'] === true)) return invalid('A claim\'s if is {"gone":true}.')
         return await this.#claim(device, op.session, op.take, op.if)
+      }
+      case 'want': {
+        if (!isText(op.session) || typeof op.device !== 'string') return invalid('A want names its session and the machine it wants it on in device, or "" for none.')
+        if (op.spec !== undefined && !isRecord(op.spec)) return invalid('A want\'s spec is a JSON object.')
+        if (op.error !== undefined && typeof op.error !== 'string') return invalid('A want\'s error is a text.')
+        const unless: unknown = op.if
+        if (unless !== undefined && !(isRecord(unless) && typeof unless['wanted'] === 'string')) return invalid('A want\'s if is {"wanted":"<the machine it wants the session on now>"}.')
+        const wanted = this.#sql.exec<{ wanted: string }>('select wanted from claims where session = ?', op.session).toArray()[0]?.wanted ?? ''
+        if (op.if !== undefined && op.if.wanted !== wanted) return { status: 409, wanted }
+        this.#writeClaim(op.session, { wanted: op.device, spec: op.spec === undefined ? '' : JSON.stringify(op.spec), error: op.error ?? '' })
+        return { status: 200 }
       }
       case 'claims': {
         if (op.prefix !== undefined && typeof op.prefix !== 'string') return invalid('A claims names the start of the sessions it asks for in prefix.')
@@ -551,16 +570,15 @@ export class Pool extends DurableObject<Env> {
       }
       case 'changes': {
         if (!Number.isInteger(op.since) || op.since < 0) return invalid('A changes names in since the last change number it holds.')
-        const rows = this.#sql.exec<{ session: string; device: string; changed: number }>('select session, device, changed from claims where changed > ? order by changed limit ?', op.since, MAX_KEYS).toArray()
-        return { status: 200, changes: rows.map(({ session, device: holder, changed }) => ({ t: 'claimed', changed, session, device: holder }) satisfies Claimed), last: this.#changed() }
+        const rows = this.#sql.exec<ClaimRow>('select * from claims where changed > ? order by changed limit ?', op.since, MAX_KEYS).toArray()
+        return { status: 200, changes: rows.map(claimedOf), last: this.#changed() }
       }
       case 'forget': {
         if (!isText(op.session)) return invalid('A forget names its session.')
         const held = this.#holderOf(op.session)
         if (held === undefined) return { status: 200 }
         if (held.id !== device.id) return { status: 409, holder: held }
-        this.#sql.exec('delete from waiting where session = ?', op.session)
-        this.#setHolder(op.session, '', Date.now())
+        this.#writeClaim(op.session, { device: '' })
         return { status: 200 }
       }
       case 'devices': {
@@ -590,7 +608,6 @@ export class Pool extends DurableObject<Env> {
         if (row === undefined) return { status: 404, error: 'unknown_device', message: `No machine with the id ${op.device} is joined.` }
         if (row.removed_at !== null) return { status: 200 }
         this.#sql.exec('update devices set removed_at = ? where id = ?', Date.now(), op.device)
-        this.#sql.exec('delete from waiting where device = ?', op.device)
         for (const socket of this.ctx.getWebSockets(op.device)) socket.close(CLOSE_REMOVED, REMOVED_REASON)
         return { status: 200 }
       }
@@ -601,64 +618,17 @@ export class Pool extends DurableObject<Env> {
 
   async #claim(device: DeviceRef, session: string, take: boolean, condition?: TakeCondition): Promise<Result> {
     const held = this.#holderOf(session)
-    const before = this.#sql.exec<{ at: number }>('select at from claims where session = ?', session).toArray()[0]?.at
-    const isRefused = (holder: DeviceRef): boolean => {
-      if (!take || condition === undefined) return !take
-      if ('at' in condition) return iso(before ?? 0) !== condition.at
-      return this.ctx.getWebSockets(holder.id).some((socket) => this.#isLive(socket))
-    }
-    if (held !== undefined && held.id !== device.id && isRefused(held)) return { status: 409, holder: held }
-    const isKept = held?.id === device.id && !take
-    const at = isKept && before !== undefined ? before : Math.max(Date.now(), (before ?? 0) + 1)
-    if (!isKept) this.#setHolder(session, device.id, at)
-    this.#sql.exec('delete from waiting where device = ? and session = ?', device.id, session)
-    if (held !== undefined && held.id !== device.id) {
-      const released = JSON.stringify({ t: 'released', session, to: device, at: iso(at) } satisfies Released)
-      this.#sql.exec('insert into waiting (device, session, taker, message, at) values (?, ?, ?, ?, ?)', held.id, session, device.id, released, at)
-      this.#deliver(held.id, released)
-    }
-    if (!take) return { status: 200, told: true, at: iso(at) }
-    await Promise.all([...(this.#writes.get(session) ?? [])])
-    let untold = this.#untold(session, device.id)
-    if (untold !== undefined && this.ctx.getWebSockets(untold.id).some((socket) => this.#isLive(socket))) {
-      await this.#heardWithin(untold.id, session, device.id)
-      untold = this.#untold(session, device.id)
-    }
-    return untold === undefined ? { status: 200, told: true, at: iso(at) } : { status: 200, previous: untold, told: false, at: iso(at) }
+    const isTaken = held !== undefined && held.id !== device.id
+    const isLive = isTaken && this.ctx.getWebSockets(held.id).some((socket) => this.#isLive(socket))
+    if (isTaken && (!take || (condition !== undefined && isLive))) return { status: 409, holder: held }
+    if (held?.id !== device.id || take) this.#writeClaim(session, { device: device.id })
+    if (!take) return { status: 200, told: true }
+    await Promise.all(this.#writes.get(session) ?? [])
+    const isUntold = isTaken && !isLive && this.#sql.exec('select id from devices where id = ? and removed_at is null', held.id).toArray().length > 0
+    return isUntold ? { status: 200, previous: held, told: false } : { status: 200, told: true }
   }
 
   #changed(): number {
     return Number(this.#sql.exec<{ value: string }>("select value from meta where key = 'changed'").toArray()[0]?.value ?? 0)
-  }
-
-  #untold(session: string, taker: string): DeviceRef | undefined {
-    return this.#sql
-      .exec<{ id: string; name: string }>(
-        "select waiting.device as id, devices.name from waiting join devices on devices.id = waiting.device where waiting.session = ? and waiting.taker = ? and devices.removed_at is null",
-        session,
-        taker,
-      )
-      .toArray()[0]
-  }
-
-  #heardWithin(holder: string, session: string, taker: string): Promise<void> {
-    const key = hearingKey(holder, session, taker)
-    const waiters = this.#hearing.get(key) ?? new Set()
-    this.#hearing.set(key, waiters)
-    return new Promise((resolve) => {
-      const done = (): void => {
-        clearTimeout(late)
-        waiters.delete(done)
-        if (waiters.size === 0) this.#hearing.delete(key)
-        resolve()
-      }
-      const late = setTimeout(done, HEARD_MS)
-      waiters.add(done)
-    })
-  }
-
-  #heard(holder: string, session: string, taker: string): void {
-    this.#sql.exec('delete from waiting where device = ? and session = ? and taker = ?', holder, session, taker)
-    for (const done of [...(this.#hearing.get(hearingKey(holder, session, taker)) ?? [])]) done()
   }
 }

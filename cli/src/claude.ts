@@ -1,5 +1,5 @@
 import { dlopen, FFIType } from 'bun:ffi'
-import { readdirSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentStatus } from '../../relay/protocol.ts'
@@ -98,18 +98,127 @@ function procStat(pid: number): string[] {
   }
 }
 
+const SYS_PROC_INFO = 336
+const PROC_INFO_CALL_PIDINFO = 2
+const PROC_PIDLISTFDS = 1
 const PROC_PIDTBSDINFO = 3
+const PROC_PIDVNODEPATHINFO = 9
+const PROC_PIDFDVNODEPATHINFO = 2
+const PROX_FDTYPE_VNODE = 1
 const BSD_INFO_BYTES = 136
 const STATUS_AT = 4
+const PARENT_AT = 16
 const START_SECONDS_AT = 120
 const SSTOP = 4
-const openLibproc = () => dlopen('/usr/lib/libSystem.B.dylib', { proc_pidinfo: { args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.ptr, FFIType.i32], returns: FFIType.i32 } })
-let libproc: ReturnType<typeof openLibproc> | undefined
+const FD_INFO_BYTES = 8
+const FD_TYPE_AT = 4
+const FD_PATH_INFO_BYTES = 1200
+const FD_PATH_AT = 176
+const FOLDERS_INFO_BYTES = 2352
+const CURRENT_FOLDER_AT = 152
+const PIDS_SPARE = 64
+const CTL_KERN = 1
+const KERN_PROCARGS2 = 49
+const ARGUMENTS_BYTES = 1 << 20
+const openLibSystem = () =>
+  dlopen('/usr/lib/libSystem.B.dylib', {
+    proc_listallpids: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    proc_pidinfo: { args: [FFIType.i32, FFIType.i32, FFIType.u64, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    proc_pidfdinfo: { args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+    sysctl: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+  })
+let libSystem: ReturnType<typeof openLibSystem> | undefined
+const decoder = new TextDecoder()
+
+const untilNul = (bytes: Uint8Array): string => {
+  const end = bytes.indexOf(0)
+  return decoder.decode(end === -1 ? bytes : bytes.subarray(0, end))
+}
+
+function infoOf(pid: number, flavor: number, bytes: number): Uint8Array | undefined {
+  libSystem ??= openLibSystem()
+  const info = new Uint8Array(bytes)
+  return libSystem.symbols.proc_pidinfo(pid, flavor, 0, info, bytes) === bytes ? info : undefined
+}
 
 function bsdInfoOf(pid: number): DataView | undefined {
-  libproc ??= openLibproc()
-  const info = new Uint8Array(BSD_INFO_BYTES)
-  return libproc.symbols.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, info, BSD_INFO_BYTES) === BSD_INFO_BYTES ? new DataView(info.buffer) : undefined
+  const info = infoOf(pid, PROC_PIDTBSDINFO, BSD_INFO_BYTES)
+  return info === undefined ? undefined : new DataView(info.buffer)
+}
+
+export function processes(): { readonly pid: number; readonly parent: number }[] {
+  if (process.platform === 'linux')
+    return namesIn('/proc')
+      .filter((name) => /^\d+$/.test(name))
+      .flatMap((name) => {
+        const parent = procStat(Number(name))[1]
+        return parent === undefined ? [] : [{ pid: Number(name), parent: Number(parent) }]
+      })
+  libSystem ??= openLibSystem()
+  const pids = new Int32Array(libSystem.symbols.proc_listallpids(null, 0) + PIDS_SPARE)
+  const count = libSystem.symbols.proc_listallpids(pids, pids.byteLength)
+  return [...pids.subarray(0, Math.max(count, 0))].flatMap((pid) => {
+    const parent = bsdInfoOf(pid)?.getUint32(PARENT_AT, true)
+    return parent === undefined ? [] : [{ pid, parent }]
+  })
+}
+
+export function openFilesOf(pid: number): string[] {
+  if (process.platform === 'linux') {
+    const folder = `/proc/${pid}/fd`
+    return namesIn(folder).flatMap((fd) => {
+      try {
+        return [readlinkSync(join(folder, fd))]
+      } catch {
+        return []
+      }
+    })
+  }
+  libSystem ??= openLibSystem()
+  const listedBytes = libSystem.symbols.proc_pidinfo(pid, PROC_PIDLISTFDS, 0, null, 0)
+  if (listedBytes <= 0) return []
+  const fds = new Uint8Array(listedBytes)
+  const filled = libSystem.symbols.proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, listedBytes)
+  const listed = new DataView(fds.buffer)
+  const info = new Uint8Array(FD_PATH_INFO_BYTES)
+  const paths: string[] = []
+  for (let at = 0; at + FD_INFO_BYTES <= filled; at += FD_INFO_BYTES) {
+    if (listed.getUint32(at + FD_TYPE_AT, true) !== PROX_FDTYPE_VNODE) continue
+    if (libSystem.symbols.proc_pidfdinfo(pid, listed.getInt32(at, true),PROC_PIDFDVNODEPATHINFO, info, FD_PATH_INFO_BYTES) === FD_PATH_INFO_BYTES) paths.push(untilNul(info.subarray(FD_PATH_AT)))
+  }
+  return paths
+}
+
+export function currentFolderOf(pid: number): string {
+  if (process.platform === 'linux') {
+    try {
+      return readlinkSync(`/proc/${pid}/cwd`)
+    } catch {
+      return ''
+    }
+  }
+  const info = infoOf(pid, PROC_PIDVNODEPATHINFO, FOLDERS_INFO_BYTES)
+  return info === undefined ? '' : untilNul(info.subarray(CURRENT_FOLDER_AT))
+}
+
+let argumentsBuffer: Uint8Array | undefined
+
+export function commandOf(pid: number): string {
+  if (process.platform === 'linux') {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').trim()
+    } catch {
+      return ''
+    }
+  }
+  libSystem ??= openLibSystem()
+  argumentsBuffer ??= new Uint8Array(ARGUMENTS_BYTES)
+  const size = new BigUint64Array([BigInt(ARGUMENTS_BYTES)])
+  if (libSystem.symbols.sysctl(new Int32Array([CTL_KERN, KERN_PROCARGS2, pid]), 3, argumentsBuffer, size, null, 0) !== 0) return ''
+  const count = new DataView(argumentsBuffer.buffer).getInt32(0, true)
+  const [, ...strings] = decoder.decode(argumentsBuffer.subarray(4, Number(size[0]))).split('\0')
+  const first = strings.findIndex((text) => text !== '')
+  return first === -1 ? '' : strings.slice(first, first + count).join(' ')
 }
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -236,8 +345,7 @@ const CLAUDE_START = [
   'if ($trustsHome) {',
   '  my $start;',
   '  if ($^O eq "linux") { if (open(my $stat, "<", "/proc/$$/stat")) { my $line = <$stat>; $start = (split / /, substr($line, rindex($line, ")") + 2))[19] } }',
-  '  else { local $ENV{TZ} = "UTC"; $start = `ps -o lstart= -p $$` }',
-  '  $start =~ s/^\\s+|\\s+$//g if defined $start;',
+  `  else { my $info = "\\0" x ${BSD_INFO_BYTES}; if (syscall(${SYS_PROC_INFO}, ${PROC_INFO_CALL_PIDINFO}, 0 + $$, ${PROC_PIDTBSDINFO}, 0, $info, ${BSD_INFO_BYTES}) == ${BSD_INFO_BYTES}) { my @at = gmtime unpack("Q<", substr($info, ${START_SECONDS_AT}, 8)); $start = sprintf("%s %s %2d %02d:%02d:%02d %d", (qw(${DAYS.join(' ')}))[$at[6]], (qw(${MONTHS.join(' ')}))[$at[4]], $at[3], $at[2], $at[1], $at[0], $at[5] + 1900) } }`,
   '  $ENV{CLAUDE_CODE_RELAUNCH_HOME_TRUST} = "$$:$start" if defined $start && $start ne "";',
   '}',
   'exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n";',
@@ -246,11 +354,9 @@ const CLAUDE_START = [
 export const claudeStart = (argv: readonly string[], trustsHome: boolean): string[] => ['perl', '-e', CLAUDE_START, '--', environmentFile(), trustsHome ? '1' : '', ...argv]
 
 export type Resumed = { readonly model?: string; readonly effort?: string }
-const EDGE_BYTES = 1 << 20
 
-export async function resumedOf(transcript: string): Promise<Resumed> {
-  const file = Bun.file(transcript)
-  const last = (await file.slice(Math.max(0, file.size - EDGE_BYTES)).text()).split('\n').findLast((line) => line.startsWith('{') && line.includes('"type":"assistant"'))
+export function resumedOf(tail: string): Resumed {
+  const last = tail.split('\n').findLast((line) => line.startsWith('{') && line.includes('"type":"assistant"'))
   const turn = last === undefined ? undefined : (JSON.parse(last) as { message?: { model?: string }; effort?: string })
   const model = turn?.message?.model?.startsWith('<') === false ? turn.message.model : undefined
   return { ...(model === undefined ? {} : { model }), ...(turn?.effort === undefined ? {} : { effort: turn.effort }) }

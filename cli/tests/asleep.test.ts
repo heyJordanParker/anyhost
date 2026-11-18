@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { LIVE_MS } from '../../relay/protocol.ts'
-import { journalOf, openCapture, openDatabase } from '../src/capture.ts'
+import { openCapture, openDatabase } from '../src/capture.ts'
 import { memoryRelay, noCode, statusOn, until, welcomed } from './memory.ts'
 import { claimOn, DESKTOP, LAPTOP, listedConnected, roots, runningOn, SESSION, temporaryFolder } from './program.ts'
 
@@ -20,7 +20,7 @@ test('a laptop gone silent with a drain in flight while the desktop takes its se
   }
 
   const [taken] = await Promise.all(desktop.run([{ op: 'claim', session: SESSION, take: true }]))
-  expect(taken).toEqual({ status: 200, previous: { id: LAPTOP.id, name: LAPTOP.name }, told: false, at: expect.any(String) })
+  expect(taken).toEqual({ status: 200, previous: { id: LAPTOP.id, name: LAPTOP.name }, told: false })
   const stored = relay.puts.length
   wake()
   await until(async () => (await statusOn(laptop.socket)).relay.state === 'connected', 'the laptop connecting again', 70_000)
@@ -30,20 +30,18 @@ test('a laptop gone silent with a drain in flight while the desktop takes its se
   expect(relay.puts.slice(stored).filter(({ key }) => key.startsWith(`journals/${SESSION}/`))).toEqual([])
 }, 180_000)
 
-test("a take of a session whose holder went silent 5 s after the Pool last heard it answers told false, and the holder's next welcome carries released, which it confirms", async () => {
+test('a take of a session whose holder went silent 5 s after the Pool last heard it answers told true, as the Pool counts that holder live, and the holder reads the new holder as it wakes', async () => {
   const relay = await memoryRelay()
   const home = join(temporaryFolder(), 'home')
   const laptop = openCapture(relay.connect(LAPTOP, roots(home)), LAPTOP, roots(home), { db: openDatabase(join(temporaryFolder(), 'state')), code: noCode })
   const desktop = relay.connect(DESKTOP, roots('/home/desktop'))
   await Promise.all([welcomed(laptop.relay), welcomed(desktop)])
-  expect(await laptop.relay.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true, at: expect.any(String) })
+  expect(await laptop.relay.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true })
   await Bun.sleep(5000)
   const wake = relay.silence(LAPTOP.id)
   expect(await listedConnected(desktop, LAPTOP.id)).toBe(true)
 
-  expect(await desktop.runOne({ op: 'claim', session: SESSION, take: true })).toEqual({ status: 200, previous: { id: LAPTOP.id, name: LAPTOP.name }, told: false, at: expect.any(String) })
+  expect(await desktop.runOne({ op: 'claim', session: SESSION, take: true })).toEqual({ status: 200, told: true })
   wake()
-  await until(() => journalOf(laptop.db, SESSION)?.holder === DESKTOP.name, 'the laptop hearing it lost the session')
-  await until(async () => (await relay.waiting()).length === 0, 'the Pool hearing the laptop confirm it')
+  await until(() => laptop.holders.known().get(SESSION) === DESKTOP.id, 'the laptop reading the new holder')
 }, 30_000)
-

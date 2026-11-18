@@ -1111,9 +1111,8 @@ test('a running program whose relay is an older relay version at its protocol ke
   const updated = cloudflare.workers.get(NAMES.worker)
   expect(updated?.metadata['keep_bindings']).toEqual(['secret_text'])
   expect(updated?.secret).toBe(sha256('an earlier setup code'))
-  const status = await statusOn(socket)
-  expect(status.relay.state).toBe('connected')
-  expect(status.updateProblem).toBeUndefined()
+  await until(async () => (await statusOn(socket)).relay.state === 'connected', 'the program connected after its own reconnect', 30_000)
+  expect((await statusOn(socket)).updateProblem).toBeUndefined()
 }, 60_000)
 
 test('a running program whose relay update failed loses the relay update problem once a relay that needs no upload welcomes it', async () => {

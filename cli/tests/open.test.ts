@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, LAPTOP, machineFor, postTo, roots, runningOn, runsOn, serveOn, SESSION, terminalOn, trustedIn, WORKER, workerOn } from './program.ts'
+import { anyhostOn, configOf, hookOn, isIndexed, LAPTOP, machineFor, postTo, roots, runningOn, runsOn, serveOn, SESSION, terminalOn, tripOn, trust, trustedIn, WORKER, workerOn } from './program.ts'
 
 test('an open of a session a terminal here runs answers that terminal and starts nothing', async () => {
   const relay = await memoryRelay()
@@ -25,6 +25,27 @@ test("an open runs Claude Code itself in the session's terminal, resumed in the 
   expect(runsOn(laptop.folder).map(({ cwd, command }) => ({ cwd, command: command.split(' ').slice(-3).join(' ') }))).toEqual([{ cwd: laptop.cwd, command: `claude --resume ${SESSION}` }])
   expect(runsOn(laptop.folder)[0]?.command).not.toContain(' run ')
   expect(trustedIn(laptop)).toEqual([realpathSync(laptop.cwd)])
+}, 60_000)
+
+test("an open of a sleeping session whose folder Claude Code trusts already answers within 2 s while another program holds Claude Code's config lock, and leaves the lock and the config as they were", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  laptop.claude.kill('SIGKILL')
+  await laptop.claude.exited
+  trust(laptop, laptop.cwd)
+  const config = readFileSync(configOf(laptop), 'utf8')
+  const lock = `${configOf(laptop)}.lock`
+  mkdirSync(lock)
+
+  const askedAt = Date.now()
+  const opened = await postTo(laptop.socket, '/agents/open', { session: SESSION })
+  const tookMs = Date.now() - askedAt
+
+  expect(opened.status).toBe(200)
+  expect(tookMs).toBeLessThan(2000)
+  expect(statSync(lock).isDirectory()).toBe(true)
+  expect(readFileSync(configOf(laptop), 'utf8')).toBe(config)
+  expect(runsOn(laptop.folder).map(({ cwd }) => cwd)).toEqual([laptop.cwd])
 }, 60_000)
 
 test('a session working in another terminal, as in tmux, moves into one terminal of herdr-core only once its turn and its background commands ended, however many opens ask for it meanwhile', async () => {
@@ -102,6 +123,26 @@ test('each worktree of a repository opens its sessions in a Herdr space of its o
   expect(sessions.map(({ id }) => spaceOf.get(id))).toEqual([keyOf(main), keyOf(main), keyOf(fix), 'anyhost-none', 'anyhost-temporary'])
 }, 60_000)
 
+test("a sleeping session whose row in anyhost.db names its worktree opens in that worktree's space, as git names it", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  await serveOn(laptop.env)
+  await until(() => relay.isConnected(LAPTOP.id), 'the machine connecting')
+  const checkout = tripOn(laptop)
+  const fix = `${checkout}-fix`
+  Bun.spawnSync(['git', '-C', checkout, 'worktree', 'add', '-b', 'fix', fix], { stdout: 'ignore', stderr: 'ignore' })
+  const cwd = join(fix, 'plans')
+  const transcript = join(laptop.env['HOME'] ?? '', '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
+  mkdirSync(join(transcript, '..'), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","message":{"role":"user","content":"Plan the trip"}}\n`)
+  await hookOn(laptop.socket, 'started', cwd)
+  await until(() => isIndexed(relay, LAPTOP, SESSION), "the machine's index listing the session")
+
+  expect((await postTo(laptop.socket, '/agents/open', { session: SESSION })).status).toBe(200)
+
+  expect(readFileSync(join(laptop.folder, 'spaces.log'), 'utf8')).toBe(`${SESSION} anyhost-w-${new Bun.CryptoHasher('sha256').update(fix).digest('hex').slice(0, 12)}\n`)
+}, 60_000)
+
 test('an open continues a session here from R2 while the machine that ran it is gone, and answers its terminal', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
@@ -175,4 +216,17 @@ test("a session this machine holds wakes here while the relay answers nothing, a
 
   expect(opened).toMatchObject({ status: 200, body: { session: SESSION } })
   expect(runsOn(laptop.folder).map(({ cwd }) => cwd)).toEqual([laptop.cwd])
+}, 60_000)
+
+test('an open of an archived session, as an agent or anyhost open asks, restores it, so the backup pass leaves its new terminal running', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const archivedOf = async (): Promise<boolean | undefined> => ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; archived: boolean }[] }).agents.find(({ id }) => id === SESSION)?.archived
+  await until(async () => (await archivedOf()) === false, 'the laptop listing the session')
+  await postTo(laptop.socket, '/agents/archive', { session: SESSION, archived: true })
+  await until(async () => (await archivedOf()) === true, 'the laptop listing the session archived')
+
+  expect((await postTo(laptop.socket, '/agents/open', { session: SESSION })).status).toBe(200)
+
+  await until(async () => (await archivedOf()) === false, 'the open restoring the session')
 }, 60_000)

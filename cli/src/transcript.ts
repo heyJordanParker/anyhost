@@ -1,8 +1,9 @@
 import { existsSync } from 'node:fs'
-import { open, readdir, readlink, stat } from 'node:fs/promises'
+import { open, readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, sep } from 'node:path'
 import type { Message } from '../../relay/protocol.ts'
+import { openFilesOf, processes } from './claude.ts'
 import type { DataFolder, MachineRoots } from './device.ts'
 
 export type Tool = 'claude' | 'codex' | 'mod'
@@ -37,35 +38,16 @@ export const codexState = (roots: MachineRoots): string => join(roots.codexHome,
 
 export const isCodexRun = (argv: readonly string[]): boolean => argv.slice(0, 2).some((part) => /^codex(\.js)?$/.test(basename(part)))
 
-const textOf = async (argv: string[]): Promise<string> => {
-  const child = Bun.spawn(argv, { env: process.env, stdin: 'ignore', stdout: 'pipe', stderr: 'ignore' })
-  const [text] = await Promise.all([new Response(child.stdout).text(), child.exited])
-  return text
-}
-
-export async function familyOf(pid: number): Promise<number[]> {
+export function familyOf(pid: number): number[] {
   const children = new Map<number, number[]>()
-  for (const line of (await textOf(['ps', '-A', '-o', 'pid=,ppid='])).split('\n')) {
-    const [child, parent] = line.trim().split(/\s+/).map(Number)
-    if (child !== undefined && parent !== undefined && Number.isInteger(child)) children.set(parent, [...(children.get(parent) ?? []), child])
-  }
+  for (const { pid: child, parent } of processes()) children.set(parent, [...(children.get(parent) ?? []), child])
   const family = [pid]
   for (let at = 0; at < family.length; at++) family.push(...(children.get(family[at] ?? 0) ?? []))
   return family
 }
 
-async function openFilesOf(pids: readonly number[]): Promise<string[]> {
-  if (process.platform !== 'linux') return (await textOf(['lsof', '-n', '-P', '-Fn', '-p', pids.join(',')])).split('\n').flatMap((line) => (line.startsWith('n') ? [line.slice(1)] : []))
-  const opened = await Promise.all(pids.map(async (pid) => {
-    const folder = `/proc/${pid}/fd`
-    const fds = await readdir(folder).catch(() => [])
-    return Promise.all(fds.map((fd) => readlink(join(folder, fd)).catch(() => '')))
-  }))
-  return opened.flat()
-}
-
-export async function codexSessionOf(pid: number): Promise<string | undefined> {
-  for (const path of await openFilesOf(await familyOf(pid))) {
+export function codexSessionOf(pid: number): string | undefined {
+  for (const path of familyOf(pid).flatMap(openFilesOf)) {
     const session = ROLLOUT.exec(basename(path))?.[1]
     if (session !== undefined) return session
   }
@@ -422,13 +404,42 @@ export const transcriptOf = (claudeHome: string, session: string): string | unde
   return found.done === true ? undefined : join(claudeHome, 'projects', found.value)
 }
 
-const CWD_TAIL_BYTES = 1 << 20
+const TRANSCRIPT_TAIL_BYTES = 1 << 20
 
-export async function lastFolderOf(transcript: string): Promise<string> {
+export async function transcriptTailOf(transcript: string): Promise<string> {
   const file = Bun.file(transcript)
-  const tail = await file.slice(Math.max(0, file.size - CWD_TAIL_BYTES)).text()
+  return await file.slice(Math.max(0, file.size - TRANSCRIPT_TAIL_BYTES)).text()
+}
+
+export function lastFolderOf(tail: string): string {
   const last = [...tail.matchAll(/"cwd":("(?:[^"\\]|\\.)*")/g)].at(-1)?.[1]
   return last === undefined ? '' : (JSON.parse(last) as string)
+}
+
+export type Turn = { readonly isOpen: boolean; readonly at: number }
+
+const TURN_MARK = marks('"type":"user"', '"type":"assistant"', '"subtype":"turn_duration"')
+const INTERRUPTED = /^\[Request interrupted by user( for tool use)?\]$/
+const OUTSIDE_TURNS = /^<(local-command-|bash-|command-name>)/
+
+function turnAt(line: string): Turn | undefined {
+  const value = JSON.parse(line) as { type?: string; subtype?: string; isSidechain?: boolean; isMeta?: boolean; isCompactSummary?: boolean; timestamp?: string; message?: { model?: string; content?: unknown } }
+  if (value.isSidechain === true) return undefined
+  const at = Date.parse(value.timestamp ?? '') || 0
+  if (value.type === 'system') return value.subtype === 'turn_duration' ? { isOpen: false, at } : undefined
+  if (value.type === 'assistant') return { isOpen: value.message?.model !== '<synthetic>', at }
+  if (value.type !== 'user' || value.isMeta === true || value.isCompactSummary === true) return undefined
+  const content = value.message?.content
+  const [text = ''] = (typeof content === 'string' ? [content] : Array.isArray(content) ? (content as Block[]).flatMap((block) => (block.type === 'text' && typeof block.text === 'string' ? [block.text] : [])) : []).map((each) => each.trim())
+  if (INTERRUPTED.test(text)) return { isOpen: false, at }
+  return text === '' || OUTSIDE_TURNS.test(text) ? undefined : { isOpen: true, at }
+}
+
+export async function lastTurnOf(transcript: string): Promise<Turn | undefined> {
+  const file = Bun.file(transcript)
+  const from = Math.max(0, file.size - TRANSCRIPT_TAIL_BYTES)
+  const tail = Buffer.from(await file.slice(from).arrayBuffer())
+  return lastLineOf(tail.subarray(from === 0 ? 0 : tail.indexOf(10) + 1, tail.lastIndexOf(10) + 1), TURN_MARK, turnAt)
 }
 
 const CHAIN_ROOT = Buffer.from('"parentUuid":null')

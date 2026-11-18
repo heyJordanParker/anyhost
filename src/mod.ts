@@ -88,31 +88,35 @@ export const anyhost = defineMod({
     }
     const clearedFrom = new Map<string, string>()
     let ended = ''
-    const changed =
-      (event: HookEvent) =>
-      (): Promise<void> => {
-        const at = new Date().toISOString()
-        const session = sessions.current.id
-        return askProgram(mod, '/sessions/changed', { session, folder: sessions.current.cwd, event, at, source: clearedFrom.get(session) ?? '' }).then(
-          () => undefined,
-          (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: 'warning' })),
-        )
-      }
+    const changed = (event: HookEvent, at = new Date().toISOString()): Promise<void> => {
+      const session = sessions.current.id
+      return askProgram(mod, '/sessions/changed', { session, folder: sessions.current.cwd, event, at, source: clearedFrom.get(session) ?? '' }).then(
+        () => undefined,
+        (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: 'warning' })),
+      )
+    }
     sessions.current.onSessionStart(async (started) => {
       if (started.source === 'clear' && ended !== '' && ended !== started.session) clearedFrom.set(started.session, ended)
       await check()
-      await changed('started')()
+      await changed('started')
     })
     sessions.current.onSessionEnd((end) => {
       ended = end.session
-      return changed(end.reason === 'exit' ? 'quit' : 'ended')()
+      return changed(end.reason === 'exit' ? 'quit' : 'ended')
     })
-    sessions.current.onTurnStart(changed('turnStart'))
-    sessions.current.onTurnEnd(changed('turnEnd'))
-    sessions.current.onElicitation(changed('asked'))
-    sessions.current.onNotification({ type: /^(permission_prompt|elicitation_dialog)$/ }, changed('asked'))
-    sessions.current.onCwdChange(changed('moved'))
-    commands.onRun({ name: 'rename' }, changed('renamed'))
+    sessions.current.onTurnStart((turn) => {
+      if (!turn.prompt.text.startsWith('/')) return changed('turnStart', turn.openedAt)
+      const answered = turn.onMessage({ type: /^(reply|toolCall)$/ }, () => {
+        answered.remove()
+        return changed('turnStart', turn.openedAt)
+      })
+      return undefined
+    })
+    sessions.current.onTurnEnd((turn) => changed('turnEnd', turn.closedAt))
+    sessions.current.onElicitation(() => changed('asked'))
+    sessions.current.onNotification({ type: /^(permission_prompt|elicitation_dialog)$/ }, () => changed('asked'))
+    sessions.current.onCwdChange(() => changed('moved'))
+    commands.onRun({ name: 'rename' }, () => changed('renamed'))
     const continuesOn = (machine: string): string => `This session continues on ${machine}, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.`
     sessions.current.beforePrompt(
       async () => {

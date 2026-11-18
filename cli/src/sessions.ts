@@ -5,7 +5,7 @@ import type { Shown } from './activity.ts'
 import { bytesOfChunks, chainOf, chunkReader, chunksIn, decompressDelta, downloadBase, framesOf, journalPrefix, ownIndex, type Capture, type ChunkReader, type IndexedSession, type RecordHeader } from './capture.ts'
 import { devicesOf } from './device.ts'
 import type { Read, Relay } from './relay.ts'
-import { isArchived, isSnoozed, settledAtOf, sharedOf, type Shared, type Stage, type Tag, type Worktree } from './shared.ts'
+import { isArchived, isSnoozed, settledAtOf, sharedOf, windowsIn, windowsKeyOf, type Shared, type Stage, type Tag, type Windows, type Worktree } from './shared.ts'
 
 export type ListedSession = IndexedSession & { readonly machine: string; readonly device: string; readonly holder: string }
 export type Segment = Pick<RecordHeader, 'device' | 'checkout' | 'path'> & { readonly offset: number; readonly size: number }
@@ -88,11 +88,12 @@ export type Agents = {
   readonly stages: readonly Stage[]
   readonly worktreeOrder: Readonly<Record<string, readonly Worktree[]>>
   readonly preferences: Readonly<Record<string, unknown>>
+  readonly windows: Windows
 }
 
 export const titleOfPrompt = (prompt: string): string => (prompt.split('\n')[0] ?? '').replace(/(?:~|\/)\S*\/([^/\s]+)/g, '$1').slice(0, 120)
 
-export type ListRead = { readonly devices: ReadonlyMap<string, Protocol.Device>; readonly indexes: ReadonlyMap<string, readonly IndexedSession[]>; readonly shared: Shared; readonly holders: ReadonlyMap<string, string> }
+export type ListRead = { readonly devices: ReadonlyMap<string, Protocol.Device>; readonly indexes: ReadonlyMap<string, readonly IndexedSession[]>; readonly shared: Shared; readonly windows: Windows; readonly holders: ReadonlyMap<string, string> }
 
 export async function agentsOf(
   capture: Capture,
@@ -102,7 +103,13 @@ export async function agentsOf(
   now = Date.now(),
 ): Promise<Agents> {
   const devices = known?.devices ?? (await devicesOf(capture.relay))
-  const [indexes, own, holders, shared] = await Promise.all([known?.indexes ?? indexesOf(capture.relay, devices.keys()), ownIndex(capture), known?.holders ?? capture.holders.current(), known?.shared ?? sharedOf(capture.relay)])
+  const [indexes, own, holders, shared, windows] = await Promise.all([
+    known?.indexes ?? indexesOf(capture.relay, devices.keys()),
+    ownIndex(capture),
+    known?.holders ?? capture.holders.current(),
+    known?.shared ?? sharedOf(capture.relay),
+    known?.windows ?? capture.relay.read([windowsKeyOf(capture.device.id)]).then(([answer]) => windowsIn(answer)),
+  ])
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
   const background = new Set(shown.background)
   const agents = sessions.filter((session) => session.firstPrompt !== '').map((session) => {
@@ -128,7 +135,7 @@ export async function agentsOf(
       stage: shared.staged[session.id] ?? '',
     }
   })
-  return { agents, settleAfterDays: shared.settleAfterDays, projectNames: shared.projectNames, projectOrder: shared.projectOrder, pinOrder: shared.pinOrder, lastMachine: shared.lastMachine, tags: shared.tags, stages: shared.stages, worktreeOrder: shared.worktreeOrder, preferences: shared.preferences }
+  return { agents, settleAfterDays: shared.settleAfterDays, projectNames: shared.projectNames, projectOrder: shared.projectOrder, pinOrder: shared.pinOrder, lastMachine: shared.lastMachine, tags: shared.tags, stages: shared.stages, worktreeOrder: shared.worktreeOrder, preferences: shared.preferences, windows }
 }
 
 export class Replay {

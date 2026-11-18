@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js'
-import { Prompt, type Mod, type ProcessSpawnOptions, type Subprocess } from '../node_modules/@cmodjs/core/mod.js'
+import { Prompt, Reply, type Mod, type ProcessSpawnOptions, type Subprocess } from '../node_modules/@cmodjs/core/mod.js'
 import { testMod } from '../node_modules/@cmodjs/core/testing.js'
 import { anyhost } from '../src/mod.js'
 import { connectStep, type AnyhostState } from '../src/pages/machines.js'
@@ -113,6 +113,47 @@ test("a session's start, end, quit, turn start and end, permission prompt, folde
   const bodies = posted.map((body) => JSON.parse(body) as { session: string; folder: string; event: string; at: string })
   expect(bodies.map(({ event }) => event)).toEqual(['started', 'turnStart', 'turnEnd', 'moved', 'asked', 'renamed', 'ended', 'quit'])
   expect(bodies.every(({ session, folder, at }) => session === 'test-session' && folder === '/test/plugins/anyhost' && !Number.isNaN(Date.parse(at)))).toBe(true)
+})
+
+test("a turn's start and end tell the program the times of the turn's own lines in Claude Code's transcript, not when the mod heard them", async () => {
+  const tested = testMod(anyhost, { files: instance })
+  const posted: string[] = []
+  tested.fakes.process.spawn = () => held()
+  tested.fakes.http.fetch = async (url, init) => {
+    if (url.endsWith('/sessions/changed')) posted.push(textOf(init?.body ?? ''))
+    return { status: 200, ok: true, headers: {}, text: '{}' }
+  }
+  const heardFrom = new Date().toISOString()
+
+  const [prompt] = await tested.add({ type: Prompt, text: 'Plan the trip' })
+  await tested.endTurn({ answer: 'Planned.' })
+  await tested.settle()
+
+  const [opened, closed] = posted.map((body) => JSON.parse(body) as { event: string; at: string })
+  expect([opened?.event, opened?.at, closed?.event]).toEqual(['turnStart', prompt?.at, 'turnEnd'])
+  expect((closed?.at ?? '') > (prompt?.at ?? '') && (closed?.at ?? '') < heardFrom).toBe(true)
+})
+
+test("a slash command's turn tells the program it started once Claude answers in it, so a local command such as /model never reads as working", async () => {
+  const tested = testMod(anyhost, { files: instance })
+  const posted: string[] = []
+  tested.fakes.process.spawn = () => held()
+  tested.fakes.http.fetch = async (url, init) => {
+    if (url.endsWith('/sessions/changed')) posted.push(textOf(init?.body ?? ''))
+    return { status: 200, ok: true, headers: {}, text: '{}' }
+  }
+
+  await tested.add({ type: Prompt, text: '/model opus' })
+  await tested.settle()
+  const afterModel = posted.map((body) => (JSON.parse(body) as { event: string }).event)
+  const [review] = await tested.add({ type: Prompt, text: '/review 12' })
+  await tested.settle()
+  const beforeReply = posted.length
+  await tested.add({ type: Reply, text: 'Reviewing the pull request.' })
+  await tested.settle()
+
+  const started = posted.map((body) => JSON.parse(body) as { event: string; at: string }).filter(({ event }) => event === 'turnStart')
+  expect([afterModel, posted.slice(0, beforeReply).some((body) => body.includes('"turnStart"')), started]).toEqual([[], false, [expect.objectContaining({ event: 'turnStart', at: review?.at })]])
 })
 
 test('a /clear tells the program, with each event of the new session, which session it continues from', async () => {

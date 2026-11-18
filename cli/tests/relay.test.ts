@@ -194,8 +194,8 @@ test('a request the relay leaves unanswered goes again on a new socket 40 second
   writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
   await uploadFiles(capture, SESSION, transcript)
   const heard: string[] = []
-  capture.relay.on('moved', ({ id }) => void heard.push(id))
-  const sending = setInterval(() => there.send({ t: 'moved', id: `move-${heard.length}`, to: device.id }), 5000)
+  capture.relay.on('told', ({ id }) => void heard.push(id))
+  const sending = setInterval(() => there.send({ t: 'told', id: `tell-${heard.length}`, to: device.id, error: 'Plan the trip' }), 5000)
   try {
     const asked = relay.requests.length
     relay.unanswered = 1

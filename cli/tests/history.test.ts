@@ -2,10 +2,9 @@ import { expect, onTestFinished, spyOn, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import zlib from 'node:zlib'
-import plugin from '../../.claude-plugin/plugin.json'
 import { Activity } from '../src/activity.ts'
-import { chunkKey, compressHot, decompress, encodeRecord, hotKey, indexForkStarts, journalOf, openCapture, openDatabase, piecesOf, QUIET_MS, relistSessions, REWRITE_OPS_PER_DAY, rewriteJournal, rewriteNext, rewriteProgress, seal, sealQuiet, sha256, UNREAD_FLEET, writeIndex, type Capture, type IndexedSession, type RecordHeader } from '../src/capture.ts'
-import { machinesOf, type Device, type MachineRoots } from '../src/device.ts'
+import { chunkKey, compressHot, decompress, encodeRecord, hotKey, indexForkStarts, journalOf, openCapture, openDatabase, piecesOf, QUIET_MS, relistSessions, REWRITE_OPS_PER_DAY, rewriteJournal, rewriteNext, rewriteProgress, seal, sealQuiet, sha256, writeIndex, type Capture, type IndexedSession, type RecordHeader } from '../src/capture.ts'
+import type { Device, MachineRoots } from '../src/device.ts'
 import { forkAgent, type MoveHere } from '../src/move.ts'
 import { restore } from '../src/resume.ts'
 import { agentsOf, downloadJournal } from '../src/sessions.ts'
@@ -22,12 +21,15 @@ function moverOf(capture: Capture): MoveHere {
   const queued = new Map<string, Set<string>>()
   return {
     moves: new Map(),
-    answers: new Map(),
+    placing: new Map(),
+    placed: new Set(),
     problems: failTest,
     checkouts: '',
     opening: new Map(),
+    touched: new Map(),
     activity: new Activity(),
     onRecordsChange: () => () => undefined,
+    onStatusElsewhere: () => undefined,
     queue: (session, _tool, path) => void queued.set(session, (queued.get(session) ?? new Set()).add(path)),
     flush: async (session) => {
       const paths = queued.get(session) ?? new Set()
@@ -515,7 +517,7 @@ test('the transition takes one sealed journal it holds each pass, marks it rewri
   expect(passes.slice(0, 1)).toEqual([undefined])
   expect(new Set(passes.slice(1, 3))).toEqual(new Set([PARENT, other]))
   expect(passes[3]).toBeUndefined()
-  expect(rewriteProgress(a.capture)).toEqual({ done: 2, journals: 2, olderMachines: [] })
+  expect(rewriteProgress(a.capture)).toEqual({ done: 2, journals: 2 })
   expect(await rewrittenIn(relay)).toEqual([PARENT, other].sort())
 
   a.capture.db.run('delete from rewrites')
@@ -533,7 +535,7 @@ test('the transition rewrites a journal this machine holds whose local row is go
 
   expect(passes).toEqual([PARENT, undefined])
   expect(journalOf(again.capture.db, PARENT)).toBeUndefined()
-  expect(rewriteProgress(again.capture)).toEqual({ done: 1, journals: 1, olderMachines: [] })
+  expect(rewriteProgress(again.capture)).toEqual({ done: 1, journals: 1 })
   expect((await relay.claims()).get(PARENT)).toBe(mac.id)
   expect((await replayedOf(relay, PARENT)).get(parent)).toBe(history)
 }, 60_000)
@@ -552,7 +554,7 @@ test('a rewrite the program stopped in the middle of waits a day as a failed one
   const passes = [await rewriteNext(restarted, failTest), await rewriteNext(restarted, failTest, Date.now() + 86_400_000 + 1)]
 
   expect(passes).toEqual([undefined, PARENT])
-  expect(rewriteProgress(restarted)).toEqual({ done: 1, journals: 1, olderMachines: [] })
+  expect(rewriteProgress(restarted)).toEqual({ done: 1, journals: 1 })
   expect((await replayedOf(relay, PARENT)).get(parent)).toBe(history)
 }, 60_000)
 
@@ -676,9 +678,9 @@ test('every machine reads not yet while one journal nobody holds keeps its old f
   const rewritten = [await rewriteNext(b.capture, failTest), rewriteProgress(b.capture)]
   const elsewhere = [await rewriteNext(c.capture, failTest), rewriteProgress(c.capture)]
 
-  expect(spent).toEqual([undefined, { done: 0, journals: 1, olderMachines: [] }])
-  expect(rewritten).toEqual([fork, { done: 1, journals: 1, olderMachines: [] }])
-  expect(elsewhere).toEqual([undefined, { done: 1, journals: 1, olderMachines: [] }])
+  expect(spent).toEqual([undefined, { done: 0, journals: 1 }])
+  expect(rewritten).toEqual([fork, { done: 1, journals: 1 }])
+  expect(elsewhere).toEqual([undefined, { done: 1, journals: 1 }])
 }, 60_000)
 
 test("the program deletes a rewrite's staging it left behind as it starts", async () => {
@@ -793,33 +795,24 @@ test("a first capture whose first frame meets a frame another machine wrote at i
 
 const rootsAt =(home: string): MachineRoots => ({ home, claudeHome: join(home, '.claude'), claudeTmp: join(home, 'tmp', 'claude-1000'), codexHome: join(home, '.codex') })
 
-test('while a machine that is not removed has not connected with anyhost 0.9.0 or newer, capture, forks and compaction write only what anyhost 0.8 reads, and chunks come back once it is removed', async () => {
+test('a session whose transcript Claude Code wrote into two project folders rewrites into chunks and restores both files whole', async () => {
   const relay = await memoryRelay()
-  await relay.join(server, rootsAt(join(temporaryFolder(), 'home')))
-  const { a, folder, parent, history } = await parentOn(relay)
-  const { session } = await forkAgent(a.capture, PARENT, '', moverOf(a.capture))
-  for (const title of ['Plan the long trip', 'Plan the longer trip']) {
-    writeFileSync(parent, history.replace('Plan the trip', title))
-    await uploadFiles(a.capture, PARENT, parent)
-  }
-  await sealQuiet(a.capture, failTest, Date.now() + QUIET_MS + 1)
-  const compacted = await rewriteJournal(a.capture, PARENT, 'claude', Date.now(), { lagMs: 0, isForced: true })
-  const closed = { chunks: await relay.keys('chunks/'), parent: await headersOf(relay, PARENT), fork: await headersOf(relay, session), frames: await relay.keys(`journals/${PARENT}/compacted/`) }
-  const programs = (await machinesOf(a.capture.relay)).map(({ name, program }) => `${name} ${program ?? 'none'}`)
-
-  await a.capture.relay.runOne({ op: 'remove', device: server.id })
-  a.capture.fleet = UNREAD_FLEET
-  writeFileSync(parent, history)
+  const { a, home, parent, history } = await parentOn(relay, 300)
+  const other = join(a.roots.claudeHome, 'projects', '-dotfiles', `${PARENT}.jsonl`)
+  mkdirSync(dirname(other), { recursive: true })
+  const short = conversation(PARENT, join(home, 'dotfiles'), 4)
+  writeFileSync(other, short)
+  await uploadFiles(a.capture, PARENT, other)
+  const grown = `${history}${conversation(PARENT, join(home, 'work'), 300).split('\n').slice(1).join('\n')}`
+  writeFileSync(parent, grown)
   await uploadFiles(a.capture, PARENT, parent)
+  await sealQuiet(a.capture, failTest, Date.now() + QUIET_MS + 1)
 
-  expect(programs.sort()).toEqual([`mac ${plugin.version}`, 'server '])
-  expect(closed.chunks).toEqual([])
-  expect(closed.parent.every(({ chunks }) => chunks === undefined)).toBe(true)
-  expect(closed.fork.every(({ chunks, fork }) => chunks === undefined && fork === undefined)).toBe(true)
-  expect(compacted?.isCurrent).toBe(false)
-  expect(closed.frames).toEqual([expect.stringMatching(new RegExp(`/compacted/${position(0)}-\\d{16}\\.zst$`))])
-  expect((await headersOf(relay, PARENT)).some(({ path, chunks }) => path === parent && chunks !== undefined)).toBe(true)
-  expect(readFileSync(join(folder, `${session}.jsonl`), 'utf8')).toContain('(fork)')
+  const rewritten = await rewriteJournal(a.capture, PARENT, 'claude', Date.now(), { lagMs: 0, isForced: true })
+  const replayed = await replayedOf(relay, PARENT)
+
+  expect(rewritten?.isCurrent).toBe(true)
+  expect([replayed.get(parent), replayed.get(other)]).toEqual([grown, short])
 }, 60_000)
 
 const filler = (session: string, lines: number, bytes: number): string =>

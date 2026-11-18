@@ -414,7 +414,7 @@ test("a take that lands between a frame's 412 and the put over this machine's un
   const a = machine(deviceA, relay)
   const b = machine(deviceB, relay)
   writeFileSync(a.transcript, lines[0] ?? '')
-  expect(await a.capture.relay.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true, at: expect.any(String) })
+  expect(await a.capture.relay.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true })
   const old = new TextEncoder().encode(lines[1])
   const stray = Buffer.concat(encodeRecord({ device: deviceA.id, path: a.transcript, at: 0, size: old.length, after: { size: old.length, sha256: '' } }, old))
   await relay.objects.put(hotKey(SESSION, 0), await compressHot(stray))
@@ -661,6 +661,9 @@ test('a restore that listed the journal before a compaction reads it whole after
 test("a compaction keeps a whole copy that another machine's append to the same file builds on, so the journal still replays", async () => {
   const relay = await memoryRelay()
   const { capture } = machine(deviceA, relay, temporaryFolder(), noCode, undefined, 0)
+  const rootsIn = (home: string) => ({ home, claudeHome: `${home}/.claude`, claudeTmp: '/tmp/claude-501', codexHome: `${home}/.codex` })
+  await relay.join({ id: 'mac', name: 'mac', os: 'darwin', arch: 'arm64' }, rootsIn('/Users/ada'))
+  await relay.join({ id: 'devbox', name: 'devbox', os: 'linux', arch: 'x64' }, rootsIn('/home/ada'))
   const record = (device: string, path: string, at: number, text: string): Uint8Array[] =>
     encodeRecord({ device, path, at, size: Buffer.byteLength(text), after: { size: at + Buffer.byteLength(text), sha256: '' } }, new TextEncoder().encode(text))
   const journal = Buffer.concat([
@@ -1146,7 +1149,7 @@ test('a database of a newer anyhost is refused whole, so an older anyhost drops 
   capture.db.run('pragma user_version = 99')
   capture.db.close()
 
-  expect(() => openDatabase(join(folder, 'state'))).toThrow(`${join(folder, 'state', 'anyhost.db')} is a database of a newer anyhost, at version 99, and this anyhost reads version 10, so it changes nothing there. Update anyhost on this machine.`)
+  expect(() => openDatabase(join(folder, 'state'))).toThrow(`${join(folder, 'state', 'anyhost.db')} is a database of a newer anyhost, at version 99, and this anyhost reads version 11, so it changes nothing there. Update anyhost on this machine.`)
   const kept = new Database(join(folder, 'state', 'anyhost.db'))
   expect(kept.query<{ count: number }, []>('select count(*) as count from sessions').get()?.count).toBe(1)
 })
@@ -1162,7 +1165,7 @@ test('a command opens the database while another process writes to it, waiting f
   await writer.exited
 })
 
-test('a database of version 4 to 9 opens at version 10 with every row it held, one stamped 10 without its columns gains them, one stamped 10 with the hook_states of a 0.9.0 working tree loses that table alone, and one older than version 4 starts over', () => {
+test('a database of version 4 to 10 opens at version 11 with every row it held, its holders gaining what each session wants, one stamped 11 without its columns gains them, one with the hook_states of a 0.9.0 working tree loses that table alone, and one older than version 4 starts over', () => {
   const databaseAt = (version: number): string => {
     const folder = join(temporaryFolder(), 'state')
     mkdirSync(folder)
@@ -1179,6 +1182,8 @@ test('a database of version 4 to 9 opens at version 10 with every row it held, o
     db.query("insert into sessions (id, tool, title) values (?, 'claude', 'trip')").run(SESSION)
     db.run('create table hook_states (session text primary key, status text not null, at integer not null, pid integer not null default 0)')
     db.query("insert into hook_states (session, status, at, pid) values (?, 'idle', 1700000000000, 4242)").run(SESSION)
+    db.run('create table holders (session text primary key, device text not null)')
+    db.query("insert into holders (session, device) values (?, 'device-laptop')").run(SESSION)
     db.run(`pragma user_version = ${version}`)
     db.close()
     return folder
@@ -1189,14 +1194,16 @@ test('a database of version 4 to 9 opens at version 10 with every row it held, o
     db.query('select session, path, journal_size from files').all(),
     db.query('select id, title, last_said, titled, last_prompt_at, source from sessions').all(),
     db.query("select name from sqlite_master where name = 'hook_states'").all(),
+    db.query('select session, device, wanted, spec, error from holders').all(),
   ]
 
   expect(rowsOf(openDatabase(databaseAt(4)))).toEqual([
-    { user_version: 10 },
+    { user_version: 11 },
     [{ session: SESSION, end: 900, sealed: 600, written_at: 1700000000000, compacted_end: 0, compacted_kept: 0, compact_after: 0, replaced: 0 }],
     [{ session: SESSION, path: '/home/ada/.claude/projects/-work-trip/s.jsonl', journal_size: 900 }],
     [{ id: SESSION, title: 'trip', last_said: '', titled: 0, last_prompt_at: '', source: '' }],
     [],
+    [{ session: SESSION, device: 'device-laptop', wanted: '', spec: '', error: '' }],
   ])
   expect(rowsOf(openDatabase(databaseAt(5)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
   expect(rowsOf(openDatabase(databaseAt(6)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
@@ -1204,5 +1211,6 @@ test('a database of version 4 to 9 opens at version 10 with every row it held, o
   expect(rowsOf(openDatabase(databaseAt(8)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
   expect(rowsOf(openDatabase(databaseAt(9)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
   expect(rowsOf(openDatabase(databaseAt(10)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
-  expect(rowsOf(openDatabase(databaseAt(3)))).toEqual([{ user_version: 10 }, [], [], [], []])
+  expect(rowsOf(openDatabase(databaseAt(11)))).toEqual(rowsOf(openDatabase(databaseAt(4))))
+  expect(rowsOf(openDatabase(databaseAt(3)))).toEqual([{ user_version: 11 }, [], [], [], [], []])
 })

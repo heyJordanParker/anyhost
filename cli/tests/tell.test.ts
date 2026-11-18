@@ -92,16 +92,19 @@ test('anyhost tell to a session its machine holds in no live terminal opens one 
   expect(sentOn(worker.folder)).toEqual(['t1 And the hotel'])
 }, 90_000)
 
-test('a message to a session asleep on its own machine wakes that same conversation with claude --resume and never starts a new one', async () => {
+test('a message to a session asleep on its own machine looks for its terminal once, wakes that same conversation with claude --resume and never starts a new one', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   laptop.claude.kill('SIGKILL')
   await laptop.claude.exited
+  writeFileSync(join(laptop.folder, 'calls.log'), '')
 
   const told = await anyhostOn(laptop.env, ['tell', SESSION.slice(0, 8), 'Wake up and report'])
+  const looked = logOf(laptop.folder, 'calls.log').filter((line) => line.startsWith('ls '))
   const again = await anyhostOn(laptop.env, ['tell', SESSION.slice(0, 8), 'And once more'])
 
   expect(told).toMatchObject({ code: 0 })
+  expect(looked).toEqual([`ls --json --label anyhost.session=${SESSION}`])
   expect(again).toMatchObject({ code: 0 })
   expect(runsOn(laptop.folder).map(({ session, command }) => ({ session, command: command.split(' ').slice(-3).join(' ') }))).toEqual([{ session: SESSION, command: `claude --resume ${SESSION}` }])
   expect(runsOn(laptop.folder).some(({ command }) => command.includes('--session-id'))).toBe(false)
@@ -125,6 +128,25 @@ test("GET /agents lists what a session another machine runs does now, and an age
   expect(pressed).toEqual({ code: 0, out: `screen of ${SESSION}\n${tagged}\n`, err: '' })
   expect(sentOn(worker.folder)).toEqual([`t0 ${tagged}`])
   expect(logOf(worker.folder, 'keys.log')).toEqual(['t0 down enter'])
+}, 90_000)
+
+test("the machine that moved a session or told it something lists the status that answer gave at once, before the other machine's next statuses arrive", async () => {
+  const relay = await memoryRelay()
+  const dropsStatuses = async (): Promise<void> => {
+    for (;;) await relay.dropNext(LAPTOP.id, 'statuses')
+  }
+  void dropsStatuses()
+  const laptop = await runningOn(relay)
+  await workerOn(relay)
+  const statusOf = async (): Promise<string | undefined> => ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; status: string }[] }).agents.find(({ id }) => id === SESSION)?.status
+
+  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
+  expect((await stepsOf(laptop.socket)).last.step).toBe('moved')
+  const moved = await statusOf()
+  await postTo(laptop.socket, '/agents/tell', { session: SESSION, text: 'Book the train' })
+  const told = await statusOf()
+
+  expect([moved, told]).toEqual(['idle', 'working'])
 }, 90_000)
 
 test('a tell to a session the person runs here outside herdr-core, as in tmux, says so and leaves the session running where it is', async () => {

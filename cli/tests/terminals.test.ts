@@ -1,9 +1,10 @@
-import { expect, onTestFinished, test } from 'bun:test'
+import { expect, onTestFinished, spyOn, test } from 'bun:test'
 import type { Subprocess } from 'bun'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { claudeStart, resumeArgv, resumedOf, startOf } from '../src/claude.ts'
+import { claudeStart, commandOf, currentFolderOf, openFilesOf, processes, resumeArgv, resumedOf, startOf } from '../src/claude.ts'
 import type { Status } from '../src/serve.ts'
+import { familyOf, lastFolderOf, transcriptTailOf } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
 import { anyhostOn, coreEvent, coreSays, decoder, hookOn, LAPTOP, logOf, machineFor, OTHER_SESSION, runningOn, sentOn, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn } from './program.ts'
 
@@ -79,11 +80,14 @@ test("the launcher starts Claude Code with the saved login environment, without 
   expect(printed).toBe(`login unmarked trust=${child.pid}:${startOf(child.pid)};\n`)
 })
 
-test('a resumed session runs on the model and effort its last turn ran with', async () => {
+test('a resumed session runs on the model and effort its last turn ran with, in the folder it last ran in, from one read of its transcript', async () => {
   const transcript = join(temporaryFolder(), `${SESSION}.jsonl`)
-  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"}}\n{"type":"assistant","message":{"model":"claude-haiku-5-5"},"effort":"medium"}\n`)
+  writeFileSync(transcript, `{"type":"user","cwd":"/work/first","message":{"role":"user","content":"Plan the trip"}}\n{"type":"assistant","cwd":"/work/trip","message":{"model":"claude-haiku-5-5"},"effort":"medium"}\n`)
 
-  expect(resumeArgv(SESSION, await resumedOf(transcript))).toEqual(['claude', '--model', 'claude-haiku-5-5', '--effort', 'medium', '--resume', SESSION])
+  const tail = await transcriptTailOf(transcript)
+
+  expect(resumeArgv(SESSION, resumedOf(tail))).toEqual(['claude', '--model', 'claude-haiku-5-5', '--effort', 'medium', '--resume', SESSION])
+  expect(lastFolderOf(tail)).toBe('/work/trip')
 })
 
 test('an idle session no screen shows is discarded after the stop time, while one that works, one a screen shows and the rest of its terminals stay, and Sleep discards an idle one at once', async () => {
@@ -111,22 +115,44 @@ test('an idle session no screen shows is discarded after the stop time, while on
   expect(Object.keys((await sharedIn(relay)).archived ?? {})).toEqual([])
 }, 60_000)
 
-test('an idle session counts its stop time from the last time a screen showed it, so one idle for an hour that a screen showed 100 s ago stays', async () => {
+test('an idle session counts its stop time from the later of going idle and the last time a screen showed it, so one a screen showed 100 s ago and one that went idle 100 s ago stay', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
   const anHourAgo = Date.now() - 3_600_000
   const seen = claudeIn(laptop, 't0', OTHER_SESSION, 'idle', anHourAgo)
-  const unseen = claudeIn(laptop, 't1', SESSION, 'idle', anHourAgo)
+  const justIdle = claudeIn(laptop, 't1', THIRD_SESSION, 'idle', Date.now() - 100_000)
+  const unseen = claudeIn(laptop, 't2', SESSION, 'idle', anHourAgo)
   coreSays(laptop.folder, {
     seq: 1,
-    terminals: [terminalIn('t0', CLAUDE, { 'anyhost.session': OTHER_SESSION, 'anyhost.shown.device-desktop': String(Date.now() - 100_000) }), terminalIn('t1', CLAUDE, { 'anyhost.session': SESSION })],
+    terminals: [
+      terminalIn('t0', CLAUDE, { 'anyhost.session': OTHER_SESSION, 'anyhost.shown.device-desktop': String(Date.now() - 100_000) }),
+      terminalIn('t1', CLAUDE, { 'anyhost.session': THIRD_SESSION, 'anyhost.shown.device-desktop': String(anHourAgo) }),
+      terminalIn('t2', CLAUDE, { 'anyhost.session': SESSION }),
+    ],
   })
 
   await serveOn({ ...laptop.env, ANYHOST_STOP_MS: '120000' })
   await until(() => hasEnded(unseen), 'the unseen idle session ending', 15_000)
 
-  expect(hasEnded(seen)).toBe(false)
+  expect([hasEnded(seen), hasEnded(justIdle)]).toEqual([false, false])
 }, 60_000)
+
+test('an open or a message restarts an idle session\'s stop time, as T3 Code touches a session at each use, so one idle for an hour that an agent opened stays', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const anHourAgo = Date.now() - 3_600_000
+  const opened = claudeIn(laptop, 't0', OTHER_SESSION, 'idle', anHourAgo)
+  const unopened = claudeIn(laptop, 't1', SESSION, 'idle', anHourAgo)
+  coreSays(laptop.folder, { seq: 1, terminals: [] })
+  await serveOn({ ...laptop.env, ANYHOST_STOP_MS: '120000' })
+
+  expect(await anyhostOn(laptop.env, ['open', OTHER_SESSION, '--json'])).toMatchObject({ code: 0 })
+  coreSays(laptop.folder, coreEvent('created', 't0', terminalIn('t0', CLAUDE, { 'anyhost.session': OTHER_SESSION })))
+  coreSays(laptop.folder, coreEvent('created', 't1', terminalIn('t1', CLAUDE, { 'anyhost.session': SESSION })))
+  await until(() => hasEnded(unopened), 'the unopened idle session ending', 45_000)
+
+  expect(hasEnded(opened)).toBe(false)
+}, 90_000)
 
 test("a 0.9.0 runner asleep, also one whose session runs elsewhere, is closed without archiving its session, and every other terminal, an awake runner too, stays", async () => {
   const relay = await memoryRelay()
@@ -263,6 +289,26 @@ test('a Codex started in a terminal is labelled with the session of the rollout 
   coreSays(laptop.folder, coreEvent('labels', 't0', { labels: { 'anyhost.session': THIRD_SESSION } }), coreEvent('finished', 't0', { exit_code: 0, finished_ms: Date.now(), reason: 'killed', signal: null }))
   await until(async () => (await sharedIn(relay)).archived?.[THIRD_SESSION]?.archived === true, 'the closed Codex session archiving', 15_000)
 }, 60_000)
+
+test("a process's parent, the files it holds open, its command line and its current folder read from the system with no process started", async () => {
+  const folder = realpathSync(temporaryFolder())
+  const held = join(folder, 'held.jsonl')
+  writeFileSync(held, '')
+  const argv = ['perl', '-e', 'open(my $f, ">>", $ARGV[0]) or die; $f->autoflush(1); print $f "{}\\n"; sleep 600', held]
+  const child = spawnForTest(argv, { cwd: folder })
+  await until(() => Bun.file(held).size > 0, 'the child holding its file open')
+  const spawns = [spyOn(Bun, 'spawn'), spyOn(Bun, 'spawnSync')]
+  onTestFinished(() => {
+    for (const spawn of spawns) spawn.mockRestore()
+  })
+
+  expect(processes()).toContainEqual({ pid: child.pid, parent: process.pid })
+  expect(familyOf(process.pid)).toContain(child.pid)
+  expect(openFilesOf(child.pid)).toContain(held)
+  expect(commandOf(child.pid)).toBe(argv.join(' '))
+  expect(currentFolderOf(child.pid)).toBe(folder)
+  expect(spawns.map((spawn) => spawn.mock.calls.length)).toEqual([0, 0])
+})
 
 test('a terminal two windows show stays shown while either shows it, keeps the time a screen last showed it, and a session is marked read once', async () => {
   const relay = await memoryRelay()
