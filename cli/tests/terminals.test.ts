@@ -75,7 +75,10 @@ test("the launcher starts Claude Code with the saved login environment, without 
   const child = spawnForTest(claudeStart(['sh', '-c', 'echo "$ANYHOST_PROBE ${CLAUDECODE:-unmarked} trust=$CLAUDE_CODE_RELAUNCH_HOME_TRUST;"; sleep 10'], true), { env: { ...process.env, CLAUDECODE: '1' } })
   const reader = child.stdout.getReader()
   let printed = ''
-  while (!printed.includes(';')) printed += decoder.decode((await reader.read()).value)
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    printed += decoder.decode(read.value)
+    if (printed.includes(';')) break
+  }
 
   expect(printed).toBe(`login unmarked trust=${child.pid}:${startOf(child.pid)};\n`)
 })

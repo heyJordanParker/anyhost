@@ -107,7 +107,7 @@ test("a move the worker cannot take while the laptop's program restarts brings t
   await until(async () => (await relay.claims()).get(SESSION) === LAPTOP.id, 'the laptop taking the session back', 30_000)
   await until(() => !isPaused(laptop.claude.pid), 'the laptop running its paused copy again', 30_000)
 
-  expect(restarted.logged()).toContain(`could not take the session: `)
+  await until(() => restarted.logged().includes('could not take the session: '), 'the laptop saying why the session stays')
   expect(laptop.claude.exitCode ?? laptop.claude.signalCode).toBeNull()
   expect(runsOn(laptop.folder)).toEqual([])
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()

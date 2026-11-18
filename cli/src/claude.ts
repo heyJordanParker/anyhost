@@ -345,7 +345,7 @@ const CLAUDE_START = [
   'if ($trustsHome) {',
   '  my $start;',
   '  if ($^O eq "linux") { if (open(my $stat, "<", "/proc/$$/stat")) { my $line = <$stat>; $start = (split / /, substr($line, rindex($line, ")") + 2))[19] } }',
-  `  else { my $info = "\\0" x ${BSD_INFO_BYTES}; if (syscall(${SYS_PROC_INFO}, ${PROC_INFO_CALL_PIDINFO}, 0 + $$, ${PROC_PIDTBSDINFO}, 0, $info, ${BSD_INFO_BYTES}) == ${BSD_INFO_BYTES}) { my @at = gmtime unpack("Q<", substr($info, ${START_SECONDS_AT}, 8)); $start = sprintf("%s %s %2d %02d:%02d:%02d %d", (qw(${DAYS.join(' ')}))[$at[6]], (qw(${MONTHS.join(' ')}))[$at[4]], $at[3], $at[2], $at[1], $at[0], $at[5] + 1900) } }`,
+  `  else { my $info = "\\0" x ${BSD_INFO_BYTES}; if ((eval { syscall(${SYS_PROC_INFO}, ${PROC_INFO_CALL_PIDINFO}, 0 + $$, ${PROC_PIDTBSDINFO}, 0, $info, ${BSD_INFO_BYTES}) } // -1) == ${BSD_INFO_BYTES}) { my @at = gmtime unpack("Q<", substr($info, ${START_SECONDS_AT}, 8)); $start = sprintf("%s %s %2d %02d:%02d:%02d %d", (qw(${DAYS.join(' ')}))[$at[6]], (qw(${MONTHS.join(' ')}))[$at[4]], $at[3], $at[2], $at[1], $at[0], $at[5] + 1900) } }`,
   '  $ENV{CLAUDE_CODE_RELAUNCH_HOME_TRUST} = "$$:$start" if defined $start && $start ne "";',
   '}',
   'exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n";',
