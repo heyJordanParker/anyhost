@@ -2,10 +2,34 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.13] - 2026-11-18
+
+### Changed
+- Each tab is a window with its own layout, as in tmux: its mode (Tabs, Scroll, Master, Dwindle, Grid or Stack), the master's side and size, the scroll position, the zoomed agent and the order of its agents. Switching windows shows each one as you left it, and a window keeps its layout while its agents sleep.
+- Closing a window, by its button, a key, Herdr or its agent quitting, shows the window you used before it, not its neighbour.
+- Ctrl+Tab walks your windows from the most recently used, as on macOS and Windows: tap it again to go further back, and pause to stay. Ctrl+Shift+Tab walks the other way. A sleeping window on the walk opens when you stop on it. Cmd+Shift+] and [ still move through the tabs in order.
+- Every window key works with the sidebar hidden.
+- Open in → Side panel shows the session in Herdr's own side panel, where Files and Changes open, so every mode (Tabs, Scroll, Master, Dwindle, Grid, Stack) makes room for it and the tab bar stays in view. It floated over the right of the window and covered agents and the mode buttons.
+- Menus, the palette, Settings and the filter act at once from their own popup, with no round trip through the sidebar.
+- A move or a new session on another machine is now a placement both machines work toward, as Kubernetes places a pod: the session records the machine it should run on, and each machine's anyhost acts on it. A move survives either machine restarting or losing its connection midway, and finishes or comes back once it reconnects. Keep it here also works after the other machine took the session and stopped answering. A move to a machine that is offline is refused at once, and the session keeps running.
+- Changes from two machines at the same time all stay: reordering projects, pins and worktrees, and settings such as open shelves, as each change is applied to the newest list. Each machine keeps its windows in a record of its own, so no machine overwrites another's, and the window layouts 0.9.12 kept as settings move there at the first start.
+- anyhost 0.9.13 needs relay protocol 3. The first machine that runs it with a Cloudflare login updates the relay by itself, and the others connect once it did. Update anyhost on every machine, as a machine still on 0.9.12 cannot take part in moves.
+
+### Fixed
+- On a busy machine anyhost keeps its connection to the relay. It reconnected whenever its own ping ran a few seconds late, 27 times in 3 hours on a Mac at load 100, and each reconnect held lists, pins and archives back. Now the relay closes a connection only once it has heard nothing on it for 45 seconds, as MQTT's server does, and a machine that slept still learns of a takeover before it sends anything.
+- A session that an agent or `anyhost open` brings back stays open: an open of an archived session restores it, so the next backup no longer closes it again within a minute.
+- An open or a message restarts a session's 8 hours of idle time, and anyhost checks the session is still idle just before it puts it to sleep, so a message that arrives during that check is never lost.
+- The sidebar no longer flips a working session back to Done when an older read of the list arrives after a newer one.
+- Two changes to the same thing reach anyhost in the order you made them, so pressing a key twice, such as the mode key, never ends on the first value.
+- A hidden Board no longer puts back older settings, such as a shelf you opened on another machine.
+- Starting a new session or picking a workspace that takes a while no longer takes the screen once it is ready if you clicked somewhere else meanwhile, as an open already did.
+- A split window whose agents all go to sleep keeps its split and its mode, and opens with both again. It could open with one agent and the default layout, as Herdr drops a closed tab a moment before its agents stop.
+- The history of a session whose transcript Claude Code wrote into two project folders, as after a resume from another folder, now rewrites into shared chunks. Its rewrite stopped with "The journal writes … past its … bytes", as the check took the two files for one.
+
 ## [0.9.12] - 2026-11-17
 
 ### Changed
-- A session you looked at stays awake for 8 hours from the last time a screen showed it, as T3 Code restarts its idle clock at each touch. A session idle since yesterday no longer goes to sleep the moment you look away from it.
+- An idle session sleeps 8 hours after the later of going idle and the last time a screen showed it, as T3 Code restarts its idle clock at each touch. A session idle since yesterday no longer goes to sleep the moment you look away from it.
 - A session that takes a while to open no longer takes the screen once it is ready if you clicked somewhere else meanwhile. It opens in its tab and leaves your focus where you put it.
 - A card counts only its open subagents, so a session whose subagents you archived no longer shows "1 subagent".
 - The keyboard cursor scrolls its card into view in the sidebar and the projects pane, with the smallest scroll, as a listbox does, and opening a shelf scrolls to its rows. Up, Down, j, k, Home, End and Page Up and Down reach every card of a long list.

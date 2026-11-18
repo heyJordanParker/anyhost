@@ -100,9 +100,7 @@ function programChecks(address: string, status: Status | undefined): Check[] {
       ? []
       : rewritten.done >= rewritten.journals
         ? [{ ok: `All ${rewritten.journals} journals in R2 keep their history as shared chunks.` }]
-        : rewritten.olderMachines.length > 0
-          ? [{ wait: `${rewritten.done} of the ${rewritten.journals} journals in R2 keep their history as shared chunks, and no machine rewrites the rest while ${rewritten.olderMachines.join(', ')} has not connected with anyhost 0.9.0 or newer.` }]
-          : [{ wait: `Your machines rewrite the journals in R2 into shared chunks, each one a minute up to a daily budget: ${rewritten.done} of ${rewritten.journals} so far.` }]
+        : [{ wait: `Your machines rewrite the journals in R2 into shared chunks, each one a minute up to a daily budget: ${rewritten.done} of ${rewritten.journals} so far.` }]
   return [connection, ...history, ...join, ...update, ...core, ...retried, ...gaps]
 }
 

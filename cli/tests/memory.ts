@@ -2,7 +2,7 @@ import { onTestFinished } from 'bun:test'
 import type { ServerWebSocket } from 'bun'
 import { Miniflare, convertV4MiniflareOptions } from '../../relay/node_modules/miniflare'
 import { bundleRelay } from '../../relay/build.ts'
-import { ANSWER, COMPATIBILITY_DATE, REQUEST, decodeMessage, encodeMessage, type Answer, type Op, type Released, type Request, type Result } from '../../relay/protocol.ts'
+import { ANSWER, COMPATIBILITY_DATE, REQUEST, decodeMessage, encodeMessage, type Answer, type Op, type Request, type Result } from '../../relay/protocol.ts'
 import type { Code, Problems } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
@@ -51,14 +51,14 @@ export type MemoryRelay = {
   keys(prefix: string): Promise<string[]>
   read(key: string): Promise<Uint8Array | undefined>
   claims(): Promise<Map<string, string>>
-  waiting(): Promise<{ readonly device: string; readonly released: Released }[]>
+  wanted(): Promise<Map<string, string>>
   join(device: Device, roots: MachineRoots): Promise<string>
   isConnected(device: string): boolean
   remove(device: string): void
   holdNext(t: string): Promise<() => void>
   loseNext(device: string, t: string): Promise<void>
   dropNext(device: string, t: string): Promise<void>
-  withholdReleased(device: string): void
+  withholdClaimed(device: string): void
   disconnect(device: string, kept?: number): () => void
   silence(device: string): () => void
   connect(device: Device, roots: MachineRoots): Relay
@@ -268,8 +268,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
           if (data !== 'pong') {
             const message = JSON.parse(data) as { readonly t: string; readonly device?: { readonly id: string } }
             if (message.t === 'welcome' && message.device !== undefined) front.data.device = message.device.id
-            if (withheld.has(front.data.device ?? '') && message.t === 'released') return
-            if (withheld.has(front.data.device ?? '') && message.t === 'welcome') return toMachine(front, JSON.stringify({ ...message, waiting: [] }))
+            if (withheld.has(front.data.device ?? '') && message.t === 'claimed') return
             if (losing !== undefined && front.data.device === losing.device && message.t === losing.t) {
               const { lost, isKept } = losing
               losing = undefined
@@ -337,9 +336,9 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       const rows = await pool.exec<{ session: string; device: string }>("select session, device from claims where device != ''")
       return new Map(rows.map(({ session, device }) => [session, device]))
     },
-    async waiting() {
-      const rows = await pool.exec<{ device: string; message: string }>('select device, message from waiting order by id')
-      return rows.map(({ device, message }) => ({ device, released: JSON.parse(message) as Released }))
+    async wanted() {
+      const rows = await pool.exec<{ session: string; wanted: string }>("select session, wanted from claims where wanted != ''")
+      return new Map(rows.map(({ session, wanted }) => [session, wanted]))
     },
     join(device, roots) {
       const token = (async (): Promise<string> => {
@@ -362,7 +361,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
     holdNext: (t) => new Promise((heard) => void (holding = { t, heard })),
     loseNext: (device, t) => new Promise((lost) => void (losing = { device, t, lost, isKept: false })),
     dropNext: (device, t) => new Promise((lost) => void (losing = { device, t, lost, isKept: true })),
-    withholdReleased: (device) => void withheld.add(device),
+    withholdClaimed: (device) => void withheld.add(device),
     disconnect(device, kept = 0) {
       disconnected.add(device)
       for (const front of [...fronts].filter((each) => each.data.device === device).slice(kept)) front.terminate()

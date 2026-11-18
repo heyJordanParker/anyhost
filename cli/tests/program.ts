@@ -1,10 +1,11 @@
 import { afterAll, onTestFinished } from 'bun:test'
 import type { SpawnOptions, Subprocess } from 'bun'
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 import { openCapture, openDatabase, uploadSessions, type Capture } from '../src/capture.ts'
+import { commandOf, currentFolderOf, processes } from '../src/claude.ts'
 import { machinesOf, type Device, type MachineRoots } from '../src/device.ts'
 import type { Relay } from '../src/relay.ts'
 import { failTest, noCode, statusOn, until, type MemoryRelay } from './memory.ts'
@@ -41,57 +42,32 @@ export function spawnForTest<const In extends SpawnOptions.Writable = 'ignore', 
   return child
 }
 
-type Running = { readonly pid: number; readonly ppid: number; readonly command: string; readonly cwd: string; readonly isMarked: boolean }
-const isUnreadable = (error: unknown): boolean => ['ENOENT', 'EACCES'].includes((error as NodeJS.ErrnoException).code ?? '')
-
-function runningOnLinux(): Running[] {
-  return readdirSync('/proc')
-    .filter((name) => /^\d+$/.test(name))
-    .flatMap((name) => {
-      try {
-        const stat = readFileSync(`/proc/${name}/stat`, 'utf8')
-        const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1])
-        const command = readFileSync(`/proc/${name}/cmdline`, 'utf8').replaceAll('\0', ' ').trim()
-        return [{ pid: Number(name), ppid, command, cwd: readlinkSync(`/proc/${name}/cwd`), isMarked: readFileSync(`/proc/${name}/environ`, 'utf8').split('\0').includes(`ANYHOST_TEST_RUN=${RUN}`) }]
-      } catch (error) {
-        if (isUnreadable(error)) return []
-        throw error
-      }
-    })
-}
-
-function runningOnMac(): Running[] {
-  const cwds = Bun.spawnSync(['lsof', '-a', '-d', 'cwd', '-u', String(process.getuid?.() ?? 0), '-F', 'pn'])
-  const cwdOf = new Map<number, string>()
-  let pid = 0
-  for (const line of cwds.stdout.toString().split('\n')) {
-    if (line.startsWith('p')) pid = Number(line.slice(1))
-    if (line.startsWith('n')) cwdOf.set(pid, line.slice(1))
+const isMarked = (pid: number): boolean => {
+  if (process.platform !== 'linux') return false
+  try {
+    return readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').includes(`ANYHOST_TEST_RUN=${RUN}`)
+  } catch {
+    return false
   }
-  const listed = Bun.spawnSync(['ps', '-axww', '-o', 'pid=,ppid=,command='])
-  return listed.stdout
-    .toString()
-    .split('\n')
-    .flatMap((line) => {
-      const [, id = '', parent = '', command = ''] = /^\s*(\d+)\s+(\d+)\s(.*)$/.exec(line) ?? []
-      const each = Number(id)
-      return id === '' || each === listed.pid || each === cwds.pid ? [] : [{ pid: each, ppid: Number(parent), command, cwd: cwdOf.get(each) ?? '', isMarked: false }]
-    })
 }
+
+export const childrenOf = (pid: number): number[] => processes().flatMap((each) => (each.parent === pid ? [each.pid] : []))
 
 const LEAK_CHECK_MS = 60_000
 const ENDING_MS = 10_000
 
-function processesLeftBehind(): Running[] {
-  const running = process.platform === 'linux' ? runningOnLinux() : runningOnMac()
-  const parentOf = new Map(running.map(({ pid, ppid }) => [pid, ppid]))
+function processesLeftBehind(): { readonly pid: number; readonly command: string }[] {
+  const running = processes()
+  const parentOf = new Map(running.map(({ pid, parent }) => [pid, parent]))
   const isDescendant = (pid: number): boolean => {
     for (let at = parentOf.get(pid); at !== undefined && at > 1; at = parentOf.get(at)) if (at === process.pid) return true
     return false
   }
   const isInFolder = (path: string): boolean => folders.some((folder) => path === folder || path.startsWith(`${folder}/`))
   const namesFolder = (command: string): boolean => folders.some((folder) => command.includes(`${folder}/`))
-  return running.filter(({ pid, command, cwd, isMarked }) => pid !== process.pid && (isMarked || isDescendant(pid) || isInFolder(cwd) || namesFolder(command)))
+  return running
+    .map(({ pid }) => ({ pid, command: commandOf(pid) }))
+    .filter(({ pid, command }) => pid !== process.pid && (isMarked(pid) || isDescendant(pid) || isInFolder(currentFolderOf(pid)) || namesFolder(command)))
 }
 
 afterAll(async () => {

@@ -35,7 +35,7 @@ test('an archive, a visit, a pin, a settle, a snooze, a project name, tags, stag
 
   const pinned = await asked('pin', id)
   await until(async () => ((await listOn(worker.socket)).pinned ?? '') !== '', 'the worker reading the pin')
-  const pinOrdered = await asked('organize', JSON.stringify([{ op: 'orderPins', sessions: [SESSION] }]))
+  const pinOrdered = await asked('organize', JSON.stringify([{ op: 'movePins', sessions: [SESSION], before: null }]))
   await until(async () => (await orderOn(worker.socket, 'pinOrder')).length === 1, 'the worker reading the pin order')
   const pinOrderThere = await orderOn(worker.socket, 'pinOrder')
   const unpinned = await asked('pin', id, '--undo')
@@ -60,10 +60,10 @@ test('an archive, a visit, a pin, a settle, a snooze, a project name, tags, stag
   ]))
   await until(async () => (await listOn(worker.socket)).stage === 'review', 'the worker reading the stage')
   const organizedThere = await listOn(worker.socket)
-  const ordered = await asked('organize', JSON.stringify([{ op: 'orderProjects', projects: ['acme/zoo', 'acme/trip'] }]))
+  const ordered = await asked('organize', JSON.stringify([{ op: 'moveProjects', projects: ['acme/zoo', 'acme/trip'], before: null }]))
   await until(async () => (await orderOn(worker.socket)).length === 2, 'the worker reading the project order')
   const orderedThere = await orderOn(worker.socket)
-  const twice = await asked('organize', JSON.stringify([{ op: 'orderProjects', projects: ['acme/trip', 'acme/trip'] }]))
+  const twice = await asked('organize', JSON.stringify([{ op: 'moveProjects', projects: ['acme/trip', 'acme/trip'], before: null }]))
   const unknown = await asked('organize', JSON.stringify([{ op: 'tagSession', session: id, tag: 'nope', on: true }]))
   const dropped = await asked('organize', JSON.stringify([{ op: 'dropTag', id: 'bug' }, { op: 'defineStages', stages: [{ id: 'todo', name: 'To do' }] }]))
 
@@ -77,7 +77,7 @@ test('an archive, a visit, a pin, a settle, a snooze, a project name, tags, stag
   expect([refused.code, refused.err.trim()]).toEqual([1, 'anyhost settle --after takes a whole number of days from 1 to 90, or never, not 91.'])
   expect(organizedThere).toMatchObject({ tags: ['bug'], stage: 'review', catalog: { bug: { name: 'Bug', color: 'red' } }, stages: ['To do', 'Review'] })
   expect([ordered.code, orderedThere]).toEqual([0, ['acme/zoo', 'acme/trip']])
-  expect([twice.code, twice.err]).toEqual([1, expect.stringContaining('The project order names each project once.')])
+  expect([twice.code, twice.err]).toEqual([1, expect.stringContaining('A move names each item once.')])
   expect([unknown.code, unknown.err]).toEqual([1, expect.stringContaining('No tag has the id nope.')])
   expect(await listOn(laptop.socket)).toMatchObject({ tags: [], stage: '', catalog: {}, stages: ['To do'] })
 }, 90_000)
@@ -144,6 +144,103 @@ test('a session archived during its turn keeps working, and its copy here stops 
   expect([archived.status, duringTurn, laptop.claude.signalCode]).toEqual([200, null, 'SIGTERM'])
 }, 60_000)
 
+test('two machines that move projects, pins and worktrees and set entries of one preference from the same read keep every change, as each change moves its own items', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const worker = await workerOn(relay)
+  type Listed = { readonly projectOrder: string[]; readonly pinOrder: string[]; readonly worktreeOrder: Record<string, { machine: string; folder: string }[]>; readonly preferences: Record<string, unknown> }
+  const listedOn = async (): Promise<Listed> => (await (await fetch('http://localhost/agents', { unix: worker.socket })).json()) as Listed
+  const on = (env: Record<string, string>, changes: object[]) => anyhostOn(env, ['organize', JSON.stringify(changes)])
+  const [a, b, c] = [{ machine: 'laptop', folder: '/a' }, { machine: 'laptop', folder: '/b' }, { machine: 'worker', folder: '/c' }]
+  const base = await on(laptop.env, [
+    { op: 'moveProjects', projects: ['acme/a', 'acme/b', 'acme/c'], before: null },
+    { op: 'movePins', sessions: ['p1', 'p2', 'p3'], before: null },
+    { op: 'moveWorktrees', project: 'acme/a', worktrees: [a, b, c], before: null },
+  ])
+
+  const both = await Promise.all([
+    on(laptop.env, [
+      { op: 'moveProjects', projects: ['acme/c'], before: 'acme/a' },
+      { op: 'movePins', sessions: ['p3'], before: 'p1' },
+      { op: 'moveWorktrees', project: 'acme/a', worktrees: [c], before: a },
+      { op: 'prefer', key: 'workspaces', entry: 'space-1', value: { mode: 'board' } },
+    ]),
+    on(worker.env, [
+      { op: 'moveProjects', projects: ['acme/d'], before: 'acme/a' },
+      { op: 'movePins', sessions: ['p1'], before: null },
+      { op: 'moveWorktrees', project: 'acme/a', worktrees: [a], before: null },
+      { op: 'prefer', key: 'workspaces', entry: 'space-2', value: { mode: 'tabs' } },
+    ]),
+  ])
+  await until(async () => (await listedOn()).preferences['workspaces'] !== undefined && Object.keys((await listedOn()).preferences['workspaces'] as object).length === 2, 'the worker reading both entries')
+  const listed = await listedOn()
+  const dropped = await on(laptop.env, [{ op: 'prefer', key: 'workspaces', entry: 'space-1', value: null }, { op: 'moveProjects', projects: ['acme/b', 'acme/b'], before: null }])
+
+  expect([base.code, ...both.map(({ code }) => code)]).toEqual([0, 0, 0])
+  expect(listed.projectOrder).toEqual(expect.arrayContaining(['acme/a', 'acme/b', 'acme/c', 'acme/d']))
+  expect(listed.projectOrder.indexOf('acme/c')).toBeLessThan(listed.projectOrder.indexOf('acme/a'))
+  expect(listed.projectOrder.indexOf('acme/d')).toBeLessThan(listed.projectOrder.indexOf('acme/a'))
+  expect(listed.pinOrder.indexOf('p3')).toBeLessThan(listed.pinOrder.indexOf('p1'))
+  expect(listed.pinOrder.at(-1)).toBe('p1')
+  expect(listed.worktreeOrder['acme/a']?.map(({ folder }) => folder)).toEqual(['/c', '/b', '/a'])
+  expect(listed.preferences['workspaces']).toEqual({ 'space-1': { mode: 'board' }, 'space-2': { mode: 'tabs' } })
+  expect([dropped.code, dropped.err]).toEqual([1, expect.stringContaining('A move names each item once.')])
+}, 90_000)
+
+test('the shelves, the unfolded subagents and the closed sessions an older anyhost kept as lists read as entries, the newest closed highest', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const asked = await anyhostOn(laptop.env, ['organize', JSON.stringify([{ op: 'prefer', key: 'shelves', value: ['working', 'settled'] }, { op: 'prefer', key: 'closed', value: ['newest', 'older'] }])])
+  const preferences = ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { preferences: Record<string, unknown> }).preferences
+
+  expect(asked.code).toBe(0)
+  expect(preferences).toEqual({ shelves: { working: true, settled: true }, closed: { newest: 2, older: 1 } })
+}, 60_000)
+
+test("a machine's windows live in its own object: two writers patch their own fields of one window, null deletes it, and the window layouts an older anyhost kept as preferences become windows at the next start", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const listed = async (): Promise<{ windows: Record<string, unknown>; preferences: Record<string, unknown> }> => (await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { windows: Record<string, unknown>; preferences: Record<string, unknown> }
+  const on = (changes: object[]) => anyhostOn(laptop.env, ['organize', JSON.stringify(changes)])
+  const panes = { split: 'right', children: [{ session: 'a1' }, { session: 'a3' }] }
+
+  const written = await Promise.all([
+    on([{ op: 'window', id: 'a1', fields: { space: 'anyhost-w-1', index: 0, panes } }]),
+    on([{ op: 'window', id: 'a1', fields: { layout: { mode: 'master', side: 'left', ratio: 0.6, offset: 0 }, zoomed: null } }]),
+    on([{ op: 'window', id: 'gone', fields: { space: 'anyhost-w-1', index: 1 } }]),
+  ])
+  await on([{ op: 'window', id: 'gone', fields: null }])
+  const windows = (await listed()).windows
+  const keys = await relay.keys('windows/')
+
+  await on([
+    { op: 'prefer', key: `tabOrder@${LAPTOP.id}`, value: { 'anyhost-w-2': ['b1', 'b2'] } },
+    { op: 'prefer', key: `tabLayouts@${LAPTOP.id}`, value: { b1: { split: 'down', children: [{ session: 'b1' }, { session: 'b2' }] } } },
+    { op: 'prefer', key: `windows@${LAPTOP.id}`, value: { b1: { mode: 'grid', side: 'left', ratio: 0.6, offset: 0, zoomed: 't4', order: [] } } },
+  ])
+  laptop.child.kill('SIGKILL')
+  await laptop.child.exited
+  await serveOn(laptop.env)
+  const movedOn = async () => {
+    const answer = await fetch('http://localhost/agents', { unix: laptop.socket })
+    const text = await answer.text()
+    if (answer.status !== 200) throw new Error(`${answer.status} ${text}`)
+    return JSON.parse(text) as { windows: Record<string, unknown>; preferences: Record<string, unknown> }
+  }
+  await until(() => relay.isConnected(LAPTOP.id), 'the restarted program connecting')
+  await until(async () => {
+    const now = await movedOn()
+    return now.windows['b1'] !== undefined && !Object.keys(now.preferences).some((key) => key.includes('@'))
+  }, 'the window layouts moving into windows')
+  const moved = await movedOn()
+
+  expect(written.map(({ code }) => code)).toEqual([0, 0, 0])
+  expect(windows).toEqual({ a1: { space: 'anyhost-w-1', index: 0, panes, layout: { mode: 'master', side: 'left', ratio: 0.6, offset: 0 }, zoomed: null } })
+  expect(keys).toEqual([`windows/${LAPTOP.id}.json`])
+  expect(moved.windows['b1']).toEqual({ space: 'anyhost-w-2', index: 0, panes: { split: 'down', children: [{ session: 'b1' }, { session: 'b2' }] }, layout: { mode: 'grid', side: 'left', ratio: 0.6, offset: 0, order: [] }, zoomed: 't4' })
+  expect(Object.keys(moved.preferences).filter((key) => key.includes('@'))).toEqual([])
+}, 90_000)
+
 test('a worktree order and a preference one machine sets reach every machine through the shared list, and a null preference drops it', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
@@ -153,14 +250,14 @@ test('a worktree order and a preference one machine sets reach every machine thr
   const worktrees = [{ machine: 'worker', folder: '/home/a/trip-b' }, { machine: 'laptop', folder: '/Users/a/trip' }]
   const asked = (changes: object[]) => anyhostOn(laptop.env, ['organize', JSON.stringify(changes)])
 
-  const ordered = await asked([{ op: 'orderWorktrees', project: 'acme/trip', worktrees }, { op: 'prefer', key: 'shelves', value: ['working'] }])
+  const ordered = await asked([{ op: 'moveWorktrees', project: 'acme/trip', worktrees, before: null }, { op: 'prefer', key: 'shelves', entry: 'working', value: true }])
   await until(async () => (await listedOn()).preferences['shelves'] !== undefined, 'the worker reading the preference')
   const there = await listedOn()
-  const twice = await asked([{ op: 'orderWorktrees', project: 'acme/trip', worktrees: [worktrees[0], worktrees[0]] }])
+  const twice = await asked([{ op: 'moveWorktrees', project: 'acme/trip', worktrees: [worktrees[0], worktrees[0]], before: null }])
   const dropped = await asked([{ op: 'prefer', key: 'shelves', value: null }])
   await until(async () => (await listedOn()).preferences['shelves'] === undefined, 'the worker reading the dropped preference')
 
   expect([ordered.code, dropped.code]).toEqual([0, 0])
-  expect(there).toMatchObject({ worktreeOrder: { 'acme/trip': worktrees }, preferences: { shelves: ['working'] } })
-  expect([twice.code, twice.err]).toEqual([1, expect.stringContaining('The worktree order names each worktree once.')])
+  expect(there).toMatchObject({ worktreeOrder: { 'acme/trip': worktrees }, preferences: { shelves: { working: true } } })
+  expect([twice.code, twice.err]).toEqual([1, expect.stringContaining('A move names each item once.')])
 }, 90_000)

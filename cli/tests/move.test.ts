@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { hotKey } from '../src/capture.ts'
 import { isPaused } from '../src/claude.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
-import { claimOn, hookOn, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
+import { childrenOf, claimOn, hookOn, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
 
 const OTHER = '99999999-2222-3333-4444-555555555555'
 
@@ -122,10 +122,11 @@ test('a move to a machine that is offline keeps the session here, with its claim
   const laptop = await runningOn(relay)
   await relay.join(WORKER, roots('/home/worker'))
 
-  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
-  const { last } = await stepsOf(laptop.socket)
+  const asked = await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
 
-  expect(last.line).toBe(`${WORKER.name} is offline, so the session keeps running here.`)
+  expect(asked).toMatchObject({ status: 400, body: { message: `${WORKER.name} is offline, so the session keeps running here.` } })
+  expect((await claimOn(laptop.socket)).move).toBeUndefined()
+  expect(await relay.wanted()).toEqual(new Map())
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   expect(isPaused(laptop.claude.pid)).toBe(false)
@@ -158,7 +159,7 @@ test('a move the worker cannot take takes the claim back, the paused Claude Code
 test('a move waiting for the turn to end goes on to uploading once the record says idle, though the watcher drops every change', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  await relay.join(WORKER, roots('/home/worker'))
+  await workerOn(relay)
   laptop.child.kill('SIGTERM')
   await laptop.child.exited
   await serveOn({ ...laptop.env, ANYHOST_WATCHER_DROPS: '1' })
@@ -291,9 +292,9 @@ let stubborn: readonly number[] = []
 test('a test machine whose Claude Code stand-in ignores SIGTERM runs it, its program and every child they start in process groups its test owns', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay, LAPTOP, {}, IGNORES_SIGTERM)
-  await until(() => Bun.spawnSync(['pgrep', '-P', String(laptop.claude.pid)]).stdout.toString().trim() !== '', 'the stand-in starting its sleep')
+  await until(() => childrenOf(laptop.claude.pid).length > 0, 'the stand-in starting its sleep')
 
-  stubborn = [laptop.claude.pid, laptop.child.pid, ...Bun.spawnSync(['pgrep', '-P', String(laptop.claude.pid)]).stdout.toString().trim().split('\n').map(Number)]
+  stubborn = [laptop.claude.pid, laptop.child.pid, ...childrenOf(laptop.claude.pid)]
 
   expect(laptop.claude.signalCode).toBeNull()
 }, 60_000)

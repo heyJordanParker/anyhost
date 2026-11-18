@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test'
 import { appendFileSync, closeSync, constants, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { isAlive } from '../src/claude.ts'
+import { commandOf, isAlive } from '../src/claude.ts'
 import { filesUnder } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
 import { WATCHER } from '../src/serve.ts'
-import { HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, PASS_MS, problemsOn, ranAnHourAgo, serveOn, SESSION, spawnForTest, temporaryFolder } from './program.ts'
+import { childrenOf, HOST, isUploaded, isWatcherProblem, machineFor, OTHER_SESSION, PASS_MS, problemsOn, ranAnHourAgo, serveOn, SESSION, spawnForTest, temporaryFolder } from './program.ts'
 
 test("a program whose watcher hangs at its start names the stall in /status, backs up a captured session's line and a new session within one backup pass, and ends at SIGTERM within 5 s", async () => {
   const relay = await memoryRelay()
@@ -23,7 +23,7 @@ test("a program whose watcher hangs at its start names the stall in /status, bac
   writeFileSync(transcriptOf(OTHER_SESSION), line(OTHER_SESSION, 'Pack the bags'))
   await until(() => isUploaded(relay, SESSION, 'Book the train') && isUploaded(relay, OTHER_SESSION, 'Pack the bags'), 'the line and the new session uploaded', 75_000)
 
-  const watchersOf = (pid: number): number[] => Bun.spawnSync(['pgrep', '-P', String(pid), '-f', 'ANYHOST_WATCHER_HANGS']).stdout.toString().split('\n').filter((found) => found !== '').map(Number)
+  const watchersOf = (pid: number): number[] => childrenOf(pid).filter((child) => commandOf(child).includes('ANYHOST_WATCHER_HANGS'))
   await until(() => watchersOf(served.child.pid).length > 0, 'a hung watcher')
   const [watcher = 0] = watchersOf(served.child.pid)
   const signalled = Date.now()
@@ -71,7 +71,7 @@ test('a watcher that exits is a problem in /status until the one started after i
   const served = await serveOn(host.env)
   await until(() => watcherPid() > 0, 'the watcher')
   const first = watcherPid()
-  expect(Bun.spawnSync(['pgrep', '-P', String(served.child.pid)]).stdout.toString().split('\n')).toContain(String(first))
+  expect(childrenOf(served.child.pid)).toContain(first)
 
   process.kill(first, 'SIGKILL')
   await until(async () => (await problemsOn(host.socket)).some((problem) => problem.includes(" watcher: Error: anyhost's watcher exited with SIGKILL, so each backup pass lists the watched folders")), 'the exit in /status')

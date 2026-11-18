@@ -222,15 +222,16 @@ type Keys = Record<string, Record<string, unknown>>
 
 const same = (key: string): string => key
 const DIRECTIONS = ['left', 'right', 'up', 'down'] as const
+const isTabKey = (key: string): boolean => key.split('-').at(-1) === 'tab'
 
-const BOUND: readonly (readonly [string, string, (key: string) => string])[] = [
-  ['mod.open:picker', 'anyhost.palette', same],
-  ['tab.close', 'anyhost.close', same],
-  ['tab.new', 'anyhost.reopen', (key) => withModifier(key, key.includes('shift-') ? 'alt' : 'shift')],
-  ['tab.next', 'anyhost.next', same],
-  ['tab.prev', 'anyhost.prev', same],
-  ['pane.zoom', 'anyhost.zoom', same],
-  ...DIRECTIONS.flatMap((direction) => [[`pane.go:${direction}`, `anyhost.go-${direction}`, same] as const, [`pane.swap:${direction}`, `anyhost.move-${direction}`, same] as const]),
+const BOUND: readonly (readonly [string, (key: string) => string, (key: string) => string])[] = [
+  ['mod.open:picker', () => 'anyhost.palette', same],
+  ['tab.close', () => 'anyhost.close', same],
+  ['tab.new', () => 'anyhost.reopen', (key) => withModifier(key, key.includes('shift-') ? 'alt' : 'shift')],
+  ['tab.next', (key) => (isTabKey(key) ? 'anyhost.recent' : 'anyhost.next'), same],
+  ['tab.prev', (key) => (isTabKey(key) ? 'anyhost.recent-back' : 'anyhost.prev'), same],
+  ['pane.zoom', () => 'anyhost.zoom', same],
+  ...DIRECTIONS.flatMap((direction) => [[`pane.go:${direction}`, () => `anyhost.go-${direction}`, same] as const, [`pane.swap:${direction}`, () => `anyhost.move-${direction}`, same] as const]),
 ]
 
 const WORKSPACE_KEYS: readonly (readonly [string, string])[] = [
@@ -256,7 +257,7 @@ const keysWanted = (keys: Keys): Record<string, string> => {
   const global = Object.entries(keys['global'] ?? {})
   const modifier = workspaceModifierOf(global)
   return Object.fromEntries([
-    ...BOUND.flatMap(([herdr, anyhost, keyOf]) => global.filter(([, action]) => action === herdr).map(([key]) => [keyOf(key), anyhost])),
+    ...BOUND.flatMap(([herdr, anyhostOf, keyOf]) => global.filter(([, action]) => action === herdr).map(([key]) => [keyOf(key), anyhostOf(key)])),
     ...(modifier === undefined ? [] : WORKSPACE_KEYS.map(([key, anyhost]) => [`${modifier}${key}`, anyhost])),
   ])
 }

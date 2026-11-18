@@ -5,7 +5,6 @@ import {
   CLOSE_OLDER_PROGRAM,
   CLOSE_REMOVED,
   CLOSE_UNKNOWN_TOKEN,
-  LIVE_MS,
   MAX_MESSAGE_BYTES,
   MAX_OPS,
   PING_MS,
@@ -22,11 +21,9 @@ import {
   type Delivered,
   type DeviceRef,
   type FromPool,
-  type Heard,
   type Listed,
   type Offline,
   type Op,
-  type Released,
   type Result,
   type Results,
   type Roots,
@@ -41,7 +38,6 @@ const RETRY_MS = [1000, 2000, 4000, 8000, 16_000, 32_000, 60_000]
 export const waitAfter = (failures: number): number => RETRY_MS[Math.min(failures, RETRY_MS.length) - 1] ?? 0
 const REQUEST_MS = 120_000
 const SLOWEST_UPLOAD_BYTES_PER_MS = 100
-const LATE_PING_MS = LIVE_MS - Math.ceil(MAX_MESSAGE_BYTES / SLOWEST_UPLOAD_BYTES_PER_MS)
 const IDLE_MS = 30_000
 const OBJECT_TRIES = 6
 
@@ -57,7 +53,7 @@ export type RelayState =
   | { readonly is: 'connected'; readonly welcome: Welcome }
   | { readonly is: 'unjoined' | 'offline' | 'refused' | 'outdated'; readonly message: string }
 export type Written = { readonly key: string; readonly etag: string }
-type Events = { readonly welcome: Welcome; readonly released: Released; readonly claimed: Claimed; readonly offline: Offline; readonly claiming: Claiming; readonly written: Written } & {
+type Events = { readonly welcome: Welcome; readonly claimed: Claimed; readonly offline: Offline; readonly claiming: Claiming; readonly written: Written } & {
   readonly [T in Delivered['t']]: Extract<Delivered, { readonly t: T }>
 }
 
@@ -70,7 +66,7 @@ export type Relay = {
   getObject(key: string): Promise<Got | undefined>
   read(keys: readonly string[]): Promise<Read[]>
   cached(keys: readonly string[]): (Read | undefined)[]
-  send(message: Routed | Heard): boolean
+  send(message: Routed): boolean
   on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): () => void
   reconnect(): void
   close(): void
@@ -159,7 +155,6 @@ export function connectRelay(options: RelayOptions): Relay {
   let isClosed = false
   let reopen: ReturnType<typeof setTimeout> | undefined
   let pinger: ReturnType<typeof setInterval> | undefined
-  let pingedAt = 0
   let pongDue: ReturnType<typeof setTimeout> | undefined
   let answerDue: ReturnType<typeof setTimeout> | undefined
 
@@ -175,21 +170,13 @@ export function connectRelay(options: RelayOptions): Relay {
     clearTimeout(answerDue)
     answerDue = setTimeout(() => drop({ is: 'offline', message: `The relay at ${login?.url} sent no answer for ${ANSWER_MS / 1000} seconds while a request waited.` }), ANSWER_MS)
   }
-  const isLate = (): boolean => {
-    const since = Date.now() - pingedAt
-    if (socket === undefined || since <= LATE_PING_MS) return false
-    console.error(`${new Date().toISOString()} anyhost last pinged the relay at ${login?.url} ${Math.round(since / 1000)} seconds ago, as before this machine slept, so it connects again before it sends anything more.`)
-    drop({ is: 'connecting' })
-    return true
-  }
   const send = (on: WebSocket, request: Pending): void => {
-    if (isLate()) return
     on.send(request.message)
     request.wasSent = true
     if (answerDue === undefined) waitForAnswer()
   }
   const welcomedLogin = (): Promise<Login> => {
-    if (state.is === 'connected' && login !== undefined && !isLate()) return Promise.resolve(login)
+    if (state.is === 'connected' && login !== undefined) return Promise.resolve(login)
     if (!options.isPatient && 'message' in state) return Promise.reject(new Error(state.message))
     return new Promise((resolve, reject) => waiting.add({ resolve, reject }))
   }
@@ -304,10 +291,8 @@ export function connectRelay(options: RelayOptions): Relay {
     })
     ws.addEventListener('open', () => {
       if (socket !== ws) return
-      pingedAt = Date.now()
       pinger = setInterval(() => {
-        if (socket !== ws || isLate()) return
-        pingedAt = Date.now()
+        if (socket !== ws) return
         ws.send('ping')
         if (pongDue === undefined) awaitPong()
       }, PING_MS)
@@ -530,7 +515,7 @@ export function connectRelay(options: RelayOptions): Relay {
     read,
     cached: (keys) => keys.map((key) => known.get(key)),
     send(message) {
-      if (state.is !== 'connected' || socket === undefined || isLate()) return false
+      if (state.is !== 'connected' || socket === undefined) return false
       socket.send(JSON.stringify(message))
       return true
     },

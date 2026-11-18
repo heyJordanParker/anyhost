@@ -53,12 +53,14 @@ test("a laptop whose Claude Code config it cannot read fails the move with the r
   trust(laptop, laptop.env['HOME'] ?? '')
   chmodSync(configOf(laptop), 0o000)
 
-  await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
-  const { last } = await stepsOf(laptop.socket)
+  const asked = await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
   chmodSync(configOf(laptop), 0o600)
+  const message = String(asked.body['message'])
 
-  expect(last.line).toStartWith(`anyhost could not move the session to ${WORKER.name}: EACCES`)
-  expect(last.line).toEndWith('. It keeps running here.')
+  expect(asked.status).toBe(400)
+  expect(message).toStartWith(`anyhost could not move the session to ${WORKER.name}: EACCES`)
+  expect(message).toEndWith('. It keeps running here.')
+  expect(await relay.wanted()).toEqual(new Map())
   expect(worker.logged()).not.toContain(`${LAPTOP.name} moves ${SESSION} here.`)
   expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
 }, 60_000)

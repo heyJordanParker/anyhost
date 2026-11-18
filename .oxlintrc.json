@@ -19,7 +19,8 @@
       "files": ["herdr/**/*.js"],
       "rules": {
         "anyhost/ui-tokens": "error",
-        "anyhost/ui-primitives": "error"
+        "anyhost/ui-primitives": "error",
+        "anyhost/shared-state": "error"
       }
     }
   ]

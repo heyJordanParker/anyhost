@@ -89,7 +89,7 @@ test("the Herdr app's sidebar shows the inbox over the projects, split by a divi
   })
 })
 
-test("in the anyhost layout the tab and pane keys act on the workspace in its view, the pane keys' modifier with enter, m, =, -, comma and period promote, cycle the view, size the master and scroll, and a key the person bound there stays theirs, as the picker key does here", async () => {
+test("in the anyhost layout the tab and pane keys act on the shown window, ctrl-tab walks the windows by recency while the other next-tab keys stay positional, the pane keys' modifier with enter, m, =, -, comma and period promote, cycle the layout, size the master and scroll, and a key the person bound there stays theirs, as the picker key does here", async () => {
   const herdr = join(temporaryFolder(), 'herdr-app')
   mkdirSync(herdr, { recursive: true })
   const global = {
@@ -99,6 +99,8 @@ test("in the anyhost layout the tab and pane keys act on the workspace in its vi
     'cmd-w': 'tab.close',
     'ctrl-tab': 'tab.next',
     'ctrl-shift-tab': 'tab.prev',
+    'cmd-shift-]': 'tab.next',
+    'cmd-shift-[': 'tab.prev',
     'cmd-shift-enter': 'pane.zoom',
     'cmd-alt-left': 'pane.go:left',
     'cmd-alt-right': 'pane.go:right',
@@ -122,8 +124,10 @@ test("in the anyhost layout the tab and pane keys act on the workspace in its vi
       'cmd-w': 'anyhost.close',
       'cmd-shift-t': 'anyhost.reopen',
       'ctrl-shift-alt-t': 'anyhost.reopen',
-      'ctrl-tab': 'anyhost.next',
-      'ctrl-shift-tab': 'anyhost.prev',
+      'ctrl-tab': 'anyhost.recent',
+      'ctrl-shift-tab': 'anyhost.recent-back',
+      'cmd-shift-]': 'anyhost.next',
+      'cmd-shift-[': 'anyhost.prev',
       'cmd-shift-enter': 'anyhost.zoom',
       'cmd-alt-left': 'anyhost.go-left',
       'cmd-alt-right': 'anyhost.go-right',

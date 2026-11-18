@@ -10,7 +10,7 @@ import { cloneRemote } from './code.ts'
 import { dataFolders, devicesOf, rootsHere, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
-import { codexState, filesUnder, historyOf, linesFiles, ownerOf, transcriptOf, type Tool } from './transcript.ts'
+import { codexState, filesUnder, historyOf, linesFiles, ownerOf, transcriptOf, transcriptTailOf, type Tool } from './transcript.ts'
 
 const NOTHING = new Uint8Array()
 
@@ -216,7 +216,7 @@ async function keepConflictedCopy(capture: Capture, session: string, local: Loca
 export async function openSession(tool: Tool, id: string, cwd: string): Promise<number> {
   process.chdir(cwd)
   const transcript = tool === 'claude' ? transcriptOf(rootsHere().claudeHome, id) : undefined
-  const argv = tool === 'codex' ? ['codex', 'resume', id] : claudeStart(resumeArgv(id, transcript === undefined ? {} : await resumedOf(transcript)), true)
+  const argv = tool === 'codex' ? ['codex', 'resume', id] : claudeStart(resumeArgv(id, transcript === undefined ? {} : resumedOf(await transcriptTailOf(transcript))), true)
   return await Bun.spawn(argv, { env: process.env, stdio: ['inherit', 'inherit', 'inherit'] }).exited
 }
 

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { anyhostOn, CLI, decoder, LAPTOP, machineFor, runsOn, sentOn, serveOn, spawnForTest, startedOn, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
 
-test('anyhost new starts a session on the worker in a terminal of herdr-core in its clone of the same repository, routed by start and started', async () => {
+test('anyhost new starts a session on the worker in a terminal of herdr-core in its clone of the same repository, as the machine the session wants', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
   const worker = await workerOn(relay)
@@ -66,17 +66,19 @@ test("anyhost new whose command's own socket drops while the worker starts the s
   expect(code).toBe(0)
 }, 60_000)
 
-test("anyhost new whose laptop sleeps as the worker's started goes prints the session once it wakes and exits 0, with one session started there", async () => {
+test('anyhost new whose laptop sleeps as the worker marks the start done prints the session once it wakes and exits 0, with one session started there', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
   const worker = await workerOn(relay)
   await serveOn(laptop.env)
   await until(() => relay.isConnected(LAPTOP.id), 'the laptop connecting')
   const checkout = tripOn(laptop)
-  const held = relay.holdNext('started')
+  let release = (): void => undefined
+  const held = new Promise<void>((resolve) => (release = resolve))
+  relay.before = (op) => (op.op === 'want' && op.device === '' && op.if?.wanted === WORKER.id ? held : undefined)
 
   const started = spawnForTest(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
-  const release = await held
+  await until(() => startedOn(worker) !== '', 'the worker starting the session', 30_000)
   const wake = relay.silence(LAPTOP.id)
   release()
   await Bun.sleep(12_000)
@@ -85,7 +87,6 @@ test("anyhost new whose laptop sleeps as the worker's started goes prints the se
 
   expect(out).toBe(`${WORKER.name} started ${startedOn(worker).slice(0, 8)} in a terminal of herdr-core there.\n`)
   expect(code).toBe(0)
-  expect(worker.logged()).toContain(`${LAPTOP.name} asked again for its answer`)
   expect(runsOn(worker.folder)).toHaveLength(1)
 }, 90_000)
 

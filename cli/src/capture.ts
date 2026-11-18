@@ -5,11 +5,12 @@ import { basename, dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { promisify } from 'node:util'
 import zlib from 'node:zlib'
-import { isOlder, MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type DeviceRef, type Listed, type Released } from '../../relay/protocol.ts'
+import { MAX_KEYS, MAX_MESSAGE_BYTES, MAX_OPS, type Claimed, type DeviceRef, type Listed } from '../../relay/protocol.ts'
 import { claimsOf, followHolders, type Holders } from './claims.ts'
 import { captureCode, restoreCode, type CodeCapture } from './code.ts'
 import { devicesOf, stateFolder, type DataFolder, type Device, type MachineRoots } from './device.ts'
 import type { Call, RanOf, Read, ReadsKept, Relay } from './relay.ts'
+import { relocate } from './relocate.ts'
 import { Replay } from './sessions.ts'
 import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, namedIn, namesFork, ownerOf, parentOf, piecesFrom, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
 
@@ -40,6 +41,11 @@ const MIGRATIONS: readonly (readonly Migration[])[] = [
   [['sessions', 'last_prompt_at', "text not null default ''"]],
   [['sessions', 'source', "text not null default ''"]],
   [{ droppedTable: 'hook_states' }, { droppedTable: 'borrowed' }],
+  [
+    ['holders', 'wanted', "text not null default ''"],
+    ['holders', 'spec', "text not null default ''"],
+    ['holders', 'error', "text not null default ''"],
+  ],
 ]
 const SCHEMA = OLDEST_SCHEMA + MIGRATIONS.length
 
@@ -86,7 +92,7 @@ export type Capture = Code & {
   lastIndex: string
   keptIndex?: Promise<readonly IndexedSession[]> | undefined
 }
-export type Fleet = { readonly readsChunks: boolean; readonly readAt: number; readonly older: readonly string[]; readonly removed: ReadonlySet<string> }
+export type Fleet = { readonly readAt: number; readonly removed: ReadonlySet<string> }
 export type Problems = { set(key: string, error: unknown): void; clear(key: string): void }
 export type RecordHeader = {
   readonly device: string
@@ -214,6 +220,7 @@ export function openCapture(
     code = { captureCode, restoreCode },
     onCode = () => undefined,
     onReleased = () => undefined,
+    onPlaced = () => undefined,
     onOtherRelay = () => undefined,
     codeEveryMs = CODE_EVERY_MS,
     readsCode = true,
@@ -223,23 +230,24 @@ export function openCapture(
     readonly code?: Code
     readonly onCode?: Capture['onCode']
     readonly onReleased?: Capture['onReleased']
+    readonly onPlaced?: (changes: readonly Claimed[]) => void
     readonly onOtherRelay?: (url: string, bucket: string) => void
     readonly codeEveryMs?: number
     readonly readsCode?: boolean
     readonly compactLagMs?: number
   } = {},
 ): Capture {
-  relay.on('welcome', ({ bucket, waiting }) => {
-    const isOther = useRelay(db, relay.url, bucket)
-    for (const message of waiting) released(message)
-    if (isOther) onOtherRelay(relay.url, bucket)
+  relay.on('welcome', ({ bucket }) => {
+    if (useRelay(db, relay.url, bucket)) onOtherRelay(relay.url, bucket)
   })
   const capture: Capture = {
     ...code, relay, db, device, roots, hashers: new Map(), codeRuns: new Map(), codeWaiting: new Map(), codeStale: new Set(), codeReadAt: new Map(), codeLater: new Map(), codeEveryMs, readsCode, compactLagMs, codeSkipped: new Set(), sealWaits: new Map(), missingFolders: new Set(), onCode, onReleased,
-    holders: followHolders(relay, db), fleet: UNREAD_FLEET, journalsInR2: { readAt: 0, isRewritten: new Map() }, dataFolders: [], lastIndex: '',
+    holders: followHolders(relay, db, (changes) => {
+      void releaseTaken(capture, changes).catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not stop capturing the sessions another machine took: ${String(error)}`))
+      onPlaced(changes)
+    }),
+    fleet: UNREAD_FLEET, journalsInR2: { readAt: 0, isRewritten: new Map() }, dataFolders: [], lastIndex: '',
   }
-  const released = ({ session, to, at }: Released): void => releasedTo(capture, session, to, `${at} ${to.name} took the session ${session} over, so ${device.name} stops capturing it.`)
-  relay.on('released', released)
   relay.on('claiming', ({ session, call }) => {
     if (call.op === 'claim' || (call.op === 'put' && call.key.startsWith(`${journalPrefix(session)}hot/`))) db.query('delete from borrowed_claims where session = ?').run(session)
   })
@@ -248,23 +256,29 @@ export function openCapture(
 
 function releasedTo(capture: Capture, session: string, holder: DeviceRef, reason: string, tool?: Tool): void {
   holdElsewhere(capture.db, session, holder.name, reason, tool)
-  capture.relay.send({ t: 'heard', session, to: holder.id })
   capture.onReleased(session, holder.name)
 }
 
-const FIRST_CHUNKED_PROGRAM = '0.9.0'
-const FLEET_EVERY_MS = 10 * 60_000
-export const UNREAD_FLEET: Fleet = { readsChunks: false, readAt: 0, older: [], removed: new Set() }
+async function releaseTaken(capture: Capture, changes: readonly Claimed[]): Promise<void> {
+  const { db, device, relay } = capture
+  const taken = changes.filter(({ session, device: holder }) => holder !== '' && holder !== device.id && journalOf(db, session)?.holder === '')
+  if (taken.length === 0) return
+  const devices = await devicesOf(relay)
+  for (const { session, device: holder } of taken) {
+    const name = devices.get(holder)?.name ?? holder
+    if (journalOf(db, session)?.holder === '') releasedTo(capture, session, { id: holder, name }, `${new Date().toISOString()} ${name} took the session ${session} over, so ${device.name} stops capturing it.`)
+  }
+}
 
-async function everyMachineReadsChunks(capture: Capture, now = Date.now()): Promise<boolean> {
-  if (now - capture.fleet.readAt < FLEET_EVERY_MS) return capture.fleet.readsChunks
+const FLEET_EVERY_MS = 10 * 60_000
+const UNREAD_FLEET: Fleet = { readAt: 0, removed: new Set() }
+
+async function readFleet(capture: Capture, now: number): Promise<boolean> {
+  if (now - capture.fleet.readAt < FLEET_EVERY_MS) return true
   const devices = await devicesOf(capture.relay).catch(() => undefined)
   if (devices === undefined) return false
-  const joined = [...devices.values()].filter(({ removedAt }) => removedAt === undefined)
-  const older = joined.filter(({ program }) => program === undefined || program === '' || isOlder(program, FIRST_CHUNKED_PROGRAM)).map(({ name }) => name)
-  const removed = new Set([...devices.values()].flatMap(({ id, removedAt }) => (removedAt === undefined ? [] : [id])))
-  capture.fleet = { readsChunks: older.length === 0, readAt: now, older, removed }
-  return capture.fleet.readsChunks
+  capture.fleet = { readAt: now, removed: new Set([...devices.values()].flatMap(({ id, removedAt }) => (removedAt === undefined ? [] : [id]))) }
+  return true
 }
 
 export const isCodePart = (path: string): boolean => path.startsWith('anyhost:code/')
@@ -819,7 +833,7 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
     const fork = await forkChange(capture, session, path, source)
     if (fork !== undefined) return fork
   }
-  const isChunkable = async (): Promise<boolean> => isAppendedFile(path, capture.roots) && (await everyMachineReadsChunks(capture))
+  const isChunkable = (): boolean => isAppendedFile(path, capture.roots)
   if (isLog(path, capture.roots) && source.size >= known.localSize) {
     if (source.size === known.localSize) return touched()
     const from = Math.max(0, known.localSize - known.tail.length)
@@ -832,7 +846,7 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
         hasher = await hasherOf(source, known.localSize)
         if (hasher.copy().digest('hex') !== known.sha256) hasher = undefined
       }
-      if (hasher !== undefined && lineEnd - known.localSize >= CHUNKED_FROM && (await isChunkable())) return await streamedChange(capture, session, path, source, { from: known.localSize, to: lineEnd }, known.journalSize, hasher)
+      if (hasher !== undefined && lineEnd - known.localSize >= CHUNKED_FROM && isChunkable()) return await streamedChange(capture, session, path, source, { from: known.localSize, to: lineEnd }, known.journalSize, hasher)
       if (hasher !== undefined) {
         let end = Math.min(source.size, known.localSize + budget)
         let read = await source.read(from, end)
@@ -848,7 +862,7 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
     }
   }
   const wholeEnd = isLog(path, capture.roots) ? await lineEndOf(source, 0) : source.size
-  if (wholeEnd >= CHUNKED_FROM && (await isChunkable())) {
+  if (wholeEnd >= CHUNKED_FROM && isChunkable()) {
     if (row !== null && source.size === known.localSize && (await hasherOf(source, source.size)).digest('hex') === known.sha256) return touched()
     return await streamedChange(capture, session, path, source, { from: 0, to: wholeEnd }, 0, new Bun.CryptoHasher('sha256'))
   }
@@ -935,7 +949,7 @@ async function forkedChange(capture: Capture, session: string, path: string, who
     pieces.push(piece)
     covered += piece.length
   }
-  if (!sameBytes((await forkedTranscript(source.subarray(0, covered), fork)).bytes, derived.bytes) || !(await everyMachineReadsChunks(capture))) return undefined
+  if (!sameBytes((await forkedTranscript(source.subarray(0, covered), fork)).bytes, derived.bytes)) return undefined
   const chunks = await storeChunks(capture, pieces.map((bytes) => ({ bytes })))
   return chunkedChange(capture, session, path, derived.bytes, mtime, { chunks, fork }, derived.bytes.length < whole.length)
 }
@@ -1003,7 +1017,7 @@ async function forkChange(capture: Capture, session: string, path: string, sourc
   if (first === undefined) return undefined
   const candidates = capture.db.query<{ path: string }, [string, string]>('select path from fork_starts where uuid = ? and path != ?').all(first, path).map((start) => start.path)
   const parent = await parentOf(path, candidates, FORK_BYTES)
-  if (parent === undefined || !(await everyMachineReadsChunks(capture))) return undefined
+  if (parent === undefined) return undefined
   return await deltaChange(capture, session, path, source, parent)
 }
 
@@ -1638,14 +1652,20 @@ async function foldsOf(capture: Capture, handle: FileHandle, records: readonly S
 }
 
 const nextPrefix = (session: string): string => `${journalPrefix(session)}next/`
-const compactedName = (start: number, end: number, written: number | undefined): string => (written === undefined ? `${position(start)}-${position(end)}.zst` : rewrittenName(start, end, written))
 const RECHECK_BYTES = 8 * 2 ** 20
 
-const fileKeyOf = (session: string, path: string): string => (path.includes(session) ? path.slice(path.indexOf(session)) : basename(path))
+type Writers = ReadonlyMap<string, { readonly roots: MachineRoots }>
+const EVERY_WRITER = { home: '/home', claudeHome: '/home/.claude', claudeTmp: '/tmp/claude', codexHome: '/home/.codex', checkout: '/home' }
 
-async function fileStatesOf(capture: Capture, session: string, folder: string, parts: AsyncIterable<Uint8Array>): Promise<Map<string, string>> {
+const fileKeyOf = (writers: Writers, { device, path }: Pick<RecordHeader, 'device' | 'path'>): string => {
+  const roots = writers.get(device)?.roots
+  if (roots === undefined) throw new Error(`The journal holds records of the device ${device}, and the relay knows no machine of that id, so anyhost cannot tell which of its files are one file.`)
+  return relocate(new Uint8Array(), path, { ...roots, checkout: roots.home }, EVERY_WRITER).path
+}
+
+async function fileStatesOf(capture: Capture, writers: Writers, folder: string, parts: AsyncIterable<Uint8Array>): Promise<Map<string, string>> {
   mkdirSync(folder, { recursive: true })
-  const replay = new Replay(folder, ({ path }) => fileKeyOf(session, path), (base) => downloadBase(capture.relay, basesOf(capture.db), base), chunkReader(capture.relay))
+  const replay = new Replay(folder, (header) => fileKeyOf(writers, header), (base) => downloadBase(capture.relay, basesOf(capture.db), base), chunkReader(capture.relay))
   for await (const bytes of parts) await replay.push(bytes)
   replay.close()
   const states = new Map<string, string>()
@@ -1708,8 +1728,7 @@ export async function rewriteJournal(capture: Capture, session: string, tool: To
     const prefixEnd = oldSpans[reach - 1]?.to ?? 0
     const inPrefix = records.findIndex(({ to }) => to > prefixEnd)
     const count = inPrefix < 0 ? records.length : inPrefix
-    const readsChunks = await everyMachineReadsChunks(capture)
-    const { replaced, folded } = readsChunks ? await foldsOf(capture, handle, records, dropped, count, read) : { replaced: new Map<number, Replacement>(), folded: new Set<number>() }
+    const { replaced, folded } = await foldsOf(capture, handle, records, dropped, count, read)
     const gone = new Set([...[...dropped].filter((index) => index < count), ...folded])
     const keptOf = (index: number): number => {
       const record = records[index]
@@ -1739,12 +1758,12 @@ export async function rewriteJournal(capture: Capture, session: string, tool: To
         }
         const body = Buffer.concat(parts)
         yield body
-        const after = readsChunks ? 1 + Math.max(...group.spans.map(({ written: was }) => was)) : undefined
-        written.push({ name: compactedName(first.start, last.end, after), body: await compressSealed(body), changed: group.records.flatMap((index) => replaced.get(index) ?? []) })
+        written.push({ name: rewrittenName(first.start, last.end, 1 + Math.max(...group.spans.map(({ written: was }) => was))), body: await compressSealed(body), changed: group.records.flatMap((index) => replaced.get(index) ?? []) })
       }
     }
-    const before = await fileStatesOf(capture, session, join(checking, 'before'), stagedRange(handle, 0, prefixEnd))
-    const after = await fileStatesOf(capture, session, join(checking, 'after'), newPrefix())
+    const writers = await devicesOf(relay)
+    const before = await fileStatesOf(capture, writers, join(checking, 'before'), stagedRange(handle, 0, prefixEnd))
+    const after = await fileStatesOf(capture, writers, join(checking, 'after'), newPrefix())
     for (const path of new Set([...before.keys(), ...after.keys()])) {
       if (before.get(path) !== after.get(path)) throw new Error(`The rewrite of ${session}'s journal replays ${path} as ${after.get(path) ?? 'nothing'}, not the ${before.get(path) ?? 'nothing'} its frames give, so anyhost keeps every frame as it was.`)
     }
@@ -1773,7 +1792,7 @@ export async function rewriteJournal(capture: Capture, session: string, tool: To
     const published: string[] = []
     for (const { name, body } of [...written].reverse()) {
       const outcome = await put(`${journalPrefix(session)}compacted/${name}`, body)
-      if (outcome === 'held' || (outcome === 'other' && readsChunks)) break
+      if (outcome !== 'written') break
       if (outcome === 'written') published.push(`${journalPrefix(session)}compacted/${name}`)
     }
     if (written.length > 0) await Promise.all(relay.run([{ op: 'delete', keys: written.map(({ name }) => `${nextPrefix(session)}${name}`), holder: session }]))
@@ -1789,7 +1808,6 @@ export async function rewriteJournal(capture: Capture, session: string, tool: To
     const picked = new Set(framesOf(session, await relay.list(journalPrefix(session))).frames.map(({ key }) => key))
     const stored = (db.query<{ count: number }, []>('select count(*) as count from chunks').get()?.count ?? 0) - chunksBefore
     const isCurrent =
-      readsChunks &&
       isWhole &&
       published.every((key) => picked.has(key)) &&
       count === records.length &&
@@ -1875,7 +1893,7 @@ export async function rewriteNext(capture: Capture, problems: Problems, now = Da
     (error: unknown) => problems.set('rewrite list', error),
   )
   const spent = db.query<{ ops: number }, [number]>('select coalesce(sum(ops), 0) as ops from rewrites where at > ?').get(now - DAY_MS)?.ops ?? 0
-  if (spent >= REWRITE_OPS_PER_DAY || !(await everyMachineReadsChunks(capture, now))) return undefined
+  if (spent >= REWRITE_OPS_PER_DAY || !(await readFleet(capture, now))) return undefined
   const isGivenBack = await giveBack(capture).then(
     () => (problems.clear('borrowed claims'), true),
     (error: unknown) => (problems.set('borrowed claims', error), false),
@@ -1921,10 +1939,10 @@ export async function rewriteNext(capture: Capture, problems: Problems, now = Da
   return session
 }
 
-export function rewriteProgress(capture: Capture): { readonly done: number; readonly journals: number; readonly olderMachines: readonly string[] } | undefined {
+export function rewriteProgress(capture: Capture): { readonly done: number; readonly journals: number } | undefined {
   const { readAt, isRewritten } = capture.journalsInR2
   if (readAt === 0) return undefined
-  return { done: [...isRewritten.values()].filter(Boolean).length, journals: isRewritten.size, olderMachines: capture.fleet.older }
+  return { done: [...isRewritten.values()].filter(Boolean).length, journals: isRewritten.size }
 }
 
 export async function checkoutOf(cwd: string): Promise<{ repo: string; folder: string }> {

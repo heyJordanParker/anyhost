@@ -49,6 +49,19 @@ export default {
         }
       },
     },
+    'shared-state': {
+      meta: { type: 'problem', docs: { description: 'Each copy of the Herdr pane dispatches its own input, so a shared key holds state alone and never an action another copy runs.' } },
+      create(context) {
+        return {
+          CallExpression(node) {
+            if (node.callee.type !== 'Identifier' || node.callee.name !== 'setShared') return
+            const value = node.arguments[1]
+            const action = value?.type === 'ObjectExpression' && value.properties.find((property) => property.type === 'Property' && ['action', 'command', 'ask'].includes(property.key.name))
+            if (action) context.report({ node: action, message: `A shared key holds state, never an action: dispatch ${action.key.name} from the copy that has the input, with enqueue() or run().` })
+          },
+        }
+      },
+    },
     'ui-primitives': {
       meta: { type: 'suggestion', docs: { description: 'Each element of the Herdr pane has one implementation: every row is item(), every input input() or searchField(), every button button().' } },
       create(context) {
