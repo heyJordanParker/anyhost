@@ -19,5 +19,6 @@
     "noEmit": true,
     "types": ["@cloudflare/workers-types", "bun"]
   },
-  "include": ["*.ts"]
+  "include": ["*.ts"],
+  "exclude": ["relay.test.ts"]
 }
