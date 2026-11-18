@@ -20,5 +20,5 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests", "../relay/relay.test.ts"]
 }
