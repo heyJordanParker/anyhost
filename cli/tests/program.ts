@@ -353,6 +353,7 @@ export const sharedIn = async (relay: MemoryRelay): Promise<{ readonly archived?
 export const isWatcherProblem = (problem: string): boolean => problem.includes(' watcher: ')
 export const dataFolderOn = (machine: { readonly env: Record<string, string> }, mod: string, rebuildable: readonly string[]): string => {
   const folder = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'data', mod)
+  mkdirSync(dirname(folder), { recursive: true })
   const cmod = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs', 'cmod')
   writeFileSync(cmod, readFileSync(cmod, 'utf8').replace(UNKNOWN_CMOD_COMMAND, `"data --json") printf '%s' '${JSON.stringify([{ mod, folder, rebuildable }])}' ;;\n  ${UNKNOWN_CMOD_COMMAND}`))
   return folder
