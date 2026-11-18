@@ -351,7 +351,7 @@ const CLAUDE_START = [
   'exec { $ARGV[0] } @ARGV or die "$ARGV[0]: $!\\n";',
 ].join(' ')
 
-export const claudeStart = (argv: readonly string[], trustsHome: boolean): string[] => ['perl', '-e', CLAUDE_START, '--', environmentFile(), trustsHome ? '1' : '', ...argv]
+export const claudeStart = (argv: readonly string[], trustsHome: boolean): string[] => [process.platform === 'darwin' ? '/usr/bin/perl' : 'perl', '-e', CLAUDE_START, '--', environmentFile(), trustsHome ? '1' : '', ...argv]
 
 export type Resumed = { readonly model?: string; readonly effort?: string }
 

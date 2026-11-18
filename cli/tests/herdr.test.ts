@@ -1,6 +1,7 @@
 import { expect, onTestFinished, test } from 'bun:test'
 import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { claudeStart } from '../src/claude.ts'
 import { installHerdr, uninstallHerdr } from '../src/herdr.ts'
 import { script, temporaryFolder } from './program.ts'
 
@@ -39,7 +40,7 @@ test("the Herdr app's Claude Code starts through anyhost's launcher, once, witho
   const ran = Bun.spawnSync(run, { env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, CLAUDE_CODE_CHILD_SESSION: '1' } })
 
   expect(name).toBe('Claude')
-  expect(run[0]).toBe('perl')
+  expect(run[0]).toBe(claudeStart([], false)[0])
   expect(ran.stdout.toString()).toBe('claude --model opus unmarked\n')
 })
 
@@ -48,6 +49,13 @@ test("a Herdr app set up by 0.9.0 runs its own Claude Code command through the l
 
   expect(run.slice(-3)).toEqual(['claude', '--model', 'opus'])
   expect(run).not.toContain(RUNNER_WRAP_0_9_0)
+})
+
+test("a Herdr app whose Claude Code an older launcher starts runs the person's own command through this launcher once", async () => {
+  const older = (argv: readonly string[]): string[] => ['perl', '-e', 'my ($environment, $trustsHome) = splice(@ARGV, 0, 2); exec @ARGV;', '--', '/old/environment.json', '', ...argv]
+  const { run } = await claudeRunIn(older(older(['claude', '--model', 'opus'])))
+
+  expect(run).toEqual(claudeStart(['claude', '--model', 'opus'], false))
 })
 
 test("the Herdr app's sidebar shows the inbox over the projects, split by a divider the person drags, its panes wear anyhost's header, and the rest of its layout is as the app ships it", async () => {

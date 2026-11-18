@@ -1391,7 +1391,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     for (const session of new Set([...capture.holders.wanted().keys(), ...pausedSessions()])) place(session)
   }
   relay.on('welcome', () => void releaseHeld().then(placeAll).catch(readFailed('the sessions to place')))
-  void releaseHeld()
+  void releaseHeld().then(placeAll).catch(readFailed('the sessions to place'))
   void settle('environment', () => saveLoginEnvironment())
   void settle('fork starts', () => indexForkStarts(capture))
 

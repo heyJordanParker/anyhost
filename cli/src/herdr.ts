@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs'
 import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import alarmClockOff from '../../herdr/anyhost/icons/alarm-clock-off.svg' with { type: 'text' }
 import alarmClock from '../../herdr/anyhost/icons/alarm-clock.svg' with { type: 'text' }
 import appWindow from '../../herdr/anyhost/icons/app-window.svg' with { type: 'text' }
@@ -306,7 +306,9 @@ const RUNNER_WRAP_0_9_0 = 'program="$HOME/.local/share/cmod/programs/anyhost"; [
 
 const ownCommandOf = (run: readonly string[]): readonly string[] => {
   const started = claudeStart([], false)
-  if (started.every((word, at) => run[at] === word)) return run.slice(started.length)
+  const [, option, script = '', end] = started
+  const isLauncher = basename(run[0] ?? '') === 'perl' && run[1] === option && run[2]?.startsWith(script.slice(0, script.indexOf(';') + 1)) === true && run[3] === end
+  if (isLauncher) return ownCommandOf(run.slice(started.length))
   if (run[0] === 'sh' && run[2] === RUNNER_WRAP_0_9_0) return run.slice(4)
   return run
 }
