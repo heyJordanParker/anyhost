@@ -2,6 +2,17 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.14] - 2026-11-19
+
+### Changed
+- Searching the sidebar lists your open sessions first. Archived sessions that match wait in a folded Archived shelf under them, which opens with a click or Enter and folds again once you clear the search, as T3 Code keeps archived threads out of its search. The palette shows them as its last group, Archived.
+
+### Fixed
+- The search field's clear button shows its × again. Its icon never reached the Herdr app, so the button drew as an empty square.
+- A /rename shows in the sidebar and the tab bar the moment Claude Code confirms it, after a /compact too. anyhost read the new name only once its upload to your Cloudflare account finished, which took seconds, or never while the upload could not get through.
+- A session you name before its first prompt is listed under that name. anyhost listed no session without a prompt, so its tab kept a number.
+- Picking No project or Temporary no longer narrows the list to the folder of the session on screen, which hid most of their sessions.
+
 ## [0.9.13] - 2026-11-18
 
 ### Changed
@@ -25,6 +36,10 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 - Starting a new session or picking a workspace that takes a while no longer takes the screen once it is ready if you clicked somewhere else meanwhile, as an open already did.
 - A split window whose agents all go to sleep keeps its split and its mode, and opens with both again. It could open with one agent and the default layout, as Herdr drops a closed tab a moment before its agents stop.
 - The history of a session whose transcript Claude Code wrote into two project folders, as after a resume from another folder, now rewrites into shared chunks. Its rewrite stopped with "The journal writes … past its … bytes", as the check took the two files for one.
+- A session started on another machine starts there even when that machine's anyhost was still starting as the request arrived. It stayed waiting forever.
+- Keep it here keeps the session where it is even when the move it cancelled reaches the machine late. The move could start again and hold the session until its turn ended.
+- A prompt you type the moment a machine wakes meets the machine that took its session while it slept, and is refused there, as anyhost first catches up with every change of holder.
+- Claude Code starts on a machine whose perl cannot read its own start time. The launcher stopped before Claude Code started.
 
 ## [0.9.12] - 2026-11-17
 
