@@ -97,6 +97,17 @@ test("the Herdr app's sidebar shows the inbox over the projects, split by a divi
   })
 })
 
+test('every icon of its own the pane draws reaches the Herdr app with it', async () => {
+  const herdr = join(temporaryFolder(), 'herdr-app')
+  mkdirSync(herdr, { recursive: true })
+
+  await installHerdr(join(herdr, 'herdr.json'), herdr)
+
+  const drawn = new Set([...readFileSync(join(PANE, 'main.js'), 'utf8').matchAll(/(?:\$\{OWN\}|mods\/anyhost\/icons)\/([a-z0-9-]+)/g)].map(([, icon]) => icon))
+  expect(drawn).toContain('circle-x')
+  expect([...drawn].filter((icon) => !existsSync(join(herdr, 'mods', 'anyhost', 'icons', `${icon}.svg`)))).toEqual([])
+})
+
 test("in the anyhost layout the tab and pane keys act on the shown window, ctrl-tab walks the windows by recency while the other next-tab keys stay positional, the pane keys' modifier with enter, m, =, -, comma and period promote, cycle the layout, size the master and scroll, and a key the person bound there stays theirs, as the picker key does here", async () => {
   const herdr = join(temporaryFolder(), 'herdr-app')
   mkdirSync(herdr, { recursive: true })
