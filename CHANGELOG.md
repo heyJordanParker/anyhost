@@ -2,6 +2,18 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.14] - 2026-11-19
+
+### Changed
+- Searching the sidebar lists your open sessions first. Archived sessions that match wait in a folded Archived shelf under them, which opens with a click or Enter and folds again once you clear the search, as T3 Code keeps archived threads out of its search. The palette shows them as its last group, Archived.
+
+### Fixed
+- The search field's clear button shows its × again. Its icon never reached the Herdr app, so the button drew as an empty square.
+- A session started on another machine starts there even when that machine's anyhost was still starting as the request arrived. It stayed waiting forever.
+- Keep it here keeps the session where it is even when the move it cancelled reaches the machine late. The move could start again and hold the session until its turn ended.
+- A prompt you type the moment a machine wakes meets the machine that took its session while it slept, and is refused there, as anyhost first catches up with every change of holder.
+- Claude Code starts on a machine whose perl cannot read its own start time. The launcher stopped before Claude Code started.
+
 ## [0.9.13] - 2026-11-18
 
 ### Changed
