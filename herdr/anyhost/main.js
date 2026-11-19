@@ -14,6 +14,7 @@ const TEMP_ROOTS = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folder
 const SHELF_FIRST = 10;
 const SHELF_MORE = 25;
 const FOUND_MAX = 40;
+const FOUND_ARCHIVED = "found-archived";
 const ICON = "mods/workspace-chrome";
 const OWN = "mods/anyhost/icons";
 const ANYHOST = 'PATH="$HOME/.local/share/cmod/programs:$HOME/.local/bin:$PATH" exec anyhost "$@"';
@@ -1049,7 +1050,7 @@ export default class Anyhost extends View {
     if (this.kind === "tabs") return this.tabsView.slots.map((slot) => slot.id);
     if (this.kind === "board") return this.board.cards.map((r) => r.key);
     const { sectionKeys, onScreen } = this.shown;
-    const keys = [...sectionKeys.pinned, ...sectionKeys.active, ...sectionKeys.working, ...sectionKeys.snoozed, ...(this.found ?? []).map((r) => r.key), ...Object.values(onScreen).flat().map((r) => r.key)];
+    const keys = [...sectionKeys.pinned, ...sectionKeys.active, ...sectionKeys.working, ...sectionKeys.snoozed, ...(this.found === null ? [] : this.foundShown().filter((r) => !r.shelf)).map((r) => r.key), ...Object.values(onScreen).flat().map((r) => r.key)];
     for (const [id] of SHELVES) if (this.opened.has(id)) keys.push(...(sectionKeys[id] ?? []).slice(0, this.shelfShown[id] ?? SHELF_FIRST));
     return keys;
   }
@@ -1187,7 +1188,7 @@ export default class Anyhost extends View {
         const r = shown.model.byKey.get(key);
         return r ? `${key}:${this.subsOf(r, shown.model).rows.length}` : key;
       });
-    return JSON.stringify([shown.sectionKeys, shown.filterKey, (this.found ?? []).map((r) => r.key), heights, this.arrived]);
+    return JSON.stringify([shown.sectionKeys, shown.filterKey, (this.found === null ? [] : this.foundShown()).map((r) => r.key), heights, this.arrived]);
   }
 
   runActs(cx, after) {
@@ -2210,6 +2211,7 @@ export default class Anyhost extends View {
     if (this.searchedIn !== undefined && project !== this.searchedIn) {
       if (this.search.value() !== "") this.search.set_value("");
       this.found = null;
+      this.opened.delete(FOUND_ARCHIVED);
       this.cursor = null;
       this.shelfShown = {};
     }
@@ -2536,6 +2538,7 @@ export default class Anyhost extends View {
 
   searched(cx) {
     this.found = this.foundOf(this.model);
+    if (this.found === null) this.opened.delete(FOUND_ARCHIVED);
     this.placeParts(cx);
     this.redrawAll(cx);
   }
@@ -2543,7 +2546,14 @@ export default class Anyhost extends View {
   foundOf(model) {
     const query = this.search.value().trim().toLowerCase();
     if (query === "" || !model) return null;
-    return model.rows.filter((r) => !r.isChild && this.searchedOf(r).includes(query)).slice(0, FOUND_MAX);
+    const matches = model.rows.filter((r) => !r.isChild && this.searchedOf(r).includes(query));
+    return { rows: matches.filter((r) => !r.archived).slice(0, FOUND_MAX), archived: matches.filter((r) => r.archived).slice(0, FOUND_MAX) };
+  }
+
+  foundShown() {
+    const { rows, archived } = this.found;
+    if (archived.length === 0) return rows;
+    return [...rows, { key: shelfStop(FOUND_ARCHIVED), shelf: FOUND_ARCHIVED }, ...(this.opened.has(FOUND_ARCHIVED) ? archived : [])];
   }
 
   renderInbox(t, cx) {
@@ -2573,10 +2583,9 @@ export default class Anyhost extends View {
     const mounted = new Set();
     const ctx = { t, shown: shown.terminal, model, filter, mounted };
     const shelves = this.shelvesOf(held, shown);
-    const found = this.found;
+    const found = this.found === null ? null : this.foundShown();
     this.visible = found ?? [...placed.pinned, ...placed.active, ...shelves.visible];
-    if (found !== null) this.childAt = new Map(found.map((r, at) => [r.key, at]));
-    const body = found !== null ? (found.length === 0 ? [this.empty(t, "No sessions found")] : found.map((r) => this.cardFor(ctx, r, mounted))) : this.listRows(ctx, placed, shelves);
+    const body = found !== null ? this.foundRows(ctx, found) : this.listRows(ctx, placed, shelves);
     this.mounted = mounted;
     if (this.isArriving) cx.timer.after(FRAME_MS, (cx) => cx.notify());
     if (this.departing.size > 0) cx.timer.after(UI.motion.duration + FRAME_MS, (cx) => cx.notify());
@@ -2754,12 +2763,20 @@ export default class Anyhost extends View {
     return this.item(`ah-head-${id}`).gap(UI.space.sm).text_size(UI.text.caption).font_medium().text_color(t.muted).child(div().flex_none().child(label)).child(div().flex_1().h(1).bg(t.border));
   }
 
+  foundRows(ctx, shown) {
+    const { rows, archived } = this.found;
+    const before = rows.length === 0 ? [this.empty(ctx.t, archived.length === 0 ? "No sessions found" : "No open sessions found")] : [];
+    this.childAt = new Map(shown.map((item, at) => [item.key, before.length + at]));
+    return [...before, ...shown.map((item) => (item.shelf ? this.shelf(ctx.t, { id: item.shelf, label: "Archived", count: archived.length, isOpen: this.opened.has(item.shelf) }) : this.cardFor(ctx, item, ctx.mounted)))];
+  }
+
   toggleShelf(id, cx) {
+    const isFound = id === FOUND_ARCHIVED;
     if (!this.opened.delete(id)) {
       this.opened.add(id);
-      this.revealing = id;
+      if (!isFound) this.revealing = id;
     }
-    preferEntry("shelves", id, this.opened.has(id) ? true : null);
+    if (!isFound) preferEntry("shelves", id, this.opened.has(id) ? true : null);
     this.isToggling = true;
     this.redrawList(cx);
   }
@@ -5223,14 +5240,17 @@ export default class Anyhost extends View {
         title: project.name,
         run: close(() => this.showProject(project.key)),
       }));
+    const item = (s) => ({ id: `s-${s.key}`, session: s, title: s.title, run: close(() => this.open(s, null)) });
     const sessions = p.sessions
-      .filter((s) => (text === "" ? !s.archived && s.kind === "own" : has(s.title, s.projectName)))
+      .filter((s) => !s.archived && (text === "" ? s.kind === "own" : has(s.title, s.projectName)))
       .slice(0, text === "" ? 12 : 40)
-      .map((s) => ({ id: `s-${s.key}`, session: s, title: s.title, run: close(() => this.open(s, null)) }));
+      .map(item);
+    const archived = text === "" ? [] : p.sessions.filter((s) => s.archived && has(s.title, s.projectName)).slice(0, 40).map(item);
     return [
       ["Actions", actions],
       ["Projects", shownProjects],
       [text === "" ? "Recent sessions" : "Sessions", sessions],
+      ["Archived", archived],
     ].filter(([, rows]) => rows.length > 0);
   }
 

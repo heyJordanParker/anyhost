@@ -9,6 +9,7 @@ import archiveRestore from '../../herdr/anyhost/icons/archive-restore.svg' with 
 import chevronUp from '../../herdr/anyhost/icons/chevron-up.svg' with { type: 'text' }
 import circleAlert from '../../herdr/anyhost/icons/circle-alert.svg' with { type: 'text' }
 import circleDashed from '../../herdr/anyhost/icons/circle-dashed.svg' with { type: 'text' }
+import circleX from '../../herdr/anyhost/icons/circle-x.svg' with { type: 'text' }
 import circle from '../../herdr/anyhost/icons/circle.svg' with { type: 'text' }
 import columns from '../../herdr/anyhost/icons/columns-2.svg' with { type: 'text' }
 import copy from '../../herdr/anyhost/icons/copy.svg' with { type: 'text' }
@@ -48,6 +49,7 @@ const ICONS: Record<string, string> = {
   'chevron-up.svg': chevronUp,
   'circle-alert.svg': circleAlert,
   'circle-dashed.svg': circleDashed,
+  'circle-x.svg': circleX,
   'circle.svg': circle,
   'columns-2.svg': columns,
   'copy.svg': copy,
