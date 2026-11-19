@@ -230,6 +230,7 @@ const isUnder = (path, root) => Boolean(root) && (path === root || path.startsWi
 const isTemporaryIn = (cwd, roots) => !isUnder(cwd, roots?.home ?? "") && [...TEMP_ROOTS, roots?.claudeTmp ?? ""].some((root) => isUnder(cwd, root));
 const hashed = new Map();
 const hex12 = (text) => hashed.get(text) ?? hashed.set(text, createHash("sha256").update(text).digest("hex").slice(0, 12)).get(text);
+const hasWorktrees = (key) => key !== NONE && key !== TEMPORARY;
 const spaceOf = (key, checkout) => (key === TEMPORARY ? "anyhost-temporary" : key === NONE ? "anyhost-none" : `anyhost-w-${hex12(checkout)}`);
 const projectSpaceBefore = (key) => `anyhost-p-${hex12(key)}`;
 const placedSpace = (on, id) => (on ? `${on}/${id}` : id);
@@ -1800,7 +1801,7 @@ export default class Anyhost extends View {
         if (isHeld && r.address) w.live++;
         continue;
       }
-      const isLoose = r.projectKey === NONE || r.projectKey === TEMPORARY;
+      const isLoose = !hasWorktrees(r.projectKey);
       const branch = this.branchOf(r.machine, r.checkout)?.branch ?? r.checkout.split("/").pop();
       known.set(id, { id, key: r.projectKey, machine: r.machine, folder: isLoose ? null : r.checkout, checkout: r.checkout, at: Date.parse(r.at) || 0, name: isLoose ? r.projectName : `${r.projectName} · ${branch}`, newest: isHeld ? this.factsOf(r) : null, live: isHeld && r.address ? 1 : 0 });
     }
@@ -1830,7 +1831,7 @@ export default class Anyhost extends View {
       const onMachines = [...new Set(p.rows.map((r) => r.machine))];
       const checkouts = Object.fromEntries(onMachines.map((m) => [m, [...new Set(p.rows.filter((r) => r.machine === m).sort(byRecent).map((r) => r.checkout))]]));
       const unread = p.rows.filter((r) => r.isUnread && !r.archived).map((r) => ({ key: r.key, at: r.at, machine: r.machine, checkout: r.checkout }));
-      return { key: p.key, name: p.name, defaultName: p.defaultName, isNamed: p.isNamed, ...this.countsOf(p.rows), worktrees: p.key === NONE ? [] : this.worktreesOf(p), machines: onMachines, checkouts, newest: p.newest, unread };
+      return { key: p.key, name: p.name, defaultName: p.defaultName, isNamed: p.isNamed, ...this.countsOf(p.rows), worktrees: hasWorktrees(p.key) ? this.worktreesOf(p) : [], machines: onMachines, checkouts, newest: p.newest, unread };
     });
     const order = this.orderNow();
     listed.sort((a, b) => placeIn(order, a.key) - placeIn(order, b.key) || b.newest - a.newest);
@@ -2095,7 +2096,7 @@ export default class Anyhost extends View {
   showProject(key, machine = null) {
     const worktree = this.worktreeToShow(key, machine);
     if (worktree === null) return notify({ title: `No machine the Herdr app reaches holds ${shared(PULSE)?.known.find((p) => p.key === key)?.name ?? projectNameOf(key)}`, body: "Add the machine that holds it, and its sessions show here.", level: "warning" });
-    if (key !== NONE && key !== TEMPORARY) setFilter({ project: key, worktree });
+    setFilter({ project: key, worktree: hasWorktrees(key) ? worktree : null });
     this.showWorkspace(key, worktree);
   }
 
@@ -2324,8 +2325,8 @@ export default class Anyhost extends View {
     const labels = at ? live.all.find((x) => x.address === at)?.labels : undefined;
     const r = model.byKey.get(labels?.[SESSION_LABEL] ?? labels?.[VIEW_LABEL] ?? "");
     if (!r) return;
-    const worktree = { machine: r.machine, folder: r.checkout };
-    if (filter.worktree !== null && !sameWorktree(filter.worktree, worktree)) return setFilter({ project: r.projectKey, worktree });
+    const worktree = hasWorktrees(r.projectKey) ? { machine: r.machine, folder: r.checkout } : null;
+    if (filter.worktree !== null && (worktree === null || !sameWorktree(filter.worktree, worktree))) return setFilter({ project: r.projectKey, worktree });
     if (filter.project !== null && r.projectKey !== filter.project) setFilter({ project: r.projectKey });
   }
 
@@ -2886,7 +2887,7 @@ export default class Anyhost extends View {
   }
 
   worktreeOf(r) {
-    if (r.projectKey === NONE || r.projectKey === TEMPORARY) return null;
+    if (!hasWorktrees(r.projectKey)) return null;
     if ((this.model?.worktrees.get(`${r.projectKey}\0${r.machine}`)?.size ?? 0) < 2) return null;
     return this.branchOf(r.machine, r.checkout)?.branch ?? r.checkout.split("/").pop();
   }
@@ -2918,7 +2919,7 @@ export default class Anyhost extends View {
               .h(UI.height.inline)
               .gap(UI.space.xs)
               .items_center()
-              .child(this.mark(t, r.projectName, false, r.projectKey === NONE || r.projectKey === TEMPORARY))
+              .child(this.mark(t, r.projectName, false, !hasWorktrees(r.projectKey)))
               .child(div().min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(meta))
               .when(worktree !== null, (line) => line.child(h_flex().min_w(0).gap(UI.space.xs).items_center().text_size(UI.text.caption).text_color(t.dim).child(svg(`${ICON}/git-branch.svg`).size(UI.icon.small).flex_none()).child(div().truncate().child(worktree))))
               .child(div().flex_1())
@@ -3273,7 +3274,7 @@ export default class Anyhost extends View {
             .hover((s) => s.bg(t.hover))
             .tooltip(r.title)
             .on_click(() => this.act((cx) => this.open(r, cx)))
-            .child(this.mark(t, r.projectName, false, r.projectKey === NONE || r.projectKey === TEMPORARY))
+            .child(this.mark(t, r.projectName, false, !hasWorktrees(r.projectKey)))
             .child(svg(iconPath(STATE[r.state].icon)).size(UI.icon.small).text_color(this.stateColor(r.state))),
         ),
       );
@@ -4170,7 +4171,7 @@ export default class Anyhost extends View {
 
   projectMenuGroups(p) {
     const project = p.project;
-    const isRepository = project.key !== NONE && project.key !== TEMPORARY;
+    const isRepository = hasWorktrees(project.key);
     const w = p.worktree ?? (project.worktrees.length === 1 ? project.worktrees[0] : null);
     const at = w === null ? null : { machine: w.machine, folder: w.folder };
     const inGit = isRepository && project.worktrees.length > 0;
@@ -4497,7 +4498,7 @@ export default class Anyhost extends View {
         .text_size(UI.text.caption)
         .font_medium()
         .text_color(t.muted)
-        .child(this.mark(t, group.name, false, group.key === NONE || group.key === TEMPORARY))
+        .child(this.mark(t, group.name, false, !hasWorktrees(group.key)))
         .child(div().flex_1().min_w(0).truncate().child(group.name))
         .child(div().flex_none().font_normal().text_color(t.dim).child(String(group.rows.length)));
     return v_flex()

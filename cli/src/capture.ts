@@ -12,7 +12,7 @@ import { devicesOf, stateFolder, type DataFolder, type Device, type MachineRoots
 import type { Call, RanOf, Read, ReadsKept, Relay } from './relay.ts'
 import { relocate } from './relocate.ts'
 import { Replay } from './sessions.ts'
-import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, namedIn, namesFork, ownerOf, parentOf, piecesFrom, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
+import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, NAMED_RANK, namedIn, namesFork, ownerOf, parentOf, piecesFrom, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
 const SCAN_READ_BYTES = 2 ** 20
@@ -53,6 +53,7 @@ export type IndexedSession = {
   readonly id: string
   readonly tool: Tool
   readonly title: string
+  readonly named?: boolean
   readonly firstPrompt: string
   readonly cwd: string
   readonly repo: string
@@ -1982,6 +1983,13 @@ export async function recordSummary(capture: Pick<Capture, 'db' | 'roots'>, id: 
   return row.last_activity === '' || after.cwd !== row.cwd || repo !== row.repo || checkout.folder !== row.repo_folder
 }
 
+export async function recordSummaryFrom(capture: Pick<Capture, 'db' | 'roots'>, id: string, tool: Tool, paths: readonly string[]): Promise<boolean> {
+  const files = paths.map((path) => ({ path, info: statSync(path) })).sort((a, b) => a.info.mtimeMs - b.info.mtimeMs)
+  const text = (await Promise.all(files.map(({ path }) => summaryTextOf(path)))).join('')
+  const size = files.reduce((total, { info }) => total + info.size, 0)
+  return await recordSummary(capture, id, tool, [text], size, new Date(Math.max(...files.map(({ info }) => info.mtimeMs))).toISOString())
+}
+
 export function recordSource(db: Database, id: string, source: string): boolean {
   if (source === '' || source === id) return false
   return db.query("update sessions set source = ? where id = ? and source = ''").run(source, id).changes > 0
@@ -2006,7 +2014,7 @@ function indexOf(db: Database): IndexedSession[] {
     .query<SessionRow & { deleted: number }, []>(`select *, ${TRANSCRIPT_GONE} as deleted from sessions order by last_activity desc`)
     .all()
     .map((row) => ({
-      id: row.id, tool: row.tool, title: row.title, firstPrompt: row.first_prompt, cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder,
+      id: row.id, tool: row.tool, title: row.title, named: row.title_rank >= NAMED_RANK, firstPrompt: row.first_prompt, cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder,
       entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source, size: row.size, deleted: row.deleted === 1,
     }))
 }
@@ -2042,14 +2050,11 @@ export async function relistSessions(capture: Capture): Promise<number> {
     const entry = kept.get(id)
     if (!journaled.has(id) || (row !== undefined && row.last_said !== '' && row.titled >= TITLE_RULES) || (row ?? entry)?.cwd === '') continue
     if (row === undefined && entry !== undefined) {
-      db.query('insert into sessions (id, tool, title, first_prompt, cwd, repo, repo_folder, entrypoint, last_said, last_activity, last_prompt_at, source, size) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-        id, tool, entry.title, entry.firstPrompt, entry.cwd, entry.repo, entry.repoFolder, entry.entrypoint ?? '', entry.lastSaid ?? '', entry.lastActivity, entry.lastPromptAt ?? '', entry.source ?? '', entry.size,
+      db.query('insert into sessions (id, tool, title, title_rank, first_prompt, cwd, repo, repo_folder, entrypoint, last_said, last_activity, last_prompt_at, source, size) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+        id, tool, entry.title, entry.named === true ? NAMED_RANK : 0, entry.firstPrompt, entry.cwd, entry.repo, entry.repoFolder, entry.entrypoint ?? '', entry.lastSaid ?? '', entry.lastActivity, entry.lastPromptAt ?? '', entry.source ?? '', entry.size,
       )
     }
-    const files = paths.map((path) => ({ path, info: statSync(path) })).sort((a, b) => a.info.mtimeMs - b.info.mtimeMs)
-    const text = (await Promise.all(files.map(({ path }) => summaryTextOf(path)))).join('')
-    const size = files.reduce((total, { info }) => total + info.size, 0)
-    await recordSummary(capture, id, tool, [text], size, new Date(Math.max(...files.map(({ info }) => info.mtimeMs))).toISOString())
+    await recordSummaryFrom(capture, id, tool, paths)
     db.query('update sessions set titled = ? where id = ?').run(TITLE_RULES, id)
     if (row === undefined || db.query<Pick<SessionRow, 'last_said'>, [string]>('select last_said from sessions where id = ?').get(id)?.last_said !== '') relisted += 1
   }

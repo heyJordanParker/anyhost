@@ -112,7 +112,7 @@ export async function agentsOf(
   ])
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
   const background = new Set(shown.background)
-  const agents = sessions.filter((session) => session.firstPrompt !== '').map((session) => {
+  const agents = sessions.filter((session) => session.firstPrompt !== '' || session.named === true).map((session) => {
     const status: Agent['status'] = shown.statuses[session.id] ?? ''
     const isBackground = background.has(session.id)
     const settledAt = settledAtOf(shared, session, isBackground ? 'working' : status, now)

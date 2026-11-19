@@ -88,6 +88,31 @@ test("a change Claude Code reports, a new session, a /rename and a /cd alike, re
   expect((await session())?.cwd).toBe(moved)
 }, 60_000)
 
+test("a /rename lists the moment its hook answers while no upload reaches the relay, and a session named before its first prompt lists by that name", async () => {
+  const relay = await memoryRelay()
+  relay.before = (op) => (op.op === 'put' && op.key.startsWith('journals/') ? new Promise<void>(() => undefined) : undefined)
+  const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 3600 })
+  await serveOn(laptop.env)
+  const home = laptop.env['HOME'] ?? ''
+  const cwd = join(home, 'work')
+  mkdirSync(cwd, { recursive: true })
+  const transcriptOf = (session: string): string => join(home, '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
+  mkdirSync(dirname(transcriptOf(SESSION)), { recursive: true })
+  writeFileSync(transcriptOf(SESSION), `{"type":"user","cwd":"${cwd}","sessionId":"${SESSION}","timestamp":"2026-11-14T10:00:00.000Z","message":{"role":"user","content":"Plan the trip"}}\n`)
+  writeFileSync(transcriptOf(OTHER_SESSION), `{"type":"custom-title","customTitle":"Packing list","sessionId":"${OTHER_SESSION}"}\n{"type":"agent-setting","agentSetting":"cto","sessionId":"${OTHER_SESSION}"}\n{"type":"system","subtype":"local_command","cwd":"${cwd}","sessionId":"${OTHER_SESSION}","timestamp":"2026-11-14T10:00:00.000Z"}\n`)
+  type Listed = { readonly agents: readonly { readonly id: string; readonly title: string }[] }
+  const titles = async (): Promise<Record<string, string>> => Object.fromEntries(((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as Listed).agents.map(({ id, title }) => [id, title]))
+
+  await hookOn(laptop.socket, 'started', cwd)
+  const started = await titles()
+  appendFileSync(transcriptOf(SESSION), `{"type":"custom-title","customTitle":"Trip to Lisbon","sessionId":"${SESSION}"}\n`)
+  await hookOn(laptop.socket, 'renamed', cwd)
+  const renamed = await titles()
+  await hookOn(laptop.socket, 'renamed', cwd, OTHER_SESSION)
+
+  expect([started, renamed, await titles()]).toEqual([{ [SESSION]: 'Plan the trip' }, { [SESSION]: 'Trip to Lisbon' }, { [SESSION]: 'Trip to Lisbon', [OTHER_SESSION]: 'Packing list' }])
+}, 60_000)
+
 test('a session a /clear started lists the session it continues from as its source, and keeps it', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 3600 })

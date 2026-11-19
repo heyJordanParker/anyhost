@@ -3,7 +3,7 @@ import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { Activity, type Shown } from './activity.ts'
-import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, recordSummaryFrom, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, LoginNeeded, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
@@ -1275,6 +1275,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           sessionsChanged()
           activityChanged()
         }
+        const transcript = transcriptOf(capture.roots.claudeHome, session)
+        if (transcript !== undefined) {
+          if (await recordSummaryFrom(capture, session, 'claude', [transcript])) void settle('index', () => writeIndex(capture))
+          sessionsChanged()
+        }
         if (event === 'asked') noteChildren()
         if (event === 'quit')
           void settle('closed', async () => {
@@ -1285,8 +1290,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         if (source !== '') sourcesWaiting.set(session, source)
         placeSource(session)
         queueFiles(await changedFiles(capture, 0, session))
-        const transcript = journalOf(capture.db, session) === undefined ? transcriptOf(capture.roots.claudeHome, session) : undefined
-        if (transcript !== undefined) queue.add(session, 'claude', transcript)
+        if (transcript !== undefined && journalOf(capture.db, session) === undefined) queue.add(session, 'claude', transcript)
         queue.uploadNow(session)
         return Response.json({})
       }

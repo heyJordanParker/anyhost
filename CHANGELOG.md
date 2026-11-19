@@ -9,6 +9,9 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 
 ### Fixed
 - The search field's clear button shows its × again. Its icon never reached the Herdr app, so the button drew as an empty square.
+- A /rename shows in the sidebar and the tab bar the moment Claude Code confirms it, after a /compact too. anyhost read the new name only once its upload to your Cloudflare account finished, which took seconds, or never while the upload could not get through.
+- A session you name before its first prompt is listed under that name. anyhost listed no session without a prompt, so its tab kept a number.
+- Picking No project or Temporary no longer narrows the list to the folder of the session on screen, which hid most of their sessions.
 
 ## [0.9.13] - 2026-11-18
 
