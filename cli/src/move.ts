@@ -491,13 +491,20 @@ async function startIn(capture: Capture, cwd: string, prompt: string, here: Move
   }
 }
 
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 export async function sessionOf(capture: Capture, asked: string): Promise<string> {
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(asked)) return asked
+  if (SESSION_ID.test(asked)) return asked
   const known = (await agentsOf(capture)).agents.map(({ id }) => id).filter((id) => id.startsWith(asked))
   const [session, ...more] = known
   if (session === undefined) throw new Error(`No session's id begins with ${asked}. anyhost list shows every session.`)
   if (more.length > 0) throw new Error(`${known.length} sessions' ids begin with ${asked}. Give more of it.`)
   return session
+}
+
+async function heldOf(capture: Capture, asked: string): Promise<{ readonly session: string; readonly holder: DeviceRef | undefined }> {
+  const [session, held] = await Promise.all([sessionOf(capture, asked), claimsOf(capture.relay, asked)])
+  return { session, holder: held.get(session) }
 }
 
 export type Tell = { readonly text: string; readonly keys: readonly string[]; readonly lines: number; readonly sender: string; readonly messages?: number; readonly skip?: number; readonly sleep?: boolean }
@@ -520,7 +527,7 @@ async function messagesHere(capture: Capture, session: string, count: number, sk
   if ((journalOf(capture.db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost reads the messages of Claude Code sessions, and ${session.slice(0, 8)} is a Codex session.`)
   const newest = await newestTranscript(capture, session)
   if (newest === undefined) throw new Error(`${session.slice(0, 8)} has no transcript on ${capture.device.name}.`)
-  return messagesOf(await Bun.file(newest).text(), count, skip)
+  return await messagesOf(newest, count, skip)
 }
 
 const tagged = (told: Tell, machine: string): string => {
@@ -640,8 +647,7 @@ async function tellHere(capture: Capture, session: string, told: Tell, here: Mov
 
 export async function tell(capture: Capture, asked: string, told: Tell, here: MoveHere): Promise<Told> {
   const { relay, device } = capture
-  const session = await sessionOf(capture, asked)
-  const holder = (await claimsOf(relay, session)).get(session)
+  const { session, holder } = await heldOf(capture, asked)
   if (holder === undefined || holder.id === device.id) return { machine: device.name, session, ...(await tellHere(capture, session, told, here)) }
   const answer = await ask(relay, { t: 'tell', id: crypto.randomUUID(), to: holder.id, session, ...told }, AbortSignal.timeout(TELL_MS)).catch((error: unknown) => {
     if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.4.0 there does not answer at all.`)
@@ -654,8 +660,7 @@ export async function tell(capture: Capture, asked: string, told: Tell, here: Mo
 }
 
 export async function showAgent(capture: Capture, asked: string, place: Place, here: MoveHere, reachOf: (machine: string) => Promise<string | null>): Promise<{ readonly session: string; readonly machine: string; readonly terminal: string }> {
-  const session = await sessionOf(capture, asked)
-  const holder = (await claimsOf(capture.relay, session)).get(session)
+  const { session, holder } = await heldOf(capture, asked)
   if (holder === undefined || holder.id === capture.device.id) {
     const terminal = await terminalOf(capture, session, here, { movesCopy: true })
     await showTerminal(session, terminal, place)
@@ -740,8 +745,7 @@ export async function openHere(capture: Capture, asked: string, here: MoveHere):
 
 export async function deleteAgent(capture: Capture, asked: string, here: MoveHere): Promise<string> {
   const { relay, device } = capture
-  const session = await sessionOf(capture, asked)
-  const holder = (await claimsOf(relay, session)).get(session)
+  const { session, holder } = await heldOf(capture, asked)
   if (holder === undefined || holder.id === device.id) return await deleteHere(capture, session, here)
   const answer = await ask(relay, { t: 'delete', id: crypto.randomUUID(), to: holder.id, session }, AbortSignal.timeout(TELL_MS)).catch((error: unknown) => {
     if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${session.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.7.3 there does not answer at all.`)
@@ -788,8 +792,7 @@ async function deleteHere(capture: Capture, asked: string, here: MoveHere): Prom
 
 export async function forkAgent(capture: Capture, asked: string, message: string, here: MoveHere): Promise<{ readonly session: string; readonly machine: string }> {
   const { relay, device } = capture
-  const source = await sessionOf(capture, asked)
-  const holder = (await claimsOf(relay, source)).get(source)
+  const { session: source, holder } = await heldOf(capture, asked)
   if (holder === undefined || holder.id === device.id) return { session: await forkHere(capture, source, message, here), machine: device.name }
   const answer = await ask(relay, { t: 'fork', id: crypto.randomUUID(), to: holder.id, session: source, message }, AbortSignal.timeout(TELL_MS)).catch((error: unknown) => {
     if (error instanceof DOMException && error.name === 'TimeoutError') throw new Error(`${holder.name}, which holds ${source.slice(0, 8)}, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.9.0 there does not answer at all.`)

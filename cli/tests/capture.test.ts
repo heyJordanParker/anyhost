@@ -1071,10 +1071,30 @@ test("a session is named as Claude Code names it: by its /rename, else its gener
   expect(summarize(UNSUMMARIZED, `${renamed}\n${generated}\n${agent}\n`, 'claude').title).toBe('anyhost migrator')
 })
 
-test("read_agent's messages keep the person's own words of a message the Claude app opens with a system reminder", () => {
+test("read_agent's messages keep the person's own words of a message the Claude app opens with a system reminder", async () => {
   const reminder = '<system-reminder>\nThe user started this session without choosing a project folder.\n</system-reminder>'
   const hi = JSON.stringify({ type: 'user', timestamp: '2026-11-14T10:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: reminder }, { type: 'text', text: 'hi' }] } })
-  expect(messagesOf(`${hi}\n`, 5)).toEqual([{ role: 'user', at: '2026-11-14T10:00:00.000Z', text: 'hi' }])
+  const transcript = join(temporaryFolder(), `${SESSION}.jsonl`)
+  writeFileSync(transcript, `${hi}\n`)
+  expect(await messagesOf(transcript, 5)).toEqual([{ role: 'user', at: '2026-11-14T10:00:00.000Z', text: 'hi' }])
+})
+
+test("read_agent's last messages come from the transcript's end, whole across its megabyte lines, and never read the history before them", async () => {
+  const at = (minute: number): string => `2026-11-14T10:${String(minute).padStart(2, '0')}:00.000Z`
+  const asked = (minute: number, text: string): string => JSON.stringify({ type: 'user', timestamp: at(minute), message: { role: 'user', content: text } })
+  const part = (minute: number, id: string, text: string): string => JSON.stringify({ type: 'assistant', timestamp: at(minute), message: { id, role: 'assistant', content: [{ type: 'text', text }] } })
+  const result = JSON.stringify({ type: 'user', timestamp: at(0), message: { role: 'user', content: [{ type: 'tool_result', content: 'x'.repeat(2 ** 20) }] } })
+  const unreadable = '{"type":"user","message":'
+  const transcript = join(temporaryFolder(), `${SESSION}.jsonl`)
+  writeFileSync(transcript, [unreadable, result, result, asked(0, 'Plan the trip'), result, result, asked(1, 'Book the train'), part(2, 'msg_1', 'Booked the 9:00.'), result, result, part(3, 'msg_1', 'Seat 42.'), asked(4, 'And the hotel'), part(5, 'msg_2', 'Booked it.'), ''].join('\n'))
+
+  const read = [await messagesOf(transcript, 2), await messagesOf(transcript, 2, 2), await messagesOf(transcript, 1, 3)]
+
+  expect(read).toEqual([
+    [{ role: 'user', at: at(4), text: 'And the hotel' }, { role: 'assistant', at: at(5), text: 'Booked it.' }],
+    [{ role: 'user', at: at(1), text: 'Book the train' }, { role: 'assistant', at: at(2), text: 'Booked the 9:00.\nSeat 42.' }],
+    [{ role: 'user', at: at(1), text: 'Book the train' }],
+  ])
 })
 
 test('a session says last what its agent last said, asked, or ran, so its row shows what needs you', () => {

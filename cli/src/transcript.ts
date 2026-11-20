@@ -755,23 +755,51 @@ export function forkIn(bytes: Uint8Array, session: string): Fork | undefined {
 
 type Line = { type?: string; isMeta?: boolean; isSidechain?: boolean; timestamp?: string; message?: { id?: string; role?: string; content?: unknown } }
 
-export function messagesOf(text: string, count: number, skip = 0): Message[] {
-  const messages: (Message & { readonly id: string })[] = []
-  for (const line of text.split('\n')) {
-    if (!line.startsWith('{"') || (!line.includes('"type":"user"') && !line.includes('"type":"assistant"'))) continue
-    const value = JSON.parse(line) as Line
-    if ((value.type !== 'user' && value.type !== 'assistant') || value.isMeta === true || value.isSidechain === true) continue
-    const content = value.message?.content
-    const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? (content as { type?: string; text?: string }[]) : []
-    const isWrapper = (said: string): boolean => value.type === 'user' && said.trimStart().startsWith('<') && !said.trimStart().startsWith('<anyhost ')
-    const said = blocks.flatMap((block) => (block.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '' && !isWrapper(block.text) ? [block.text] : [])).join('\n')
-    if (said === '') continue
-    const id = value.message?.id ?? ''
-    const last = messages.at(-1)
-    if (value.type === 'assistant' && id !== '' && last?.id === id) messages[messages.length - 1] = { ...last, text: `${last.text}\n${said}` }
-    else messages.push({ role: value.type, at: value.timestamp ?? '', text: said, id })
+const READ_BACK_BYTES = 1 << 20
+const MESSAGE_MARKS = marks('"type":"user"', '"type":"assistant"')
+const LINE_START = Buffer.from('{"')
+
+function messageIn(line: Buffer): (Message & { readonly id: string }) | undefined {
+  if (!line.subarray(0, 2).equals(LINE_START) || !MESSAGE_MARKS.some((mark) => line.includes(mark))) return undefined
+  const value = JSON.parse(line.toString('utf8')) as Line
+  if ((value.type !== 'user' && value.type !== 'assistant') || value.isMeta === true || value.isSidechain === true) return undefined
+  const content = value.message?.content
+  const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : Array.isArray(content) ? (content as { type?: string; text?: string }[]) : []
+  const isWrapper = (said: string): boolean => value.type === 'user' && said.trimStart().startsWith('<') && !said.trimStart().startsWith('<anyhost ')
+  const said = blocks.flatMap((block) => (block.type === 'text' && typeof block.text === 'string' && block.text.trim() !== '' && !isWrapper(block.text) ? [block.text] : [])).join('\n')
+  return said === '' ? undefined : { role: value.type, at: value.timestamp ?? '', text: said, id: value.message?.id ?? '' }
+}
+
+export async function messagesOf(path: string, count: number, skip = 0): Promise<Message[]> {
+  const newestFirst: (Message & { readonly id: string })[] = []
+  const file = await open(path, 'r')
+  try {
+    let end = (await file.stat()).size
+    let head = Buffer.alloc(0)
+    while (end > 0 && newestFirst.length <= count + skip) {
+      const start = Math.max(0, end - READ_BACK_BYTES)
+      const block = Buffer.allocUnsafe(end - start)
+      await file.read(block, 0, block.length, start)
+      const view = head.length === 0 ? block : Buffer.concat([block, head])
+      const first = start === 0 ? 0 : view.indexOf(10) + 1 || view.length
+      for (let to = view[view.length - 1] === 10 ? view.length - 1 : view.length; to > first; ) {
+        const from = Math.max(first, view.lastIndexOf(10, to - 1) + 1)
+        const message = messageIn(view.subarray(from, to))
+        const newer = newestFirst.at(-1)
+        if (message !== undefined && message.role === 'assistant' && message.id !== '' && newer?.id === message.id) newestFirst[newestFirst.length - 1] = { ...newer, at: message.at, text: `${message.text}\n${newer.text}` }
+        else if (message !== undefined) newestFirst.push(message)
+        to = from - 1
+      }
+      head = view.subarray(0, first)
+      end = start
+    }
+  } finally {
+    await file.close()
   }
-  return messages.slice(0, messages.length - skip).slice(-count).map(({ role, at, text: said }) => ({ role, at, text: said }))
+  return newestFirst
+    .slice(skip, skip + count)
+    .reverse()
+    .map(({ role, at, text }) => ({ role, at, text }))
 }
 
 let codexNames = { modifiedAt: -1, names: new Map<string, string>() }

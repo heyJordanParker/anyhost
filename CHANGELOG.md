@@ -2,6 +2,12 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.15] - 2026-11-20
+
+### Fixed
+- read_agent answers in milliseconds on a session with a long history. Reading a session's last messages loaded its whole transcript, up to 784 MB, into memory and parsed every line, which took up to 176 seconds on a busy Mac, timed the read out, and slowed everything else anyhost did meanwhile. It now reads the transcript backward from its end, as `tail` does, and stops at the messages it returns.
+- read_agent, show_agent, fork_agent and delete_agent with a short id look up which machine holds the session while they resolve the id, one round trip to the relay sooner.
+
 ## [0.9.14] - 2026-11-19
 
 ### Changed
