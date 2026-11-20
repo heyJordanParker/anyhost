@@ -58,7 +58,7 @@ test("a Herdr app whose Claude Code an older launcher starts runs the person's o
   expect(run).toEqual(claudeStart(['claude', '--model', 'opus'], false))
 })
 
-test("the Herdr app's sidebar shows the inbox over the projects, split by a divider the person drags, its panes wear anyhost's header, and the rest of its layout is as the app ships it", async () => {
+test("the Herdr app's sidebar shows the inbox over the projects, split by a divider the person drags, its panes wear anyhost's header, anyhost draws its notifications at the top right and its terminals' right-click menu, and the rest of its layout is as the app ships it", async () => {
   const herdr = join(temporaryFolder(), 'herdr-app')
   mkdirSync(join(herdr, 'layouts'), { recursive: true })
   const lists = { id: 'sidebar-lists', type: 'column', children: [{ id: 'spaces', type: 'block', content: { mod: 'spaces' } }, { id: 'agents', type: 'block', content: { mod: 'agents' } }] }
@@ -68,7 +68,8 @@ test("the Herdr app's sidebar shows the inbox over the projects, split by a divi
 
   await installHerdr(join(herdr, 'herdr.json'), herdr)
 
-  const written = JSON.parse(readFileSync(join(herdr, 'layouts', 'anyhost.json'), 'utf8')) as { children: Record<string, unknown>[] & { children?: unknown[] }[] }
+  const written = JSON.parse(readFileSync(join(herdr, 'layouts', 'anyhost.json'), 'utf8')) as { toast: string; terminal_menu: string; children: Record<string, unknown>[] & { children?: unknown[] }[] }
+  expect([written.toast, written.terminal_menu]).toEqual(['anyhost', 'anyhost'])
   expect(written.children[0]?.children?.[1]).toEqual({
     id: 'sidebar-lists',
     type: 'column',
@@ -87,6 +88,7 @@ test("the Herdr app's sidebar shows the inbox over the projects, split by a divi
         type: 'stack',
         active: 'main',
         min: 200,
+        floating: [{ id: 'toasts', content: { mod: 'anyhost', props: { view: 'toasts' } }, edge: 'top', align: 'end' }],
         children: [
           { id: 'main', type: 'block', content: { tab: 'active', pane: { gap: 8, header: { content: { mod: 'anyhost', props: { view: 'pane' } }, height: 30, position: 'top', reveal: 'always' } } } },
           { id: 'tiles', type: 'row', children: [] },
@@ -108,7 +110,7 @@ test('every icon of its own the pane draws reaches the Herdr app with it', async
   expect([...drawn].filter((icon) => !existsSync(join(herdr, 'mods', 'anyhost', 'icons', `${icon}.svg`)))).toEqual([])
 })
 
-test("in the anyhost layout the tab and pane keys act on the shown window, ctrl-tab walks the windows by recency while the other next-tab keys stay positional, the pane keys' modifier with enter, m, =, -, comma and period promote, cycle the layout, size the master and scroll, and a key the person bound there stays theirs, as the picker key does here", async () => {
+test("in the anyhost layout the new-tab key starts a session as the sidebar's New session does, with alt it opens an empty terminal, the tab and pane keys act on the shown window, ctrl-tab walks the windows by recency while the other next-tab keys stay positional, the pane keys' modifier with enter, m, =, -, comma and period promote, cycle the layout, size the master and scroll, and a key the person bound there stays theirs, as the picker key does here", async () => {
   const herdr = join(temporaryFolder(), 'herdr-app')
   mkdirSync(herdr, { recursive: true })
   const global = {
@@ -141,6 +143,9 @@ test("in the anyhost layout the tab and pane keys act on the shown window, ctrl-
     'layout:anyhost': {
       'cmd-p': 'files.open',
       'cmd-w': 'anyhost.close',
+      'cmd-t': 'anyhost.new',
+      'ctrl-shift-t': 'anyhost.new',
+      'cmd-alt-t': 'tab.new',
       'cmd-shift-t': 'anyhost.reopen',
       'ctrl-shift-alt-t': 'anyhost.reopen',
       'ctrl-tab': 'anyhost.recent',
@@ -188,7 +193,7 @@ test("an update replaces the pane and the layout anyhost installed, keeps each o
   expect(readFileSync(join(herdr, 'mods', 'anyhost-edited', 'main.js'), 'utf8')).toBe('export default class Edited {}\n')
   expect(readFileSync(join(herdr, 'mods', 'anyhost', 'main.js'), 'utf8')).toBe(readFileSync(join(PANE, 'main.js'), 'utf8'))
   expect(readFileSync(join(herdr, 'layouts', 'anyhost-edited.json'), 'utf8')).toContain('"theme":"mine"')
-  expect(jsonOf(join(herdr, 'layouts', 'anyhost.json'))).toEqual({ id: 'root', type: 'row', children: [] })
+  expect(jsonOf(join(herdr, 'layouts', 'anyhost.json'))).toEqual({ id: 'root', type: 'row', children: [], toast: 'anyhost', terminal_menu: 'anyhost' })
 })
 
 test("a pane folder linked to this checkout holds the pane anyhost ships, so an install leaves the link and the Herdr app shows the checkout's pane live", async () => {

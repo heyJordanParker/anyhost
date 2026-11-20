@@ -165,10 +165,23 @@ const withSessions = (node: Node): Node => {
   if (node.id === 'tabs') return { ...node, content: { mod: 'anyhost', props: { view: 'tabs' } } }
   if (node.id === 'main') {
     const { size, min, max, ...shown } = node
-    return { id: 'views', type: 'stack', active: 'main', ...(size === undefined ? {} : { size }), ...(min === undefined ? {} : { min }), ...(max === undefined ? {} : { max }), children: [withPaneHeader(shown),{ id: 'tiles', type: 'row', children: [] }, { id: 'board', type: 'block', content: { mod: 'anyhost', props: { view: 'board' } } }] }
+    return {
+      id: 'views',
+      type: 'stack',
+      active: 'main',
+      ...(size === undefined ? {} : { size }),
+      ...(min === undefined ? {} : { min }),
+      ...(max === undefined ? {} : { max }),
+      floating: [TOASTS],
+      children: [withPaneHeader(shown), { id: 'tiles', type: 'row', children: [] }, { id: 'board', type: 'block', content: { mod: 'anyhost', props: { view: 'board' } } }],
+    }
   }
   return { ...node, ...(node.children === undefined ? {} : { children: node.children.map(withSessions) }) }
 }
+
+const TOASTS: Node = { id: 'toasts', content: { mod: 'anyhost', props: { view: 'toasts' } }, edge: 'top', align: 'end' }
+
+const anyhostLayoutOf = (main: Node): Node => ({ ...withSessions(main), toast: MOD, terminal_menu: MOD })
 
 const herdrApp = (): string | undefined => Bun.which('herdr-app', { PATH: `${process.env['PATH'] ?? ''}:${join(homedir(), '.local', 'bin')}` }) ?? undefined
 
@@ -199,7 +212,7 @@ async function placeLayout(home: string, was: Installed): Promise<string | undef
   const layouts = join(home, 'layouts')
   const main = await textOf(join(layouts, 'main.json'))
   if (main === undefined) return was.layout
-  const text = `${JSON.stringify(withSessions(JSON.parse(main) as Node), null, 2)}\n`
+  const text = `${JSON.stringify(anyhostLayoutOf(JSON.parse(main) as Node), null, 2)}\n`
   const path = join(layouts, `${LAYOUT}.json`)
   const current = await textOf(path)
   if (current !== undefined && current !== text && was.layout !== undefined && fingerprint(current) !== was.layout) {
@@ -226,9 +239,11 @@ const same = (key: string): string => key
 const DIRECTIONS = ['left', 'right', 'up', 'down'] as const
 const isTabKey = (key: string): boolean => key.split('-').at(-1) === 'tab'
 
-const BOUND: readonly (readonly [string, (key: string) => string, (key: string) => string])[] = [
+const BOUND: readonly (readonly [string, (key: string) => string, (key: string) => string | undefined])[] = [
   ['mod.open:picker', () => 'anyhost.palette', same],
   ['tab.close', () => 'anyhost.close', same],
+  ['tab.new', () => 'anyhost.new', same],
+  ['tab.new', () => 'tab.new', (key) => (key.includes('shift-') || key.includes('alt-') ? undefined : withModifier(key, 'alt'))],
   ['tab.new', () => 'anyhost.reopen', (key) => withModifier(key, key.includes('shift-') ? 'alt' : 'shift')],
   ['tab.next', (key) => (isTabKey(key) ? 'anyhost.recent' : 'anyhost.next'), same],
   ['tab.prev', (key) => (isTabKey(key) ? 'anyhost.recent-back' : 'anyhost.prev'), same],
@@ -259,7 +274,7 @@ const keysWanted = (keys: Keys): Record<string, string> => {
   const global = Object.entries(keys['global'] ?? {})
   const modifier = workspaceModifierOf(global)
   return Object.fromEntries([
-    ...BOUND.flatMap(([herdr, anyhostOf, keyOf]) => global.filter(([, action]) => action === herdr).map(([key]) => [keyOf(key), anyhostOf(key)])),
+    ...BOUND.flatMap(([herdr, anyhostOf, keyOf]) => global.filter(([, action]) => action === herdr).flatMap(([key]) => (keyOf(key) === undefined ? [] : [[keyOf(key), anyhostOf(key)]]))),
     ...(modifier === undefined ? [] : WORKSPACE_KEYS.map(([key, anyhost]) => [`${modifier}${key}`, anyhost])),
   ])
 }

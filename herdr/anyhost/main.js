@@ -1,6 +1,6 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, appHome, closeOverlay, exec, focused, hc, home, layout, machines, nextCommand, notify, openOverlay, panes, props, readTextFile, run, setAgentOrder, setShared, shared, spaces, terminals, theme, updates, window, writeTextFile } from "herdr";
+import { agents, appHome, closeOverlay, exec, focused, hc, home, keys, layout, machines, nextCommand, notify, openOverlay, panes, props, readTextFile, run, setAgentOrder, setShared, shared, spaces, terminals, theme, updates, window, writeTextFile } from "herdr";
 import { createHash } from "crypto";
 
 const REFRESH_MS = 30_000;
@@ -45,6 +45,7 @@ const TILED = new Set(["scroll", "master", "dwindle", "grid", "stack"]);
 const CYCLED = MODES.map(([mode]) => mode).filter((mode) => mode !== "board");
 const SIDES = ["left", "right", "top"];
 const VIEW_NODE = { tabs: "main", board: "board", tiles: "tiles" };
+const ON_BOARD = new Set(["board", "start", "opening"]);
 const WORKSPACE = { mode: "tabs" };
 const LAYOUT = { mode: "tabs", side: "left", ratio: 0.6, offset: 0, order: [] };
 const RECENT_MS = 750;
@@ -53,6 +54,21 @@ const RECENT_MOST = 50;
 const ALL_WORK = "anyhost-all";
 const START_MOST = 8;
 const START_WIDTH = 560;
+const LOADING_SLOW_S = 3;
+const TOASTS = "anyhost.toasts";
+const OPENED = "anyhost.opened";
+const TOAST_MS = 5000;
+const TOAST_ERROR_MS = 10_000;
+const TOAST_TICK_MS = 100;
+const TOAST_MOST = 4;
+const TOAST_WIDTH = 360;
+const OPEN_QUIET_MS = 30_000;
+const TOAST_LOOK = {
+  info: { icon: "mods/anyhost/icons/circle", colors: ["#787774", "#9b9b9b"] },
+  success: { icon: "circle-check", colors: ["#059669", "#34d399"] },
+  warning: { icon: "mods/anyhost/icons/circle-alert", colors: ["#d97706", "#fbbf24"] },
+  error: { icon: "mods/anyhost/icons/circle-x", colors: ["#dc2626", "#f87171"] },
+};
 const SHAPES = [
   ["panel", "Side panel", `${OWN}/panel-right`],
   ["popup", "Popup", `${OWN}/picture-in-picture-2`],
@@ -459,7 +475,9 @@ const enqueue = ({ changes = {}, ops = [], run = [], failed = "anyhost could not
   setShared(OUTBOX, { ...outboxOf(), [id]: { at: Date.now(), changes, ops, run, failed, toast, opens } });
   return id;
 };
+const LOADED_AT = Date.now();
 const deadlineOf = (entry) => entry.run.reduce((total, step) => total + (step.timeout ?? COMMAND_MS), 0);
+const isInFlight = (entry, now) => entry.sent !== undefined && entry.sent >= LOADED_AT && now - entry.sent < deadlineOf(entry);
 const preferencesOf = () => shared(PREFERENCES) ?? {};
 const preference = (key, fallback) => preferencesOf()[key] ?? fallback;
 const entriesOf = (key) => {
@@ -533,10 +551,6 @@ const sideOf = (at, size) =>
     ["up", at.y / size.height],
     ["down", 1 - at.y / size.height],
   ].reduce((a, b) => (b[1] < a[1] ? b : a))[0];
-const focusKeyOf = () => {
-  const at = focused();
-  return `${at?.space ?? ""}\0${at?.tab ?? ""}\0${at?.pane ?? ""}`;
-};
 const splitInto = (addresses, side, target = focused()?.pane) => {
   if (addresses.includes(panes().find((p) => p.pane === target)?.terminal)) return;
   if (!target) return notify({ title: "Pick a pane to split first", body: "Drop the tab on a tab's terminal to place it beside that terminal.", level: "warning" });
@@ -669,9 +683,57 @@ const sessionsOfTab = (tab) => {
   const sessionAt = new Map(terminals().map((x) => [x.address, x.labels?.[SESSION_LABEL]]));
   return [...new Set(panes().filter((p) => p.tab === tab && p.terminal).map((p) => sessionAt.get(p.terminal)).filter(Boolean))];
 };
+const windowFacts = (tab, pane = null) => {
+  const space = spaces().find((sp) => sp.tabs.some((x) => x.id === tab)) ?? null;
+  const tabs = space?.tabs ?? [];
+  const at = tabs.findIndex((x) => x.id === tab);
+  const inTab = panes().filter((p) => p.tab === tab);
+  const shown = inTab.find((p) => p.pane === pane) ?? inTab.find((p) => p.focused) ?? inTab[0] ?? null;
+  const all = terminals();
+  const terminal = all.find((x) => x.address === shown?.terminal) ?? null;
+  const parent = terminal?.parent ? (all.find((x) => x.address === terminal.parent) ?? null) : null;
+  return {
+    tab,
+    space: space?.id ?? null,
+    name: tabs[at]?.name ?? "",
+    others: tabs.filter((x) => x.id !== tab).map((x) => x.id),
+    right: tabs.slice(at + 1).map((x) => x.id),
+    pane: shown?.pane ?? null,
+    isPane: pane !== null,
+    zoomed: Boolean(shown?.zoomed),
+    terminal: shown?.terminal ?? null,
+    cwd: shown?.cwd ?? "",
+    toProgram: terminal?.labels?.["herdr.right-click"] === "program",
+    parent: parent ? { address: parent.address, name: parent.name || parent.address } : null,
+    session: terminal?.labels?.[SESSION_LABEL] || sessionsOfTab(tab)[0] || null,
+  };
+};
+const MODIFIER_GLYPHS = [["ctrl", "⌃"], ["alt", "⌥"], ["shift", "⇧"], ["cmd", "⌘"]];
+const KEY_GLYPHS = { enter: "↩", left: "←", right: "→", up: "↑", down: "↓", backspace: "⌫", tab: "⇥", escape: "⎋" };
+const keyLabelOf = (combo) => {
+  const [, held = "", key] = combo.match(/^((?:(?:ctrl|alt|shift|cmd)-)*)(.+)$/) ?? [];
+  const named = KEY_GLYPHS[key] ?? key.toUpperCase();
+  if (window()?.platform !== "macos") return [...held.split("-").filter(Boolean).map((m) => m[0].toUpperCase() + m.slice(1)), named].join("+");
+  return `${MODIFIER_GLYPHS.filter(([m]) => held.split("-").includes(m)).map(([, glyph]) => glyph).join("")}${named}`;
+};
+const keyFor = (action) => {
+  const here = keys().filter((k) => k.section === "global" || k.section === `layout:${shared("layout")}`);
+  const bound = here.find((k) => k.action === action && (k.section !== "global" || !here.some((o) => o.keys === k.keys && o.section !== "global")));
+  return bound ? keyLabelOf(bound.keys) : undefined;
+};
 const wantedOf = () => shared(WANTED) ?? null;
-const want = (wanted) => setShared(WANTED, { id: idOf(), from: focusKeyOf(), at: Date.now(), act: "focus", ...wanted });
-const isStillWanted = (w) => focusKeyOf() === w.from || (Boolean(w.space) && focused()?.space === w.space);
+const want = (wanted) => setShared(WANTED, { id: idOf(), at: Date.now(), act: "focus", ...wanted });
+const cancelWant = () => {
+  if (wantedOf() !== null) setShared(WANTED, null);
+};
+const isPanedSession = (key) => terminals().some((x) => x.state === "live" && x.labels?.[SESSION_LABEL] === key && panes().some((p) => p.terminal === x.address));
+const loadingOf = () => {
+  const w = wantedOf();
+  if (w === null || w.act !== "focus") return null;
+  if (w.starting) return w;
+  if (w.session) return isPanedSession(w.session) ? null : w;
+  return w.space && !spaces().some((sp) => sp.id === w.space) ? w : null;
+};
 const reachOf = (machine) => {
   const pulse = shared(PULSE);
   if (!pulse || machine === pulse.here) return "";
@@ -717,15 +779,17 @@ const openSession = (s, how = {}) => {
   const space = on === null ? null : placedSpace(on, s.space);
   if (space !== null && workspaceOf(space).mode === "board") changeWorkspace(space, { mode: "tabs" });
   const slept = s.address || on !== "" ? null : sleptLayoutOf(s.key);
+  const now = Date.now();
+  setShared(OPENED, { ...Object.fromEntries(Object.entries(shared(OPENED) ?? {}).filter(([, at]) => now - at < OPEN_QUIET_MS)), [s.key]: now });
   if (!s.address) startOpening(s, on ?? "");
   for (const key of slept ? leavesOf(slept.tree) : []) {
     const other = key === s.key ? null : sleptSessionOf(key);
     if (other) startOpening(other, "");
   }
-  want({ session: s.key, space, title: s.title, ...(slept && how.act === undefined ? { layout: { from: slept.tab, steps: placementsOf(slept.tree) } } : {}), ...how });
+  want({ session: s.key, space, title: s.title, machine: s.machine, folder: s.checkout, ...(slept && how.act === undefined ? { layout: { from: slept.tab, steps: placementsOf(slept.tree) } } : {}), ...how });
 };
-const startSession = (machine, folder, on, failed, space = null) => {
-  if (on !== null) want({ starting: true, space, title: "the new session" });
+const startSession = (machine, folder, on, failed, space = null, project = null) => {
+  if (on !== null) want({ starting: true, space, title: "New session", machine, folder, project });
   enqueue({ run: [{ args: ["new", machine, folder, "--json"], timeout: LONG_MS, ...(on !== null ? { wants: wantedOf().id } : {}) }], failed });
 };
 const presentedOf = () => shared(PRESENTED) ?? null;
@@ -841,8 +905,12 @@ class Part extends View {
 
 export default class Anyhost extends View {
   init(_props, cx) {
-    const view = props()?.view ?? "inbox";
+    const given = props() ?? {};
+    const view = given.view ?? (given.tab === "pane" ? "terminal-menu" : given.overlay && typeof given.title === "string" ? "toast" : "inbox");
     this.kind = view;
+    if (view === "terminal-menu") return this.handOffTerminalMenu(given);
+    if (view === "toast") return this.takeToast(given);
+    if (view === "toasts") return this.initToasts(cx);
     this.isSyncing = false;
     this.isDrawing = false;
     this.partViews = new Map();
@@ -882,9 +950,11 @@ export default class Anyhost extends View {
   }
 
   draw(view, t, cx) {
+    if (view === "terminal-menu" || view === "toast") return div();
+    if (view === "toasts") return this.renderToasts(t);
     if (view === "projects") return this.renderProjects(t).on_mouse_up("left", () => endTabDrag(false));
     if (view === "footer") return this.renderFooter(t).on_mouse_up("left", () => endTabDrag(false));
-    if (view === "board") return this.renderBoard(t);
+    if (view === "board") return this.renderBoard(t, cx);
     if (view === "menu") return this.renderMenu(t);
     if (view === "filter") return this.renderFilter(t);
     if (view === "settings") return this.renderSettings(t);
@@ -1102,7 +1172,7 @@ export default class Anyhost extends View {
   }
 
   redrawChanged(cx, isPlaced) {
-    if (this.kind === "board" ? this.board === null || this.board.isStart : this.kind === "projects" ? this.projectsView === null || this.projectsView.isNarrow : this.kind === "inbox" && this.shown === null) return this.redrawAll(cx);
+    if (this.kind === "board" ? this.board === null || this.board.isStart || this.board.loading !== null : this.kind === "projects" ? this.projectsView === null || this.projectsView.isNarrow : this.kind === "inbox" && this.shown === null) return this.redrawAll(cx);
     const drawn = new Map();
     for (const [key, view] of this.partViews) {
       const now = this.drawnOf(key);
@@ -1387,9 +1457,8 @@ export default class Anyhost extends View {
     const filter = this.kind === "board" ? this.boardFilter() : filterOf();
     const work = this.kind === "board" ? this.workNow() : null;
     const isStart = work?.mode === "start";
-    const wanted = wantedOf();
-    const openingTitle = isStart && wanted?.space && wanted.space === work.workspace?.id ? wanted.title : null;
-    return { key: `${this.signatureOf(live, filter)}|${isStart}|${openingTitle}`, filter, isStart, openingTitle };
+    const loading = work?.mode === "opening" ? loadingOf() : null;
+    return { key: `${this.signatureOf(live, filter)}|${isStart}|${loading?.id ?? ""}|${loading?.session ?? ""}`, filter, isStart, loading };
   }
 
   inputsOf(live, modelInputs, opening) {
@@ -1406,11 +1475,11 @@ export default class Anyhost extends View {
 
   rebuild(live = this.liveInputs(), modelInputs = this.modelInputsOf(live)) {
     if (modelInputs === null || modelInputs.key === this.signature) return false;
-    const { key: signature, filter, isStart, openingTitle } = modelInputs;
+    const { key: signature, filter, isStart, loading } = modelInputs;
     this.signature = signature;
     this.live = live;
     this.model = this.computeModel(live, filter);
-    if (this.kind === "board") this.board = { ...this.boardOf(this.model, filter), isStart, openingTitle };
+    if (this.kind === "board") this.board = { ...this.boardOf(this.model, filter), isStart, loading };
     else this.shown = this.shownOf(this.model, live, filter);
     return true;
   }
@@ -1582,7 +1651,7 @@ export default class Anyhost extends View {
       const keys = [...Object.keys(entry.changes), ...(entry.ops.length > 0 ? ["ops"] : [])];
       const isBehind = keys.some((key) => held.has(key));
       for (const key of keys) held.add(key);
-      if (isBehind || (entry.sent !== undefined && now - entry.sent < deadlineOf(entry))) continue;
+      if (isBehind || isInFlight(entry, now)) continue;
       this.sendEntry(cx, id, entry, now);
     }
   }
@@ -1886,7 +1955,10 @@ export default class Anyhost extends View {
       const ps = panes().filter((p) => p.tab === tab);
       const rows = [...new Set(ps.map((p) => byAddress.get(p.terminal)?.labels?.[SESSION_LABEL]).filter(Boolean))].map((key) => this.sessionRowOf(key)).filter(Boolean);
       if (rows.some((r) => r.pinned)) continue;
-      if (rows.length === 0) run("tab.close", { id: tab, confirmed: true });
+      if (rows.length === 0) {
+        run("tab.close", { id: tab, confirmed: true });
+        continue;
+      }
       for (const p of ps.filter((p) => !byAddress.get(p.terminal)?.labels?.[SESSION_LABEL])) run("pane.close", { pane: p.pane });
       leaving.push(...rows);
     }
@@ -2142,8 +2214,7 @@ export default class Anyhost extends View {
     if (!chosen || !where) return this.newSession();
     const on = pulse.all.machines.find((m) => m.name === chosen)?.on ?? null;
     const name = p?.name ?? where.split("/").pop();
-    notify({ title: `Starting a session in ${name}`, body: `On ${pulse.all.machines.find((m) => m.name === chosen)?.place ?? chosen}, in ${tildeOf(where, pulse.all.machines.find((m) => m.name === chosen)?.home ?? "")}.`, level: "info", timeout: 3000 });
-    startSession(chosen, where, on, `anyhost could not start a session in ${name}`, on === null ? null : placedSpace(on, spaceOf(p?.key ?? NONE, where)));
+    startSession(chosen, where, on, `anyhost could not start a session in ${name}`, on === null ? null : placedSpace(on, spaceOf(p?.key ?? NONE, where)), name);
   }
 
   newSession() {
@@ -2185,7 +2256,6 @@ export default class Anyhost extends View {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") this.keys.focus();
-        if (command === "new") this.newHere();
         if (command === "filter") this.openFilter();
         if (command === "palette") this.openPalette();
         if (command === "board") this.openBoard(filterOf().project);
@@ -2254,6 +2324,16 @@ export default class Anyhost extends View {
     if (asked.action === "closeTabs") return this.closeTabs(cx, asked.tabs);
     if (asked.action === "reopen") return this.reopenClosed(cx);
     if (asked.action === "showProject") return this.showProject(asked.key, asked.machine ?? null);
+    if (asked.window) {
+      const w = asked.window;
+      if (asked.action === "newSession") return this.newHere();
+      if (asked.action === "newTerminal") return run("tab.new", w.space ? { space: w.space } : {});
+      if (asked.action === "split") return run("pane.split", { direction: asked.direction, pane: w.pane });
+      if (asked.action === "zoom") return run("pane.zoom", { pane: w.pane });
+      if (asked.action === "closePane") return run("pane.close", { pane: w.pane });
+      if (asked.action === "rightClicks") return run("terminal.right_click", { terminal: w.terminal, to: asked.to });
+      if (asked.action === "park") return run("terminal.park", { terminal: w.terminal });
+    }
     if (!r) return;
     if (asked.action === "open") return this.open(r, cx);
     if (asked.action === "present") return this.present(cx, r, asked.shape);
@@ -3133,13 +3213,137 @@ export default class Anyhost extends View {
     );
   }
 
-  menu(r, tabActions = null) {
-    const f = r.session ? this.factsOf(r) : r;
+  handOffTerminalMenu(given) {
+    closeOverlay(given.overlay);
+    const pane = panes().find((p) => p.pane === given.target?.pane);
+    if (pane) return this.windowMenu(windowFacts(pane.tab, pane.pane));
+    const key = terminals().find((x) => x.address === given.target?.terminal)?.labels?.[SESSION_LABEL];
+    const r = key ? shared(PULSE)?.sessions?.[key] : null;
+    if (r) this.menu({ key, ...r });
+  }
+
+  takeToast(given) {
+    closeOverlay(given.overlay);
+    const terminal = given.action?.args?.terminal ?? null;
+    const key = terminal ? (terminals().find((x) => x.address === terminal)?.labels?.[SESSION_LABEL] ?? null) : null;
+    if (key !== null && (wantedOf()?.session === key || Date.now() - ((shared(OPENED) ?? {})[key] ?? 0) < OPEN_QUIET_MS)) return;
+    const facts = key === null ? null : (shared(PULSE)?.sessions?.[key] ?? null);
+    const toast = {
+      id: idOf(),
+      at: Date.now(),
+      title: given.title,
+      body: given.body ?? "",
+      level: TOAST_LOOK[given.level] ? given.level : "info",
+      icon: given.icon ?? null,
+      action: given.action ?? null,
+      timeout: given.timeout ?? (given.level === "error" ? TOAST_ERROR_MS : TOAST_MS),
+      session: facts === null ? null : { title: facts.title, project: facts.projectName ?? "", machine: facts.machine ?? "", tool: facts.tool ?? "claude", state: facts.state ?? "" },
+    };
+    setShared(TOASTS, [toast, ...(shared(TOASTS) ?? []).filter((x) => x.title !== toast.title || x.body !== toast.body)].slice(0, TOAST_MOST));
+  }
+
+  initToasts(cx) {
+    this.hoveredToast = null;
+    cx.timer.every(TOAST_TICK_MS, (cx) => {
+      const all = shared(TOASTS) ?? [];
+      if (all.length === 0) return;
+      const now = Date.now();
+      const live = all.filter((x) => x.id === this.hoveredToast || now - x.at < x.timeout);
+      if (live.length !== all.length) setShared(TOASTS, live);
+      cx.notify();
+    });
+  }
+
+  dismissToast(id) {
+    setShared(TOASTS, (shared(TOASTS) ?? []).filter((x) => x.id !== id));
+  }
+
+  renderToasts(t) {
+    const all = shared(TOASTS) ?? [];
+    if (all.length === 0) return div();
+    return v_flex()
+      .id("ah-toasts")
+      .w(TOAST_WIDTH)
+      .text_color(t.foreground)
+      .children(all.flatMap((x, n) => [...(n > 0 ? [div().h(1).mx(UI.space.md).flex_none().bg(t.border)] : []), this.toastRow(t, x)]));
+  }
+
+  toastRow(t, x) {
+    const look = TOAST_LOOK[x.level];
+    const color = x.level === "error" ? t.ansi1 : x.level === "info" ? t.muted : look.colors[this.isDark ? 1 : 0];
+    const where = x.session ? [x.session.project, x.session.machine !== shared(PULSE)?.here ? x.session.machine : ""].filter(Boolean).join(" · ") : "";
+    const title = x.session ? x.session.title : x.title;
+    const body = x.session ? [x.title, x.body].filter(Boolean).join(" · ") : x.body;
+    const isHovered = this.hoveredToast === x.id;
+    const left = isHovered ? 1 : Math.max(0, 1 - (Date.now() - x.at) / x.timeout);
+    const lead = x.session ? this.harnessIcon(t, { key: `toast-${x.id}`, harness: x.session.tool }) : x.icon ? image(x.icon).size(UI.icon.body).flex_none() : svg(iconPath(look.icon)).size(UI.icon.body).flex_none().text_color(color);
+    return v_flex()
+      .id(`ah-toast-${x.id}`)
+      .w_full()
+      .relative()
+      .rounded(UI.radius.control)
+      .when(x.action !== null, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
+      .on_hover((on, cx) => {
+        if (on) this.hoveredToast = x.id;
+        else if (this.hoveredToast === x.id) {
+          this.hoveredToast = null;
+          setShared(TOASTS, (shared(TOASTS) ?? []).map((each) => (each.id === x.id ? { ...each, at: Date.now() } : each)));
+        }
+        cx.notify();
+      })
+      .on_click(() => {
+        if (x.action?.name) run(x.action.name, x.action.args ?? {});
+        this.dismissToast(x.id);
+      })
+      .child(
+        h_flex()
+          .w_full()
+          .px(UI.space.md)
+          .py(UI.space.sm)
+          .gap(UI.space.sm)
+          .items_start()
+          .child(div().h(UI.height.inline).flex().flex_none().items_center().child(lead))
+          .child(
+            v_flex()
+              .flex_1()
+              .min_w(0)
+              .gap(UI.space.xs)
+              .child(div().min_h(UI.height.inline).flex().items_center().child(div().truncate().text_size(UI.text.body).font_semibold().child(title)))
+              .when(body !== "", (el) => el.child(div().text_size(UI.text.caption).text_color(t.muted).child(body)))
+              .when(where !== "" || x.action !== null, (el) =>
+                el.child(
+                  h_flex()
+                    .gap(UI.space.xs)
+                    .items_center()
+                    .text_size(UI.text.caption)
+                    .text_color(t.dim)
+                    .when(where !== "", (row) => row.child(div().min_w(0).truncate().child(where)))
+                    .when(Boolean(STATE[x.session?.state ?? ""]) && x.session.state !== "idle", (row) => row.child(this.stateChip(t, x.session.state, STATE[x.session.state].name))),
+                ),
+              ),
+          )
+          .child(this.iconButton(t, `ah-toast-close-${x.id}`, "x", "Dismiss", () => this.dismissToast(x.id), UI.height.inline)),
+      )
+      .child(div().h(UI.rule).w(TOAST_WIDTH - UI.space.md * 2).mx(UI.space.md).mb(UI.space.xs).flex_none().rounded(1).bg(t.border).child(div().h_full().w(Math.round((TOAST_WIDTH - UI.space.md * 2) * left)).rounded(1).bg(color)));
+  }
+
+  windowMenu(window) {
+    const pulse = shared(PULSE);
+    const r = window.session ? (pulse?.sessions?.[window.session] ?? null) : null;
+    this.menu(r === null ? null : { key: window.session, ...r }, window);
+  }
+
+  menu(r, window = null) {
+    const pulse = shared(PULSE);
+    const shown = { view: "menu", window, canReopen: (pulse?.closed ?? []).length > 0, key: null, ...(r === null ? {} : this.sessionMenuOf(r.session ? this.factsOf(r) : r)) };
+    openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: MENU_WIDTH * 2 + UI.space.sm, height: this.menuHeight(this.sessionMenuGroups(shown)), props: shown });
+  }
+
+  sessionMenuOf(f) {
     const pulse = shared(PULSE);
     const at = focused();
     const tabs = at?.space ? (spaces().find((sp) => sp.id === at.space)?.tabs ?? []).filter((x) => !panes().some((p) => p.tab === x.id && p.terminal === f.address)).map((x) => ({ id: x.id, name: x.name })) : [];
-    const shown = {
-      view: "menu",
+    return {
       key: f.key,
       title: f.title,
       row: f,
@@ -3164,10 +3368,7 @@ export default class Anyhost extends View {
       tagged: f.tags ?? [],
       stages: this.data?.stages ?? pulse?.stages ?? [],
       stage: f.stage ?? "",
-      tabActions,
-      canReopen: (pulse?.closed ?? []).length > 0,
     };
-    openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: MENU_WIDTH * 2 + UI.space.sm, height: this.menuHeight(this.sessionMenuGroups(shown)), props: shown });
   }
 
   menuHeight(groups) {
@@ -3823,8 +4024,36 @@ export default class Anyhost extends View {
     };
   }
 
+  renderLoading(t, w, cx) {
+    cx.timer.after(1000, (cx) => cx.notify());
+    const facts = w.session ? shared(PULSE)?.sessions?.[w.session] : null;
+    const machine = shared(PULSE)?.all.machines.find((m) => m.name === (w.machine ?? facts?.machine));
+    const where = [w.project ?? facts?.projectName, machine && machine.name !== shared(PULSE)?.here ? machine.place : null, w.folder ? tildeOf(w.folder, machine?.home ?? home()) : null].filter(Boolean).join(" · ");
+    const step = w.starting ? "Starting Claude Code" : w.session ? (facts?.tool === "codex" ? "Resuming Codex" : "Resuming Claude Code") : "Opening a terminal";
+    const waited = Math.floor((Date.now() - w.at) / 1000);
+    return v_flex()
+      .id("ah-loading")
+      .size_full()
+      .items_center()
+      .justify_center()
+      .gap(UI.space.lg)
+      .bg(t.background)
+      .text_color(t.foreground)
+      .child(
+        v_flex()
+          .max_w(START_WIDTH)
+          .px(UI.space.lg)
+          .gap(UI.space.sm)
+          .items_center()
+          .child(div().size(UI.space.xl * 2).flex().items_center().justify_center().rounded(UI.radius.panel).bg(t.raised).child(svg(`${ICON}/spinner.svg`).size(UI.icon.lead).text_color(this.stateColor("working")).spin(900)))
+          .child(div().max_w_full().truncate().text_size(UI.text.title).font_semibold().child(w.starting ? "New session" : w.title))
+          .when(where !== "", (el) => el.child(div().max_w_full().truncate().text_size(UI.text.caption).text_color(t.muted).child(where)))
+          .child(div().text_size(UI.text.caption).text_color(t.dim).child(waited >= LOADING_SLOW_S ? `${step}… ${waited}s` : `${step}…`)),
+      )
+      .child(this.textButton(t, "ah-loading-back", "Back", () => cancelWant()));
+  }
+
   renderStart(t, board) {
-    if (board.openingTitle !== null) return v_flex().id("ah-start").size_full().items_center().justify_center().bg(t.background).child(this.spinnerLabel(t, `Opening ${board.openingTitle.slice(0, 60)}`));
     const recent = [...board.cards].sort((a, b) => b.since - a.since).slice(0, START_MOST);
     return v_flex()
       .id("ah-start")
@@ -3877,9 +4106,10 @@ export default class Anyhost extends View {
     this.refresh(cx);
   }
 
-  renderBoard(t) {
+  renderBoard(t, cx) {
     const board = this.board;
     if (board === null) return v_flex().size_full().bg(t.background).child(this.empty(t, "Reading your sessions…"));
+    if (board.loading !== null) return this.renderLoading(t, board.loading, cx);
     if (board.isStart) return this.renderStart(t, board);
     const { model, cards } = board;
     const columns = board[this.groupBy];
@@ -4197,26 +4427,48 @@ export default class Anyhost extends View {
   }
 
   sessionMenuGroups(p) {
+    const w = p.window;
+    const isBusy = isRunning(p.state) || p.state === "blocked";
+    const rename = { id: "rename", icon: `${OWN}/pencil`, label: "Rename…", disabled: p.key !== null && isBusy, reason: BUSY_REASON, open: "renameWindow" };
+    const windowItems = w
+      ? [
+          [rename, { id: "new-session", icon: "square-pen", label: "New session", detail: keyFor("anyhost.new"), ask: { action: "newSession" } }, { id: "new-terminal", icon: "terminal", label: "New terminal", detail: keyFor("tab.new"), ask: { action: "newTerminal" } }],
+          w.pane
+            ? [
+                { id: "split-right", icon: `${OWN}/columns-2`, label: "Split right", ask: { action: "split", direction: "right" } },
+                { id: "split-down", icon: `${OWN}/rows-2`, label: "Split down", ask: { action: "split", direction: "down" } },
+                { id: "zoom", icon: `${OWN}/maximize-2`, label: w.zoomed ? "Show every pane" : "Zoom", detail: keyFor("anyhost.zoom"), ask: { action: "zoom" } },
+              ]
+            : [],
+        ]
+      : [[rename]];
+    const paneItems =
+      w?.isPane && w.terminal
+        ? [
+            w.toProgram ? { id: "right-menu", icon: `${OWN}/list-filter`, label: "Use this menu on right-click", ask: { action: "rightClicks", to: "menu" } } : { id: "right-program", icon: "terminal", label: "Send right-clicks to the program", ask: { action: "rightClicks", to: "program" } },
+            ...(w.parent ? [{ id: "park", icon: `${OWN}/archive-restore`, label: `Send back to ${w.parent.name}`, ask: { action: "park" } }] : []),
+          ]
+        : [];
+    const closeItems = w
+      ? [
+          ...(w.isPane ? [{ id: "close-pane", icon: "x", label: "Close pane", ask: { action: "closePane" } }] : []),
+          { id: "close-tab", icon: "x", label: "Close tab", detail: keyFor("anyhost.close"), disabled: Boolean(p.pinned), reason: "Unpin it to close it", ask: { action: "closeTabs", tabs: [w.tab] } },
+          { id: "close-others", icon: "x", label: "Close other tabs", disabled: w.others.length === 0, reason: "No other tab is open", ask: { action: "closeTabs", tabs: w.others } },
+          { id: "close-right", icon: "x", label: "Close tabs to the right", disabled: w.right.length === 0, reason: "No tab is to its right", ask: { action: "closeTabs", tabs: w.right } },
+          { id: "reopen", icon: `${OWN}/archive-restore`, label: "Reopen closed tab", detail: keyFor("anyhost.reopen"), disabled: !p.canReopen, reason: "No closed tab to reopen", ask: { action: "reopen" } },
+        ]
+      : [];
+    if (p.key === null) return [...windowItems, paneItems, closeItems];
     const tagged = this.tagged ?? p.tagged;
     const tagItems = [...Object.entries(p.tags).map(([id, tag]) => ({ id: `tag-${id}`, icon: tagged.includes(id) ? "check" : `${OWN}/tag`, label: tag.name, toggle: id })), { id: "tags-edit", icon: "plus", label: "New tag…", open: "tags" }];
     const stageItems = [{ id: "stage-none", icon: p.stage === "" ? "check" : "minus", label: "No stage", ask: { action: "organize", changes: [{ op: "stageSession", session: p.key, stage: "" }], optimistic: [[p.key, { stage: "" }]] } }, ...p.stages.map((s) => ({ id: `stage-${s.id}`, icon: p.stage === s.id ? "check" : "square", label: s.name, ask: { action: "organize", changes: [{ op: "stageSession", session: p.key, stage: s.id }], optimistic: [[p.key, { stage: s.id }]] } })), { id: "stages-edit", icon: "plus", label: "New stage…", open: "stages" }];
-    const tabs = p.tabActions;
-    const isBusy = isRunning(p.state) || p.state === "blocked";
-    const now = new Date();
-    const snoozeItems = [...snoozesAt(now).map((snooze) => ({ id: `snooze-${snooze.id}`, label: snooze.label, detail: snooze.detail, snooze })), { id: "snooze-custom", label: "Custom…", open: "snooze", separatorBefore: true }];
+    const snoozeItems = [...snoozesAt(new Date()).map((snooze) => ({ id: `snooze-${snooze.id}`, label: snooze.label, detail: snooze.detail, snooze })), { id: "snooze-custom", label: "Custom…", open: "snooze", separatorBefore: true }];
     return [
-      tabs
-        ? [
-            { id: "close-tab", icon: "x", label: "Close tab", disabled: p.pinned, reason: "Unpin it to close it", ask: { action: "closeTabs", tabs: [tabs.tab] } },
-            { id: "close-others", icon: "x", label: "Close other tabs", disabled: tabs.others.length === 0, reason: "No other tab is open", ask: { action: "closeTabs", tabs: tabs.others } },
-            { id: "close-right", icon: "x", label: "Close tabs to the right", disabled: tabs.right.length === 0, reason: "No tab is to its right", ask: { action: "closeTabs", tabs: tabs.right } },
-            { id: "reopen", icon: `${OWN}/archive-restore`, label: "Reopen closed tab", disabled: !p.canReopen, reason: "No closed tab to reopen", ask: { action: "reopen" } },
-          ]
-        : [],
+      ...windowItems,
       [
         { id: "peek", icon: `${OWN}/eye`, label: "Peek", ask: { action: "peek" } },
         ...(p.canSleep ? [{ id: "sleep", icon: `${OWN}/moon`, label: "Sleep", disabled: isBusy, reason: BUSY_REASON, ask: { action: "sleep" } }] : []),
-        ...(p.canStartHere ? [{ id: "start-here", icon: "square-pen", label: "New session in its folder", ask: { action: "startHere" } }] : []),
+        ...(!w && p.canStartHere ? [{ id: "start-here", icon: "square-pen", label: "New session in its folder", ask: { action: "startHere" } }] : []),
       ],
       p.archived || p.deleted
         ? []
@@ -4235,7 +4487,7 @@ export default class Anyhost extends View {
       ],
       [
         ...(!p.deleted ? [{ id: "open-in", icon: `${OWN}/panel-right`, label: "Open in", sub: SHAPES.map(([shape, label, icon]) => ({ id: `open-${shape}`, icon, label, ask: { action: "present", shape } })) }] : []),
-        ...(p.canShowHere
+        ...(!w && p.canShowHere
           ? [
               { id: "here-right", icon: `${OWN}/columns-2`, label: "Show beside this pane", ask: { action: "showHere", direction: "right" } },
               { id: "here-down", icon: `${OWN}/rows-2`, label: "Show below this pane", ask: { action: "showHere", direction: "down" } },
@@ -4245,6 +4497,8 @@ export default class Anyhost extends View {
         ...(p.targets.length > 0 ? [{ id: "move", icon: "server", label: "Move to machine", sub: p.targets.map((to) => ({ id: `move-${to}`, icon: "server", label: to, ask: { action: "move", to } })) }] : []),
       ],
       [{ id: "copy", icon: `${OWN}/copy`, label: "Copy", sub: [...(p.cwd ? [{ id: "copy-path", icon: "folder", label: "Folder path", copy: p.cwd }] : []), { id: "copy-id", icon: `${OWN}/hash`, label: "Session ID", copy: p.key }] }],
+      paneItems,
+      closeItems,
       [
         ...(p.deleted ? [{ id: "undelete", icon: `${OWN}/archive-restore`, label: "Restore", ask: { action: "open" } }] : p.archived ? [{ id: "restore", icon: `${OWN}/archive-restore`, label: "Restore", ask: { action: "restore" } }] : [{ id: "archive", icon: "archive", label: "Archive", ask: { action: "archive" }, disabled: p.pinned, reason: "Unpin it to archive it" }]),
         ...(!p.deleted ? [{ id: "delete", icon: `${OWN}/trash`, label: "Delete…", ask: { action: "confirmDelete" }, isDestructive: true, disabled: isBusy, reason: BUSY_REASON }] : []),
@@ -4268,14 +4522,15 @@ export default class Anyhost extends View {
     if (item.open === "tags") return openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: 260, height: 360, props: { view: "tags", key: p.key, tagged: p.tagged, tags: p.tags } });
     if (item.open === "stages") return openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: 260, height: 360, props: { view: "tags", isStage: true, key: p.key, stage: p.stage, stages: p.stages } });
     if (item.open === "snooze") return openOverlay({ mod: "anyhost", kind: "dialog", width: 420, props: { view: "snooze", key: p.key, title: p.title } });
-    if (item.open === "rename") return openOverlay({ mod: "anyhost", kind: "dialog", width: 420, props: { view: "rename", project: p.project } });
+    if (item.open === "rename") return this.openRename({ project: p.project });
     if (item.snooze !== undefined) {
       const until = item.snooze.preset.after !== undefined ? snoozeOf(item.snooze.preset, new Date()).until : isFuture(item.snooze.until) ? item.snooze.until : null;
       if (until === null) return notify({ title: "anyhost could not snooze it", body: "That snooze time has passed. Choose another time.", level: "warning" });
       return this.snooze(cx, p.row, until);
     }
+    if (item.open === "renameWindow") return this.openRename(p.key !== null ? { session: { key: p.key, title: p.title } } : { tab: { id: p.window.tab, name: p.window.name } });
     if (item.board !== undefined) return this.openBoard(item.board);
-    if (item.ask) this.perform({ key: p.key, ...item.ask }, cx, p.row);
+    if (item.ask) this.perform({ key: p.key, window: p.window, ...item.ask }, cx, p.row);
   }
 
   popupMenu(t, groups) {
@@ -4592,20 +4847,32 @@ export default class Anyhost extends View {
       );
   }
 
+  openRename(subject) {
+    openOverlay({ mod: "anyhost", kind: "dialog", width: 420, props: { view: "rename", ...subject } });
+  }
+
+  renamed() {
+    const { project, session, tab } = props();
+    if (project) return { title: "Rename project", hint: "Every machine shows this name.", name: project.name, placeholder: project.defaultName, detail: `Repository: ${project.key}`, reset: project.isNamed ? `Reset to ${project.defaultName}` : null };
+    if (session) return { title: "Rename session", hint: "Claude Code names the session, so every machine and its /resume list show the new name.", name: session.title, placeholder: session.title, detail: null, reset: null };
+    return { title: "Rename tab", hint: "Herdr shows this name on the tab.", name: tab.name, placeholder: tab.name, detail: null, reset: tab.name !== "" ? "Number it again" : null };
+  }
+
   initRename(cx) {
-    const { project } = props();
-    this.name = InputState.new({ placeholder: project.defaultName });
-    this.name.set_value(project.name);
+    const shown = this.renamed();
+    this.name = InputState.new({ placeholder: shown.placeholder });
+    this.name.set_value(shown.name);
     this.name.on("submit", () => this.saveName(this.name.value()));
     cx.timer.after(0, () => this.name.focus());
   }
 
   saveName(text) {
-    const { project, overlay } = props();
-    const name = text === null ? null : text.trim();
+    const { project, session, tab, overlay } = props();
+    const name = text === null ? null : text.replace(/\s+/g, " ").trim();
     closeOverlay(overlay);
-    if (name === project.name) return;
-    this.nameProject(null, project.key, name === "" || name === project.defaultName ? null : name);
+    if (project) return name === project.name ? undefined : this.nameProject(null, project.key, name === "" || name === project.defaultName ? null : name);
+    if (session) return name === null || name === "" || name === session.title ? undefined : enqueue({ run: [{ args: ["tell", session.key, `/rename ${name}`] }], failed: `anyhost could not rename ${session.title.slice(0, 40)}` });
+    run("tab.rename", { id: tab.id, name: name ?? "" });
   }
 
   renderPresent(t) {
@@ -4664,6 +4931,7 @@ export default class Anyhost extends View {
 
   renderRename(t) {
     const p = props();
+    const shown = this.renamed();
     return v_flex()
       .id("ah-rename")
       .w_full()
@@ -4674,13 +4942,13 @@ export default class Anyhost extends View {
       .on_key_down((e) => {
         if (e.key === "escape") closeOverlay(p.overlay);
       })
-      .child(div().text_size(UI.text.title).font_semibold().child("Rename project"))
-      .child(div().text_size(UI.text.body).text_color(t.muted).child("Every machine shows this name."))
-      .child(v_flex().gap(UI.space.xs).child(this.input(t, this.name)).child(div().text_size(UI.text.caption).text_color(t.dim).truncate().child(`Repository: ${p.project.key}`)))
+      .child(div().text_size(UI.text.title).font_semibold().child(shown.title))
+      .child(div().text_size(UI.text.body).text_color(t.muted).child(shown.hint))
+      .child(v_flex().gap(UI.space.xs).child(this.input(t, this.name)).when(shown.detail !== null, (el) => el.child(div().text_size(UI.text.caption).text_color(t.dim).truncate().child(shown.detail))))
       .child(
         h_flex()
           .gap(UI.space.sm)
-          .when(p.project.isNamed, (el) => el.child(this.button(t, "ah-rename-reset", `Reset to ${p.project.defaultName}`, false, () => this.saveName(null))))
+          .when(shown.reset !== null, (el) => el.child(this.button(t, "ah-rename-reset", shown.reset, false, () => this.saveName(null))))
           .child(div().flex_1())
           .child(this.button(t, "ah-rename-cancel", "Cancel", false, () => closeOverlay(p.overlay)))
           .child(this.button(t, "ah-rename-go", "Save", true, () => this.saveName(this.name.value()))),
@@ -5317,10 +5585,12 @@ export default class Anyhost extends View {
     const [, verb, direction] = /^(go|move)-(left|right|up|down)$/.exec(command) ?? [];
     const [, mode] = /^view-(\w+)$/.exec(command) ?? [];
     const [, undone, id] = /^(open|restore|unsettle|repin|wake)-(.+)$/.exec(command) ?? [];
+    if (verb === "go" || command === "next" || command === "prev") cancelWant();
     if (verb === "go") return this.go(work, direction);
     if (verb === "move") return this.move(work, direction);
     if (command === "next" || command === "prev") return run(command === "next" ? "tab.next" : "tab.prev");
     if (command === "recent" || command === "recent-back") return this.walkRecent(cx, command === "recent" ? 1 : -1);
+    if (command === "new") return this.newHere();
     if (command === "close") return this.closeShownWindow(cx);
     if (command === "reopen") return this.reopenClosed(cx);
     if (command === "undo") return this.undoDrop(cx);
@@ -5361,7 +5631,7 @@ export default class Anyhost extends View {
     const boardId = space?.id ?? workspace?.id ?? ALL_WORK;
     const isBoard = workspaceOf(boardId).mode === "board";
     const canTile = Boolean(find(layout(), "tiles")) && terminals.length > 0;
-    const mode = space === null ? (isBoard ? "board" : "start") : isBoard ? "board" : TILED.has(settings.mode) && canTile ? settings.mode : "tabs";
+    const mode = loadingOf() !== null ? "opening" : space === null ? (isBoard ? "board" : "start") : isBoard ? "board" : TILED.has(settings.mode) && canTile ? settings.mode : "tabs";
     const at = focused()?.terminal ?? null;
     return { workspace, space, id: space?.id ?? null, boardId, tab: tab?.id ?? null, terminals, mode, layoutMode: settings.mode, settings, focused: terminals.includes(at) ? at : null };
   }
@@ -5442,7 +5712,7 @@ export default class Anyhost extends View {
           sessions,
           isPinned: sessions.some((key) => known[key]?.pinned),
           state: ofSessions ?? (tab.status === "blocked" || tab.status === "working" || tab.status === "done" ? tab.status : null),
-          isShown: isHere && tab.active && work.mode !== "board" && work.mode !== "start",
+          isShown: isHere && tab.active && !ON_BOARD.has(work.mode),
         };
       }),
     );
@@ -5510,7 +5780,7 @@ export default class Anyhost extends View {
     const work = this.workNow();
     if (this.focusTarget !== null && !panes().some((p) => p.terminal === this.focusTarget)) this.focusTarget = null;
     if (this.focusTarget !== null && TILED.has(work.mode) && work.terminals.includes(this.focusTarget) && !tileTerminals().includes(this.focusTarget) && this.bringIntoView(work, this.focusTarget)) return;
-    const node = work.mode === "tabs" ? VIEW_NODE.tabs : work.mode === "board" || work.mode === "start" ? VIEW_NODE.board : VIEW_NODE.tiles;
+    const node = work.mode === "tabs" ? VIEW_NODE.tabs : ON_BOARD.has(work.mode) ? VIEW_NODE.board : VIEW_NODE.tiles;
     const shown = () => {
       if (find(layout(), "views")?.active !== node) run("layout.select", { stack: "views", child: node });
       if (this.focusTarget !== null && work.terminals.includes(this.focusTarget) && (!TILED.has(work.mode) || tileTerminals().includes(this.focusTarget))) {
@@ -5718,6 +5988,7 @@ export default class Anyhost extends View {
   }
 
   showWindow({ tab, space }) {
+    cancelWant();
     if (space && space !== spaces().find((sp) => sp.active)?.id) run("space.select", { id: space });
     if (space && workspaceOf(space).mode === "board") changeWorkspace(space, { mode: "tabs" });
     run("tab.select", { id: tab });
@@ -5767,9 +6038,7 @@ export default class Anyhost extends View {
     const done = () => {
       if (wantedOf()?.id === w.id) setShared(WANTED, null);
     };
-    const isPlacing = this.wantedLive && (w.layout?.steps.length ?? 0) > 0;
     if (Date.now() - w.at > LONG_MS) return done();
-    if (!isPlacing && !isStillWanted(w)) return window()?.active === true ? done() : undefined;
     if (!w.session) {
       if (w.starting || !spaces().some((sp) => sp.id === w.space)) return;
       run("space.select", { id: w.space });
@@ -6085,7 +6354,7 @@ export default class Anyhost extends View {
   }
 
   modeButton(t, mode, label, icon, work) {
-    const isChosen = (work.mode === "start" ? "tabs" : work.mode) === mode;
+    const isChosen = (work.mode === "start" || work.mode === "opening" ? work.layoutMode : work.mode) === mode;
     const side = work.settings.side;
     const nextSide = SIDES[(SIDES.indexOf(side) + 1) % SIDES.length];
     const tooltip = mode === "master" && isChosen ? `Master on the ${side} at ${Math.round(work.settings.ratio * 100)}% · click for the ${nextSide}` : label;
@@ -6240,12 +6509,7 @@ export default class Anyhost extends View {
       })
       .on_mouse_down("right", (_e, cx) => {
         cx.stop_propagation();
-        const shownTabs = this.shownTabsOf(slot.pill.space);
-        const i = shownTabs.findIndex((x) => x.id === tab.id);
-        const tabActions = { tab: tab.id, others: shownTabs.filter((x) => x.id !== tab.id).map((x) => x.id), right: shownTabs.slice(i + 1).map((x) => x.id) };
-        const row = shared(PULSE)?.sessions?.[sessions[0]];
-        if (row) return this.menu(row, tabActions);
-        openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: tab.id, space: slot.pill.space } } });
+        this.windowMenu(windowFacts(tab.id));
       })
       .when(lead !== null, (el) => el.child(lead))
       .child(div().flex_1().min_w(0).truncate().child(tab.name))
