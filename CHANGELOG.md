@@ -21,6 +21,7 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 - Closing or archiving a window keeps you in the project on screen: the last window you saw there, else another of its windows, else its start screen. Only All projects goes to the last window of any project.
 - A project's start screen no longer lists sessions you archived while it was hidden.
 - Closing, archiving or deleting a session no longer leaves a drag behind that moves it or offers to split it into a pane.
+- A move to another machine no longer hangs at Moving. A file the session wrote after its last upload went up after the hand-off and claimed the session back, so the other machine was refused and never tried again. The machine handing a session over now uploads nothing more of it.
 - An open that a Herdr app restart or an anyhost update interrupted runs again at once. Before, the session showed Opening for up to 10 minutes.
 - Claude Code's hooks answer at once. Each hook waited while anyhost checked every file of its session for changes, about 200 ms on a session with 16,000 files. That check now runs after the answer.
 - read_agent and tell_agent find a session's terminal from what anyhost already follows, instead of asking herdr-core each time, about 80 ms sooner.

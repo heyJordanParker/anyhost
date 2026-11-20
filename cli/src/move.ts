@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AgentStatus, Delivered, DeviceRef, Message, Offline, Routed } from '../../relay/protocol.ts'
 import type { Activity, Shown } from './activity.ts'
-import { captureAgainFrom, chainOf, changedFiles, checkoutOf, checkoutOfEntry, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
+import { captureAgainFrom, chainOf, changedFiles, checkoutOf, checkoutOfEntry, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, stopJournal, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim, type Placement } from './claims.ts'
 import { claudeStart, pauseCopy, pausedSessions, recordedSessions, resumeArgv, resumedOf, resumeCopy, run, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
 import { devicesOf, otherMachine } from './device.ts'
@@ -299,6 +299,8 @@ async function drainTo(capture: Capture, session: string, target: DeviceRef, her
     }
     await upload(capture, session, tool, here, signal, uploading)
     signal.throwIfAborted()
+    stopJournal(capture.db, session, tool, `${stamp()} ${capture.device.name} hands ${session} to ${target.name}, so it uploads no more of it.`)
+    await here.flush(session, signal, uploading)
     const forgot = await relay.runOne({ op: 'forget', session })
     if (forgot.status === 409 && forgot.holder.id !== target.id) throw new HeldElsewhere(forgot.holder)
     moving.handedAt = Date.now()
@@ -311,6 +313,7 @@ async function drainTo(capture: Capture, session: string, target: DeviceRef, her
       await stopCopy(roots.claudeHome, session).catch((failure: unknown) => console.error(`${stamp()} anyhost could not stop the paused copy of ${session}: ${messageOf(failure)}`))
       return say('failed', `${holder} took ${id} over during the move, so it continues there.`)
     }
+    holdHere(capture.db, session)
     const isKept = signal.aborted
     if (!isKept) await want(relay, session, '', { error: reasonOf(error), if: target.id }).catch((failure: unknown) => console.error(`${stamp()} anyhost could not drop the move of ${session}: ${messageOf(failure)}`))
     const line = isKept ? `Kept ${id} here, so it does not move to ${target.name}.` : `anyhost could not move the session to ${target.name}: ${reasonOf(error)}. It keeps running here.`
@@ -370,7 +373,7 @@ async function reconcile(capture: Capture, session: string, here: MoveHere): Pro
     if (placement.device !== device.id) {
       await takeClaim(relay, session, isTaken ? { take: true, if: { gone: true } } : { take: false })
       await continueHere(capture, session, journalOf(capture.db, session)?.tool ?? 'claude', here)
-    }
+    } else holdHere(capture.db, session)
     sayOn(moving, 'failed', await resumedHere(capture, session, here, line))
     if (placement.wanted !== '' || placement.error !== undefined) await want(relay, session, '', { if: placement.wanted })
   } catch (error) {
