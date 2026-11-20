@@ -2,6 +2,12 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.17] - 2026-11-20
+
+### Changed
+- A notification sits still. The timer bar under it is gone, and pointing at one no longer paints a highlight that stopped short of its edges.
+- A session's notification says what happened under the session's title, and its project and machine once each. It no longer repeats the project and title, or shows the state the session had before it finished.
+
 ## [0.9.16] - 2026-11-20
 
 ### Changed
