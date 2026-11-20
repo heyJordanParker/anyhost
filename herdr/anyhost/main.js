@@ -3264,7 +3264,7 @@ export default class Anyhost extends View {
       icon: given.icon ?? null,
       action: given.action ?? null,
       timeout: given.timeout ?? (given.level === "error" ? TOAST_ERROR_MS : TOAST_MS),
-      session: facts === null ? null : { title: facts.title, project: facts.projectName ?? "", machine: facts.machine ?? "", tool: facts.tool ?? "claude", state: facts.state ?? "" },
+      session: facts === null ? null : { title: facts.title, project: facts.projectName ?? "", machine: facts.machine ?? "", tool: facts.tool ?? "claude" },
     };
     setShared(TOASTS, [toast, ...(shared(TOASTS) ?? []).filter((x) => x.title !== toast.title || x.body !== toast.body)].slice(0, TOAST_MOST));
   }
@@ -3276,7 +3276,8 @@ export default class Anyhost extends View {
       if (all.length === 0) return;
       const now = Date.now();
       const live = all.filter((x) => x.id === this.hoveredToast || now - x.at < x.timeout);
-      if (live.length !== all.length) setShared(TOASTS, live);
+      if (live.length === all.length) return;
+      setShared(TOASTS, live);
       cx.notify();
     });
   }
@@ -3300,16 +3301,12 @@ export default class Anyhost extends View {
     const color = x.level === "error" ? t.ansi1 : x.level === "info" ? t.muted : look.colors[this.isDark ? 1 : 0];
     const where = x.session ? [x.session.project, x.session.machine !== shared(PULSE)?.here ? x.session.machine : ""].filter(Boolean).join(" · ") : "";
     const title = x.session ? x.session.title : x.title;
-    const body = x.session ? [x.title, x.body].filter(Boolean).join(" · ") : x.body;
-    const isHovered = this.hoveredToast === x.id;
-    const left = isHovered ? 1 : Math.max(0, 1 - (Date.now() - x.at) / x.timeout);
+    const body = x.session ? x.title : x.body;
     const lead = x.session ? this.harnessIcon(t, { key: `toast-${x.id}`, harness: x.session.tool }) : x.icon ? image(x.icon).size(UI.icon.body).flex_none() : svg(iconPath(look.icon)).size(UI.icon.body).flex_none().text_color(color);
     return v_flex()
       .id(`ah-toast-${x.id}`)
       .w_full()
-      .relative()
-      .rounded(UI.radius.control)
-      .when(x.action !== null, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
+      .when(x.action !== null, (el) => el.cursor_pointer())
       .on_hover((on, cx) => {
         if (on) this.hoveredToast = x.id;
         else if (this.hoveredToast === x.id) {
@@ -3337,21 +3334,10 @@ export default class Anyhost extends View {
               .gap(UI.space.xs)
               .child(div().min_h(UI.height.inline).flex().items_center().child(div().truncate().text_size(UI.text.body).font_semibold().child(title)))
               .when(body !== "", (el) => el.child(div().text_size(UI.text.caption).text_color(t.muted).child(body)))
-              .when(where !== "" || x.action !== null, (el) =>
-                el.child(
-                  h_flex()
-                    .gap(UI.space.xs)
-                    .items_center()
-                    .text_size(UI.text.caption)
-                    .text_color(t.dim)
-                    .when(where !== "", (row) => row.child(div().min_w(0).truncate().child(where)))
-                    .when(Boolean(STATE[x.session?.state ?? ""]) && x.session.state !== "idle", (row) => row.child(this.stateChip(t, x.session.state, STATE[x.session.state].name))),
-                ),
-              ),
+              .when(where !== "", (el) => el.child(div().min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(where))),
           )
           .child(this.iconButton(t, `ah-toast-close-${x.id}`, "x", "Dismiss", () => this.dismissToast(x.id), UI.height.inline)),
-      )
-      .child(div().h(UI.rule).w(TOAST_WIDTH - UI.space.md * 2).mx(UI.space.md).mb(UI.space.xs).flex_none().rounded(1).bg(t.border).child(div().h_full().w(Math.round((TOAST_WIDTH - UI.space.md * 2) * left)).rounded(1).bg(color)));
+      );
   }
 
   windowMenu(window) {
