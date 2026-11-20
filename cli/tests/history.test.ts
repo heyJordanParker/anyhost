@@ -30,6 +30,7 @@ function moverOf(capture: Capture): MoveHere {
     activity: new Activity(),
     onRecordsChange: () => () => undefined,
     onStatusElsewhere: () => undefined,
+    terminalNow: () => undefined,
     queue: (session, _tool, path) => void queued.set(session, (queued.get(session) ?? new Set()).add(path)),
     flush: async (session) => {
       const paths = queued.get(session) ?? new Set()

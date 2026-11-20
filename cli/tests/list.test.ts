@@ -88,7 +88,7 @@ test("a change Claude Code reports, a new session, a /rename and a /cd alike, re
   expect((await session())?.cwd).toBe(moved)
 }, 60_000)
 
-test("a /rename lists the moment its hook answers while no upload reaches the relay, and a session named before its first prompt lists by that name", async () => {
+test("a /rename lists the moment its hook answers, before Claude Code writes the name into the transcript and while no upload reaches the relay, an agent name written after it never replaces it, and a session named before its first prompt lists by that name", async () => {
   const relay = await memoryRelay()
   relay.before = (op) => (op.op === 'put' && op.key.startsWith('journals/') ? new Promise<void>(() => undefined) : undefined)
   const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 3600 })
@@ -105,12 +105,14 @@ test("a /rename lists the moment its hook answers while no upload reaches the re
 
   await hookOn(laptop.socket, 'started', cwd)
   const started = await titles()
-  appendFileSync(transcriptOf(SESSION), `{"type":"custom-title","customTitle":"Trip to Lisbon","sessionId":"${SESSION}"}\n`)
-  await hookOn(laptop.socket, 'renamed', cwd)
+  await hookOn(laptop.socket, 'renamed', cwd, SESSION, '', 'Trip to Lisbon')
   const renamed = await titles()
+  appendFileSync(transcriptOf(SESSION), `{"type":"custom-title","customTitle":"Trip to Lisbon","sessionId":"${SESSION}"}\n{"type":"agent-name","agentName":"cto","sessionId":"${SESSION}"}\n`)
+  await hookOn(laptop.socket, 'turnEnd', cwd)
+  const written = await titles()
   await hookOn(laptop.socket, 'renamed', cwd, OTHER_SESSION)
 
-  expect([started, renamed, await titles()]).toEqual([{ [SESSION]: 'Plan the trip' }, { [SESSION]: 'Trip to Lisbon' }, { [SESSION]: 'Trip to Lisbon', [OTHER_SESSION]: 'Packing list' }])
+  expect([started, renamed, written, await titles()]).toEqual([{ [SESSION]: 'Plan the trip' }, { [SESSION]: 'Trip to Lisbon' }, { [SESSION]: 'Trip to Lisbon' }, { [SESSION]: 'Trip to Lisbon', [OTHER_SESSION]: 'Packing list' }])
 }, 60_000)
 
 test('a session a /clear started lists the session it continues from as its source, and keeps it', async () => {

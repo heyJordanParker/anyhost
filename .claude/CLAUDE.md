@@ -32,7 +32,7 @@ anyhost keeps every Claude Code and Codex session of every machine the Architect
 
 ## The models the Architecture copies
 
-- Sessions follow T3 Code's `ProviderSessionManager.ts` and Chrome's discarded tabs. A session is live while Claude Code runs in a terminal labelled `anyhost.session=<id>`, or discarded with no process. The program discards an idle session no screen showed for 8 hours (`ANYHOST_STOP_MS`), and an open, a click or a message starts it again (`terminalOf` in `move.ts`).
+- Sessions follow T3 Code's `ProviderSessionManager.ts` and Chrome's discarded tabs. A session is live while Claude Code runs in a terminal labelled `anyhost.session=<id>`, or discarded with no process. The program discards an idle session no screen showed for 24 hours (`ANYHOST_STOP_MS`), so a day's scrollback survives, and an open, a click or a message starts it again (`terminalOf` in `move.ts`).
 - The list and its states follow T3 Code's sidebar (`Sidebar.logic.ts`). Settled and snoozed are computed on read from shared marks, so no machine settles a session by its own judgment.
 - A session's files live in R2 as a journal of zstd frames under `journals/<session>/`, as Litestream streams a database. Large logs go up as content-addressed `chunks/<sha256>`, which no machine deletes. Journals seal and compact as Kafka compacts a log (`rewriteJournal` in `capture.ts`).
 - Placement is Kubernetes' desired state. The Pool's claims row holds the holder (`device`), the machine the session should run on (`wanted`), a start's `spec` and the last `error`, and each program reconciles every session against it (`placeSession` in `move.ts`). Only the holder writes a session's journal: every frame carries `holder`, and the Pool refuses another machine's with 409.

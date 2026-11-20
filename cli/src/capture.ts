@@ -12,7 +12,7 @@ import { devicesOf, stateFolder, type DataFolder, type Device, type MachineRoots
 import type { Call, RanOf, Read, ReadsKept, Relay } from './relay.ts'
 import { relocate } from './relocate.ts'
 import { Replay } from './sessions.ts'
-import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, NAMED_RANK, namedIn, namesFork, ownerOf, parentOf, piecesFrom, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
+import { codexNameOf, codexState, cutsOf, filesOf, filesUnder, firstUuidIn, forkedTranscript, forkIn, forkStartsIn, historyOf, linesFiles, NAMED_RANK, namedIn, namesFork, oneLine, ownerOf, parentOf, piecesFrom, RENAMED_RANK, summarize, TITLE_RULES, transcriptOf, transcriptsOn, uuidsIn, type Fork, type Summary, type Tool } from './transcript.ts'
 
 export const FRAME_BYTES = 64 * 2 ** 20
 const SCAN_READ_BYTES = 2 ** 20
@@ -2004,7 +2004,10 @@ export async function recordFolder(db: Database, id: string, cwd: string, at: st
   return true
 }
 
-export const forgetUnstarted = (db: Database, id: string): void => void db.query("delete from sessions where id = ? and first_prompt = '' and title_rank < ?").run(id, NAMED_RANK)
+export const recordName = (db: Database, id: string, name: string): boolean =>
+  oneLine(name) !== '' && db.query('update sessions set title = ?, title_rank = ? where id = ? and (title != ? or title_rank < ?)').run(oneLine(name), RENAMED_RANK, id, oneLine(name), RENAMED_RANK).changes > 0
+
+export const forgetUnstarted =(db: Database, id: string): void => void db.query("delete from sessions where id = ? and first_prompt = '' and title_rank < ?").run(id, NAMED_RANK)
 
 const IS_TRANSCRIPT = "files.session = sessions.id and (files.path like '%' || sessions.id || '.jsonl' or files.path like '%' || sessions.id || '.jsonl.zst')"
 const TRANSCRIPT_GONE = `(exists (select 1 from files where ${IS_TRANSCRIPT}) and not exists (select 1 from files where ${IS_TRANSCRIPT} and files.sha256 != ''))`
