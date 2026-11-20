@@ -293,6 +293,15 @@ const isSameSession = (a, b) => {
   return count === Object.keys(a).length;
 };
 const menuOffsetOf = (groups, item) => groups.flat().indexOf(item) * UI.height.row + groups.findIndex((group) => group.includes(item)) * MENU_SEPARATOR;
+const MENU_SUB_MOST = 10;
+const menuPanelOf = (body) => body + UI.space.xs * 2 + 2 + UI.space.lg;
+const subBodyOf = (sub) => Math.min(sub.length * UI.height.row + sub.filter((item) => item.separatorBefore).length * MENU_SEPARATOR, MENU_SUB_MOST * UI.height.row);
+const menuSizeOf = (groups) => {
+  const shown = groups.filter((group) => group.length > 0);
+  const main = menuPanelOf(shown.flat().length * UI.height.row + (shown.length - 1) * MENU_SEPARATOR);
+  return Math.max(main, ...shown.flat().filter((item) => item.sub).map((item) => menuPanelOf(subBodyOf(item.sub))));
+};
+const subTopOf = (groups, item) => Math.max(0, Math.min(menuOffsetOf(groups, item), menuSizeOf(groups) - menuPanelOf(subBodyOf(item.sub))));
 const projectNameOf = (key, names = {}, repoName = key.split("/").pop()) => (key === NONE ? "No project" : key === TEMPORARY ? "Temporary" : (names?.[key] ?? prettyName(repoName)));
 
 const isFuture = (at, now = Date.now()) => Boolean(at) && Date.parse(at) > now;
@@ -679,6 +688,12 @@ const changeWindowLayout = (tab, change) => {
 const inOrder = (order, list) => [...order.filter((x) => list.includes(x)), ...list.filter((x) => !order.includes(x))];
 const tabOfTerminal = (address) => panes().find((p) => p.terminal === address)?.tab ?? null;
 const spaceOfTab = (tab) => spaces().find((sp) => sp.tabs.some((x) => x.id === tab))?.id ?? null;
+const isInFilter = (space) => {
+  const { project, worktree } = filterOf();
+  if (project === null) return true;
+  const w = (shared(PULSE)?.workspaces ?? []).find((each) => each.id === space);
+  return Boolean(w) && w.key === project && (worktree === null || sameWorktree(w, worktree));
+};
 const sessionsOfTab = (tab) => {
   const sessionAt = new Map(terminals().map((x) => [x.address, x.labels?.[SESSION_LABEL]]));
   return [...new Set(panes().filter((p) => p.tab === tab && p.terminal).map((p) => sessionAt.get(p.terminal)).filter(Boolean))];
@@ -975,6 +990,7 @@ export default class Anyhost extends View {
       .on_mouse_move((e, cx) => {
         const drag = this.pressed;
         if (!drag) return;
+        if (this.isPressGone()) return this.cancelDrag(cx);
         if (drag.moveTo(e.position)) {
           this.dragKeys.focus();
           if (drag.address) setShared(DRAG_TAB, { tab: null, title: drag.title, space: null, terminals: [drag.address], overlay: null, lifted: false, from: "inbox" });
@@ -1002,6 +1018,15 @@ export default class Anyhost extends View {
         cx.stop_propagation();
         this.cancelDrag(cx);
       });
+  }
+
+  isPressGone() {
+    const id = this.pressed?.id;
+    if (id === undefined) return false;
+    if (this.kind === "tabs") return this.closing.has(id) || !(this.tabsView?.slots ?? []).some((slot) => slot.id === id);
+    if (this.kind !== "inbox" && this.kind !== "board") return false;
+    const r = this.model?.byKey.get(id);
+    return !r || r.archived || r.deleted;
   }
 
   cancelDrag(cx) {
@@ -1098,6 +1123,7 @@ export default class Anyhost extends View {
       this.pressed = null;
       this.redrawAll(cx);
     }
+    if (this.isPressGone()) this.cancelDrag(cx);
     this.adoptOutbox(cx);
     if (this.readPreferences()) {
       this.placeParts(cx);
@@ -3130,6 +3156,7 @@ export default class Anyhost extends View {
       .text_color(t.muted)
       .cursor_pointer()
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => {
         cx.stop_propagation();
         onClick(cx);
@@ -3336,7 +3363,7 @@ export default class Anyhost extends View {
   menu(r, window = null) {
     const pulse = shared(PULSE);
     const shown = { view: "menu", window, canReopen: (pulse?.closed ?? []).length > 0, key: null, ...(r === null ? {} : this.sessionMenuOf(r.session ? this.factsOf(r) : r)) };
-    openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: MENU_WIDTH * 2 + UI.space.sm, height: this.menuHeight(this.sessionMenuGroups(shown)), props: shown });
+    openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: MENU_WIDTH * 2 + UI.space.sm, height: menuSizeOf(this.sessionMenuGroups(shown)), props: shown });
   }
 
   sessionMenuOf(f) {
@@ -3369,13 +3396,6 @@ export default class Anyhost extends View {
       stages: this.data?.stages ?? pulse?.stages ?? [],
       stage: f.stage ?? "",
     };
-  }
-
-  menuHeight(groups) {
-    const shown = groups.filter((group) => group.length > 0);
-    const items = shown.flat();
-    const panelOf = (rows, separators) => rows * UI.height.row + separators * MENU_SEPARATOR + UI.space.xs * 2 + 2 + UI.space.lg;
-    return Math.max(panelOf(items.length, shown.length - 1), ...items.filter((item) => item.sub).map((item) => menuOffsetOf(shown, item) + panelOf(item.sub.length, item.sub.filter((sub) => sub.separatorBefore).length)));
   }
 
   key(e, cx) {
@@ -3507,6 +3527,7 @@ export default class Anyhost extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .tooltip(tooltip)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => {
         cx.stop_propagation();
         onClick(cx);
@@ -3867,7 +3888,7 @@ export default class Anyhost extends View {
 
   projectMenu(p, pulse, worktree = null) {
     const shown = { view: "menu", project: p, worktree, here: pulse.here, homes: Object.fromEntries(pulse.all.machines.map((m) => [m.name, m.home])), machines: pulse.all.machines.filter((m) => m.connected).map((m) => m.name) };
-    openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: MENU_WIDTH * 2 + UI.space.sm, height: this.menuHeight(this.projectMenuGroups(shown)), props: shown });
+    openOverlay({ mod: "anyhost", kind: "popup", frame: "none", width: MENU_WIDTH * 2 + UI.space.sm, height: menuSizeOf(this.projectMenuGroups(shown)), props: shown });
   }
 
   moveHere(t) {
@@ -4099,7 +4120,7 @@ export default class Anyhost extends View {
   boardReconcile(cx) {
     const changed = shared(CHANGED) ?? 0;
     const isShown = this.isBoardShown();
-    const isStale = isShown && !this.wasShown && Date.now() - (this.readAt ?? 0) > REFRESH_MS;
+    const isStale = isShown && !this.wasShown;
     this.wasShown = isShown;
     if (changed <= this.changedAt && !isStale) return;
     this.changedAt = Math.max(this.changedAt, changed);
@@ -4127,6 +4148,7 @@ export default class Anyhost extends View {
         this.paneAt = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y };
         const drag = this.pressed;
         if (!drag) return;
+        if (this.isPressGone()) return this.cancelDrag(cx);
         if (drag.moveTo(e.position)) {
           this.dragKeys.focus();
           return this.redrawDragStart(cx, drag.id);
@@ -4389,6 +4411,7 @@ export default class Anyhost extends View {
   initPopup(cx) {
     this.at = null;
     this.subAt = null;
+    this.subScroll = ScrollHandle.new();
     this.handle = cx.focus_handle();
     this.handle.focus();
   }
@@ -4572,7 +4595,20 @@ export default class Anyhost extends View {
       .gap(UI.space.xs)
       .on_key_down((e, cx) => this.menuKey(e, cx, items, opened))
       .child(panel().children(groups.flatMap((group, n) => [...(n > 0 ? [this.divider(t)] : []), ...group.map((item) => entry(item, hoverAt(item), this.at === item.id && this.subAt == null))])))
-      .when(opened !== null, (el) => el.child(panel().mt(menuOffsetOf(groups, opened)).children(opened.sub.flatMap((item) => [...(item.separatorBefore ? [this.divider(t)] : []), entry(item, hoverSub(item), this.subAt === item.id)]))));
+      .when(opened !== null, (el) =>
+        el.child(
+          panel()
+            .mt(subTopOf(groups, opened))
+            .child(
+              v_flex()
+                .id(`ah-menu-sub-${opened.id}`)
+                .h(subBodyOf(opened.sub))
+                .overflow_y_scrollbar()
+                .track_scroll(this.subScroll)
+                .children(opened.sub.flatMap((item) => [...(item.separatorBefore ? [this.divider(t)] : []), entry(item, hoverSub(item), this.subAt === item.id)])),
+            ),
+        ),
+      );
   }
 
   menuKey(e, cx, items, opened) {
@@ -4586,6 +4622,7 @@ export default class Anyhost extends View {
       if (inSub) this.subAt = next.id;
       else this.at = next.id;
     }
+    if (inSub && next) this.subScroll.scroll_to_item(opened.sub.flatMap((item) => [...(item.separatorBefore ? [null] : []), item]).indexOf(next));
     const current = inSub ? opened.sub.find((item) => item.id === this.subAt) : items.find((item) => item.id === this.at);
     const firstSub = (item) => item?.sub?.find((sub) => !sub.disabled)?.id ?? null;
     if (e.key === "right" && !inSub && current?.sub && !current.disabled) this.subAt = firstSub(current);
@@ -5677,6 +5714,9 @@ export default class Anyhost extends View {
       this.pressed = null;
       cx.notify();
     }
+    if (this.isPressGone()) this.cancelDrag(cx);
+    const live = new Set(terminals().filter((x) => x.state === "live").map((x) => x.address));
+    if (drag && (drag.tab ? spaceOfTab(drag.tab) === null : drag.terminals.every((address) => !live.has(address)))) endTabDrag(false);
     const tree = layout();
     const width = this.tilesWidth();
     const key = `${work.mode}|${work.id}|${work.terminals.join(",")}|${JSON.stringify(work.settings)}|${scrollShown(width)}:${Math.floor(width / TILE_WIDTH)}|${find(tree, "views")?.active}|${tileTerminals(tree).join(",")}|${this.focusTarget ?? ""}|${work.tab ?? ""}|${spaces().reduce((sum, sp) => sum + sp.tabs.length, 0)}|${panes().length}|${isLayoutLoaded()}|${(shared(PULSE)?.pinned ?? []).map((p) => `${p.key}:${p.state}`).join(",")}|${pinsInOrder().join(",")}|${(work.space?.tabs ?? []).map((tab) => tab.id).join(",")}|${JSON.stringify(presentedOf())}|${find(tree, "present-terminal")?.content?.terminal ?? ""}`;
@@ -5994,9 +6034,14 @@ export default class Anyhost extends View {
     run("tab.select", { id: tab });
   }
 
+  nextWindow(closed) {
+    const open = this.spacesInOrder().flatMap((space) => space.tabs.map((tab) => ({ tab: tab.id, space: space.id })));
+    return [...this.recent.map((e) => this.windowOf(e)), ...open].find((w) => w?.tab && w.tab !== closed && !this.closing.has(w.tab) && isInFilter(w.space)) ?? null;
+  }
+
   leftWindow(closed) {
     if (wantedOf() !== null || this.walk !== null) return;
-    const next = this.recent.map((e) => this.windowOf(e)).find((w) => w?.tab && w.tab !== closed && !this.closing.has(w.tab));
+    const next = this.nextWindow(closed);
     if (next && next.tab !== this.shownTab) this.showWindow(next);
   }
 
@@ -6150,6 +6195,7 @@ export default class Anyhost extends View {
         this.barBounds = { x: e.position.x - e.local_position.x, y: e.position.y - e.local_position.y, width: e.bounds.width, height: e.bounds.height };
         const drag = this.pressed;
         if (!drag) return;
+        if (this.isPressGone()) return this.cancelDrag(cx);
         if (drag.moveTo(e.position)) return this.startDrag(cx, drag);
         if (drag.isMoving) this.redrawDrag(cx);
       })
@@ -6238,10 +6284,6 @@ export default class Anyhost extends View {
     return slot.pill ? this.tabPill(t, slot, isGhost) : this.sessionPill(t, slot, isGhost);
   }
 
-  shownTabsOf(space) {
-    return this.tabsView.pills.filter((pill) => pill.space === space && !this.leaving.has(pill.tab.id)).map((pill) => pill.tab);
-  }
-
 
   startDrag(cx, drag) {
     const slots = this.tabsView.slots;
@@ -6303,10 +6345,7 @@ export default class Anyhost extends View {
     if (pill.isPinned) return;
     if (!isRunning(pill.state) && pill.state !== "blocked") {
       this.closing.add(tab.id);
-      const shownTabs = this.shownTabsOf(pill.space);
-      const at = shownTabs.findIndex((x) => x.id === tab.id);
-      const neighbour = shownTabs[at + 1] ?? shownTabs[at - 1];
-      const next = this.recent.map((e) => this.windowOf(e)).find((w) => w?.tab && !this.closing.has(w.tab)) ?? (neighbour ? { tab: neighbour.id, space: pill.space } : null);
+      const next = this.nextWindow(tab.id);
       if (pill.isShown && next) this.showWindow(next);
     }
     this.closeTabs(cx, [tab.id]);

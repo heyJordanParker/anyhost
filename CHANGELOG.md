@@ -17,6 +17,10 @@ What changed in each version of anyhost, for the people who use it. cmod publish
 ### Fixed
 - A /rename shows in the sidebar the moment you press Enter. The hook carries the new name, so the sidebar no longer waits for Claude Code to write it to the transcript, and a later agent name no longer takes its place.
 - Closing a new tab right after opening it no longer shows an error. A tab with no session was closed twice.
+- A menu stays where it opened while you move between its items. A long submenu, as Move to tab with many tabs, shows ten rows and scrolls, where it made the menu taller than the window and pushed it elsewhere.
+- Closing or archiving a window keeps you in the project on screen: the last window you saw there, else another of its windows, else its start screen. Only All projects goes to the last window of any project.
+- A project's start screen no longer lists sessions you archived while it was hidden.
+- Closing, archiving or deleting a session no longer leaves a drag behind that moves it or offers to split it into a pane.
 - An open that a Herdr app restart or an anyhost update interrupted runs again at once. Before, the session showed Opening for up to 10 minutes.
 - Claude Code's hooks answer at once. Each hook waited while anyhost checked every file of its session for changes, about 200 ms on a session with 16,000 files. That check now runs after the answer.
 - read_agent and tell_agent find a session's terminal from what anyhost already follows, instead of asking herdr-core each time, about 80 ms sooner.
