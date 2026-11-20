@@ -4,6 +4,7 @@ import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { claudeStart, commandOf, currentFolderOf, openFilesOf, processes, resumeArgv, resumedOf, startOf } from '../src/claude.ts'
 import type { Status } from '../src/serve.ts'
+import { shellsOf } from '../src/hc.ts'
 import { familyOf, lastFolderOf, transcriptTailOf } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
 import { anyhostOn, coreEvent, coreSays, decoder, hookOn, LAPTOP, logOf, machineFor, OTHER_SESSION, runningOn, sentOn, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn } from './program.ts'
@@ -204,7 +205,7 @@ test("after a herdr-core restart gives a session's kept terminal a shell, the se
   expect(Object.keys((await sharedIn(relay)).archived ?? {})).toEqual([])
 }, 60_000)
 
-test("a Claude Code the Herdr app runs as its terminal's own program gets its session's label, a /clear moves the label to the new session, and a claude a person typed into a shell stays unlabelled", async () => {
+test("a Claude Code its terminal runs, as the Herdr app's own program or typed into a shell, gets its session's label, and a /clear moves the label to the new session", async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
   const recorded = (copy: Subprocess, session: string): void =>
@@ -222,8 +223,16 @@ test("a Claude Code the Herdr app runs as its terminal's own program gets its se
   await until(() => logOf(laptop.folder, 'labels.log').length > 1, 'the program moving the label at a /clear', 15_000)
   await Bun.sleep(1000)
 
-  expect(logOf(laptop.folder, 'labels.log')).toEqual([`t0 anyhost.session=${SESSION}`, `t0 anyhost.session=${OTHER_SESSION}`])
+  expect(logOf(laptop.folder, 'labels.log').toSorted()).toEqual([`t0 anyhost.session=${SESSION}`, `t0 anyhost.session=${OTHER_SESSION}`, `t1 anyhost.session=${THIRD_SESSION}`])
 }, 60_000)
+
+test("quitting a Claude Code typed into a shell gives back only that shell, and never a terminal that runs Claude Code as its own program", () => {
+  const running = new Map(
+    [terminalIn('t0', CLAUDE, { 'anyhost.session': SESSION }), terminalIn('t1', SHELL, { 'anyhost.session': SESSION }, CLAUDE), terminalIn('t2', SHELL, { 'anyhost.session': OTHER_SESSION }, CLAUDE), terminalIn('mac/t3', SHELL, { 'anyhost.session': SESSION }, CLAUDE)].map((terminal) => [terminal.address, { ...terminal, reason: null, exitCode: null }]),
+  )
+
+  expect(shellsOf(running, SESSION)).toEqual(['t1'])
+})
 
 test("closing a session's pane or quitting its agent archives the session once, and an agent that crashes, a terminal the program closes, a herdr-core stop and a computer shutdown archive nothing", async () => {
   const relay = await memoryRelay()

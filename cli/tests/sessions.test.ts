@@ -3,7 +3,7 @@ import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { Activity } from '../src/activity.ts'
-import { compressHot, journalOf, openCapture, openDatabase, QUIET_MS, recordSummary, relistSessions, seal, sealQuiet, untoldOf, writeIndex, type Capture } from '../src/capture.ts'
+import { compressHot, forgetUnstarted, journalOf, openCapture, openDatabase, QUIET_MS, recordFolder, recordSummary, relistSessions, seal, sealQuiet, untoldOf, writeIndex, type Capture } from '../src/capture.ts'
 import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
@@ -14,7 +14,7 @@ import { pin, settle, snooze, type Shared } from '../src/shared.ts'
 import { copyT3Marks } from '../src/t3.ts'
 import { statusesHere } from '../src/move.ts'
 import { eventLoopDuring, failTest, memoryRelay, noCode, until, type MemoryRelay } from './memory.ts'
-import { captureOn, temporaryFolder, uploadFiles } from './program.ts'
+import { captureOn, SESSION, temporaryFolder, uploadFiles } from './program.ts'
 
 const mac: Device = { id: 'device-mac', name: 'mac', os: 'darwin', arch: 'arm64' }
 const server: Device = { id: 'device-server', name: 'server', os: 'linux', arch: 'x64' }
@@ -238,6 +238,20 @@ test('a session nobody named is named by the first line of its first prompt, wit
   const { agents } = await agentsOf(capture)
 
   expect(agents.map(({ title }) => title).sort()).toEqual(['MCP speed fixes', 'handoff-cmod-link.md read this & propose'])
+})
+
+test('a Claude Code session lists the moment it starts, as New session in its folder, while it runs before its first prompt, and a quit before that prompt forgets it', async () => {
+  const relay = await memoryRelay()
+  const { capture } = captureOn(mac, relay)
+  const folder = temporaryFolder()
+  const listed = async (statuses: Readonly<Record<string, AgentStatus>>) => (await agentsOf(capture, { statuses, since: {}, background: [] }, new Map())).agents.map(({ id, title, cwd }) => [id, title, cwd])
+  await recordFolder(capture.db, SESSION, folder, '2026-11-20T10:00:00.000Z')
+
+  const running = await listed({ [SESSION]: 'idle' })
+  const ended = await listed({})
+  forgetUnstarted(capture.db, SESSION)
+
+  expect([running, ended, await listed({ [SESSION]: 'idle' })]).toEqual([[[SESSION, 'New session', folder]], [], []])
 })
 
 const NOW = Date.parse('2026-11-15T12:00:00.000Z')

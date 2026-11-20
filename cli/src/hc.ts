@@ -83,10 +83,14 @@ export type TerminalChange = { readonly type: string; readonly address: string }
 
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'fish', 'nu', 'dash', 'ksh', 'mksh', 'tcsh', 'csh', 'elvish', 'xonsh', 'pwsh'])
 
+const runsShell =(terminal: Terminal): boolean => !terminal.argv.includes('-c') && SHELLS.has((terminal.argv[0] ?? '').split('/').at(-1)?.replace(/^-/, '') ?? '')
+
+export const shellsOf = (terminals: ReadonlyMap<string, Terminal>, session: string): string[] =>
+  [...terminals].filter(([address, terminal]) => !address.includes('/') && terminal.state === 'live' && terminal.labels[SESSION_LABEL] === session && runsShell(terminal)).map(([address]) => address)
+
 export const isKeptShell = (terminal: Terminal): boolean =>
   terminal.state === 'live' &&
-  !terminal.argv.includes('-c') &&
-  SHELLS.has((terminal.argv[0] ?? '').split('/').at(-1)?.replace(/^-/, '') ?? '') &&
+  runsShell(terminal) &&
   terminal.foreground?.pid === terminal.pid &&
   terminal.foreground.argv.join('\0') === terminal.argv.join('\0')
 

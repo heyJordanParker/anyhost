@@ -2,6 +2,12 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.16] - 2026-11-20
+
+### Changed
+- A Claude Code session is one kind of session wherever it starts. One you start by typing `claude` in a terminal joins the sidebar, and its tab gets the full session menu, as a session anyhost opened does. Quitting it gives the terminal back as a plain shell and leaves the shell open.
+- A session lists the moment Claude Code starts, as New session in its folder, before its first prompt. One you quit before typing anything leaves the list again.
+
 ## [0.9.15] - 2026-11-20
 
 ### Fixed
