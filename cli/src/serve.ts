@@ -3,11 +3,11 @@ import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { Activity, type Shown } from './activity.ts'
-import { changedFiles, countedRelay, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, recordSummaryFrom, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, forgetUnstarted, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, recordSummaryFrom, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, LoginNeeded, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
-import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, shownAt, label, machinesReached, SESSION_LABEL, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
+import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, shownAt, label, machinesReached, SESSION_LABEL, shellsOf, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
 import { activityOf, deleteAgent, forkAgent, keepHere, sessionOf, move, noteWaiting, placeSession, receiveDelete, receiveFork, receiveList, receiveReleased, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
@@ -618,11 +618,16 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     for (const [address, terminal] of terminals) {
       if (!isHere(address) || terminal.state !== 'live') continue
       const codex = terminal.foreground !== null && sessionIn(address) === '' && isCodexRun(terminal.foreground.argv) ? codexSessionOf(terminal.foreground.pid) : undefined
-      const session = codex ?? (terminal.pid === null ? undefined : sessionOfPid.get(terminal.pid))
-      if (session === undefined || sessionIn(address) === session || labelledAs.get(address) === session) continue
+      const pid = [terminal.pid, terminal.foreground?.pid].find((each): each is number => typeof each === 'number' && sessionOfPid.has(each))
+      const session = codex ?? (pid === undefined ? undefined : sessionOfPid.get(pid))
+      const run = `${session}\0${pid ?? terminal.foreground?.pid ?? ''}`
+      if (session === undefined || sessionIn(address) === session || labelledAs.get(address) === run) continue
       await label(address, SESSION_LABEL, session)
-      labelledAs.set(address, session)
+      labelledAs.set(address, run)
     }
+  }
+  const unlabelShellsOf = async (session: string): Promise<void> => {
+    for (const address of shellsOf(terminals, session)) await label(address, SESSION_LABEL, '')
   }
   let labelling = Promise.resolve()
   const labelNow = (): void => void (labelling = labelling.then(() => settle('labelled', labelOwnRuns)))
@@ -1283,10 +1288,15 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         if (event === 'asked') noteChildren()
         if (event === 'quit')
           void settle('closed', async () => {
+            await unlabelShellsOf(session)
             await archiveSession(session, true)
+            if (transcript === undefined) forgetUnstarted(capture.db, session)
             sessionsChanged()
           })
-        await recordFolder(capture.db, session, folder)
+        if (await recordFolder(capture.db, session, folder, at)) {
+          void settle('index', () => writeIndex(capture))
+          sessionsChanged()
+        }
         if (source !== '') sourcesWaiting.set(session, source)
         placeSource(session)
         queueFiles(await changedFiles(capture, 0, session))

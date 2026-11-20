@@ -1995,13 +1995,16 @@ export function recordSource(db: Database, id: string, source: string): boolean 
   return db.query("update sessions set source = ? where id = ? and source = ''").run(source, id).changes > 0
 }
 
-export async function recordFolder(db: Database, id: string, cwd: string): Promise<boolean> {
+export async function recordFolder(db: Database, id: string, cwd: string, at: string): Promise<boolean> {
   const row = db.query<Pick<SessionRow, 'cwd'>, [string]>('select cwd from sessions where id = ?').get(id)
-  if (row === null || cwd === '' || row.cwd === cwd) return false
+  if (cwd === '' || row?.cwd === cwd) return false
   const checkout = await checkoutOf(cwd)
-  db.query('update sessions set cwd = ?, repo = ?, repo_folder = ? where id = ?').run(cwd, checkout.repo, checkout.folder, id)
+  if (row === null) db.query("insert into sessions (id, tool, cwd, repo, repo_folder, last_activity) values (?, 'claude', ?, ?, ?, ?)").run(id, cwd, checkout.repo, checkout.folder, at)
+  else db.query('update sessions set cwd = ?, repo = ?, repo_folder = ? where id = ?').run(cwd, checkout.repo, checkout.folder, id)
   return true
 }
+
+export const forgetUnstarted = (db: Database, id: string): void => void db.query("delete from sessions where id = ? and first_prompt = '' and title_rank < ?").run(id, NAMED_RANK)
 
 const IS_TRANSCRIPT = "files.session = sessions.id and (files.path like '%' || sessions.id || '.jsonl' or files.path like '%' || sessions.id || '.jsonl.zst')"
 const TRANSCRIPT_GONE = `(exists (select 1 from files where ${IS_TRANSCRIPT}) and not exists (select 1 from files where ${IS_TRANSCRIPT} and files.sha256 != ''))`

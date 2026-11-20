@@ -91,7 +91,9 @@ export type Agents = {
   readonly windows: Windows
 }
 
-export const titleOfPrompt = (prompt: string): string => (prompt.split('\n')[0] ?? '').replace(/(?:~|\/)\S*\/([^/\s]+)/g, '$1').slice(0, 120)
+const NEW_SESSION = 'New session'
+
+export const titleOfPrompt =(prompt: string): string => (prompt.split('\n')[0] ?? '').replace(/(?:~|\/)\S*\/([^/\s]+)/g, '$1').slice(0, 120)
 
 export type ListRead = { readonly devices: ReadonlyMap<string, Protocol.Device>; readonly indexes: ReadonlyMap<string, readonly IndexedSession[]>; readonly shared: Shared; readonly windows: Windows; readonly holders: ReadonlyMap<string, string> }
 
@@ -112,13 +114,13 @@ export async function agentsOf(
   ])
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
   const background = new Set(shown.background)
-  const agents = sessions.filter((session) => session.firstPrompt !== '' || session.named === true).map((session) => {
+  const agents = sessions.filter((session) => session.firstPrompt !== '' || session.named === true || (shown.statuses[session.id] ?? '') !== '').map((session) => {
     const status: Agent['status'] = shown.statuses[session.id] ?? ''
     const isBackground = background.has(session.id)
     const settledAt = settledAtOf(shared, session, isBackground ? 'working' : status, now)
     return {
       ...session,
-      title: session.title || titleOfPrompt(session.firstPrompt),
+      title: session.title || titleOfPrompt(session.firstPrompt) || NEW_SESSION,
       terminal: terminals.get(session.id) ?? '',
       status,
       statusSince: shown.since[session.id] ? new Date(shown.since[session.id] ?? 0).toISOString() : '',
