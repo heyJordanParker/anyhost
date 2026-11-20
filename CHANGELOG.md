@@ -2,6 +2,30 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.9.16] - 2026-11-20
+
+### Changed
+- A Claude Code session is one kind of session wherever it starts. One you start by typing `claude` in a terminal joins the sidebar, and its tab gets the full session menu, as a session anyhost opened does. Quitting it gives the terminal back as a plain shell and leaves the shell open.
+- A session lists the moment Claude Code starts, as New session in its folder, before its first prompt. One you quit before typing anything leaves the list again.
+- Every tab has one menu, on its tab and on a right-click in its terminal: Rename…, New session, New terminal, Split right, Split down, Zoom and the close items, plus the session's own items when a session runs in it. Items that can't apply are greyed out, and each shows its shortcut as ⌘T, not cmd-t.
+- Rename… renames a project, a session or a plain tab in the same dialog.
+- ⌘T opens a new session as the sidebar's New session button does: in the project on screen, or with the project picker outside one. ⌥⌘T opens an empty terminal.
+- Opening a session turns the screen into its loading view at the click, with its title, project, machine and how long it has waited. Clicking another session before it loads moves to that one, and the first one never takes the screen back when it finishes.
+- Notifications stack at the top right with the session's project, machine and state, a timer bar that pauses while you point at them, and a close button. Opening a session no longer notifies you about it.
+- An idle session sleeps after 24 hours no screen showed it, not 8, so a day's scrollback is still there when you come back.
+
+### Fixed
+- A /rename shows in the sidebar the moment you press Enter. The hook carries the new name, so the sidebar no longer waits for Claude Code to write it to the transcript, and a later agent name no longer takes its place.
+- Closing a new tab right after opening it no longer shows an error. A tab with no session was closed twice.
+- A menu stays where it opened while you move between its items. A long submenu, as Move to tab with many tabs, shows ten rows and scrolls, where it made the menu taller than the window and pushed it elsewhere.
+- Closing or archiving a window keeps you in the project on screen: the last window you saw there, else another of its windows, else its start screen. Only All projects goes to the last window of any project.
+- A project's start screen no longer lists sessions you archived while it was hidden.
+- Closing, archiving or deleting a session no longer leaves a drag behind that moves it or offers to split it into a pane.
+- A move to another machine no longer hangs at Moving. A file the session wrote after its last upload went up after the hand-off and claimed the session back, so the other machine was refused and never tried again. The machine handing a session over now uploads nothing more of it.
+- An open that a Herdr app restart or an anyhost update interrupted runs again at once. Before, the session showed Opening for up to 10 minutes.
+- Claude Code's hooks answer at once. Each hook waited while anyhost checked every file of its session for changes, about 200 ms on a session with 16,000 files. That check now runs after the answer.
+- read_agent and tell_agent find a session's terminal from what anyhost already follows, instead of asking herdr-core each time, about 80 ms sooner.
+
 ## [0.9.15] - 2026-11-20
 
 ### Fixed
