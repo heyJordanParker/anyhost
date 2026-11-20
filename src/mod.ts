@@ -88,9 +88,9 @@ export const anyhost = defineMod({
     }
     const clearedFrom = new Map<string, string>()
     let ended = ''
-    const changed = (event: HookEvent, at = new Date().toISOString()): Promise<void> => {
+    const changed = (event: HookEvent, at = new Date().toISOString(), title = ''): Promise<void> => {
       const session = sessions.current.id
-      return askProgram(mod, '/sessions/changed', { session, folder: sessions.current.cwd, event, at, source: clearedFrom.get(session) ?? '' }).then(
+      return askProgram(mod, '/sessions/changed', { session, folder: sessions.current.cwd, event, at, source: clearedFrom.get(session) ?? '', title }).then(
         () => undefined,
         (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: 'warning' })),
       )
@@ -116,7 +116,7 @@ export const anyhost = defineMod({
     sessions.current.onElicitation(() => changed('asked'))
     sessions.current.onNotification({ type: /^(permission_prompt|elicitation_dialog)$/ }, () => changed('asked'))
     sessions.current.onCwdChange(() => changed('moved'))
-    commands.onRun({ name: 'rename' }, () => changed('renamed'))
+    commands.onRun({ name: 'rename' }, (run) => changed('renamed', undefined, run.args.trim() || sessions.current.title))
     const continuesOn = (machine: string): string => `This session continues on ${machine}, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.`
     sessions.current.beforePrompt(
       async () => {

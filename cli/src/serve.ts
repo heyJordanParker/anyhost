@@ -3,7 +3,7 @@ import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { Activity, type Shown } from './activity.ts'
-import { changedFiles, countedRelay, forgetUnstarted, indexForkStarts, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, recordSummaryFrom, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
+import { changedFiles, countedRelay, forgetUnstarted, indexForkStarts, recordName, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, recordSummaryFrom, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, LoginNeeded, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
@@ -73,7 +73,7 @@ const RUNNING_MS = 2000
 const STATUSES_FRESH_MS = 10_000
 const LIST_FRESH_MS = 5000
 const LIST_WAIT_MS = 25_000
-const STOP_MS = Number(process.env['ANYHOST_STOP_MS'] ?? 8 * 60 * 60_000)
+const STOP_MS = Number(process.env['ANYHOST_STOP_MS'] ?? 24 * 60 * 60_000)
 const DISCARD_EVERY_MS = Math.min(30_000, STOP_MS / 4)
 const RESUME_IN_PLACE_MS = 60_000
 const UPDATE_FIRST_MS = 60_000
@@ -567,6 +567,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       othersStatuses.set(machine, { shown: { statuses: { ...statuses, [session]: status }, since: Object.fromEntries(Object.entries(since).filter(([id]) => id !== session)), background: background.filter((id) => id !== session) }, at: Date.now() })
       sessionsChanged()
     },
+    terminalNow: (session) => sessionTerminals().get(session),
   }
   const noteChildren = noteWaiting(capture, mover)
   const archivedBusy = new Set<string>()
@@ -953,6 +954,22 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       for (const path of paths) queue.add(session, tool, path)
     }
   }
+  const sweepsAgain = new Map<string, boolean>()
+  const sweepSoon = (session: string): void => {
+    if (sweepsAgain.has(session)) return void sweepsAgain.set(session, true)
+    sweepsAgain.set(session, true)
+    void settle('backup', async () => {
+      try {
+        while (sweepsAgain.get(session) === true) {
+          sweepsAgain.set(session, false)
+          queueFiles(await changedFiles(capture, 0, session))
+          queue.uploadNow(session)
+        }
+      } finally {
+        sweepsAgain.delete(session)
+      }
+    })
+  }
   let dataFailure = ''
   const readDataFolders = async (): Promise<void> => {
     try {
@@ -1222,8 +1239,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     readonly terminals?: readonly string[]
     readonly event?: string
     readonly source?: string
+    readonly title?: string
   }
-  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, skip = 0, sleep = false, place = 'focus', sender = '', apiToken, target = '', archived = true, settled = true, until, pinned = true, settleAfterDays, project = '', name, at = '', changes = [], window = '', terminals: onScreen = [], event = '', source = '' }: Asked): Promise<Response> => {
+  const act = async (pathname: string, { id = '', link = '', session = '', machine = '', folder = '', prompt = '', parent = '', text = '', keys = [], lines = 0, messages = 0, skip = 0, sleep = false, place = 'focus', sender = '', apiToken, target = '', archived = true, settled = true, until, pinned = true, settleAfterDays, project = '', name, at = '', changes = [], window = '', terminals: onScreen = [], event = '', source = '', title = '' }: Asked): Promise<Response> => {
     switch (pathname) {
       case '/connect': {
         if (connecting?.view.is === 'running') return Response.json(connecting.view)
@@ -1293,15 +1311,15 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
             if (transcript === undefined) forgetUnstarted(capture.db, session)
             sessionsChanged()
           })
-        if (await recordFolder(capture.db, session, folder, at)) {
+        const isMoved = await recordFolder(capture.db, session, folder, at)
+        if ((event === 'renamed' && recordName(capture.db, session, title)) || isMoved) {
           void settle('index', () => writeIndex(capture))
           sessionsChanged()
         }
         if (source !== '') sourcesWaiting.set(session, source)
         placeSource(session)
-        queueFiles(await changedFiles(capture, 0, session))
         if (transcript !== undefined && journalOf(capture.db, session) === undefined) queue.add(session, 'claude', transcript)
-        queue.uploadNow(session)
+        sweepSoon(session)
         return Response.json({})
       }
       case '/agents/pin':

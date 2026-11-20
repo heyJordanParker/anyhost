@@ -253,10 +253,11 @@ function firstLineOf<T>(view: Buffer, markers: readonly Buffer[], read: (line: s
 
 const CWD_LINE_LENGTH = 64 * 1024
 export const NAMED_RANK = 3
-const TITLES: Record<string, readonly [string, number]> = { 'custom-title': ['customTitle', NAMED_RANK], 'agent-name': ['agentName', NAMED_RANK], 'ai-title': ['aiTitle', 2], summary: ['summary', 1], 'agent-setting': ['agentSetting', 0.5] }
+export const RENAMED_RANK = 4
+const TITLES: Record<string, readonly [string, number]> = { 'custom-title': ['customTitle', RENAMED_RANK], 'agent-name': ['agentName', NAMED_RANK], 'ai-title': ['aiTitle', 2], summary: ['summary', 1], 'agent-setting': ['agentSetting', 0.5] }
 export const TITLE_RULES = 2
 
-const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim().slice(0, PROMPT_LENGTH)
+export const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim().slice(0, PROMPT_LENGTH)
 
 function promptOf(line: string, tool: Tool): string | undefined {
   if (tool === 'claude') {

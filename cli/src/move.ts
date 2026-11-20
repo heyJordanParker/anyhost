@@ -40,6 +40,7 @@ export type MoveHere = {
   readonly touched: Map<string, number>
   readonly activity: Activity
   readonly onStatusElsewhere: (machine: string, session: string, status: AgentStatus) => void
+  readonly terminalNow: (session: string) => string | undefined
 }
 
 type Reply = Extract<Routed, { readonly t: 'told' | 'listed' | 'deleted' | 'forked' }>
@@ -536,7 +537,7 @@ const tagged = (told: Tell, machine: string): string => {
   return `<anyhost from="${sender} on ${machine}" reach="tell_agent ${sender} when done or stuck">${told.text}</anyhost>`
 }
 
-const labelledHere = async (session: string): Promise<string | undefined> => (hcPath() === undefined ? undefined : (await labelledTerminals(session))[0])
+const labelledHere = async (session: string, here: MoveHere): Promise<string | undefined> => here.terminalNow(session) ?? (hcPath() === undefined ? undefined : (await labelledTerminals(session))[0])
 
 async function newestTail(capture: Capture, session: string): Promise<string | undefined> {
   const transcript = await newestTranscript(capture, session)
@@ -560,8 +561,8 @@ class RunsOutside extends Error {
   }
 }
 
-async function terminalHere(capture: Capture, session: string): Promise<string | undefined> {
-  const address = await labelledHere(session)
+async function terminalHere(capture: Capture, session: string, here: MoveHere): Promise<string | undefined> {
+  const address = await labelledHere(session, here)
   if (address !== undefined) return address
   if ((await statusOf(capture.roots.claudeHome, session)) === undefined) return undefined
   throw new RunsOutside(capture, session)
@@ -591,7 +592,7 @@ async function lastRunHere(capture: Capture, session: string): Promise<LastRun> 
 
 async function placeInTerminal(capture: Capture, session: string, here: MoveHere, movesCopy: boolean): Promise<string> {
   const reading = Promise.all([statusOf(capture.roots.claudeHome, session), lastRunHere(capture, session)])
-  const ran = await labelledHere(session).catch(() => undefined)
+  const ran = await labelledHere(session, here).catch(() => undefined)
   if (ran !== undefined) {
     void reading.catch(() => undefined)
     return ran
@@ -629,13 +630,13 @@ async function tellHere(capture: Capture, session: string, told: Tell, here: Mov
   if ((told.messages ?? 0) > 0) return { status: (await activityOf(capture, here.activity, session)) ?? 'idle', screen: '', messages: await messagesHere(capture, session, told.messages ?? 0, told.skip ?? 0) }
   if (told.sleep === true) {
     if ((journalOf(db, session)?.tool ?? 'claude') !== 'claude') throw new Error(`anyhost puts Claude Code sessions to sleep, and ${id} is a Codex session.`)
-    const running = await terminalHere(capture, session)
+    const running = await terminalHere(capture, session, here)
     if (running !== undefined) await askToSleep(running)
     return { status: (await activityOf(capture, here.activity, session)) ?? 'idle', screen: running === undefined ? '' : await readTerminal(running, 0) }
   }
   const isRead = told.text === '' && told.keys.length === 0
   if (!isRead) here.touched.set(session, Date.now())
-  const address = isRead ? await terminalHere(capture, session) : await terminalOf(capture, session, here, { movesCopy: false })
+  const address = isRead ? await terminalHere(capture, session, here) : await terminalOf(capture, session, here, { movesCopy: false })
   if (address === undefined) throw new Error(`${id} runs in no terminal of herdr-core on ${device.name}. Tell it something to start it again.`)
   if (told.keys.length > 0) await pressKeys(address, told.keys)
   if (told.text !== '') {
