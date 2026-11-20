@@ -29,6 +29,7 @@ import {
   type JoiningDevice,
   type Joined,
   type Op,
+  type Presence,
   type Refusal,
   type TakeCondition,
   type Result,
@@ -114,6 +115,10 @@ const claimedOf = ({ session, device, changed, wanted, spec, error }: ClaimRow):
   ...(spec === '' ? {} : { spec: JSON.parse(spec) as Readonly<Record<string, unknown>> }),
   ...(error === '' ? {} : { error }),
 })
+const deviceOf = (socket: WebSocket): DeviceRef => {
+  const { device, name } = socket.deserializeAttachment() as Attachment
+  return { id: device, name }
+}
 const base64url = (bytes: Uint8Array): string => btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
 
 function inviteCode(): string {
@@ -317,8 +322,37 @@ export class Pool extends DurableObject<Env> {
     return Date.now() - Math.max(this.#heardAt.get(socket) ?? 0, pingedAt, connectedAt) <= LIVE_MS
   }
 
+  #closeSilent(sockets: readonly WebSocket[]): void {
+    const silent = sockets.filter((socket) => socket.readyState === WebSocket.OPEN && !this.#isLive(socket))
+    for (const socket of silent) socket.close(1000, `The relay heard nothing on this socket for ${LIVE_MS / 1000} seconds`)
+    for (const device of new Map(silent.map((socket) => [deviceOf(socket).id, deviceOf(socket)])).values()) this.#tellGone(device)
+  }
+
+  #tellGone(device: DeviceRef): void {
+    if (!this.ctx.getWebSockets(device.id).some((socket) => this.#isLive(socket))) this.#tellPresence(device, false)
+  }
+
+  #tellPresence(device: DeviceRef, connected: boolean): void {
+    const others = this.ctx.getWebSockets().filter((socket) => deviceOf(socket).id !== device.id && this.#isLive(socket))
+    this.#deliver('every machine', JSON.stringify({ t: 'presence', device, connected } satisfies Presence), others)
+  }
+
+  #liveDevices(): DeviceRef[] {
+    const live = this.ctx.getWebSockets().filter((socket) => this.#isLive(socket))
+    return [...new Map(live.map((socket) => [deviceOf(socket).id, deviceOf(socket)])).values()]
+  }
+
+  async #watchLinks(): Promise<void> {
+    if (this.#liveDevices().length > 1 && (await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + LIVE_MS)
+  }
+
+  override async alarm(): Promise<void> {
+    this.#closeSilent(this.ctx.getWebSockets())
+    if (this.#liveDevices().length > 1) await this.ctx.storage.setAlarm(Date.now() + LIVE_MS)
+  }
+
   #deliver(device: string, message: string | Uint8Array, sockets = this.ctx.getWebSockets(device)): boolean {
-    for (const socket of sockets.filter((socket) => !this.#isLive(socket))) socket.close(1000, `The relay heard nothing on this socket for ${LIVE_MS / 1000} seconds`)
+    this.#closeSilent(sockets)
     const live = sockets.filter((socket) => this.#isLive(socket))
     for (const socket of live) {
       try {
@@ -410,6 +444,9 @@ export class Pool extends DurableObject<Env> {
     server.serializeAttachment({ device: row.id, name, origin: new URL(request.url).origin, connectedAt: now } satisfies Attachment)
     const welcome: Welcome = { t: 'welcome', ...healthOf(this.env), device: { id: row.id, name }, changed: this.#changed() }
     server.send(JSON.stringify(welcome))
+    for (const device of this.#liveDevices()) if (device.id !== row.id) server.send(JSON.stringify({ t: 'presence', device, connected: true } satisfies Presence))
+    this.#tellPresence(welcome.device, true)
+    await this.#watchLinks()
     return opened
   }
 
@@ -423,7 +460,8 @@ export class Pool extends DurableObject<Env> {
   }
 
   override async webSocketClose(ws: WebSocket): Promise<void> {
-    this.#sql.exec('update devices set seen_at = ? where id = ?', Date.now(), (ws.deserializeAttachment() as Attachment).device)
+    this.#sql.exec('update devices set seen_at = ? where id = ?', Date.now(), deviceOf(ws).id)
+    this.#tellGone(deviceOf(ws))
   }
 
   override async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
@@ -442,7 +480,7 @@ export class Pool extends DurableObject<Env> {
     const own = ws.deserializeAttachment() as Attachment
     const from = { id: own.device, name: own.name }
     const { t, to } = message
-    if (t === 'welcome' || t === 'claimed' || t === 'offline' || t === 'invalid') return invalid(`Only the relay sends ${t}.`)
+    if (t === 'welcome' || t === 'claimed' || t === 'offline' || t === 'invalid' || t === 'presence') return invalid(`Only the relay sends ${t}.`)
     if (!isText(to)) return invalid(`A ${t} message names the machine it goes to in to.`)
     if (!this.#deliver(to, JSON.stringify({ ...message, from }))) ws.send(JSON.stringify({ t: 'offline', ...('id' in message ? { id: message['id'] } : {}), to }))
   }
@@ -604,11 +642,13 @@ export class Pool extends DurableObject<Env> {
       }
       case 'remove': {
         if (!isText(op.device)) return invalid('A remove names the device id.')
-        const row = this.#sql.exec<{ removed_at: number | null }>('select removed_at from devices where id = ?', op.device).toArray()[0]
+        const row = this.#sql.exec<{ name: string; removed_at: number | null }>('select name, removed_at from devices where id = ?', op.device).toArray()[0]
         if (row === undefined) return { status: 404, error: 'unknown_device', message: `No machine with the id ${op.device} is joined.` }
         if (row.removed_at !== null) return { status: 200 }
         this.#sql.exec('update devices set removed_at = ? where id = ?', Date.now(), op.device)
-        for (const socket of this.ctx.getWebSockets(op.device)) socket.close(CLOSE_REMOVED, REMOVED_REASON)
+        const sockets = this.ctx.getWebSockets(op.device)
+        for (const socket of sockets) socket.close(CLOSE_REMOVED, REMOVED_REASON)
+        if (sockets.length > 0) this.#tellGone({ id: op.device, name: row.name })
         return { status: 200 }
       }
       default:

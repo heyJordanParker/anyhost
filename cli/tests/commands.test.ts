@@ -111,7 +111,7 @@ async function unjoinedWithOption(link: string): Promise<{ readonly env: Record<
   writeFileSync(settings, JSON.stringify({ join: link }))
   script(
     join(programs, 'cmod'),
-    `#!/bin/sh\ncase "$1 $2" in\n  "secret get") cat '${programs}/token' ;;\n  "secret store") cat > '${programs}/token' ;;\n  "options anyhost") printf '{"person":%s}' "$(cat '${settings}')" ;;\n  "option anyhost") echo "$3=$4" >> '${programs}/options-set'; printf '{}' > '${settings}' ;;\n  "device --json") printf '%s' '${JSON.stringify(HOST)}' ;;\n  *) exit 1 ;;\nesac\n`,
+    `#!/bin/sh\ncase "$1 $2" in\n  "secrets get") cat '${programs}/token' ;;\n  "secrets store") cat > '${programs}/token' ;;\n  "options get") printf '{"person":%s}' "$(cat '${settings}')" ;;\n  "options set") echo "$3 $4=$5" >> '${programs}/options-set'; printf '{}' > '${settings}' ;;\n  "device --json") printf '%s' '${JSON.stringify(HOST)}' ;;\n  *) exit 1 ;;\nesac\n`,
   )
   rmSync(join(machine.env['XDG_STATE_HOME'] ?? '', 'anyhost', 'relay.json'))
   return machine
@@ -145,7 +145,7 @@ test('the option join joins at the program\'s start, running in /status, and one
     const refused = await statusOn(machine.socket)
     expect(refused.joining).toEqual({ is: 'failed', error: `${origin} refused to join anyhost-a: The invite already joined anyhost-c at 2026-11-07T09:00:00.000Z. Make a new one with Add a machine.` })
     expect(refused.problems.filter((problem) => problem.includes('refused to join'))).toEqual([])
-    expect(readFileSync(join(programs, 'options-set'), 'utf8')).toBe('join=\n')
+    expect(readFileSync(join(programs, 'options-set'), 'utf8')).toBe('anyhost join=\n')
     expect(existsSync(join(programs, 'token'))).toBe(false)
 
     const joined = await fetch('http://localhost/join', { unix: machine.socket, method: 'POST', body: JSON.stringify({ link: `${origin}/v1/join#FRESH` }) })

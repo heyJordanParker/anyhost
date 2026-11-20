@@ -208,7 +208,7 @@ export async function machineFor(relay: MemoryRelay, device: Device, person: Rec
   const token = await relay.join(device, roots(home))
   script(
     join(env.XDG_DATA_HOME, 'cmod', 'programs', 'cmod'),
-    `#!/bin/sh\ncase "$1 $2" in\n  "secret get") printf '%s' '${token}' ;;\n  "options anyhost") [ -n "$CLAUDE_CODE_EXECPATH" ] || { echo 'cmod options: claude is not on PATH. Install it, then run the command again.' >&2; exit 1; }; printf '%s' '${JSON.stringify({ person })}' ;;\n  "device --json") printf '%s' '${JSON.stringify(device)}' ;;\n  ${UNKNOWN_CMOD_COMMAND}\nesac\n`,
+    `#!/bin/sh\ncase "$*" in\n  "secrets get anyhost token") printf '%s' '${token}' ;;\n  "options get anyhost --json") [ -n "$CLAUDE_CODE_EXECPATH" ] || { echo 'cmod options: claude is not on PATH. Install it, then run the command again.' >&2; exit 1; }; printf '%s' '${JSON.stringify({ person })}' ;;\n  "device --json") printf '%s' '${JSON.stringify(device)}' ;;\n  ${UNKNOWN_CMOD_COMMAND}\nesac\n`,
   )
   mkdirSync(join(env.XDG_STATE_HOME, 'anyhost'), { recursive: true })
   writeFileSync(join(env.XDG_STATE_HOME, 'anyhost', 'relay.json'), JSON.stringify({ url: relay.url }))
@@ -351,10 +351,88 @@ export const coreSays = (folder: string, ...lines: readonly object[]): void => a
 export const sharedIn = async (relay: MemoryRelay): Promise<{ readonly archived?: Record<string, { readonly archived: boolean; readonly at: string }>; readonly visited?: Record<string, string> }> =>
   JSON.parse(decoder.decode((await relay.read('shared.json')) ?? new TextEncoder().encode('{}'))) as { archived?: Record<string, { archived: boolean; at: string }>; visited?: Record<string, string> }
 export const isWatcherProblem = (problem: string): boolean => problem.includes(' watcher: ')
-export const dataFolderOn = (machine: { readonly env: Record<string, string> }, mod: string, rebuildable: readonly string[]): string => {
+export const dataFolderOn = (machine: { readonly env: Record<string, string> }, mod: string): string => {
   const folder = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'data', mod)
   mkdirSync(dirname(folder), { recursive: true })
   const cmod = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs', 'cmod')
-  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace(UNKNOWN_CMOD_COMMAND, `"data --json") printf '%s' '${JSON.stringify([{ mod, folder, rebuildable }])}' ;;\n  ${UNKNOWN_CMOD_COMMAND}`))
+  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace(UNKNOWN_CMOD_COMMAND, `"data --json") printf '%s' '${JSON.stringify([{ mod, folder }])}' ;;\n  ${UNKNOWN_CMOD_COMMAND}`))
   return folder
+}
+
+type Rpc = { readonly jsonrpc: '2.0'; readonly id?: number | string; readonly method?: string; readonly params?: unknown; readonly result?: unknown; readonly error?: { readonly code: number; readonly message: string } }
+export type Heard = { readonly event: string; readonly payload: unknown }
+
+export const withCmod = (env: Record<string, string>): Record<string, string> => ({ ...env, CMOD_MOD: 'anyhost', CMOD_PROGRAM: 'anyhost' })
+
+export function cmodServeOf(machine: { readonly env: Record<string, string> }) {
+  const store = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod')
+  mkdirSync(store, { recursive: true })
+  const outbox: Rpc[] = []
+  const answers = new Map<number | string, (answer: Rpc) => void>()
+  const events = new Map<string, string>()
+  const heard: Heard[] = []
+  const provided: string[] = []
+  const watchers = new Set<() => void>()
+  let poll: ((messages: Rpc[]) => void) | undefined
+  let asked = 0
+  const changed = (): void => {
+    for (const watcher of watchers) watcher()
+  }
+  const once = (isTrue: () => boolean): Promise<void> =>
+    new Promise((resolve) => {
+      const watcher = (): void => {
+        if (!isTrue()) return
+        watchers.delete(watcher)
+        resolve()
+      }
+      watchers.add(watcher)
+      watcher()
+    })
+  const send = (message: Rpc): void => {
+    outbox.push(message)
+    const waiting = poll
+    poll = undefined
+    waiting?.(outbox.splice(0))
+  }
+  const request = (method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      const id = `serve-${(asked += 1)}`
+      answers.set(id, (answer) => (answer.error === undefined ? resolve(answer.result) : reject(Object.assign(new Error(answer.error.message), { code: answer.error.code }))))
+      send({ jsonrpc: '2.0', id, method, params })
+    })
+  const receive = (message: Rpc): void => {
+    const params = (message.params ?? {}) as Record<string, unknown>
+    if (message.method === '$/on') heard.push({ event: events.get(String(params['id'])) ?? '', payload: params['payload'] })
+    if (message.method === '$/provide') provided.push(String(params['interface']))
+    if (message.method === '$/provide' && message.id !== undefined) send({ jsonrpc: '2.0', id: message.id, result: {} })
+    else if (message.method !== undefined && message.id !== undefined) send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `The stand-in for cmod serve answers no ${message.method}.` } })
+    if (message.method === undefined && message.id !== undefined) answers.get(message.id)?.(message)
+    changed()
+  }
+  // @ts-expect-error bun-types 1.4.4 leaves idleTimeout off a unix socket's options, which Bun 1.4.4 honors
+  const server = Bun.serve({
+    unix: join(store, 'serve.sock'),
+    idleTimeout: 0,
+    async fetch(request) {
+      if (new URL(request.url).pathname === '/rpc/connect') return Response.json({ connection: 'anyhost' })
+      if (request.method === 'POST') {
+        for (const message of [await request.json()].flat() as Rpc[]) receive(message)
+        return new Response(null, { status: 204 })
+      }
+      if (request.method === 'DELETE' || outbox.length > 0) return Response.json(outbox.splice(0))
+      return Response.json(await new Promise<Rpc[]>((resolve) => void (poll = resolve)))
+    },
+  })
+  onTestFinished(() => void server.stop(true))
+  return {
+    heard,
+    once,
+    provides: (name: string): Promise<void> => once(() => provided.includes(name)),
+    async listen(name: string, event: string): Promise<void> {
+      const id = `on-${name}-${event}`
+      events.set(id, event)
+      await request('$/listen', { id, interface: name, kind: 'on', event })
+    },
+    call: (name: string, method: string, ...params: readonly unknown[]): Promise<unknown> => request(`${name}.${method}`, params),
+  }
 }

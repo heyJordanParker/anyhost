@@ -4,7 +4,7 @@ import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js
 import { option } from '../node_modules/@cmodjs/core/options.js'
 import type { HookEvent } from '../relay/protocol.ts'
 import { agentTools } from './agents.js'
-import { askProgram, connectStep, FOLLOW_MS, initialState, machinesPage, NoAnswer, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
+import { askProgram, connectStep, FOLLOW_MS, initialState, machinesView, NoAnswer, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
 
 type Move = { readonly to: string; readonly step: 'waiting' | 'uploading' | 'moving' | 'moved' | 'failed'; readonly line: string }
 type Holder = { readonly machine?: string; readonly problem?: string; readonly untold?: string; readonly move?: Move }
@@ -48,15 +48,15 @@ export const anyhost = defineMod({
     )
     reachProgram(mod, capture)
     for (const job of agentTools(mod)) mod.use(job)
-    const page = mod.sidebar.add(machinesPage)
+    const view = mod.views.add(machinesView)
     mod.use(
       slashCommand({
         name: 'machines',
         description: 'Show every machine joined to your relay, add a machine, or remove one',
-        reply: () => toggleMachines(mod, page),
+        reply: () => toggleMachines(mod, view),
       }),
     )
-    mod.every(MACHINES_EVERY_MS, () => (page.isOpen ? showMachines(mod) : undefined))
+    mod.every(MACHINES_EVERY_MS, () => (view.isOpen ? showMachines(mod) : undefined))
     const shown = new Set<string>()
     const showOnce = (message: string, description: string): void => {
       if (shown.has(message)) return

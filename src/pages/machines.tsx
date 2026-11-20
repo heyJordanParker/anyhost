@@ -1,4 +1,4 @@
-import { http, messageOf, type Mod, type Page, type PageInit, type Step } from '../../node_modules/@cmodjs/core/mod.js'
+import { http, messageOf, type Mod, type Step, type View, type ViewInit } from '../../node_modules/@cmodjs/core/mod.js'
 import type { Program } from '../../node_modules/@cmodjs/core/jobs/program.js'
 import { Box, Button, Input, Text } from '../../node_modules/@cmodjs/core/ui/elements.js'
 import type { Device as Machine } from '../../relay/protocol.ts'
@@ -214,13 +214,13 @@ export async function showMachines(mod: Mod<AnyhostState>): Promise<void> {
   await act(mod, async () => void (mod.state.memory.machines = await askProgram<Machines>(mod, '/machines')))
 }
 
-export async function toggleMachines(mod: Mod<AnyhostState>, page: Page): Promise<void> {
-  if (!page.isOpen) {
+export async function toggleMachines(mod: Mod<AnyhostState>, view: View): Promise<void> {
+  if (!view.isOpen) {
     mod.state.memory.isAdding = false
     mod.state.memory.removing = null
     void showMachines(mod)
   }
-  await page.toggle({ focus: true })
+  await view.toggle({ focus: true })
 }
 
 const addMachine = (mod: Mod<AnyhostState>, target: string): Promise<void> =>
@@ -236,7 +236,7 @@ const remove = (mod: Mod<AnyhostState>, id: string): Promise<void> =>
     await showMachines(mod)
   })
 
-export const machinesPage: PageInit<AnyhostState> = {
+export const machinesView: ViewInit<AnyhostState> = {
   id: 'machines',
   title: 'Machines',
   render: (mod) => {

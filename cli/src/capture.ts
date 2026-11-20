@@ -1075,7 +1075,7 @@ async function readUpload(capture: Capture, session: string, tool: Tool, paths: 
   const data = dataOf(capture, session)
   if (tool === 'mod' && data === undefined) return new Set()
   if (journal === undefined) {
-    const files = data === undefined ? await filesOf(session, tool, roots) : (await filesUnder(data.folder)).map(({ path }) => path).filter((path) => ownerOf(path, roots, [data]) !== undefined)
+    const files = data === undefined ? await filesOf(session, tool, roots) : (await filesUnder(data.folder)).map(({ path }) => path)
     const isWritten = [...work].some((path) => existsSync(path)) && [...work, ...files].some((path) => isTranscript(path, roots) && existsSync(path))
     if (data === undefined && !isWritten) return new Set()
     db.transaction(() => {

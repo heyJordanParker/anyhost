@@ -182,6 +182,12 @@ export async function sendTo(address: string, text: string): Promise<void> {
 
 export const pressKeys = async (address: string, keys: readonly string[]): Promise<void> => void (await run([hcHere(), 'keys', address, ...keys]))
 
+const NAMED_KEYS: Readonly<Record<string, string>> = { '\r': 'enter', '\n': 'enter', '\t': 'tab', '\x1b': 'esc', '\x7f': 'backspace', ' ': 'space', '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left' }
+
+const keyNameOf = (key: string): string => NAMED_KEYS[key] ?? (key < ' ' ? `ctrl+${String.fromCharCode(key.charCodeAt(0) + 96)}` : key === key.toLowerCase() ? key : `shift+${key.toLowerCase()}`)
+
+export const keyNamesOf = (typed: string): string[] => (typed.match(/\x1b\[[A-D]|[^]/gu) ?? []).map(keyNameOf)
+
 export const askToSleep = async (address: string): Promise<void> => await label(address, SLEEP_LABEL, String(Date.now()))
 
 export const readTerminal = async (address: string, lines: number): Promise<string> =>

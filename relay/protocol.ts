@@ -1,4 +1,4 @@
-export const RELAY_VERSION = 9
+export const RELAY_VERSION = 10
 export const PROTOCOL_VERSION = 3
 export const COMPATIBILITY_DATE = '2026-11-01'
 
@@ -118,6 +118,7 @@ export type Routed =
   | { readonly t: 'listed'; readonly id: string; readonly to: string; readonly statuses: Readonly<Record<string, AgentStatus>>; readonly since?: Readonly<Record<string, number>>; readonly background?: readonly string[] }
   | { readonly t: 'stored'; readonly to: string; readonly key: string; readonly etag: string }
   | { readonly t: 'statuses'; readonly to: string; readonly statuses: Readonly<Record<string, AgentStatus>>; readonly since?: Readonly<Record<string, number>>; readonly background?: readonly string[] }
+  | { readonly t: 'cmod'; readonly to: string; readonly message: unknown }
 export type AgentStatus = 'working' | 'idle' | 'waiting'
 export const HOOK_EVENTS = ['started', 'turnStart', 'asked', 'turnEnd', 'ended', 'quit', 'moved', 'renamed'] as const
 export type HookEvent = (typeof HOOK_EVENTS)[number]
@@ -125,7 +126,8 @@ export type Message = { readonly role: 'user' | 'assistant'; readonly at: string
 export type Delivered = Routed & { readonly from: DeviceRef }
 export type Offline = { readonly t: 'offline'; readonly id?: string; readonly to: string }
 export type Invalid = { readonly t: 'invalid'; readonly message: string }
-export type FromPool = Welcome | Claimed | Delivered | Offline | Invalid
+export type Presence = { readonly t: 'presence'; readonly device: DeviceRef; readonly connected: boolean }
+export type FromPool = Welcome | Claimed | Delivered | Offline | Invalid | Presence
 
 export function cloneFixFor(os: string): string {
   return os === 'darwin'

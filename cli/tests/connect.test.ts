@@ -24,7 +24,7 @@ beforeAll(() => {
   mkdirSync(dirname(cmod), { recursive: true })
   writeFileSync(
     cmod,
-    `#!/bin/sh\ncase "$1 $2" in\n  device*) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  "secret get") echo "secret get" >> "$(dirname "$0")/calls"; cat "$(dirname "$0")/secret-$3-$4" ;;\n  "secret delete") rm -f "$(dirname "$0")/secret-$3-$4" ;;\n  secret*) cat > "$(dirname "$0")/secret-$3-$4" ;;\n  options*) echo options >> "$(dirname "$0")/calls"; printf '{"person":%s}' "$(cat "$(dirname "$0")/settings.json")" ;;\n  *) exit 2 ;;\nesac\n`,
+    `#!/bin/sh\ncase "$1 $2" in\n  device*) printf '%s' '${JSON.stringify(DEVICE)}' ;;\n  "secrets get") echo "secrets get $3 $4" >> "$(dirname "$0")/calls"; cat "$(dirname "$0")/secret-$3-$4" ;;\n  "secrets delete") rm -f "$(dirname "$0")/secret-$3-$4" ;;\n  "secrets store") cat > "$(dirname "$0")/secret-$3-$4" ;;\n  "options get") echo "options get $3 $4" >> "$(dirname "$0")/calls"; printf '{"person":%s}' "$(cat "$(dirname "$0")/settings.json")" ;;\n  *) exit 2 ;;\nesac\n`,
   )
   chmodSync(cmod, 0o755)
   for (const [name, value] of Object.entries({ XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: undefined, CLAUDE_CONFIG_DIR: undefined, CLOUDFLARE_API_TOKEN: undefined })) {
@@ -845,12 +845,12 @@ test("the options are read at the first ask, then again only after a write to Cl
   symlinkSync(dotfiles, join(process.env['CLAUDE_CONFIG_DIR'] ?? '', 'settings.json'))
   expect(await personOptions()).toEqual({ uploadEvery: 7 })
   expect(await personOptions()).toEqual({ uploadEvery: 7 })
-  expect(cmodCalls()).toEqual(['options'])
+  expect(cmodCalls()).toEqual(['options get anyhost --json'])
 
   writeFileSync(dotfiles, '{"uploadEvery":7,"join":"https://anyhost-test-connect.parker-labs.workers.dev/v1/join#code"}')
   expect(await personOptions()).toEqual({ uploadEvery: 7, join: 'https://anyhost-test-connect.parker-labs.workers.dev/v1/join#code' })
   expect(await personOptions()).toEqual({ uploadEvery: 7, join: 'https://anyhost-test-connect.parker-labs.workers.dev/v1/join#code' })
-  expect(cmodCalls()).toEqual(['options', 'options'])
+  expect(cmodCalls()).toEqual(['options get anyhost --json', 'options get anyhost --json'])
 })
 
 test('the device token is read at the first connect, then again only after a join wrote relay.json', async () => {
@@ -858,12 +858,12 @@ test('the device token is read at the first connect, then again only after a joi
   await saveRelayLogin({ url, token: 'first-token' })
   expect(await relayLogin()).toEqual({ url, token: 'first-token' })
   expect(await relayLogin()).toEqual({ url, token: 'first-token' })
-  expect(cmodCalls()).toEqual(['secret get'])
+  expect(cmodCalls()).toEqual(['secrets get anyhost token'])
 
   await saveRelayLogin({ url, token: 'second-token' })
   expect(await relayLogin()).toEqual({ url, token: 'second-token' })
   expect(await relayLogin()).toEqual({ url, token: 'second-token' })
-  expect(cmodCalls()).toEqual(['secret get', 'secret get'])
+  expect(cmodCalls()).toEqual(['secrets get anyhost token', 'secrets get anyhost token'])
 })
 
 const ROOTS = { home: '/home/ada', claudeHome: '/home/ada/.claude', claudeTmp: '/tmp/claude-1000', codexHome: '/home/ada/.codex' }

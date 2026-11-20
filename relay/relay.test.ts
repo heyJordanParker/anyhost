@@ -939,3 +939,28 @@ describe('messages between machines', () => {
     await target.socket.none('claimed')
   })
 })
+
+describe('presence', () => {
+  const presenceOf = (on: Joined, of: Joined, connected: boolean, ms?: number): Promise<Message> =>
+    on.socket.next((m) => !(m instanceof Uint8Array) && m['t'] === 'presence' && m['device']['id'] === of.device.id && m['connected'] === connected, `presence of ${of.device.name}, connected ${connected}`, ms)
+
+  test('a machine hears every other link that is up at its welcome, each link that comes up after, and each that closes, and no machine sends presence itself', async () => {
+    const first = await joinNew(mac, 'present-first')
+    const second = await joinNew(mac, 'present-second')
+    expect(await presenceOf(second, first, true)).toEqual({ t: 'presence', device: { id: first.device.id, name: first.device.name }, connected: true })
+    expect(await presenceOf(first, second, true)).toEqual({ t: 'presence', device: { id: second.device.id, name: second.device.name }, connected: true })
+    second.socket.close()
+    expect(await presenceOf(first, second, false)).toEqual({ t: 'presence', device: { id: second.device.id, name: second.device.name }, connected: false })
+    first.socket.send({ t: 'presence', to: mac.device.id, device: { id: second.device.id, name: second.device.name }, connected: true })
+    expect(await first.socket.message('invalid')).toMatchObject({ message: 'Only the relay sends presence.' })
+  })
+
+  test("a machine hears another machine's link go dead once that machine's socket stays silent past LIVE_MS, with no message sent meanwhile", async () => {
+    const awake = await joinNew(mac, 'present-awake')
+    const asleep = await joinNew(mac, 'present-asleep')
+    await presenceOf(awake, asleep, true)
+    asleep.socket.silence()
+    expect(await presenceOf(awake, asleep, false, 2 * LIVE_MS + 15_000)).toEqual({ t: 'presence', device: { id: asleep.device.id, name: asleep.device.name }, connected: false })
+    expect(await asleep.socket.closed).toEqual({ code: 1000, reason: `The relay heard nothing on this socket for ${LIVE_MS / 1000} seconds` })
+  }, 2 * LIVE_MS + 30_000)
+})

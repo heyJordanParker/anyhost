@@ -58,12 +58,15 @@ test("a Herdr app whose Claude Code an older launcher starts runs the person's o
   expect(run).toEqual(claudeStart(['claude', '--model', 'opus'], false))
 })
 
-test("the Herdr app's sidebar shows the inbox over the projects, split by a divider the person drags, its panes wear anyhost's header, anyhost draws its notifications at the top right and its terminals' right-click menu, and the rest of its layout is as the app ships it", async () => {
+test("the Herdr app's sidebar shows the inbox over the projects, split by a divider the person drags, its panes wear anyhost's header, anyhost draws its notifications at the top right and its terminals' right-click menu, the right panel holds cmod's views beside Files and Changes, and the rest of its layout is as the app ships it", async () => {
   const herdr = join(temporaryFolder(), 'herdr-app')
   mkdirSync(join(herdr, 'layouts'), { recursive: true })
   const lists = { id: 'sidebar-lists', type: 'column', children: [{ id: 'spaces', type: 'block', content: { mod: 'spaces' } }, { id: 'agents', type: 'block', content: { mod: 'agents' } }] }
   const tab = { id: 'main', type: 'block', min: 200, content: { tab: 'active', pane: { gap: 8, header: { content: { mod: 'pane' }, height: 30, position: 'top', reveal: 'always' } } } }
-  const main = { id: 'root', type: 'row', children: [{ id: 'sidebar', type: 'column', children: [{ id: 'brand', type: 'block' }, lists] }, { id: 'work', type: 'column', children: [{ id: 'tabs', type: 'block', size: { px: 30 }, content: { mod: 'tabs' } }, tab] }] }
+  const files = { id: 'files', type: 'block', content: { mod: 'files' } }
+  const changes = { id: 'changes', type: 'block', content: { mod: 'changes' } }
+  const panel = { id: 'panel', type: 'column', hidden: true, children: [{ id: 'panel-body', type: 'stack', active: 'files', children: [files, changes] }] }
+  const main = { id: 'root', type: 'row', children: [{ id: 'sidebar', type: 'column', children: [{ id: 'brand', type: 'block' }, lists] }, { id: 'work', type: 'column', children: [{ id: 'tabs', type: 'block', size: { px: 30 }, content: { mod: 'tabs' } }, tab] }, panel] }
   writeFileSync(join(herdr, 'layouts', 'main.json'), JSON.stringify(main))
 
   await installHerdr(join(herdr, 'herdr.json'), herdr)
@@ -96,6 +99,34 @@ test("the Herdr app's sidebar shows the inbox over the projects, split by a divi
         ],
       },
     ],
+  })
+  expect(written.children[2]).toEqual({
+    id: 'panel',
+    type: 'column',
+    hidden: true,
+    children: [{ id: 'panel-body', type: 'stack', active: 'files', children: [files, changes, { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views' } } }] }],
+  })
+})
+
+test('a layout an older anyhost wrote, without cmod in the right panel, gains it at the next install and is not kept as an edited copy', async () => {
+  const { herdr, record } = herdrHomeIn()
+  mkdirSync(join(herdr, 'layouts'), { recursive: true })
+  const body = { id: 'panel-body', type: 'stack', active: 'files', children: [{ id: 'files', type: 'block', content: { mod: 'files' } }] }
+  writeFileSync(join(herdr, 'layouts', 'main.json'), JSON.stringify({ id: 'root', type: 'row', children: [body] }))
+  await installHerdr(record, herdr)
+  const older = `${JSON.stringify({ id: 'root', type: 'row', children: [body], toast: 'anyhost', terminal_menu: 'anyhost' }, null, 2)}\n`
+  writeFileSync(join(herdr, 'layouts', 'anyhost.json'), older)
+  writeFileSync(record, JSON.stringify({ ...(jsonOf(record) as Record<string, unknown>), layout: new Bun.CryptoHasher('sha256').update(older).digest('hex') }))
+
+  await installHerdr(record, herdr)
+
+  expect(readdirSync(join(herdr, 'layouts')).sort()).toEqual(['anyhost.json', 'main.json'])
+  expect(jsonOf(join(herdr, 'layouts', 'anyhost.json'))).toEqual({
+    id: 'root',
+    type: 'row',
+    children: [{ ...body, children: [...body.children, { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views' } } }] }],
+    toast: 'anyhost',
+    terminal_menu: 'anyhost',
   })
 })
 

@@ -586,8 +586,8 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
   const { transcript, capture } = machine(deviceA, relay)
   const bodies: Uint8Array[] = []
   let at = 0
-  for (let index = 0; index < 40; index += 1) {
-    const bytes = crypto.getRandomValues(new Uint8Array(600 * 1024))
+  for (let index = 0; index < 17; index += 1) {
+    const bytes = crypto.getRandomValues(new Uint8Array(MAX_MESSAGE_BYTES / 2 + 8 * 1024))
     const body = Buffer.concat(encodeRecord({ device: deviceA.id, path: transcript, at, size: bytes.length, after: { size: at + bytes.length, sha256: '' } }, bytes))
     await relay.objects.put(hotKey(SESSION, bodies.reduce((total, frame) => total + frame.length, 0)), await compressHot(body))
     bodies.push(body)
@@ -607,7 +607,7 @@ test('a seal reads small frames many to a request, and at most 16 requests at on
 
   expect(await seal(capture, SESSION)).toBe(before.length)
   expect(relay.mostAtOnce).toBe(16)
-  expect(relay.requests.slice(asked).filter((ops) => ops[0]?.op === 'get').map((ops) => ops.length)).toEqual([...Array.from({ length: 39 }, () => 1), 41])
+  expect(relay.requests.slice(asked).filter((ops) => ops[0]?.op === 'get').map((ops) => ops.length)).toEqual([...Array.from({ length: 16 }, () => 1), 41])
   const sealed = await relay.keys(`journals/${SESSION}/`)
   expect(sealed).toEqual([`journals/${SESSION}/sealed/${'0'.padStart(16, '0')}-${String(before.length).padStart(16, '0')}.zst`])
   expect(Buffer.from(await frameOf(relay, sealed[0] ?? '')).equals(before)).toBe(true)

@@ -46,16 +46,16 @@ let optionsRead: { readonly write: string; readonly options: PersonOptions } | u
 export async function personOptions(): Promise<PersonOptions> {
   const write = await lastWriteOf(join(rootsHere().claudeHome, 'settings.json'))
   if (optionsRead?.write === write) return optionsRead.options
-  const options = (JSON.parse(await cmod(['options', 'anyhost', '--json'])) as { person: PersonOptions }).person
+  const options = (JSON.parse(await cmod(['options', 'get', 'anyhost', '--json'])) as { person: PersonOptions }).person
   optionsRead = { write, options }
   return options
 }
 
-export type DataFolder = { readonly mod: string; readonly folder: string; readonly rebuildable: readonly string[] }
+export type DataFolder = { readonly mod: string; readonly folder: string }
 
 const isDataFolder = (entry: unknown): entry is DataFolder => {
-  const { mod, folder, rebuildable } = (entry ?? {}) as Partial<Record<keyof DataFolder, unknown>>
-  return typeof mod === 'string' && /^[\w.-]+$/.test(mod) && typeof folder === 'string' && folder.startsWith('/') && !folder.endsWith('/') && Array.isArray(rebuildable) && rebuildable.every((pattern) => typeof pattern === 'string')
+  const { mod, folder } = (entry ?? {}) as Partial<Record<keyof DataFolder, unknown>>
+  return typeof mod === 'string' && /^[\w.-]+$/.test(mod) && typeof folder === 'string' && folder.startsWith('/') && !folder.endsWith('/')
 }
 
 let dataRead: { readonly write: string; readonly folders: Promise<readonly DataFolder[]> } | undefined
@@ -64,7 +64,7 @@ export async function dataFolders(): Promise<readonly DataFolder[]> {
   if (dataRead?.write !== write) {
     const folders = cmod(['data', '--json']).then((text) => {
       const answer = JSON.parse(text) as unknown
-      if (!Array.isArray(answer) || !answer.every(isDataFolder)) throw new Error(`cmod data --json answered ${text.trim().slice(0, 200)}, not a list of { mod, folder, rebuildable }.`)
+      if (!Array.isArray(answer) || !answer.every(isDataFolder)) throw new Error(`cmod data --json answered ${text.trim().slice(0, 200)}, not a list of { mod, folder }.`)
       return answer
     })
     dataRead = { write, folders }
@@ -82,7 +82,7 @@ export async function relayLogin(): Promise<Login | undefined> {
   if (loginRead?.write === write) return loginRead.login
   const { url } = (await file.json()) as { url?: unknown }
   if (typeof url !== 'string' || url === '') throw new Error(`${file.name} names no relay address in url.`)
-  const token = await cmod(['secret', 'get', 'anyhost', 'token'])
+  const token = await cmod(['secrets', 'get', 'anyhost', 'token'])
   const login = token === '' ? undefined : { url: url.replace(/\/+$/, ''), token }
   loginRead = { write, login }
   return login
@@ -97,7 +97,7 @@ const inTurn = (write: () => Promise<void>): Promise<void> => {
 
 export async function saveRelayLogin({ url, token }: Login): Promise<void> {
   await inTurn(async () => {
-    await cmod(['secret', 'store', 'anyhost', 'token'], token)
+    await cmod(['secrets', 'store', 'anyhost', 'token'], token)
     mkdirSync(stateFolder(), { recursive: true })
     await Bun.write(relayFile(), `${JSON.stringify({ url })}\n`)
   })
@@ -107,7 +107,7 @@ export async function forgetRelayLogin(refused: Login): Promise<void> {
   await inTurn(async () => {
     if (loginRead?.login?.token !== refused.token || loginRead.write !== (await lastWriteOf(relayFile()))) return
     await rm(relayFile(), { force: true })
-    await cmod(['secret', 'delete', 'anyhost', 'token'])
+    await cmod(['secrets', 'delete', 'anyhost', 'token'])
   })
 }
 

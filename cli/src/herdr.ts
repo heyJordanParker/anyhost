@@ -6,6 +6,7 @@ import alarmClockOff from '../../herdr/anyhost/icons/alarm-clock-off.svg' with {
 import alarmClock from '../../herdr/anyhost/icons/alarm-clock.svg' with { type: 'text' }
 import appWindow from '../../herdr/anyhost/icons/app-window.svg' with { type: 'text' }
 import archiveRestore from '../../herdr/anyhost/icons/archive-restore.svg' with { type: 'text' }
+import blocks from '../../herdr/anyhost/icons/blocks.svg' with { type: 'text' }
 import chevronUp from '../../herdr/anyhost/icons/chevron-up.svg' with { type: 'text' }
 import circleAlert from '../../herdr/anyhost/icons/circle-alert.svg' with { type: 'text' }
 import circleDashed from '../../herdr/anyhost/icons/circle-dashed.svg' with { type: 'text' }
@@ -46,6 +47,7 @@ const ICONS: Record<string, string> = {
   'alarm-clock.svg': alarmClock,
   'app-window.svg': appWindow,
   'archive-restore.svg': archiveRestore,
+  'blocks.svg': blocks,
   'chevron-up.svg': chevronUp,
   'circle-alert.svg': circleAlert,
   'circle-dashed.svg': circleDashed,
@@ -163,6 +165,7 @@ const withSessions = (node: Node): Node => {
   if (node.id === 'sidebar-lists') return { id: node.id, type: 'column', children: [...PANES] }
   if (node.id === 'sidebar-footer') return { ...node, content: { mod: 'anyhost', props: { view: 'footer' } } }
   if (node.id === 'tabs') return { ...node, content: { mod: 'anyhost', props: { view: 'tabs' } } }
+  if (node.id === 'panel-body') return { ...node, children: [...(node.children ?? []), CMOD_DOCK] }
   if (node.id === 'main') {
     const { size, min, max, ...shown } = node
     return {
@@ -180,6 +183,7 @@ const withSessions = (node: Node): Node => {
 }
 
 const TOASTS: Node = { id: 'toasts', content: { mod: 'anyhost', props: { view: 'toasts' } }, edge: 'top', align: 'end' }
+const CMOD_DOCK: Node = { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views' } } }
 
 const anyhostLayoutOf = (main: Node): Node => ({ ...withSessions(main), toast: MOD, terminal_menu: MOD })
 

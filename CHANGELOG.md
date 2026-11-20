@@ -2,6 +2,21 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.10.0] - 2026-11-21
+
+### Added
+- cmod's session tools reach every machine anyhost joins. A session on one machine lists, reads, messages and drives the sessions and mods of your other machines, over your own relay.
+- cmod's tools read a session's screen, type into it and show it, on whichever machine runs it.
+- A machine that is off still lists its sessions in cmod's tools, from your Cloudflare account.
+- The right panel of the anyhost layout has a Views button, which shows the views your mods draw for the session you look at.
+
+### Changed
+- anyhost needs cmod 8.0.0 or newer. The machines list is a view of cmod 8.
+- Each machine learns at once when another machine's link drops, so a call waiting on it fails at once.
+
+### Fixed
+- A session takes your mods' data with it again on cmod 8, which lists each mod's data folder in a new shape.
+
 ## [0.9.17] - 2026-11-20
 
 ### Changed

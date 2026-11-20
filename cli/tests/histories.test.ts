@@ -1,12 +1,11 @@
 import { expect, test } from 'bun:test'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 import type { RecordHeader } from '../src/capture.ts'
 import type { Agents } from '../src/sessions.ts'
-import { ownerOf } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, dataFolderOn, decoder, HOST, isUploaded, LAPTOP, machineFor, roots, serveOn, SESSION } from './program.ts'
+import { anyhostOn, dataFolderOn, decoder, HOST, isUploaded, LAPTOP, machineFor, serveOn, SESSION } from './program.ts'
 
 const MOD = 'diary'
 const FIRST = '{"said":"Plan the trip"}\n'
@@ -23,29 +22,17 @@ const recordsOf = (body: Uint8Array): { readonly header: RecordHeader; readonly 
   return records
 }
 
-test("a data folder's rebuildable patterns read as .gitignore lines: a name matches at any depth, a slash anchors it, a trailing slash matches folders alone, and ! keeps a file again", () => {
-  const data = { mod: MOD, folder: '/data/diary', rebuildable: ['*.index', '!keep.index', '/top.db', 'cache/', 'index/**/*.bin', '# a comment', ''] }
-  const isKept = (path: string): boolean => ownerOf(join(data.folder, path), roots('/home/ada'), [data]) !== undefined
-
-  expect(['a.index', 'deep/b.index', 'top.db', 'cache/x', 'deep/cache/y', 'index/a/b/c.bin', 'index/c.bin'].filter(isKept)).toEqual([])
-  const kept = ['keep.index', 'deep/keep.index', 'deep/top.db', 'cache', 'deep/index/c.bin', 'day/2026-11-13.jsonl', '# a comment']
-  expect(kept.filter(isKept)).toEqual(kept)
-  expect(ownerOf(join(data.folder, 'notes.md'), roots('/home/ada'), [data])).toEqual({ mod: MOD })
-})
-
-test("a mod's data folder is this machine's history: every file but the rebuildable ones goes up, and an append uploads only its new bytes", async () => {
+test("a mod's data folder that cmod data --json lists as { mod, folder } is this machine's history: a file in it goes up as the mod's, and an append uploads only its new bytes", async () => {
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST, { uploadEvery: 0 })
-  const folder = dataFolderOn(host, MOD, ['main.index'])
+  const folder = dataFolderOn(host, MOD)
   const history = `${MOD}@${HOST.id}`
   const day = join(folder, 'day', '2026-11-13.jsonl')
   mkdirSync(dirname(day), { recursive: true })
-  writeFileSync(join(folder, 'main.index'), 'an index the mod rebuilds\n')
   await serveOn(host.env)
   await until(() => relay.isConnected(HOST.id), 'the machine connecting')
 
   writeFileSync(day, FIRST)
-  writeFileSync(join(folder, 'main.index'), 'the index, rebuilt\n')
   await until(() => isUploaded(relay, history, 'Plan the trip'), 'the day file uploaded', 30_000)
   appendFileSync(day, SECOND)
   await until(() => isUploaded(relay, history, 'Book the train'), 'the appended line uploaded', 30_000)
@@ -62,7 +49,7 @@ test("a mod's data folder is this machine's history: every file but the rebuilda
 test("anyhost resume --data places another machine's copy of a mod's data folder into this machine's empty one byte for byte, which this machine keeps as its own history, and refuses a folder that holds a file", async () => {
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST, { uploadEvery: 0 })
-  const folder = dataFolderOn(host, MOD, ['main.index'])
+  const folder = dataFolderOn(host, MOD)
   const files = { [join('day', '2026-11-13.jsonl')]: `${FIRST}${SECOND}`, 'notes.md': 'Lisbon, then Porto\n', [join('items', 'trip.bin')]: '\u0000\u0001 seat 42' }
   await serveOn(host.env)
   await until(() => relay.isConnected(HOST.id), 'the host connecting')
@@ -70,10 +57,9 @@ test("anyhost resume --data places another machine's copy of a mod's data folder
     mkdirSync(dirname(join(folder, name)), { recursive: true })
     writeFileSync(join(folder, name), text)
   }
-  writeFileSync(join(folder, 'main.index'), 'an index the mod rebuilds\n')
   await until(() => isUploaded(relay, `${MOD}@${HOST.id}`, 'Lisbon, then Porto') && isUploaded(relay, `${MOD}@${HOST.id}`, 'seat 42') && isUploaded(relay, `${MOD}@${HOST.id}`, 'Book the train'), "the host's data uploaded", 30_000)
   const laptop = await machineFor(relay, LAPTOP, { uploadEvery: 0 })
-  const there = dataFolderOn(laptop, MOD, ['main.index'])
+  const there = dataFolderOn(laptop, MOD)
   mkdirSync(there, { recursive: true })
   writeFileSync(join(there, 'kept.txt'), 'the laptop wrote this\n')
   await serveOn(laptop.env)
@@ -90,7 +76,6 @@ test("anyhost resume --data places another machine's copy of a mod's data folder
   expect(keptAfterRefusal).toEqual(['kept.txt'])
   expect(placed).toMatchObject({ code: 0, err: '' })
   for (const name of Object.keys(files)) expect(readFileSync(join(there, name))).toEqual(readFileSync(join(folder, name)))
-  expect(existsSync(join(there, 'main.index'))).toBe(false)
   expect((await relay.claims()).get(`${MOD}@${HOST.id}`)).toBe(HOST.id)
   expect((await relay.claims()).get(`${MOD}@${LAPTOP.id}`)).toBe(LAPTOP.id)
 }, 90_000)
@@ -111,14 +96,14 @@ test('a cmod that answers cmod data with a nonzero exit keeps no data folder', a
   await Bun.sleep(1000)
 
   expect(await relay.keys(`journals/${MOD}@`)).toEqual([])
-  expect(served.logged()).toContain('anyhost keeps no mod\'s data folder, as cmod data --json, which names each folder and the files its mod rebuilds by itself, failed: cmod: "data" is not a command.\n')
+  expect(served.logged()).toContain('anyhost keeps no mod\'s data folder, as cmod data --json, which names each folder, failed: cmod: "data" is not a command.\n')
   expect(served.logged()).not.toContain('Usage: cmod')
 }, 60_000)
 
 test('/agents, anyhost list and the index list no mod history, and no session id prefix names one', async () => {
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST, { uploadEvery: 0 })
-  const folder = dataFolderOn(host, MOD, [])
+  const folder = dataFolderOn(host, MOD)
   const home = host.env['HOME'] ?? ''
   await serveOn(host.env)
   await until(() => relay.isConnected(HOST.id), 'the machine connecting')

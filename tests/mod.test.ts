@@ -198,7 +198,7 @@ function withProgram(answers: Record<string, Answer[]>) {
     setup: async (mod: Parameters<typeof anyhost.setup>[0]) => {
       started = mod
       await anyhost.setup(mod)
-      const step = mod.sidebar.add({ id: 'step', title: connectStep.title, render: (current, props) => connectStep.render(current, props) })
+      const step = mod.views.add({ id: 'step', title: connectStep.title, render: (current, props) => connectStep.render(current, props) })
       mod.use(slashCommand({ name: 'step', description: 'Show the Step', reply: () => step.open({ focus: true }) }))
     },
   }
@@ -280,7 +280,7 @@ test('the Step on a program whose install command\'s link joined no relay shows 
   const { tested, mod } = withProgram({ 'GET /status': [{ body: { relay: { state: 'unjoined', message: '' }, joining: { is: 'failed', error } } }] })
   expect(await connectStep.isDone(await mod())).toBe(false)
   await tested.type('/step')
-  const drawn = (await tested.shown.page.lines({ columns: 400 })).join('\n')
+  const drawn = (await tested.shown.view.lines({ columns: 400 })).join('\n')
   expect(drawn).toContain(`The invite link of the install command joined no relay: ${error}`)
   expect(drawn).toContain('anyhost tries a link once. Add this machine again from /machines on a joined machine.')
 })
@@ -291,11 +291,11 @@ test('a machine removed after a link pasted on the Step joined it gets the Step 
   const { tested, mod } = withProgram({ 'POST /join': [{ body: { url: 'https://anyhost.parker-labs.workers.dev' } }], 'GET /status': [{ body: { relay: { state: 'unjoined', message: removed } } }] })
   const started = await mod()
   await tested.type('/step')
-  await tested.shown.page.input('invite', command)
-  expect((await tested.shown.page.lines()).join('\n')).toContain('✔ Joined https://anyhost.parker-labs.workers.dev')
+  await tested.shown.view.input('invite', command)
+  expect((await tested.shown.view.lines()).join('\n')).toContain('✔ Joined https://anyhost.parker-labs.workers.dev')
 
   expect(await connectStep.isDone(started)).toBe(false)
-  expect((await tested.shown.page.lines()).join('\n')).not.toContain('✔ Joined')
+  expect((await tested.shown.view.lines()).join('\n')).not.toContain('✔ Joined')
 })
 
 test('Connect Cloudflare on the Step shows each line, asks for the account, and says when this machine joined', async () => {
@@ -309,18 +309,18 @@ test('Connect Cloudflare on the Step shows each line, asks for the account, and 
     'GET /status': [{ body: { relay: { state: 'connected', message: '' }, connecting: joined } }],
   })
   await tested.type('/step')
-  await tested.shown.page.press('connect')
-  const lines = (await tested.shown.page.lines()).join('\n')
+  await tested.shown.view.press('connect')
+  const lines = (await tested.shown.view.lines()).join('\n')
   expect(lines).toContain('Checking your Cloudflare login')
   expect(lines).toContain('Pick the one your relay goes in')
   expect(lines).not.toContain('[Connect Cloudflare]')
 
-  await tested.shown.page.press('account-a1')
+  await tested.shown.view.press('account-a1')
   expect(asked.at(-1)).toEqual({ method: 'POST', path: '/connect/account', body: { id: 'a1' } })
-  expect((await tested.shown.page.lines()).join('\n')).toContain('Found the bucket anyhost in the eu jurisdiction')
+  expect((await tested.shown.view.lines()).join('\n')).toContain('Found the bucket anyhost in the eu jurisdiction')
   for (const tick of ticks) await tick()
   await tested.settle()
-  const done = (await tested.shown.page.lines()).join('\n')
+  const done = (await tested.shown.view.lines()).join('\n')
   expect(done).toContain('Joined this machine to https://anyhost.parker-labs.workers.dev')
   expect(done).toContain('This machine is joined to your relay.')
   expect(done).not.toContain('[Connect Cloudflare]')
@@ -332,7 +332,7 @@ test('a machine removed after Connect Cloudflare joined it gets the Step afresh,
   const { tested, mod } = withProgram({ 'GET /status': [{ body: { relay: { state: 'unjoined', message: removed }, connecting: joined } }] })
   expect(await connectStep.isDone(await mod())).toBe(false)
   await tested.type('/step')
-  const drawn = (await tested.shown.page.lines()).join('\n')
+  const drawn = (await tested.shown.view.lines()).join('\n')
   expect(drawn).toContain('[Connect Cloudflare]')
   expect(drawn).not.toContain('Joined this machine')
 })
@@ -343,7 +343,7 @@ test('a Step whose Connect Cloudflare joined keeps the run while the relay still
   const { tested, mod } = withProgram({ 'GET /status': [{ body: { relay: { state: 'outdated', message: outdated }, connecting: joined } }] })
   expect(await connectStep.isDone(await mod())).toBe(false)
   await tested.type('/step')
-  const drawn = (await tested.shown.page.lines({ columns: 400 })).join('\n')
+  const drawn = (await tested.shown.view.lines({ columns: 400 })).join('\n')
   expect(drawn).toContain('Joined this machine to https://anyhost.parker-labs.workers.dev')
   expect(drawn).toContain('✔ This machine is joined to your relay.')
   expect(drawn).toContain("Cloudflare still runs your relay's older version, for up to 5 minutes after the upload. Press Finish once it runs the new one.")
@@ -354,12 +354,12 @@ test('the Step shows the R2 page while R2 is off, and Next tells the program it 
   const off = { is: 'running', lines: ['R2 is off in Parker Labs. Turn it on at https://dash.cloudflare.com/?to=/:account/r2/overview, then go on.'], r2Page: 'https://dash.cloudflare.com/?to=/:account/r2/overview' }
   const { tested, asked } = withProgram({ 'POST /connect': [{ body: off }], 'POST /connect/r2': [{ body: { is: 'running', lines: off.lines } }] })
   await tested.type('/step')
-  await tested.shown.page.press('connect')
-  expect((await tested.shown.page.lines()).join('\n')).toContain("[Open Cloudflare's R2 page]  Turn R2 on there, then press Next.  [Next]")
+  await tested.shown.view.press('connect')
+  expect((await tested.shown.view.lines()).join('\n')).toContain("[Open Cloudflare's R2 page]  Turn R2 on there, then press Next.  [Next]")
 
-  await tested.shown.page.press('r2-next')
+  await tested.shown.view.press('r2-next')
   expect(asked.at(-1)).toEqual({ method: 'POST', path: '/connect/r2', body: {} })
-  expect((await tested.shown.page.lines()).join('\n')).not.toContain('press Next')
+  expect((await tested.shown.view.lines()).join('\n')).not.toContain('press Next')
 })
 
 test('the command or link pasted on the Step joins this machine, or says why the relay refused it', async () => {
@@ -368,12 +368,12 @@ test('the command or link pasted on the Step joins this machine, or says why the
     'POST /join': [{ body: { url: 'https://anyhost.parker-labs.workers.dev' } }, { status: 500, body: { message: 'https://anyhost.parker-labs.workers.dev refused to join test-computer: The invite already joined anyhost-b.' } }],
   })
   await tested.type('/step')
-  await tested.shown.page.input('invite', command)
+  await tested.shown.view.input('invite', command)
   expect(asked.at(-1)).toEqual({ method: 'POST', path: '/join', body: { link: command } })
-  expect((await tested.shown.page.lines()).join('\n')).toContain('✔ Joined https://anyhost.parker-labs.workers.dev')
+  expect((await tested.shown.view.lines()).join('\n')).toContain('✔ Joined https://anyhost.parker-labs.workers.dev')
 
-  await tested.shown.page.input('invite', command)
-  expect((await tested.shown.page.lines()).join(' ')).toContain('refused to join test-computer: The invite already joined anyhost-b.')
+  await tested.shown.view.input('invite', command)
+  expect((await tested.shown.view.lines()).join(' ')).toContain('refused to join test-computer: The invite already joined anyhost-b.')
 })
 
 const machines = {
@@ -395,21 +395,39 @@ test('/machines lists every machine, adds one over ssh from your Tailscale netwo
   })
   await tested.type('/machines')
   await tested.settle()
-  const listed = (await tested.shown.page.lines()).map((line) => line.trim())
+  const listed = (await tested.shown.view.lines()).map((line) => line.trim())
   expect(listed.find((line) => line.startsWith('anyhost-b'))).toMatch(/^anyhost-b {2}linux-arm64 {3}last seen .+ {2}\[Remove\]$/)
   expect(listed.find((line) => line.startsWith('macbook'))).toBe('macbook    darwin-arm64  connected  this machine')
 
-  await tested.shown.page.press('add')
-  expect((await tested.shown.page.lines({ columns: 160 })).join('\n')).toContain('On your Tailscale network:  [mac-studio]')
-  await tested.shown.page.press('candidate-mac-studio')
+  await tested.shown.view.press('add')
+  expect((await tested.shown.view.lines({ columns: 160 })).join('\n')).toContain('On your Tailscale network:  [mac-studio]')
+  await tested.shown.view.press('candidate-mac-studio')
   expect(asked.filter(({ method }) => method === 'POST').at(-1)).toEqual({ method: 'POST', path: '/machines/add', body: { target: 'mac-studio' } })
-  expect((await tested.shown.page.lines({ columns: 160 })).join('\n')).toContain('Adding mac-studio: anyhost installs there and joins it')
+  expect((await tested.shown.view.lines({ columns: 160 })).join('\n')).toContain('Adding mac-studio: anyhost installs there and joins it')
 
-  await tested.shown.page.press('remove-b-id')
-  expect((await tested.shown.page.lines()).join('\n')).toContain('Remove anyhost-b? It stops uploading at once')
-  await tested.shown.page.press('remove-yes-b-id')
+  await tested.shown.view.press('remove-b-id')
+  expect((await tested.shown.view.lines()).join('\n')).toContain('Remove anyhost-b? It stops uploading at once')
+  await tested.shown.view.press('remove-yes-b-id')
   expect(asked.filter(({ method }) => method === 'POST').at(-1)).toEqual({ method: 'POST', path: '/machines/remove', body: { id: 'b-id' } })
-  expect((await tested.shown.page.lines()).some((line) => line.startsWith('anyhost-b'))).toBe(false)
+  expect((await tested.shown.view.lines()).some((line) => line.startsWith('anyhost-b'))).toBe(false)
+})
+
+test('/machines reads the machines again every 10 s while its view is open, and a second /machines closes it', async () => {
+  const { tested, asked, every } = withProgram({ 'GET /machines': [{ body: machines }] })
+  const read = (): number => asked.filter(({ path }) => path === '/machines').length
+  const tick = async (): Promise<void> => {
+    await every.get(10_000)?.()
+    await tested.settle()
+  }
+  await tested.type('/machines')
+  await tick()
+  const whileOpen = [tested.shown.view.id, read()]
+
+  await tested.type('/machines')
+  await tick()
+
+  expect([whileOpen, read()]).toEqual([['machines', 2], 2])
+  await expect(tested.shown.view.lines()).rejects.toThrow('No view of anyhost shows in the Sidebar')
 })
 
 const moveIs = (step: string, line: string, machine?: string): Answer => ({ body: { ...(machine === undefined ? {} : { machine }), move: { to: 'anyhost-a', step, line } } })
@@ -668,5 +686,5 @@ test('/machines says why it lists nothing while this machine is not joined', asy
   const { tested } = withProgram({ 'GET /machines': [{ status: 503, body: { message: 'This machine is not joined to your relay, so anyhost keeps what its sessions write and uploads nothing.' } }] })
   await tested.type('/machines')
   await tested.settle()
-  expect((await tested.shown.page.lines()).join('\n')).toContain('This machine is not joined to your relay')
+  expect((await tested.shown.view.lines()).join('\n')).toContain('This machine is not joined to your relay')
 })

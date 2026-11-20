@@ -24,6 +24,7 @@ import {
   type Listed,
   type Offline,
   type Op,
+  type Presence,
   type Result,
   type Results,
   type Roots,
@@ -53,7 +54,7 @@ export type RelayState =
   | { readonly is: 'connected'; readonly welcome: Welcome }
   | { readonly is: 'unjoined' | 'offline' | 'refused' | 'outdated'; readonly message: string }
 export type Written = { readonly key: string; readonly etag: string }
-type Events = { readonly welcome: Welcome; readonly claimed: Claimed; readonly offline: Offline; readonly claiming: Claiming; readonly written: Written } & {
+type Events = { readonly welcome: Welcome; readonly claimed: Claimed; readonly offline: Offline; readonly presence: Presence; readonly claiming: Claiming; readonly written: Written } & {
   readonly [T in Delivered['t']]: Extract<Delivered, { readonly t: T }>
 }
 
@@ -66,6 +67,7 @@ export type Relay = {
   getObject(key: string): Promise<Got | undefined>
   read(keys: readonly string[]): Promise<Read[]>
   cached(keys: readonly string[]): (Read | undefined)[]
+  connectedMachines(): DeviceRef[]
   send(message: Routed): boolean
   on<K extends keyof Events>(kind: K, listener: (message: Events[K]) => void): () => void
   reconnect(): void
@@ -157,7 +159,14 @@ export function connectRelay(options: RelayOptions): Relay {
   let pinger: ReturnType<typeof setInterval> | undefined
   let pongDue: ReturnType<typeof setTimeout> | undefined
   let answerDue: ReturnType<typeof setTimeout> | undefined
+  const machines = new Map<string, DeviceRef>()
 
+  const heardPresence = (device: DeviceRef, connected: boolean): void => {
+    if (machines.has(device.id) === connected) return
+    if (connected) machines.set(device.id, device)
+    else machines.delete(device.id)
+    emit('presence', { t: 'presence', device, connected })
+  }
   const failPending = (message: string): void => {
     for (const [id, request] of pending) {
       pending.delete(id)
@@ -193,6 +202,7 @@ export function connectRelay(options: RelayOptions): Relay {
     const wasConnected = state.is === 'connected'
     state = next
     if (isClosed) return
+    if (wasConnected) for (const device of machines.values()) heardPresence(device, false)
     if (wasConnected && 'message' in next) console.error(`${new Date().toISOString()} ${next.message}${next.is === 'unjoined' ? '' : ' anyhost connects again.'}`)
     if (!wasConnected) failures += 1
     if (!wasConnected && !options.isPatient && 'message' in next) failPending(next.message)
@@ -235,8 +245,12 @@ export function connectRelay(options: RelayOptions): Relay {
       waiting.clear()
       return
     }
-    if (message.t === 'invalid') console.error(`${new Date().toISOString()} The relay read no message of this program: ${message.message}`)
-    else emit(message.t, message as never)
+    if (message.t === 'invalid') return void console.error(`${new Date().toISOString()} The relay read no message of this program: ${message.message}`)
+    if (message.t === 'presence') return heardPresence(message.device, message.connected)
+    const offline = message.t === 'offline' ? machines.get(message.to) : undefined
+    if (offline !== undefined) heardPresence(offline, false)
+    if ('from' in message) heardPresence(message.from, true)
+    emit(message.t, message as never)
   }
 
   const open = async (): Promise<void> => {
@@ -514,6 +528,7 @@ export function connectRelay(options: RelayOptions): Relay {
     getObject,
     read,
     cached: (keys) => keys.map((key) => known.get(key)),
+    connectedMachines: () => [...machines.values()],
     send(message) {
       if (state.is !== 'connected' || socket === undefined) return false
       socket.send(JSON.stringify(message))

@@ -7,7 +7,7 @@ import type { Status } from '../src/serve.ts'
 import { shellsOf } from '../src/hc.ts'
 import { familyOf, lastFolderOf, transcriptTailOf } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, coreEvent, coreSays, decoder, hookOn, LAPTOP, logOf, machineFor, OTHER_SESSION, runningOn, sentOn, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn } from './program.ts'
+import { anyhostOn, cmodServeOf, coreEvent, coreSays, decoder, hookOn, LAPTOP, logOf, machineFor, OTHER_SESSION, runningOn, script, sentOn, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn, terminalOn, withCmod } from './program.ts'
 
 const SHELL = ['/bin/zsh', '-l']
 const CLAUDE = ['claude']
@@ -344,4 +344,29 @@ test('a terminal two windows show stays shown while either shows it, keeps the t
   expect(shownLabels()).toEqual(whileOneShows)
   const visits = relay.puts.filter(({ key }) => key === 'shared.json').map(({ body }) => (JSON.parse(decoder.decode(body)) as { visited?: Record<string, string> }).visited?.[SESSION])
   expect(new Set(visits.filter((at) => at !== undefined)).size).toBe(1)
+}, 60_000)
+
+test("cmod/Terminal reads, types into and shows the terminal of a session this machine's herdr-core runs, and answers not held for a session it runs in no terminal, so cmod asks the next provider", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  script(join(laptop.folder, 'bin', 'herdr-app'), `#!/bin/sh\ncase "$1" in\n  ls) printf '{"spaces":[]}' ;;\n  do) shift; echo "$*" >> '${join(laptop.folder, 'herdr.log')}' ;;\nesac\n`)
+  terminalOn(laptop, 't0')
+  const cmod = cmodServeOf(laptop)
+  await serveOn(withCmod(laptop.env))
+  await cmod.provides('cmod/Terminal')
+  const terminal = (method: string, ...params: readonly unknown[]): Promise<unknown> => cmod.call('cmod/Terminal', method, ...params)
+  const refusalOf = (asked: Promise<unknown>): Promise<unknown> => asked.then(String, (error: Error & { readonly code: number }) => ({ code: error.code, message: error.message }))
+
+  const screen = await terminal('screen', SESSION)
+  await terminal('press', SESSION, '1\r')
+  await terminal('press', SESSION, '\x1b[BYes \x1b\x03')
+  await terminal('show', SESSION, 'right')
+  const unread = await refusalOf(terminal('screen', OTHER_SESSION))
+  const unpressed = await refusalOf(terminal('press', OTHER_SESSION, '1\r'))
+  const unshown = await refusalOf(terminal('show', OTHER_SESSION, 'focus'))
+
+  expect(screen).toBe(`screen of ${SESSION}`)
+  expect(logOf(laptop.folder, 'keys.log')).toEqual(['t0 1 enter', 't0 down shift+y e s space esc ctrl+c'])
+  expect(logOf(laptop.folder, 'herdr.log')).toEqual(['terminal.keep {"terminal":"t0","place":"right"}'])
+  expect([unread, unpressed, unshown]).toEqual(Array.from({ length: 3 }, () => ({ code: -32098, message: `This provider holds no session ${OTHER_SESSION}.` })))
 }, 60_000)

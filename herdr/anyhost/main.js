@@ -41,6 +41,11 @@ const MODES = [
   ["stack", "Stack", `${OWN}/square-stack`],
   ["board", "Board", `${OWN}/kanban`],
 ];
+const PANELS = [
+  ["files", "Files", "mods/files/file"],
+  ["changes", "Changes", "mods/changes/changes"],
+  ["cmod", "Views", `${OWN}/blocks`],
+];
 const TILED = new Set(["scroll", "master", "dwindle", "grid", "stack"]);
 const CYCLED = MODES.map(([mode]) => mode).filter((mode) => mode !== "board");
 const SIDES = ["left", "right", "top"];
@@ -1246,8 +1251,8 @@ export default class Anyhost extends View {
       return { root: JSON.stringify([pulse.all, filter.project === null, this.isCursorOn(ALL)]), list: JSON.stringify(this.entries.map((entry) => entry.id)), head: "" };
     }
     if (this.kind === "tabs") {
-      const { isLoaded, isAll, labels, project, slots, lights, hasViews, hasButtons, panels, work } = this.tabsView;
-      return { root: JSON.stringify([isLoaded, lights, hasViews, hasButtons, project, panels, work.mode, work.id, work.settings, work.workspace?.key ?? null]), list: JSON.stringify([isLoaded, isAll, labels, project, slots.map((slot) => [slot.id, slot.lane, slot.isPinned])]), head: "" };
+      const { isLoaded, isAll, labels, project, slots, lights, hasViews, hasButtons, openPanel, work } = this.tabsView;
+      return { root: JSON.stringify([isLoaded, lights, hasViews, hasButtons, project, openPanel, work.mode, work.id, work.settings, work.workspace?.key ?? null]), list: JSON.stringify([isLoaded, isAll, labels, project, slots.map((slot) => [slot.id, slot.lane, slot.isPinned])]), head: "" };
     }
     const shown = this.shown;
     return {
@@ -5760,7 +5765,6 @@ export default class Anyhost extends View {
     const w = window();
     const sidebar = find(root, "sidebar");
     const panel = find(root, "panel");
-    const panelBody = find(root, "panel-body")?.active;
     const isLoaded = isLayoutLoaded();
     this.tabsView = {
       isLoaded,
@@ -5775,9 +5779,9 @@ export default class Anyhost extends View {
       project: isAll ? null : (work.workspace?.name ?? (work.workspace?.key ? (shared(PULSE)?.known.find((p) => p.key === work.workspace.key)?.name ?? projectNameOf(work.workspace.key)) : null)),
       isAll,
       labels: isAll ? Object.fromEntries(groups.map((space) => [space.id, this.groupName(space)])) : {},
-      panels: { files: Boolean(panel) && !panel.hidden && panelBody === "files", changes: Boolean(panel) && !panel.hidden && panelBody === "changes" },
+      openPanel: panel && !panel.hidden ? (find(root, "panel-body")?.active ?? null) : null,
     };
-    const signature = JSON.stringify([this.tabsView.isLoaded, [...this.leaving], pills.map((pill) => [pill.tab.id, pill.space, pill.tab.name, pill.tab.index, pill.program?.icon ?? null, pill.program?.tint ?? null, pill.sessions, pill.state, pill.isPinned, pill.isShown]), discarded, work.mode, work.id, work.settings, work.focused, work.terminals, this.tabsView.lights, this.tabsView.hasViews, this.tabsView.hasButtons, this.tabsView.project, this.tabsView.labels, this.tabsView.panels, pinsInOrder()]);
+    const signature = JSON.stringify([this.tabsView.isLoaded, [...this.leaving], pills.map((pill) => [pill.tab.id, pill.space, pill.tab.name, pill.tab.index, pill.program?.icon ?? null, pill.program?.tint ?? null, pill.sessions, pill.state, pill.isPinned, pill.isShown]), discarded, work.mode, work.id, work.settings, work.focused, work.terminals, this.tabsView.lights, this.tabsView.hasViews, this.tabsView.hasButtons, this.tabsView.project, this.tabsView.labels, this.tabsView.openPanel, pinsInOrder()]);
     if (signature === this.tabsSignature) return false;
     this.tabsSignature = signature;
     return true;
@@ -6156,7 +6160,7 @@ export default class Anyhost extends View {
   }
 
   renderTabs(t) {
-    const { isLoaded, work, lights, hasViews, hasButtons, project, panels } = this.tabsView;
+    const { isLoaded, work, lights, hasViews, hasButtons, project, openPanel } = this.tabsView;
     const drag = this.pressed?.isMoving ? this.pressed : null;
     return h_flex()
       .id("ah-tabs")
@@ -6200,12 +6204,7 @@ export default class Anyhost extends View {
           .gap(UI.space.xs)
           .items_center()
           .when(isLoaded, (el) =>
-            el.child(this.iconButton(t, "ah-tab-new", "plus", project && work.workspace?.key !== NONE ? `New session in ${project}` : "New session", () => this.newHere())).children(
-              [
-                ["files", "Files", "mods/files/file"],
-                ["changes", "Changes", "mods/changes/changes"],
-              ].map(([id, label, icon]) => this.panelButton(t, id, label, icon, panels[id])),
-            ),
+            el.child(this.iconButton(t, "ah-tab-new", "plus", project && work.workspace?.key !== NONE ? `New session in ${project}` : "New session", () => this.newHere())).children(PANELS.map(([id, label, icon]) => this.panelButton(t, id, label, icon, openPanel === id))),
           )
           .when(isLoaded && hasViews, (el) => el.child(h_flex().id("ah-modes").flex_none().gap(1).items_center().children(MODES.map(([mode, label, icon]) => this.modeButton(t, mode, label, icon, work)))))
           .when(hasButtons, (el) => el.child(this.iconButton(t, "ah-window-min", "minus", "Minimize", () => run("window.minimize"))).child(this.iconButton(t, "ah-window-max", "square", "Maximize", () => run("window.maximize"))).child(this.iconButton(t, "ah-window-close", "x", "Close", () => run("window.close")))),

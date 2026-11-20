@@ -46,6 +46,7 @@ anyhost keeps every Claude Code and Codex session of every machine the Architect
 - The Pool's SQLite allows 5,000,000 rows read a day on the Free plan, so the `claims` op reads only the rows under a prefix.
 - R2's free tier allows 1,000,000 Class A requests a month, so the option `uploadEvery` defaults to 5 seconds.
 - The Pool counts a socket alive only while it heard from it within `LIVE_MS`, because Cloudflare keeps a sleeping machine's half-open socket listed.
+- A ping the Pool answers with `setWebSocketAutoResponse` never wakes it, so only its alarm notices a silent socket. The alarm runs every `LIVE_MS` while two or more machines are connected, at most 1,920 times a day, and tells the other machines the silent one's link went dead as `presence`.
 - Bun 1.4.4's `fs.watch` on macOS registers its FSEventStream on the calling thread, which freezes while fseventsd stops answering (Bun issue #43870). So every watch runs in a separate watcher process (`WATCHER` in `serve.ts`).
 - macOS refuses a unix socket path over 104 bytes, so a test's `XDG_STATE_HOME` stays short.
 - Claude Code's record `sessions/<pid>.json` is the program's source of a session's status (`busy`, `shell`, `waiting`, `idle`, `parkedJobId`), read only through `recordedSessions` and `recordAt` in `claude.ts`.

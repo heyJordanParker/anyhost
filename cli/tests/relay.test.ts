@@ -221,13 +221,13 @@ test('a relay login that fails to read is a problem of its own with the reason, 
   let reads = 0
   const login = async (): Promise<{ url: string; token: string }> => {
     reads += 1
-    if (reads === 1) throw new Error('cmod secret get anyhost token exited with 1.')
+    if (reads === 1) throw new Error('cmod secrets get anyhost token exited with 1.')
     return { url: relay.url, token }
   }
   const service = connect({ login, device, roots: roots('/home/ada'), isPatient: true })
 
   await until(() => service.state.is !== 'connecting', 'the failed read')
-  expect(service.state).toEqual({ is: 'offline', message: "anyhost could not read this machine's relay login: cmod secret get anyhost token exited with 1." })
+  expect(service.state).toEqual({ is: 'offline', message: "anyhost could not read this machine's relay login: cmod secrets get anyhost token exited with 1." })
   await welcomed(service)
   expect(reads).toBe(2)
 })

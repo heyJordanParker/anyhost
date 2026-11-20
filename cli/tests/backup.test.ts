@@ -102,7 +102,7 @@ test('a file written in a watched folder while the watcher hears nothing is uplo
   const host = await machineFor(relay, HOST)
   const cmod = join(host.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs', 'cmod')
   const release = join(host.folder, 'release')
-  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace('"options anyhost")', `"options anyhost") while [ ! -e '${release}' ]; do sleep 0.1; done;`))
+  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace('"options get anyhost --json")', `"options get anyhost --json") while [ ! -e '${release}' ]; do sleep 0.1; done;`))
   ranAnHourAgo(host)
   await serveOn({ ...host.env, ANYHOST_WATCHER_DROPS: '1' })
   await Bun.sleep(3000)

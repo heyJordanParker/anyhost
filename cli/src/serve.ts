@@ -2,18 +2,20 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { provide } from '@cmodjs/core/mod.js'
+import { connect, NotHeld } from '@cmodjs/core/rpc.js'
 import { Activity, type Shown } from './activity.ts'
 import { changedFiles, countedRelay, forgetUnstarted, indexForkStarts, recordName, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, recordSummaryFrom, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, LoginNeeded, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
-import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, shownAt, label, machinesReached, SESSION_LABEL, shellsOf, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
-import { PLACES, type Place } from './herdr.ts'
+import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, keyNamesOf, killTerminal, shownAt, label, machinesReached, pressKeys, readTerminal, SESSION_LABEL, shellsOf, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
+import { PLACES, showTerminal, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { activityOf, deleteAgent, forkAgent, keepHere, sessionOf, move, noteWaiting, placeSession, receiveDelete, receiveFork, receiveList, receiveReleased, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
+import { activityOf, deleteAgent, forkAgent, keepHere, labelledHere, sessionOf, move, noteWaiting, placeSession, receiveDelete, receiveFork, receiveList, receiveReleased, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type RelayState, type Written } from './relay.ts'
-import { HOOK_EVENTS, type AgentStatus, type HookEvent, type Routed } from '../../relay/protocol.ts'
-import { agentsOf, indexesIn, indexKeyOf, type ListRead } from './sessions.ts'
+import { HOOK_EVENTS, type AgentStatus, type DeviceRef, type HookEvent, type Routed } from '../../relay/protocol.ts'
+import { agentsOf, indexesIn, indexKeyOf, type Agent, type ListRead } from './sessions.ts'
 import { archive, isArchived, moveWindowPreferences, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, windowsIn, windowsKeyOf, type Organize } from './shared.ts'
 import { copyT3Marks } from './t3.ts'
 import { codexSessionOf, codexState, familyOf, filesUnder, isCodexRun, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
@@ -379,7 +381,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       process.exit(1)
     },
   })
-  let release = (_session: string, _holder: string): void => undefined
+  let release =(_session: string, _holder: string): void => undefined
   let place = (_session: string): void => undefined
   const capture = openCapture(relay, device, roots, {
     db,
@@ -978,7 +980,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     } catch (error) {
       capture.dataFolders = []
       const reason = error instanceof Error ? error.message : String(error)
-      if (reason !== dataFailure) console.error(`${new Date().toISOString()} anyhost keeps no mod's data folder, as cmod data --json, which names each folder and the files its mod rebuilds by itself, failed: ${reason}`)
+      if (reason !== dataFailure) console.error(`${new Date().toISOString()} anyhost keeps no mod's data folder, as cmod data --json, which names each folder, failed: ${reason}`)
       dataFailure = reason
     }
   }
@@ -999,7 +1001,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       try {
         await joinRelay(link, device, cloudflare)
       } finally {
-        await cmod(['option', 'anyhost', 'join', ''])
+        await cmod(['options', 'set', 'anyhost', 'join', ''])
       }
       joined()
     } catch (error) {
@@ -1426,6 +1428,136 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   void releaseHeld().then(placeAll).catch(readFailed('the sessions to place'))
   void settle('environment', () => saveLoginEnvironment())
   void settle('fork starts', () => indexForkStarts(capture))
+  void connect().then(
+    () => {
+      const devices = provide('cmod/Devices', {
+        devices: () => relay.connectedMachines(),
+        send: (to: string, message: unknown) => {
+          if (!relay.send({ t: 'cmod', to, message })) throw new Error('message' in relay.state ? relay.state.message : `${device.name} is still connecting to its relay.`)
+        },
+      })
+      relay.on('presence', (presence) => devices.tell('Change', { device: presence.device.id }))
+      relay.on('cmod', ({ from, message }) => devices.tell('Message', { device: from.id, message }))
+      const heldTerminal = async (session: string): Promise<string> => {
+        const terminal = await labelledHere(session, mover)
+        if (terminal === undefined) throw new NotHeld(session)
+        return terminal
+      }
+      provide('cmod/Terminal', {
+        screen: async (session) => await readTerminal(await heldTerminal(session), 0),
+        press: async (session, keys) => {
+          const terminal = await heldTerminal(session)
+          mover.touched.set(session, Date.now())
+          await pressKeys(terminal, keyNamesOf(keys))
+        },
+        show: async (session, place) => {
+          const terminal = await heldTerminal(session)
+          mover.touched.set(session, Date.now())
+          await showTerminal(session, terminal, place)
+          if (place !== 'peek' && place !== 'hide') restoreOpened(session)
+        },
+      })
+      const isJoined = (): boolean => relay.state.is !== 'unjoined' && relay.state.is !== 'refused' && relay.state.is !== 'outdated'
+      const heldSessions = async (): Promise<{ readonly agent: Agent; readonly machine: DeviceRef }[]> => {
+        const { devices } = await machinesForList()
+        const { agents } = await agentsOf(capture, undefined, undefined, await listOf(new Map(devices.map((each) => [each.id, each]))))
+        const holders = capture.holders.known()
+        const names = new Map(devices.map(({ id, name }) => [id, name]))
+        return agents.flatMap((agent) => {
+          const holder = holders.get(agent.id)
+          return holder === undefined || agent.tool !== 'claude' || agent.deleted ? [] : [{ agent, machine: { id: holder, name: names.get(holder) ?? holder } }]
+        })
+      }
+      const offSessions = async (): Promise<{ readonly agent: Agent; readonly machine: DeviceRef }[]> => {
+        if (!isJoined()) return []
+        const on = new Set([device.id, ...relay.connectedMachines().map(({ id }) => id)])
+        return (await heldSessions()).filter(({ machine }) => !on.has(machine.id))
+      }
+      const offSession = async (session: string): Promise<{ readonly agent: Agent; readonly machine: DeviceRef }> => {
+        const found = (await offSessions()).find(({ agent }) => agent.id === session)
+        if (found === undefined) throw new NotHeld(session)
+        return found
+      }
+      const unreadable = async (session: string): Promise<never> => {
+        const { name } = (await offSession(session)).machine
+        throw new Error(`anyhost cannot read ${name}'s session while ${name} is off, until cmod can read a transcript anyhost keeps.`)
+      }
+      const sessions = provide('cmod/Sessions', {
+        sessions: async ({ project, everyProject = false, running = false, since = '' } = {}) =>
+          running
+            ? []
+            : (await offSessions())
+                .filter(({ agent }) => (everyProject || project === undefined || agent.cwd === project) && agent.lastActivity >= since)
+                .map(({ agent, machine }) => ({
+                  id: agent.id,
+                  title: agent.title,
+                  project: agent.cwd,
+                  cwd: agent.cwd,
+                  model: '',
+                  startedAt: '',
+                  lastAt: agent.lastActivity,
+                  ...(agent.source === '' ? {} : { forkedFrom: agent.source }),
+                  isRunning: false,
+                  ...(agent.visitedAt === '' ? {} : { visitedAt: agent.visitedAt }),
+                  device: machine,
+                })),
+        search: () => {
+          throw new Error('anyhost keeps the sessions of machines that are off as journals in R2, with no index of their messages, so it searches none of them.')
+        },
+        read: async (session) => await unreadable(session),
+        send: async (session, { type, text, as }, { caller = '' } = {}) => {
+          const { machine } = await offSession(session)
+          if (type === 'note') throw new Error(`anyhost types prompts into a session's terminal and keeps no note for its next prompt, so ${session.slice(0, 8)} of ${machine.name} gets none.`)
+          await tell(capture, session, { text, keys: [], lines: 0, sender: as === 'session' ? caller : '' }, mover)
+        },
+        abort: async (session) => {
+          await offSession(session)
+          await tell(capture, session, { text: '', keys: ['esc'], lines: 0, sender: '' }, mover)
+        },
+        end: async (session) => {
+          await offSession(session)
+          await tell(capture, session, { text: '', keys: [], lines: 0, sender: '', sleep: true }, mover)
+        },
+        fork: async (session, { prompt, title, at = '' }, { caller = '' } = {}) => {
+          await offSession(session)
+          const forked = await forkAgent(capture, session, at, mover)
+          await tell(capture, forked.session, { text: prompt, keys: [], lines: 0, sender: caller }, mover)
+          return { id: forked.session, title, openedBy: caller, openedAt: new Date().toISOString(), forkedFrom: session }
+        },
+        startTask: async (session, { prompt, title, cwd = '', device: named }, { caller = '' } = {}) => {
+          const target = isJoined() ? (await machinesForList()).devices.find(({ id, name }) => id === named || name === named) : undefined
+          if (target === undefined || target.id === device.id || relay.connectedMachines().some(({ id }) => id === target.id)) throw new NotHeld(session)
+          const started = await startNew(capture, target.name, cwd, prompt, mover, caller)
+          return { id: started, title, openedBy: caller, openedAt: new Date().toISOString() }
+        },
+        callTool: async (session) => {
+          const { machine } = await offSession(session)
+          throw new Error(`${session.slice(0, 8)} is a session of ${machine.name}, which is off, and anyhost calls no tool in a session.`)
+        },
+        usage: async (session) => await unreadable(session),
+        surfaces: async (session) => {
+          await offSession(session)
+          return []
+        },
+        visit: async (session, at = new Date().toISOString()) => {
+          await offSession(session)
+          await visit(relay, session, at)
+          sessions.tell('Change', { session, part: 'visit' })
+        },
+        delete: async (session) => {
+          await offSession(session)
+          await deleteAgent(capture, session, mover)
+          sessions.tell('Change', { session, part: 'deleted' })
+        },
+      })
+      relay.on('presence', ({ device: changed }) =>
+        void heldSessions().then((held) => {
+          for (const { agent, machine } of held) if (machine.id === changed.id) sessions.tell('Change', { session: agent.id, part: 'running' })
+        }, readFailed(`the sessions of ${changed.name}`)),
+      )
+    },
+    (error: unknown) => console.error(`${new Date().toISOString()} anyhost provides nothing to cmod, as connect() failed: ${error instanceof Error ? error.message : String(error)}`),
+  )
 
   await startLineOffsets(capture)
   rmSync(socket, { force: true })
