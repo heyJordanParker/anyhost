@@ -279,7 +279,7 @@ function readHotkeys(hotkeys) {
     throw new Error(`package.json "cmod.hotkeys" is not a map of hotkeys to their title and optional default combo. ${fix}`);
   return { hotkeys: checkHotkeys('package.json "cmod"', hotkeys) };
 }
-var coreVersion = "8.2.0";
+var coreVersion = "8.3.0";
 var oldestCmodVersion = "8.0.0";
 function hotkeyCommand(mod, hotkey) {
   return `${mod}--${hotkey}`;
@@ -4229,7 +4229,10 @@ var conversationMethods = {
   before: "cmod:before",
   sessionColor: "cmod:sessionColor"
 };
-var sessionFields = { id: true, title: true, color: true, project: true, cwd: true, model: true, startedAt: true, lastAt: true, forkedFrom: true, isRunning: true, agentType: true, visitedAt: true, device: true, status: true, waitingFor: true, contextPercent: true, lastTurn: true };
+function subagentTranscript(sessionTranscript, task) {
+  return sessionTranscript?.endsWith(".jsonl") === true ? `${sessionTranscript.slice(0, -".jsonl".length)}/subagents/agent-${task}.jsonl` : undefined;
+}
+var sessionFields = { id: true, title: true, color: true, project: true, cwd: true, transcriptPath: true, model: true, startedAt: true, lastAt: true, forkedFrom: true, isRunning: true, agentType: true, visitedAt: true, device: true, status: true, waitingFor: true, contextPercent: true, lastTurn: true };
 async function usageOf(claude) {
   const [model, usage] = await Promise.all([claude.session.model(), claude.session.usage()]);
   const { tokens, window, percent } = usage.context;
@@ -4591,6 +4594,7 @@ function createSessionsClient({ name, claude, report, hookOn, routeOn, permissio
   const ownerOf = (session, data) => {
     const parent = session === current.id ? current : known.get(session);
     const isBackground = data.isBackground === true;
+    const transcriptPath = isBackground ? known.get(data.id)?.transcriptPath : subagentTranscript(parent?.transcriptPath, data.id);
     return sessionOf(() => ({
       id: data.id,
       title: data.title,
@@ -4598,6 +4602,7 @@ function createSessionsClient({ name, claude, report, hookOn, routeOn, permissio
       ...data.agentType === undefined ? {} : { agentType: data.agentType },
       model: data.model ?? "",
       cwd: parent?.cwd ?? "",
+      ...transcriptPath === undefined ? {} : { transcriptPath },
       isRunning: data.closedAt === undefined && (isBackground || (parent?.isRunning ?? true)),
       startedAt: data.openedAt,
       lastAt: data.closedAt ?? data.openedAt,
@@ -4650,7 +4655,7 @@ function createSessionsClient({ name, claude, report, hookOn, routeOn, permissio
       const routes = permissionRoutes?.();
       if (routes === undefined)
         throw new Error(withoutPermissionCheck(name, method));
-      return routes(method, { raise, refusalFor, hookOn, routeOn, current: () => current });
+      return routes(method, { name, raise, refusalFor, hookOn, routeOn, current: () => current });
     }
     const event = processEvents[named];
     const hook = (isBefore ? event.before : undefined) ?? event.on;
@@ -4815,7 +4820,7 @@ var answerKeys = {
   WorktreeCreate: ["result"],
   Elicitation: ["refuse"],
   ElicitationResponse: ["refuse"],
-  PermissionCheck: ["allow", "ask", "refuse"],
+  PermissionCheck: ["allow", "ask", "refuse", "note"],
   PermissionRequest: ["allow", "input", "updates", "refuse", "interrupt"],
   PermissionDenial: ["retry"],
   ToolBatch: ["note"],
@@ -7591,7 +7596,7 @@ function createLifecycle(definition, permissionRoutes = () => {
   };
   const isInstalledCopy = async () => {
     await recording;
-    if (plugin === undefined)
+    if (plugin === undefined || plugin.name === cmodPluginName)
       return true;
     const recorded = await readRecord((path) => claude().fs.read(path).catch(ifMissing(undefined)), plugin.store, plugin.name);
     return recorded === undefined || recorded.root === plugin.root;
@@ -8362,8 +8367,8 @@ async function createMod(definition, runtime) {
     }
   };
   const followCurrent = async (id, title) => {
-    const [model, usage] = await Promise.all([claude.session.model(), claude.session.usage()]);
-    followed = { id, title: title ?? "", project: modState.root, cwd, model, startedAt: new Date(usage.startedAt).toISOString(), ...forkedFrom === undefined ? {} : { forkedFrom }, ...agentType === undefined ? {} : { agentType } };
+    const [model, usage, { transcriptPath }] = await Promise.all([claude.session.model(), claude.session.usage(), claude.session.info()]);
+    followed = { id, title: title ?? "", project: modState.root, cwd, ...transcriptPath === "" ? {} : { transcriptPath }, model, startedAt: new Date(usage.startedAt).toISOString(), ...forkedFrom === undefined ? {} : { forkedFrom }, ...agentType === undefined ? {} : { agentType } };
     client.follow(followed);
   };
   router.add("classic.SessionStart", async (e, next) => {
@@ -8620,6 +8625,7 @@ async function startMod($, eventInput, passOn) {
       usage: () => $.session.usage(),
       surfaces: () => $.session.surfaces(),
       version: async () => (await $.session.version()).version,
+      info: () => $.session.info(),
       messages: (args) => args === undefined ? $.session.messages() : $.session.messages(args),
       append: (args) => $.session.append(args),
       send: (args) => $.session.send(args)
@@ -9109,7 +9115,7 @@ function resultOf2(value) {
   return JSON.stringify(value);
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-NzqgVF/release/src/program.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-9gvQyg/release/src/program.ts
 var READY_MS = 1e4;
 var FOLLOW_MS = 1000;
 var programs = new WeakMap;
@@ -9149,7 +9155,7 @@ async function askProgram(mod, path, body) {
   return read;
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-NzqgVF/release/src/agents.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-9gvQyg/release/src/agents.ts
 var AGENT = { type: "string", description: "The agent id, or its first 8 characters." };
 var WAKES = "An idle agent takes the message at once, works, and rests again on its own.";
 function agentTools(mod) {
@@ -9363,7 +9369,7 @@ function agentTools(mod) {
   ];
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-NzqgVF/release/src/connect.tsx
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-9gvQyg/release/src/connect.tsx
 var CONNECT_WAIT_MS = 15000;
 var pause = (mod, ms) => new Promise((resolve) => void mod.after(ms, resolve));
 function follow(mod) {
@@ -9513,12 +9519,12 @@ function ConnectingView({ mod, connecting }) {
   }, connecting.error));
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-NzqgVF/release/src/state.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-9gvQyg/release/src/state.ts
 var initialState = {
   memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null }
 };
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-NzqgVF/release/src/views/machines.tsx
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-9gvQyg/release/src/views/machines.tsx
 function momentOf(iso) {
   const at = new Date(iso);
   const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -9652,7 +9658,7 @@ function MachineList({ mod, machines, removing }) {
   }, "[Cancel]"))))));
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-NzqgVF/release/src/mod.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-9gvQyg/release/src/mod.ts
 var MACHINES_EVERY_MS = 1e4;
 var PROMPT_ASK_MS = 1500;
 var PROMPT_MS = 3000;
@@ -9839,7 +9845,7 @@ var anyhost = defineMod({
   }
 });
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-NzqgVF/release/hooks/register.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-9gvQyg/release/hooks/register.ts
 function register(addHook, options) {
   registerMod(addHook, anyhost, options);
 }
