@@ -52,7 +52,7 @@ anyhost keeps every Claude Code and Codex session of every machine the Architect
 - Claude Code's record `sessions/<pid>.json` is the program's source of a session's status (`busy`, `shell`, `waiting`, `idle`, `parkedJobId`), read only through `recordedSessions` and `recordAt` in `claude.ts`.
 - Claude Code saves no transcript under a parent Claude Code's `CLAUDE_CODE_CHILD_SESSION`, so every anyhost process drops `CLAUDE_MARKERS` as it starts.
 - herdr-core gives new terminals the environment its core started with, which `hc server restart` keeps and a stop and start replaces.
-- The Herdr app interrupts a render after 50 ms and an event after 500 ms (`Budgets` in gpui-kit's `sandbox.rs`), so a render only draws a model built in a task (`computeModel` in `main.js`).
+- The Herdr app interrupts a render after 50 ms and an event after 500 ms (`Budgets` in gpui-kit's `sandbox.rs`), so a render only draws a model built in a task (`computeModel` in `main.js`). The interrupt runs no `catch` and no `finally` and ends the task, so the pane holds no flag across an `await`, builds cards one step per `sync` (`building`), and takes each list it reads in a timer of its own (`receive`), never in the task that follows the list.
 
 ## Tests
 

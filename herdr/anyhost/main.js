@@ -32,6 +32,7 @@ const WANTED = "anyhost.wanted";
 const PRESENTED = "anyhost.presented";
 const STICKY = "anyhost.sticky";
 const WINDOWS = "anyhost.windows";
+const STATUS_WORDS = "anyhost.statusWords";
 const MODES = [
   ["tabs", "Tabs", `${OWN}/app-window`],
   ["scroll", "Scroll", `${OWN}/gallery-horizontal`],
@@ -115,19 +116,17 @@ const STATE = {
   idle: { name: "Idle", sentence: "It is idle", icon: "mods/anyhost/icons/circle", colors: ["#787774", "#9b9b9b"] },
 };
 const isRunning = (state) => state === "working" || state === "tasks";
-const noteStatuses = (seen, all) => {
-  for (const x of all) {
-    const was = seen.get(x.address);
-    if (was === undefined) seen.set(x.address, { word: x.status, at: 0 });
-    else if (was.word !== x.status) seen.set(x.address, { word: x.status, at: Date.now() });
-  }
+const noteStatusWords = (all) => {
+  const was = shared(STATUS_WORDS) ?? {};
+  const now = Object.fromEntries(all.map((x) => [x.address, was[x.address]?.word === (x.status ?? null) ? was[x.address] : { word: x.status ?? null, at: x.address in was ? Date.now() : 0 }]));
+  if (JSON.stringify(now) !== JSON.stringify(was)) setShared(STATUS_WORDS, now);
 };
-const liveStateOf = (known, terminal, seen) => {
-  const word = terminal && !terminal.address.includes("/") ? terminal.status : null;
-  if (!word || !((seen.get(terminal.address)?.at ?? 0) > (known?.since ?? 0))) return known?.state;
+const wordChangedAt = (address) => shared(STATUS_WORDS)?.[address]?.at ?? 0;
+const liveStateOf = (known, terminal) => {
+  const word = terminal && !terminal.address.includes("/") && wordChangedAt(terminal.address) > (known.since ?? 0) ? terminal.status : null;
   if (word === "working") return "working";
   if (word === "blocked" || word === "error") return "blocked";
-  return known?.state === "working" || known?.state === "blocked" ? (known.background ? "tasks" : "done") : known?.state;
+  return word && (known.state === "working" || known.state === "blocked") ? (known.background ? "tasks" : "done") : known.state;
 };
 const INCLUDES = [
   ["background", "Background", "layers"],
@@ -752,6 +751,7 @@ const loadingOf = () => {
   if (w === null || w.act !== "focus") return null;
   if (w.starting) return w;
   if (w.session) return isPanedSession(w.session) ? null : w;
+  if (w.terminal) return panes().some((p) => p.terminal === w.terminal && spaceOfTab(p.tab) === w.space) ? null : w;
   return w.space && !spaces().some((sp) => sp.id === w.space) ? w : null;
 };
 const reachOf = (machine) => {
@@ -934,7 +934,6 @@ export default class Anyhost extends View {
     this.isSyncing = false;
     this.isDrawing = false;
     this.partViews = new Map();
-    this.statusSeen = new Map();
     this.wanted = new Set();
     this.mounted = new Set();
     this.pressed = null;
@@ -1116,6 +1115,10 @@ export default class Anyhost extends View {
       this.listView = cx.new(Part, { owner: this, key: LIST_PART });
       this.headView = cx.new(Part, { owner: this, key: HEAD_PART });
       cx.notify();
+    }
+    if (this.building) {
+      this.syncSoon(cx);
+      if (this.building.next().done) this.building = null;
     }
     const live = this.liveInputs();
     const opening = JSON.stringify(openingOf());
@@ -1360,28 +1363,24 @@ export default class Anyhost extends View {
     this.signature = "";
     this.model = null;
     this.shown = null;
-    this.isTaking = false;
+    this.building = null;
+    this.received = null;
     this.isFollowing = false;
     this.changedAt = shared(CHANGED) ?? 0;
     this.listed = "";
     this.branches = new Map(saved("branches", []));
     this.branchesVersion = 0;
     this.branchesReading = false;
-    cx.spawn(async (cx) => {
-      const cached = saved("listed", null);
-      if (!cached?.listed || this.data !== null) return;
-      await this.take(cx, cached.listed, cached.askedAt ?? 0, cached.readAt ?? null);
-      cx.notify();
-    });
+    const cached = saved("listed", null);
+    if (cached?.listed) this.receive(cx, cached.listed, cached.askedAt ?? 0, cached.readAt ?? null);
     this.runActs(cx, (cx) => this.redrawCard(cx, null));
     cx.timer.every(TICK_MS, (cx) => this.redrawAll(cx));
     this.follow(cx, isPolled);
   }
 
   follow(cx, isPolled) {
-    if (!isPolled()) {
-      return cx.timer.after(FOLLOW_MS, (cx) => this.follow(cx, isPolled));
-    }
+    if (!isPolled()) return cx.timer.after(FOLLOW_MS, (cx) => this.follow(cx, isPolled));
+    if (this.received !== null) return cx.timer.after(FRAME_MS, (cx) => this.follow(cx, isPolled));
     const askedAt = Date.now();
     const wait = this.isFollowing && this.version !== undefined ? ["--wait", String(this.version)] : [];
     cx.spawn(async (cx) => {
@@ -1389,7 +1388,7 @@ export default class Anyhost extends View {
         const listed = await anyhost(["list", "--json", "--brief", ...wait]);
         this.isFollowing = true;
         this.retryWait = 0;
-        await this.take(cx, listed, askedAt);
+        this.receive(cx, listed, askedAt, Date.now());
       } catch (error) {
         this.isFollowing = false;
         this.retryWait = Math.min(this.retryWait * 2 || FOLLOW_MS, REFRESH_MS);
@@ -1405,7 +1404,7 @@ export default class Anyhost extends View {
     cx.spawn(async (cx) => {
       try {
         const listed = await anyhost(["list", "--json", "--brief"]);
-        await this.take(cx, listed, askedAt);
+        this.receive(cx, listed, askedAt, Date.now());
       } catch (error) {
         console.error(`anyhost could not read the sessions: ${messageOf(error)}`);
       }
@@ -1413,20 +1412,24 @@ export default class Anyhost extends View {
     });
   }
 
+  receive(cx, listed, askedAt, readAt) {
+    this.received = { listed, askedAt, readAt };
+    cx.timer.after(0, (cx) => {
+      const received = this.received;
+      if (received === null) return;
+      this.received = null;
+      void this.take(cx, received.listed, received.askedAt, received.readAt);
+      cx.notify();
+    });
+  }
+
   async take(cx, listed, askedAt, readAt = Date.now()) {
     const isNew = this.apply(listed, askedAt, readAt);
+    if (isNew) this.building = this.cardSteps();
     this.adoptOutbox(cx);
     if (!isNew) return;
-    this.isTaking = true;
-    try {
-      await nextTask(cx);
-      save("listed", { listed, readAt, askedAt });
-      await nextTask(cx);
-      const steps = this.cardSteps();
-      while (!steps.next().done) await nextTask(cx);
-    } finally {
-      this.isTaking = false;
-    }
+    await nextTask(cx);
+    save("listed", { listed, readAt, askedAt });
   }
 
   apply(listed, askedAt, readAt) {
@@ -1468,23 +1471,23 @@ export default class Anyhost extends View {
 
   liveInputs() {
     const all = terminals().filter((x) => x.state === "live");
-    noteStatuses(this.statusSeen, all);
+    noteStatusWords(all);
     const listed = agents();
     const isLooking = window()?.active === true;
     const at = focused();
     const tree = layout();
-    const view = shownView(tree);
     const ps = panes();
     const allSpaces = spaces();
     const paned = new Set(ps.map((p) => p.terminal).filter(Boolean));
-    const focusedTerminal = view !== "board" ? (at?.terminal ?? ps.find((p) => p.tab === at?.tab && p.focused && p.terminal)?.terminal ?? null) : null;
+    const { shown } = this.workNow();
+    const focusedTerminal = shown?.terminal ?? null;
     const layouts = machines().map((m) => m.layout).join(",");
     const placed = `${ps.map((p) => `${p.pane}:${p.tab}:${p.terminal ?? ""}`).join(",")}|${allSpaces.map((sp) => sp.id).join(",")}|${layouts}|${at?.space ?? ""}:${at?.pane ?? ""}`;
-    return { all, listed, isLooking, view, tiles: tileTerminals(tree), paned, isNarrow: narrow(tree), activeSpace: allSpaces.find((sp) => sp.active)?.id ?? null, shown: isLooking ? focusedTerminal : null, focusedTab: at?.tab ?? null, focusedTerminal, placed, shape: `${at?.tab ?? ""}|${ps.length}|${allSpaces.length}|${layouts}` };
+    return { all, listed, isLooking, view: shownView(tree), tiles: tileTerminals(tree), paned, isNarrow: narrow(tree), activeSpace: allSpaces.find((sp) => sp.active)?.id ?? null, shown: isLooking ? focusedTerminal : null, focusedTab: shown?.tab ?? null, focusedTerminal, placed, shape: `${at?.tab ?? ""}|${ps.length}|${allSpaces.length}|${layouts}` };
   }
 
   modelInputsOf(live) {
-    if (this.data === null || this.isTaking) return null;
+    if (this.data === null || this.building) return null;
     const filter = this.kind === "board" ? this.boardFilter() : filterOf();
     const work = this.kind === "board" ? this.workNow() : null;
     const isStart = work?.mode === "start";
@@ -1493,7 +1496,7 @@ export default class Anyhost extends View {
   }
 
   inputsOf(live, modelInputs, opening) {
-    return `${opening}|${modelInputs?.key ?? this.isTaking}|${Math.floor(Date.now() / TICK_MS)}|${this.snapshotAt}|${live.placed}|${shared(CHANGED) ?? 0}|${wantedOf()?.id ?? ""}|${JSON.stringify(outboxOf())}|${JSON.stringify(preferencesOf())}|${Boolean(shared(DRAG_TAB))}|${Boolean(shared(SPLIT))}|${this.pressed?.isMoving === true}`;
+    return `${opening}|${modelInputs?.key ?? ""}|${Math.floor(Date.now() / TICK_MS)}|${this.snapshotAt}|${live.placed}|${shared(CHANGED) ?? 0}|${wantedOf()?.id ?? ""}|${JSON.stringify(outboxOf())}|${JSON.stringify(preferencesOf())}|${Boolean(shared(DRAG_TAB))}|${Boolean(shared(SPLIT))}|${this.pressed?.isMoving === true}`;
   }
 
   signatureOf(live, filter) {
@@ -1842,8 +1845,8 @@ export default class Anyhost extends View {
     const isShown = Boolean(c.address) && (c.address === shown || c.views.includes(shown)) && shared(STICKY) !== c.key;
     const isUnread = !isShown && c.isNewer;
     const listed = c.status === "blocked" || c.status === "working" ? c.status : c.background ? "tasks" : now - at < FRESH_MS ? "done" : "idle";
-    const state = liveStateOf({ state: listed, since: c.statusSinceMs, background: c.background }, terminal, this.statusSeen);
-    const since = state === "blocked" || isRunning(state) ? ((state === listed ? c.statusSinceMs : this.statusSeen.get(terminal.address).at) ?? terminal?.status_ms ?? at) : at;
+    const state = liveStateOf({ state: listed, since: c.statusSinceMs, background: c.background }, terminal);
+    const since = state === "blocked" || isRunning(state) ? ((state === listed ? c.statusSinceMs : wordChangedAt(terminal.address)) ?? terminal?.status_ms ?? at) : at;
     const label = isOffline ? "Offline" : state === "blocked" ? (ASKS[terminal?.report?.kind] ?? (terminal?.status === "error" ? "Error" : "Needs you")) : state === "idle" ? "" : STATE[state].name;
     return { state, label, since, isUnread, isOffline, seenAt: isOffline ? (holder.seenAt ?? null) : null };
   }
@@ -2557,14 +2560,19 @@ export default class Anyhost extends View {
     const stranded = live.all.filter((x) => x.labels?.["herdr.space"] && !isWorkspace(x.labels["herdr.space"]) && !this.moves.has(x.address));
     if (stranded.length === 0) return;
     const folderAt = new Map(panes().map((p) => [p.terminal, p.cwd ?? ""]));
+    const shownFrom = [];
     for (const x of stranded) {
       const tab = x.labels["herdr.tab"] || idOf();
       const machine = this.machineAt(x.address);
       const folder = folderAt.get(x.address) ?? "";
       const holder = model.rows.filter((r) => r.kind === "own" && !r.deleted && hasWorktrees(r.projectKey) && r.machine === machine && isUnder(folder, r.checkout)).sort((a, b) => b.checkout.length - a.checkout.length)[0];
       const space = (model.byKey.get(x.labels[SESSION_LABEL] || x.labels[VIEW_LABEL] || "") ?? holder)?.space;
-      if (space) this.moveTerminal(x.address, { space, tab });
+      if (!space) continue;
+      if (spaceOfTerminal(x.address) === live.activeSpace) shownFrom.push({ terminal: x.address, space: placedSpace(this.onOf(machine) ?? "", space), title: x.title || "a terminal" });
+      this.moveTerminal(x.address, { space, tab });
     }
+    const shown = shownFrom.find((moved) => moved.terminal === live.focusedTerminal) ?? shownFrom[0];
+    if (shown) want(shown);
   }
 
   recordTabs(cx, model) {
@@ -5647,7 +5655,8 @@ export default class Anyhost extends View {
   workNow() {
     const { workspace, space } = workPlace();
     const tab = space?.tabs.find((x) => x.active) ?? null;
-    const inTab = tab ? panes().filter((p) => p.tab === tab.id && p.terminal).map((p) => p.terminal) : [];
+    const paned = tab ? panes().filter((p) => p.tab === tab.id && p.terminal) : [];
+    const inTab = paned.map((p) => p.terminal);
     const settings = windowLayoutOf(tab?.id);
     const terminals = inOrder(settings.order, inTab);
     const boardId = space?.id ?? workspace?.id ?? ALL_WORK;
@@ -5655,7 +5664,9 @@ export default class Anyhost extends View {
     const canTile = Boolean(find(layout(), "tiles")) && terminals.length > 0;
     const mode = loadingOf() !== null ? "opening" : space === null ? (isBoard ? "board" : "start") : isBoard ? "board" : TILED.has(settings.mode) && canTile ? settings.mode : "tabs";
     const at = focused()?.terminal ?? null;
-    return { workspace, space, id: space?.id ?? null, boardId, tab: tab?.id ?? null, terminals, mode, layoutMode: settings.mode, settings, focused: terminals.includes(at) ? at : null };
+    const isFocused = terminals.includes(at);
+    const shown = tab === null || ON_BOARD.has(mode) ? null : { tab: tab.id, terminal: isFocused ? at : (paned.find((p) => p.focused)?.terminal ?? null) };
+    return { workspace, space, id: space?.id ?? null, boardId, tab: tab?.id ?? null, terminals, mode, layoutMode: settings.mode, settings, focused: isFocused ? at : null, shown };
   }
 
   tilesFor(work) {
@@ -5675,7 +5686,7 @@ export default class Anyhost extends View {
     return JSON.stringify([
       spaces(),
       panes().map((p) => [p.pane, p.tab, p.terminal, p.mod, p.focused, p.zoomed, p.program?.icon, p.program?.tint, p.program?.agent]),
-      terminals().map((x) => [x.address, x.state, x.labels?.[SESSION_LABEL], x.status, x.status_ms]),
+      terminals().map((x) => [x.address, x.state, x.labels?.[SESSION_LABEL]]),
       layout(),
       machines(),
       [w?.platform, w?.titlebar, w?.fullscreen, w?.buttons, at?.space, at?.tab, at?.pane, at?.terminal],
@@ -5685,7 +5696,6 @@ export default class Anyhost extends View {
   }
 
   syncTabs(cx) {
-    noteStatuses(this.statusSeen, terminals());
     const inputs = this.tabInputsOf();
     if (inputs === this.tabsInputs) return;
     this.tabsInputs = inputs;
@@ -5718,8 +5728,7 @@ export default class Anyhost extends View {
     const archived = new Map(queued().flatMap(([, entry]) => Object.entries(entry.changes).filter(([, fields]) => "archived" in fields).map(([key, fields]) => [key, fields.archived])));
     const archiving = new Set([...archived].filter(([, isArchived]) => isArchived).map(([key]) => key));
     const ps = panes();
-    const terminalAt = new Map(terminals().map((x) => [x.address, x]));
-    const sessionAt = new Map([...terminalAt].map(([address, x]) => [address, x.labels?.[SESSION_LABEL]]));
+    const sessionAt = new Map(terminals().map((x) => [x.address, x.labels?.[SESSION_LABEL]]));
     const known = shared(PULSE)?.sessions ?? {};
     const isAll = filterOf().project === null;
     const groups = isAll ? this.spacesInOrder() : [work.space].filter(Boolean);
@@ -5727,9 +5736,8 @@ export default class Anyhost extends View {
       space.tabs.map((tab) => {
         const inTab = ps.filter((p) => p.tab === tab.id);
         const sessions = [...new Set(inTab.map((p) => sessionAt.get(p.terminal)).filter(Boolean))];
-        const states = inTab.filter((p) => sessionAt.get(p.terminal)).map((p) => liveStateOf(known[sessionAt.get(p.terminal)], terminalAt.get(p.terminal), this.statusSeen));
+        const states = sessions.map((key) => known[key]?.state);
         const ofSessions = Object.keys(STATE).find((state) => states.includes(state));
-        const isHere = space.id === work.id;
         return {
           tab,
           space: space.id,
@@ -5737,7 +5745,7 @@ export default class Anyhost extends View {
           sessions,
           isPinned: sessions.some((key) => known[key]?.pinned),
           state: ofSessions ?? (tab.status === "blocked" || tab.status === "working" || tab.status === "done" ? tab.status : null),
-          isShown: isHere && tab.active && !ON_BOARD.has(work.mode),
+          isShown: tab.id === work.shown?.tab,
         };
       }),
     );
@@ -6068,12 +6076,12 @@ export default class Anyhost extends View {
       if (wantedOf()?.id === w.id) setShared(WANTED, null);
     };
     if (Date.now() - w.at > LONG_MS) return done();
-    if (!w.session) {
+    if (!w.session && !w.terminal) {
       if (w.starting || !spaces().some((sp) => sp.id === w.space)) return;
       run("space.select", { id: w.space });
       return done();
     }
-    const labelled = terminals().filter((x) => x.labels?.[SESSION_LABEL] === w.session && x.state === "live");
+    const labelled = terminals().filter((x) => x.state === "live" && (w.terminal ? x.address === w.terminal : x.labels?.[SESSION_LABEL] === w.session));
     const x = labelled.find((each) => !each.program?.shell) ?? labelled[0];
     if (!x) {
       if (this.wantedLive) {
@@ -6096,9 +6104,9 @@ export default class Anyhost extends View {
       run("pane.split", { pane: w.pane, direction: w.direction, argv: ["sh", "-c", VIEW, "view", w.session, x.address] });
       return done();
     }
-    const pane = panes().find((p) => p.terminal === x.address);
+    const pane = panes().find((p) => p.terminal === x.address && (!w.terminal || spaceOfTab(p.tab) === w.space));
     if (!pane) {
-      if (!x.labels?.["herdr.space"] && w.space && this.adoptedFor !== w.id) {
+      if (w.session && !x.labels?.["herdr.space"] && w.space && this.adoptedFor !== w.id) {
         this.adoptedFor = w.id;
         void hc(["label", x.address, `herdr.space=${w.space.split("/").pop()}`, `herdr.tab=${w.session.slice(0, 8)}`]);
       }
@@ -6398,7 +6406,7 @@ export default class Anyhost extends View {
   }
 
   tabSized(el) {
-    return el.flex_1().min_w(TAB_LEAST).max_w(TAB_MOST).h(UI.height.control).overflow_hidden();
+    return el.flex_none().max_w(TAB_MOST).h(UI.height.control).overflow_hidden();
   }
 
   sessionPill(t, slot, isGhost = false) {
@@ -6410,7 +6418,8 @@ export default class Anyhost extends View {
     const isPicked = isLoading && this.picked === session.key;
     return h_flex()
       .id(`ah-tab-${id}`)
-      .size_full()
+      .h_full()
+      .max_w_full()
       .on_size_change((size) => this.widths.set(slot.id, size.width))
       .px(UI.space.sm)
       .gap(UI.space.sm)
@@ -6447,7 +6456,7 @@ export default class Anyhost extends View {
         if (row) this.menu(row);
       })
       .child(isLoading ? this.loadingLead() : (this.stateLead(session.state) ?? this.harnessIcon(t, session)))
-      .child(div().flex_1().min_w(0).truncate().child(session.title))
+      .child(div().min_w(0).truncate().child(session.title))
       .child(this.tabEnd(t, id, session.isPinned, isHovered && !isDragged, "Archive", (cx) => this.archiveSlept(cx, session)));
   }
 
@@ -6492,7 +6501,8 @@ export default class Anyhost extends View {
       (!program?.icon ? null : program.tint ? svg(program.icon).size(UI.icon.body).flex_none().text_color(t.muted) : image(program.icon).size(UI.icon.body).flex_none());
     return h_flex()
       .id(`ah-tab-${tab.id}`)
-      .size_full()
+      .h_full()
+      .max_w_full()
       .on_size_change((size) => this.widths.set(slot.id, size.width))
       .px(UI.space.sm)
       .gap(UI.space.sm)
@@ -6530,7 +6540,7 @@ export default class Anyhost extends View {
         this.windowMenu(windowFacts(tab.id));
       })
       .when(lead !== null, (el) => el.child(lead))
-      .child(div().flex_1().min_w(0).truncate().child(tab.name))
+      .child(div().min_w(0).truncate().child(tab.name))
       .child(this.tabEnd(t, tab.id, slot.pill.isPinned, (isShown || isHovered) && !isDragged, sessions.length > 0 ? "Close and archive · Reopen closed tab brings it back" : "Close the tab", (cx) => this.closeNow(cx, slot.pill)));
   }
 
