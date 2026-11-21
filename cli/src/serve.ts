@@ -1185,6 +1185,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       })
       .catch(readFailed('the machines'))
   for (const kind of ['list', 'stored', 'statuses'] as const) relay.on(kind, ({ from }) => void heardFrom.add(from.id))
+  relay.on('presence', ({ device: { id }, connected }) => void (connected && heardFrom.add(id)))
   let toldStatuses = ''
   const tellStatuses = async (): Promise<void> => {
     const shown = await statusesHere(capture, mover.activity)
