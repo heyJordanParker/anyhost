@@ -3,7 +3,7 @@ import { appendFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openCapture, openDatabase } from '../src/capture.ts'
 import { memoryRelay, noCode, statusOn, until, welcomed } from './memory.ts'
-import { claimOn, DESKTOP, isUploaded, LAPTOP, postTo, roots, runningOn, runsOn, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
+import { claimOn, DESKTOP, isUploaded, killMachine, LAPTOP, postTo, roots, runningOn, runsOn, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
 
 test('a move whose session another machine takes while it waits ends failed within seconds, the program answering meanwhile, and leaves the session with that machine', async () => {
   const relay = await memoryRelay()
@@ -77,7 +77,7 @@ test("a session another machine took while the program was down stops its copy h
   const claimer = relay.connect(WORKER, roots(workerHome))
   expect(await claimer.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true })
   claimer.close()
-  worker.child.kill('SIGKILL')
+  killMachine(worker)
   await worker.child.exited
   await until(() => !relay.isConnected(WORKER.id), "the worker's socket closing")
   const laptop = relay.connect(LAPTOP, roots('/home/laptop'))

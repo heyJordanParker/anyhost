@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, configOf, hookOn, isIndexed, LAPTOP, machineFor, postTo, roots, runningOn, runsOn, serveOn, SESSION, terminalOn, tripOn, trust, trustedIn, WORKER, workerOn } from './program.ts'
+import { anyhostOn, configOf, hookOn, isIndexed, killMachine, LAPTOP, machineFor, postTo, roots, runningOn, runsOn, serveOn, SESSION, terminalOn, tripOn, trust, trustedIn, WORKER, workerOn } from './program.ts'
 
 test('an open of a session a terminal here runs answers that terminal and starts nothing', async () => {
   const relay = await memoryRelay()
@@ -147,7 +147,7 @@ test('an open continues a session here from R2 while the machine that ran it is 
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
-  laptop.child.kill('SIGKILL')
+  killMachine(laptop)
   type Machines = { readonly machines: readonly { readonly id: string; readonly connected: boolean }[] }
   const isLaptopGone = async (): Promise<boolean> => !((await (await fetch('http://localhost/machines', { unix: worker.socket })).json()) as Machines).machines.some(({ id, connected }) => id === LAPTOP.id && connected)
   await until(isLaptopGone, 'the Pool counting the laptop gone', 60_000)
@@ -179,7 +179,7 @@ test('an open of a session a connected machine runs, as a click on a list read b
 test("anyhost open with a session's first 8 characters continues a session another machine's index lists and no machine claims, as the one-time import leaves one", async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
-  laptop.child.kill('SIGKILL')
+  killMachine(laptop)
   await relay.connect(LAPTOP, roots(laptop.env['HOME'] ?? '')).runOne({ op: 'forget', session: SESSION })
   const worker = await workerOn(relay)
   const claimedBefore = (await relay.claims()).has(SESSION)

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import { existsSync, readFileSync } from 'node:fs'
 import { memoryRelay, until } from './memory.ts'
-import { LAPTOP, postTo, runningOn, SESSION, workerOn } from './program.ts'
+import { killMachine, LAPTOP, postTo, runningOn, SESSION, workerOn } from './program.ts'
 
 test('a delete stops the session and removes its files, every machine lists it as deleted, and opening it brings its conversation back', async () => {
   const relay = await memoryRelay()
@@ -24,7 +24,7 @@ test('a session whose machine is gone, or that no machine here ever held, is del
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
-  laptop.child.kill('SIGKILL')
+  killMachine(laptop)
   type Machines = { readonly machines: readonly { readonly id: string; readonly connected: boolean }[] }
   const isLaptopGone = async (): Promise<boolean> => !((await (await fetch('http://localhost/machines', { unix: worker.socket })).json()) as Machines).machines.some(({ id, connected }) => id === LAPTOP.id && connected)
   await until(isLaptopGone, 'the Pool counting the laptop gone', 60_000)

@@ -42,6 +42,8 @@ export function spawnForTest<const In extends SpawnOptions.Writable = 'ignore', 
   return child
 }
 
+export const killMachine = (machine: { readonly child: Subprocess }): void => kill(-machine.child.pid)
+
 const isMarked = (pid: number): boolean => {
   if (process.platform !== 'linux') return false
   try {

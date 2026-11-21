@@ -841,6 +841,21 @@ describe('the holder', () => {
     expect(await mac.socket.results({ op: 'remove', device: away.device.id })).toEqual([{ status: 200 }])
     expect(await mac.socket.results({ op: 'claim', session, take: true })).toEqual([{ status: 200, told: true }])
   })
+
+  test('a take if gone of a session whose holder sent a request just before its link broke answers told false once the other machines heard that holder gone', async () => {
+    const lost = await joinNew(mac, 'lost-link')
+    const session = crypto.randomUUID()
+    expect(await lost.socket.results({ op: 'claim', session, take: false })).toEqual([{ status: 200, told: true }])
+    lost.socket.send(encodeMessage(REQUEST, { id: 0, ops: [{ op: 'claims', prefix: session }] }, []))
+    lost.socket.ws.terminate()
+    await mac.socket.next((m) => !(m instanceof Uint8Array) && m['t'] === 'presence' && m['device']['id'] === lost.device.id && m['connected'] === false, `presence of ${lost.device.name}, connected false`)
+
+    const [devices] = await mac.socket.results({ op: 'devices' })
+    const taken = await mac.socket.results({ op: 'claim', session, take: true, if: { gone: true } })
+
+    expect((devices!['devices'] as Json[]).find((device) => device['id'] === lost.device.id)?.['connected']).toBe(false)
+    expect(taken).toEqual([{ status: 200, previous: { id: lost.device.id, name: lost.device.name }, told: false }])
+  })
 })
 
 describe('remove', () => {

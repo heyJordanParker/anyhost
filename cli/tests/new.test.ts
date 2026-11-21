@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, statusOn, until } from './memory.ts'
-import { anyhostOn, CLI, decoder, LAPTOP, machineFor, runsOn, sentOn, serveOn, spawnForTest, startedOn, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
+import { anyhostOn, CLI, decoder, killMachine, LAPTOP, machineFor, runsOn, sentOn, serveOn, spawnForTest, startedOn, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
 
 test('anyhost new starts a session on the worker in a terminal of herdr-core in its clone of the same repository, as the machine the session wants', async () => {
   const relay = await memoryRelay()
@@ -37,7 +37,7 @@ test('anyhost new to a worker whose program ends after it took the start ends wi
 
   const started = spawnForTest(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
   await until(() => startedOn(worker) !== '', 'the worker starting the session', 30_000)
-  worker.child.kill('SIGKILL')
+  killMachine(worker)
   const endedAt = Date.now()
   const [code, err] = await Promise.all([started.exited, new Response(started.stderr).text()])
 
