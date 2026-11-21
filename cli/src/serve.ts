@@ -1,4 +1,5 @@
 import type { Subprocess } from 'bun'
+import type { CmodInterfaces } from 'claude-code'
 import { once } from 'node:events'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -1441,7 +1442,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   void settle('environment', () => saveLoginEnvironment())
   void settle('fork starts', () => indexForkStarts(capture))
   void connect().then(
-    () => {
+    (connection) => {
       const devices = provide('cmod/Devices', {
         devices: () => relay.connectedMachines(),
         send: (to: string, message: unknown) => {
@@ -1545,15 +1546,25 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           for (const { agent, machine } of held) if (machine.id === changed.id) sessions.tell('Change', { session: agent.id, part: 'running' })
         }, readFailed(`the sessions of ${changed.name}`)),
       )
-      void providers('cmod/Terminal').then((terminals) => {
-        for (const terminal of terminals.filter((each) => each.mod === 'cmod' && each.device.id === device.id)) {
-          terminal.onPressed(({ session }) => void mover.touched.set(session, Date.now()))
-          terminal.onShown(({ session, place }) => {
-            mover.touched.set(session, Date.now())
-            if (place !== 'peek' && place !== 'hide') restoreOpened(session)
-          })
-        }
-      }, readFailed("cmod serve's providers of cmod/Terminal"))
+      const listenedTerminals = new Set<string>()
+      const listenToTerminals = (): void =>
+        void providers('cmod/Terminal').then((terminals) => {
+          for (const terminal of terminals) {
+            const program = terminal.program ?? terminal.mod
+            if (terminal.mod !== 'cmod' || terminal.device.id !== device.id || listenedTerminals.has(program)) continue
+            listenedTerminals.add(program)
+            terminal.onPressed(({ session }) => void mover.touched.set(session, Date.now()))
+            terminal.onShown(({ session, place }) => {
+              mover.touched.set(session, Date.now())
+              if (place !== 'peek' && place !== 'hide') restoreOpened(session)
+            })
+          }
+        }, readFailed("cmod serve's providers of cmod/Terminal"))
+      connection.listen('cmod/Providers', 'Change', (told) => {
+        const change = told as CmodInterfaces['cmod/Providers']['events']['Change']
+        if (change.interface === 'cmod/Terminal' && change.device.id === device.id) listenToTerminals()
+      })
+      listenToTerminals()
     },
     (error: unknown) => console.error(`${new Date().toISOString()} anyhost provides nothing to cmod, as connect() failed: ${error instanceof Error ? error.message : String(error)}`),
   )

@@ -2,6 +2,14 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.4] - 2026-11-21
+
+### Changed
+- anyhost needs cmod 8.3.0 or newer.
+
+### Fixed
+- A session an agent shows or types into through cmod stays running also when cmod's terminal tools start after anyhost, as after a cmod update.
+
 ## [0.11.3] - 2026-11-21
 
 ### Changed

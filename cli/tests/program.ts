@@ -374,7 +374,7 @@ export type Heard = { readonly event: string; readonly payload: unknown }
 
 export const withCmod = (env: Record<string, string>): Record<string, string> => ({ ...env, CMOD_MOD: 'anyhost', CMOD_PROGRAM: 'anyhost' })
 
-export function cmodServeOf(machine: { readonly env: Record<string, string> }) {
+export function cmodServeOf(machine: { readonly env: Record<string, string> }, { providesTerminal = true } = {}) {
   const store = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod')
   mkdirSync(store, { recursive: true })
   const outbox: Rpc[] = []
@@ -383,7 +383,9 @@ export function cmodServeOf(machine: { readonly env: Record<string, string> }) {
   const heard: Heard[] = []
   const provided: string[] = []
   const listening: { readonly id: string; readonly name: string; readonly event: string }[] = []
-  const terminals = [{ mod: 'cmod', program: 'cmod', device: { id: machine.env['ANYHOST_DEVICE_ID'], name: machine.env['ANYHOST_DEVICE_NAME'] } }]
+  const here = { id: machine.env['ANYHOST_DEVICE_ID'], name: machine.env['ANYHOST_DEVICE_NAME'] }
+  const terminal = { mod: 'cmod', program: 'cmod', device: here }
+  const terminals = providesTerminal ? [terminal] : []
   const watchers = new Set<() => void>()
   let poll: ((messages: Rpc[]) => void) | undefined
   let asked = 0
@@ -446,15 +448,21 @@ export function cmodServeOf(machine: { readonly env: Record<string, string> }) {
     },
   })
   onTestFinished(() => void server.stop(true))
+  const tell = (name: string, event: string, payload: unknown): Promise<void> => {
+    const readAt = polls + (poll === undefined ? 2 : 1)
+    for (const { id } of listening.filter((each) => each.name === name && each.event === event)) send({ jsonrpc: '2.0', method: '$/on', params: { id, payload, cursor: String((told += 1)) } })
+    return once(() => polls >= readAt)
+  }
   return {
     heard,
     once,
     provides: (name: string): Promise<void> => once(() => provided.includes(name)),
     listens: (name: string, event: string): Promise<void> => once(() => listening.some((each) => each.name === name && each.event === event)),
-    tell(name: string, event: string, payload: unknown): Promise<void> {
-      const readAt = polls + (poll === undefined ? 2 : 1)
-      for (const { id } of listening.filter((each) => each.name === name && each.event === event)) send({ jsonrpc: '2.0', method: '$/on', params: { id, payload, cursor: String((told += 1)) } })
-      return once(() => polls >= readAt)
+    listenerCount: (name: string, event: string): number => listening.filter((each) => each.name === name && each.event === event).length,
+    tell,
+    provideTerminal(): Promise<void> {
+      terminals.push(terminal)
+      return tell('cmod/Providers', 'Change', { interface: 'cmod/Terminal', device: here })
     },
     restart(): void {
       starts += 1

@@ -184,6 +184,29 @@ test("a press or a show cmod makes in an idle session's terminal restarts its st
 
   expect([hasEnded(pressed), hasEnded(shown)]).toEqual([false, false])
   expect((await sharedIn(relay)).archived?.[FOURTH_SESSION]?.archived).toBe(false)
+  expect([cmod.listenerCount('cmod/Terminal', 'Pressed'), cmod.listenerCount('cmod/Terminal', 'Shown')]).toEqual([1, 1])
+}, 90_000)
+
+test("a press cmod makes in an idle session's terminal restarts its stop time when cmod serve starts providing cmod/Terminal after anyhost connected, and anyhost listens to that provider once however often cmod/Providers tells it changed", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const anHourAgo = Date.now() - 3_600_000
+  const pressed = claudeIn(laptop, 't0', OTHER_SESSION, 'idle', anHourAgo)
+  const untouched = claudeIn(laptop, 't1', SESSION, 'idle', anHourAgo)
+  coreSays(laptop.folder, { seq: 1, terminals: [] })
+  const cmod = cmodServeOf(laptop, { providesTerminal: false })
+  await serveOn(withCmod({ ...laptop.env, ANYHOST_STOP_MS: '120000' }))
+
+  await cmod.listens('cmod/Providers', 'Change')
+  await cmod.provideTerminal()
+  await cmod.listens('cmod/Terminal', 'Pressed')
+  await cmod.tell('cmod/Providers', 'Change', { interface: 'cmod/Terminal', device: { id: LAPTOP.id, name: LAPTOP.name } })
+  await cmod.tell('cmod/Terminal', 'Pressed', { session: OTHER_SESSION })
+  for (const [address, session] of [['t0', OTHER_SESSION], ['t1', SESSION]] as const) coreSays(laptop.folder, coreEvent('created', address, terminalIn(address, CLAUDE, { 'anyhost.session': session })))
+  await untouched.exited
+
+  expect(hasEnded(pressed)).toBe(false)
+  expect([cmod.listenerCount('cmod/Terminal', 'Pressed'), cmod.listenerCount('cmod/Terminal', 'Shown')]).toEqual([1, 1])
 }, 90_000)
 
 test("a session another machine archived stops here at the next backup, and one a screen shows, as cmod's show_session puts it on screen, stays while it shows", async () => {
