@@ -2,6 +2,16 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.3] - 2026-11-21
+
+### Changed
+- ⌘N starts a session in the project on screen, as ⌘T does. A space the Herdr app makes on its own joins the project that holds its folder and shows its terminal, and the palette no longer offers New space.
+
+### Fixed
+- The sidebar always highlights the session the tabs show, and gives each session the same state as its tab. The sidebar, the tab bar and the Board read one answer for both, and the pane no longer freezes on an old list when the Herdr app cuts a slow step short.
+- Keep it here always keeps the session, and anyhost new prints the session after a laptop wakes, even when the machine's background work hears the change first.
+- Plain shell tabs no longer leave a gap after their name.
+
 ## [0.11.2] - 2026-11-21
 
 ### Changed
