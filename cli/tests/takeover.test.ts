@@ -37,10 +37,16 @@ test('a move whose laptop loses its socket as it hands the session over reaches 
   const worker = await workerOn(relay)
   let release = (): void => undefined
   const held = new Promise<void>((resolve) => (release = resolve))
-  relay.holdAnswer = (op) => (op.op === 'forget' ? held : undefined)
+  const handedOver = new Promise<void>((answered) => {
+    relay.holdAnswer = (op) => {
+      if (op.op !== 'forget') return undefined
+      answered()
+      return held
+    }
+  })
 
   await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })
-  await until(() => relay.requests.some((ops) => ops.some((op) => op.op === 'forget')), 'the laptop handing the session over', 30_000)
+  await handedOver
   const reconnect = relay.disconnect(LAPTOP.id)
   await until(() => !relay.isConnected(LAPTOP.id), 'the laptop losing its socket')
   release()
