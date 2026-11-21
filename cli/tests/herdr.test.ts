@@ -104,7 +104,7 @@ test("the Herdr app's sidebar shows the inbox over the projects, split by a divi
     id: 'panel',
     type: 'column',
     hidden: true,
-    children: [{ id: 'panel-body', type: 'stack', active: 'files', children: [files, changes, { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views' } } }] }],
+    children: [{ id: 'panel-body', type: 'stack', active: 'files', children: [files, changes, { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views', block: 'cmod' } } }] }],
   })
 })
 
@@ -124,7 +124,7 @@ test('a layout an older anyhost wrote, without cmod in the right panel, gains it
   expect(jsonOf(join(herdr, 'layouts', 'anyhost.json'))).toEqual({
     id: 'root',
     type: 'row',
-    children: [{ ...body, children: [...body.children, { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views' } } }] }],
+    children: [{ ...body, children: [...body.children, { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views', block: 'cmod' } } }] }],
     toast: 'anyhost',
     terminal_menu: 'anyhost',
   })

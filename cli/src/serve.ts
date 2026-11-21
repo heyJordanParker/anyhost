@@ -2,18 +2,19 @@ import type { Subprocess } from 'bun'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
-import { provide } from '@cmodjs/core/mod.js'
+import { provide, type Usage } from '@cmodjs/core/mod.js'
 import { connect, NotHeld } from '@cmodjs/core/rpc.js'
 import { Activity, type Shown } from './activity.ts'
 import { changedFiles, countedRelay, forgetUnstarted, indexForkStarts, recordName, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, recordSummaryFrom, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
 import { loginEnvironment, markersIn, pausedSessions, recordedSessions, saveLoginEnvironment, stopCopy, type OnRecordsChange } from './claude.ts'
 import { connectForStep, join as joinRelay, LoginNeeded, needsUpload, updateRelay, type Cloudflare, type ConnectRun, type Connecting, type RelayNames } from './connect.ts'
 import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine, personOptions, relayLogin, removeMachine, rootsHere, stateFolder, type DataFolder, type Device } from './device.ts'
-import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, keyNamesOf, killTerminal, shownAt, label, machinesReached, pressKeys, readTerminal, SESSION_LABEL, shellsOf, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
-import { PLACES, showTerminal, type Place } from './herdr.ts'
+import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, shownAt, label, machinesReached, SESSION_LABEL, shellsOf, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
+import { PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { activityOf, deleteAgent, forkAgent, keepHere, labelledHere, sessionOf, move, noteWaiting, placeSession, receiveDelete, receiveFork, receiveList, receiveReleased, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
+import { activityOf, deleteAgent, forkAgent, keepHere, sessionOf, move, noteWaiting, placeSession, receiveDelete, receiveFork, receiveList, receiveReleased, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type RelayState, type Written } from './relay.ts'
+import { readSession } from './resume.ts'
 import { HOOK_EVENTS, type AgentStatus, type DeviceRef, type HookEvent, type Routed } from '../../relay/protocol.ts'
 import { agentsOf, indexesIn, indexKeyOf, type Agent, type ListRead } from './sessions.ts'
 import { archive, isArchived, moveWindowPreferences, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, windowsIn, windowsKeyOf, type Organize } from './shared.ts'
@@ -936,8 +937,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (Date.now() < updateAt || !(state.is === 'outdated' || (state.is === 'connected' && needsUpload(state.welcome)))) return
     updateAt = Infinity
     try {
-      await updateRelay(names, cloudflare)
+      const isUploaded = await updateRelay(names, cloudflare)
       updateDone()
+      if (!isUploaded) updateAt = Date.now() + updateWait
       relay.reconnect()
     } catch (error) {
       problems.set('relay update', error)
@@ -1012,9 +1014,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   }
   const closeArchived = async (): Promise<void> => {
     const settled = []
-    for (const session of sessionTerminals().keys()) {
+    for (const [session, address] of sessionTerminals()) {
       const status = await activityOf(capture, mover.activity, session)
-      if (status !== 'working' && status !== 'waiting') settled.push(session)
+      if (status !== 'working' && status !== 'waiting' && !isShown(terminals.get(address)?.labels ?? {})) settled.push(session)
     }
     if (settled.length === 0) return
     const shared = await sharedOf(relay)
@@ -1438,25 +1440,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       })
       relay.on('presence', (presence) => devices.tell('Change', { device: presence.device.id }))
       relay.on('cmod', ({ from, message }) => devices.tell('Message', { device: from.id, message }))
-      const heldTerminal = async (session: string): Promise<string> => {
-        const terminal = await labelledHere(session, mover)
-        if (terminal === undefined) throw new NotHeld(session)
-        return terminal
-      }
-      provide('cmod/Terminal', {
-        screen: async (session) => await readTerminal(await heldTerminal(session), 0),
-        press: async (session, keys) => {
-          const terminal = await heldTerminal(session)
-          mover.touched.set(session, Date.now())
-          await pressKeys(terminal, keyNamesOf(keys))
-        },
-        show: async (session, place) => {
-          const terminal = await heldTerminal(session)
-          mover.touched.set(session, Date.now())
-          await showTerminal(session, terminal, place)
-          if (place !== 'peek' && place !== 'hide') restoreOpened(session)
-        },
-      })
       const isJoined = (): boolean => relay.state.is !== 'unjoined' && relay.state.is !== 'refused' && relay.state.is !== 'outdated'
       const heldSessions = async (): Promise<{ readonly agent: Agent; readonly machine: DeviceRef }[]> => {
         const { devices } = await machinesForList()
@@ -1478,10 +1461,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         if (found === undefined) throw new NotHeld(session)
         return found
       }
-      const unreadable = async (session: string): Promise<never> => {
-        const { name } = (await offSession(session)).machine
-        throw new Error(`anyhost cannot read ${name}'s session while ${name} is off, until cmod can read a transcript anyhost keeps.`)
-      }
+      const readOff = async (session: string, part: string, options: Readonly<Record<string, unknown>>): Promise<unknown> => await readSession(capture, (await offSession(session)).agent, part, options)
       const sessions = provide('cmod/Sessions', {
         sessions: async ({ project, everyProject = false, running = false, since = '' } = {}) =>
           running
@@ -1504,7 +1484,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         search: () => {
           throw new Error('anyhost keeps the sessions of machines that are off as journals in R2, with no index of their messages, so it searches none of them.')
         },
-        read: async (session) => await unreadable(session),
+        read: async (session, part, options = {}) => await readOff(session, part, options),
         send: async (session, { type, text, as }, { caller = '' } = {}) => {
           const { machine } = await offSession(session)
           if (type === 'note') throw new Error(`anyhost types prompts into a session's terminal and keeps no note for its next prompt, so ${session.slice(0, 8)} of ${machine.name} gets none.`)
@@ -1534,7 +1514,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           const { machine } = await offSession(session)
           throw new Error(`${session.slice(0, 8)} is a session of ${machine.name}, which is off, and anyhost calls no tool in a session.`)
         },
-        usage: async (session) => await unreadable(session),
+        usage: async (session, _input, { project, task } = {}) => (await readOff(session, 'usage', { project, task })) as Usage,
         surfaces: async (session) => {
           await offSession(session)
           return []

@@ -1,6 +1,7 @@
 import { tool } from '../node_modules/@cmodjs/core/jobs/tool.js'
 import { sessions, type Mod } from '../node_modules/@cmodjs/core/mod.js'
-import { askProgram, type AnyhostState } from './pages/machines.js'
+import { askProgram } from './program.js'
+import type { AnyhostState, Machines } from './state.js'
 
 type Agent = {
   readonly id: string
@@ -18,7 +19,6 @@ type Agent = {
   readonly source: string
 }
 type Message = { readonly role: 'user' | 'assistant'; readonly at: string; readonly text: string }
-type Machines = { readonly here: string; readonly machines: readonly { readonly id: string; readonly name: string; readonly connected: boolean; readonly seenAt: string }[] }
 type Told = { readonly machine: string; readonly session: string; readonly status: string; readonly screen: string; readonly messages?: readonly Message[] }
 
 const AGENT = { type: 'string', description: 'The agent id, or its first 8 characters.' } as const

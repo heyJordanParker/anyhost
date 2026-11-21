@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { memoryRelay, type MemoryRelay } from './memory.ts'
-import { cmodServeOf, hookOn, LAPTOP, machineFor, OTHER_SESSION, runningOn, serveOn, SESSION, withCmod, WORKER } from './program.ts'
+import { cmodServeOf, hookOn, isUploaded, LAPTOP, logOf, machineFor, OTHER_SESSION, runningOn, serveOn, SESSION, transcriptsReadOn, withCmod, WORKER } from './program.ts'
 
 type Listed = { readonly id: string; readonly title: string; readonly cwd: string; readonly isRunning: boolean; readonly visitedAt?: string; readonly device?: { readonly id: string; readonly name: string } }
 type Refused = { readonly code: number; readonly message: string }
@@ -10,7 +10,9 @@ type Change = { readonly session: string; readonly part: string }
 
 const NOT_HELD = -32098
 const laptopMachine = { id: LAPTOP.id, name: LAPTOP.name }
-const unreadable = `anyhost cannot read ${LAPTOP.name}'s session while ${LAPTOP.name} is off, until cmod can read a transcript anyhost keeps.`
+const MESSAGES = [{ id: 'm1', role: 'user', text: 'Plan the trip' }]
+const USAGE = { model: 'claude-opus-5-5', contextWindow: { tokenCount: 1200 } }
+const transcriptsOf = (line: string): string => line.split(' ')[line.split(' ').indexOf('--transcripts') + 1] ?? ''
 
 type Agents = { readonly agents: readonly { readonly id: string; readonly deleted: boolean }[]; readonly version: string }
 
@@ -34,14 +36,14 @@ async function ownSessionOn(relay: MemoryRelay, worker: { readonly env: Record<s
 
 async function laptopOff() {
   const relay = await memoryRelay()
-  const laptop = await runningOn(relay)
+  const laptop = await runningOn(relay, LAPTOP, { uploadEvery: 0 })
   const worker = await machineFor(relay, WORKER, { uploadEvery: 0 })
   const cmod = cmodServeOf(worker)
   await serveOn(withCmod(worker.env))
   await cmod.provides('cmod/Sessions')
   await ownSessionOn(relay, worker)
   await hookOn(laptop.socket, 'renamed', laptop.cwd, SESSION, '', 'Plan the trip')
-  await watchList(worker.socket, (agents) => agents.some(({ id, deleted }) => id === SESSION && !deleted))
+  await watchList(worker.socket, (agents) => agents.some(({ id, deleted }) => id === SESSION && !deleted) && isUploaded(relay, SESSION, 'Plan the trip'))
   await cmod.listen('cmod/Sessions', 'Change')
   const listed = async (): Promise<Listed[]> => (await cmod.call('cmod/Sessions', 'sessions', { everyProject: true })) as Listed[]
   const changes = (): Change[] => cmod.heard.filter(({ event }) => event === 'Change').map(({ payload }) => payload as Change)
@@ -64,10 +66,9 @@ async function laptopOff() {
   return { relay, laptop, worker, cmod, listed, changes, listedOnChange, whileOff, reconnect, refusal }
 }
 
-test("cmod/Sessions lists the session of a machine that is off with that machine as its device and none of this machine's, refuses to read its messages while that machine is off, tells it stopped running, refuses this machine's sessions as not held, and lists it no more once its machine connects again", async () => {
+test("cmod/Sessions lists the session of a machine that is off with that machine as its device and none of this machine's, tells it stopped running, refuses this machine's sessions as not held, and lists it no more once its machine connects again", async () => {
   const { relay, laptop, changes, listedOnChange, whileOff, reconnect, refusal } = await laptopOff()
 
-  const messages = await refusal('read', SESSION, 'messages', { last: 2 })
   const ownSession = await refusal('read', OTHER_SESSION, 'messages', {})
   const toldWhileOff = changes().filter(({ session }) => session === SESSION)
   reconnect()
@@ -76,10 +77,24 @@ test("cmod/Sessions lists the session of a machine that is off with that machine
   expect(whileOff.map(({ id, title, cwd, isRunning, device }) => ({ id, title, cwd, isRunning, device }))).toEqual([{ id: SESSION, title: 'Plan the trip', cwd: laptop.cwd, isRunning: false, device: laptopMachine }])
   expect((await relay.claims()).get(OTHER_SESSION)).toBe(WORKER.id)
   expect(toldWhileOff).toContainEqual({ session: SESSION, part: 'running' })
-  expect(messages.message).toBe(unreadable)
-  expect(messages.code).not.toBe(NOT_HELD)
   expect(ownSession).toEqual({ code: NOT_HELD, message: `This provider holds no session ${OTHER_SESSION}.` })
   expect(whileOn.map(({ id }) => id)).toEqual([])
+}, 120_000)
+
+test("cmod/Sessions reads the messages and usage of a session of a machine that is off from its journal in R2, through cmod's --transcripts on a Claude Code folder that holds the session's transcript while cmod runs and is gone after", async () => {
+  const { laptop, worker, cmod } = await laptopOff()
+  const seen = transcriptsReadOn(worker, { messages: MESSAGES, usage: USAGE })
+
+  const messages = await cmod.call('cmod/Sessions', 'read', SESSION, 'messages', { last: 2 })
+  const usage = await cmod.call('cmod/Sessions', 'usage', SESSION, null, { task: 'agent-1' })
+  const [readMessages = '', readUsage = ''] = logOf(seen, 'argv.log')
+
+  expect(readMessages).toBe(`sessions read messages ${SESSION} --transcripts ${transcriptsOf(readMessages)} --last 2 --json`)
+  expect(readUsage).toBe(`sessions read usage ${SESSION} --transcripts ${transcriptsOf(readUsage)} --task agent-1 --json`)
+  expect(readFileSync(join(seen, 'messages', basename(dirname(laptop.transcript)), `${SESSION}.jsonl`), 'utf8')).toBe(readFileSync(laptop.transcript, 'utf8'))
+  expect([readMessages, readUsage].map((line) => existsSync(dirname(transcriptsOf(line))))).toEqual([false, false])
+  expect(messages).toEqual(MESSAGES)
+  expect(usage).toEqual(USAGE)
 }, 120_000)
 
 test("cmod/Sessions answers each action on a session of a machine that is off as anyhost's own routes do: running it is refused with why, a visit marks it, a delete takes it over and deletes it, and a task on that machine is refused while a task on a machine that is on is not held", async () => {
@@ -98,7 +113,6 @@ test("cmod/Sessions answers each action on a session of a machine that is off as
     search: await refusal('search', 'trip', { everyProject: true }),
     startTask: await refusal('startTask', OTHER_SESSION, { prompt: 'Plan the return', title: 'Return', device: LAPTOP.id }, { caller: OTHER_SESSION }),
     startTaskHere: await refusal('startTask', OTHER_SESSION, { prompt: 'Plan the return', title: 'Return', device: WORKER.id }, { caller: OTHER_SESSION }),
-    usage: await refusal('usage', SESSION, null, {}),
   }
   const surfaces = await cmod.call('cmod/Sessions', 'surfaces', SESSION, null, {})
   await cmod.call('cmod/Sessions', 'visit', SESSION, visitedAt)
@@ -119,7 +133,6 @@ test("cmod/Sessions answers each action on a session of a machine that is off as
     search: 'anyhost keeps the sessions of machines that are off as journals in R2, with no index of their messages, so it searches none of them.',
     startTask: `${LAPTOP.name} is offline, so no session starts there.`,
     startTaskHere: `This provider holds no session ${OTHER_SESSION}.`,
-    usage: unreadable,
   })
   expect(Object.entries(refused).flatMap(([method, { code }]) => (code === NOT_HELD ? [method] : []))).toEqual(['startTaskHere'])
   expect(surfaces).toEqual([])

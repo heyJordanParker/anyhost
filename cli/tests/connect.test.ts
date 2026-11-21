@@ -293,6 +293,7 @@ test('deploys the relay from nothing into the bucket it finds in the EU and join
       { type: 'secret_text', name: 'SETUP_CODE_SHA256', text: worker?.secret ?? '' },
     ],
     migrations: { new_tag: 'v1', new_sqlite_classes: ['Pool'] },
+    code_update_strategy: { mode: 'immediate' },
   })
   expect(worker?.module).toContain('class Pool')
   expect(storedToken()).toBe('token-of-macbook')
@@ -727,6 +728,7 @@ test('setup on an account whose relay is older than this program uploads this on
   expect(again?.secret).not.toBe(sha256('an earlier setup code'))
   expect(again?.metadata['migrations']).toBeUndefined()
   expect(again?.metadata['keep_bindings']).toBeUndefined()
+  expect(again?.metadata['code_update_strategy']).toEqual({ mode: 'immediate' })
   expect(storedToken()).toBe('token-of-macbook')
 })
 
@@ -811,10 +813,11 @@ test('with a login on two accounts, one of which holds the Worker, Connect Cloud
 test('updateRelay uploads the relay over an older one with keep_bindings and no secret, so the setup code secret stays', async () => {
   const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION - 1 })
   const secret = cloudflare.workers.get(NAMES.worker)?.secret
-  await updateRelay(NAMES, cloudflare.cloudflare)
+  expect(await updateRelay(NAMES, cloudflare.cloudflare)).toBe(true)
   const updated = cloudflare.workers.get(NAMES.worker)
   expect(updated?.relay).toBe(RELAY_VERSION)
   expect(updated?.metadata['keep_bindings']).toEqual(['secret_text'])
+  expect(updated?.metadata['code_update_strategy']).toEqual({ mode: 'immediate' })
   expect((updated?.metadata['bindings'] as { type: string }[]).map(({ type }) => type)).toEqual(['r2_bucket', 'durable_object_namespace', 'plain_text'])
   expect(updated?.metadata['migrations']).toBeUndefined()
   expect(updated?.secret).toBe(secret)
@@ -822,7 +825,7 @@ test('updateRelay uploads the relay over an older one with keep_bindings and no 
 
 test('updateRelay uploads nothing over a relay as new as this program\'s or newer, as a newer machine put up', async () => {
   const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION + 1 })
-  await updateRelay(NAMES, cloudflare.cloudflare)
+  expect(await updateRelay(NAMES, cloudflare.cloudflare)).toBe(false)
   expect(cloudflare.workers.get(NAMES.worker)?.relay).toBe(RELAY_VERSION + 1)
   expect(cloudflare.calls.filter((call) => call.startsWith('PUT') || call.startsWith('POST'))).toEqual([])
 })
@@ -1043,8 +1046,11 @@ await serve(deviceFromEnvironment(), ${JSON.stringify(NAMES)}, {
 
 type Carried = { readonly headers: Record<string, string>; readonly queued: (string | Uint8Array)[]; relay?: WebSocket }
 
-function frontOf(relay: MemoryRelay, worker: () => Worker | undefined): { readonly url: string; readonly welcomes: { relay: number; protocol: number }[] } {
-  const welcomes: { relay: number; protocol: number }[] = []
+type Versions = { readonly relay: number; readonly protocol: number }
+
+function frontOf(relay: MemoryRelay, pool: () => Versions | undefined): { readonly url: string; readonly welcomes: Versions[]; readonly nextWelcome: Promise<void> } {
+  const welcomes: Versions[] = []
+  let heard = Promise.withResolvers<void>()
   const server = Bun.serve<Carried>({
     port: 0,
     hostname: '127.0.0.1',
@@ -1065,8 +1071,10 @@ function frontOf(relay: MemoryRelay, worker: () => Worker | undefined): { readon
           if (typeof data !== 'string') return void front.send(new Uint8Array(data as ArrayBuffer))
           const message = data === 'pong' ? undefined : (JSON.parse(data) as { readonly t?: string })
           if (message?.t !== 'welcome') return void front.send(data)
-          const versions = { relay: worker()?.relay ?? 0, protocol: worker()?.protocol ?? 0 }
+          const versions = { relay: pool()?.relay ?? 0, protocol: pool()?.protocol ?? 0 }
           welcomes.push(versions)
+          heard.resolve()
+          heard = Promise.withResolvers<void>()
           front.send(JSON.stringify({ ...message, ...versions }))
         })
         socket.addEventListener('close', ({ code, reason }) => (code === 1000 || (code >= 3000 && code < 5000) ? front.close(code, reason) : front.terminate()))
@@ -1082,7 +1090,13 @@ function frontOf(relay: MemoryRelay, worker: () => Worker | undefined): { readon
     },
   })
   servers.push(server)
-  return { url: `http://127.0.0.1:${server.port}`, welcomes }
+  return {
+    url: `http://127.0.0.1:${server.port}`,
+    welcomes,
+    get nextWelcome() {
+      return heard.promise
+    },
+  }
 }
 
 test('a running program whose relay is an older relay version at its protocol keeps capturing while it uploads this relay with its cf login, then connects to it', async () => {
@@ -1131,6 +1145,29 @@ test('a running program whose relay update failed loses the relay update problem
   if (worker !== undefined) worker.protocol = PROTOCOL_VERSION
   await until(async () => (await statusOn(socket)).relay.state === 'connected', 'the program connecting', 30_000)
   expect((await statusOn(socket)).updateProblem).toBeUndefined()
+}, 60_000)
+
+test("a running program whose Pool still welcomes with an older relay, while the Worker's health names this one, uploads nothing and reconnects once, not again and again", async () => {
+  const relay = await memoryRelay()
+  const cloudflare = standIn({ r2: true, subdomain: 'parker-labs', buckets: { 'anyhost-test': 'eu' }, relay: RELAY_VERSION })
+  const older = { relay: RELAY_VERSION - 1, protocol: PROTOCOL_VERSION }
+  const front = frontOf(relay, () => older)
+  await saveRelayLogin({ url: front.url, token: await relay.join(DEVICE, ROOTS) })
+  const env = machineEnv()
+  await programWith(cloudflare.cloudflare, env)
+  while (front.welcomes.length < 2) await front.nextWelcome
+
+  const uploaded = Promise.withResolvers<void>()
+  relay.holdAnswer = (op) => {
+    if (op.op === 'put' && op.key.startsWith(`journals/${SESSION}/hot/`)) uploaded.resolve()
+    return undefined
+  }
+  const transcript = join(env['CLAUDE_CONFIG_DIR'] ?? '', 'projects', '-work', `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Plan the trip"},"sessionId":"${SESSION}"}\n`)
+  await uploaded.promise
+  expect(cloudflare.calls.filter((call) => call.endsWith('/v1/health'))).toHaveLength(1)
+  expect(cloudflare.calls.filter((call) => call.startsWith('PUT '))).toEqual([])
 }, 60_000)
 
 test("anyhost connect with CLOUDFLARE_API_TOKEN set sends it to the running program, whose Connect Cloudflare logs cf in and calls Cloudflare's API with it", async () => {

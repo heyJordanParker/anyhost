@@ -540,7 +540,7 @@ const tagged = (told: Tell, machine: string): string => {
   return `<anyhost from="${sender} on ${machine}" reach="tell_agent ${sender} when done or stuck">${told.text}</anyhost>`
 }
 
-export const labelledHere = async (session: string, here: MoveHere): Promise<string | undefined> => here.terminalNow(session) ?? (hcPath() === undefined ? undefined : (await labelledTerminals(session))[0])
+const labelledHere = async (session: string, here: MoveHere): Promise<string | undefined> => here.terminalNow(session) ?? (hcPath() === undefined ? undefined : (await labelledTerminals(session))[0])
 
 async function newestTail(capture: Capture, session: string): Promise<string | undefined> {
   const transcript = await newestTranscript(capture, session)

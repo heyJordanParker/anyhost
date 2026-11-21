@@ -4,7 +4,10 @@ import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js
 import { option } from '../node_modules/@cmodjs/core/options.js'
 import type { HookEvent } from '../relay/protocol.ts'
 import { agentTools } from './agents.js'
-import { askProgram, connectStep, FOLLOW_MS, initialState, machinesView, NoAnswer, reachProgram, showMachines, toggleMachines } from './pages/machines.js'
+import { connectStep } from './connect.js'
+import { askProgram, FOLLOW_MS, NoAnswer, reachProgram } from './program.js'
+import { initialState } from './state.js'
+import { machinesView, showMachines, toggleMachines } from './views/machines.js'
 
 type Move = { readonly to: string; readonly step: 'waiting' | 'uploading' | 'moving' | 'moved' | 'failed'; readonly line: string }
 type Holder = { readonly machine?: string; readonly problem?: string; readonly untold?: string; readonly move?: Move }
