@@ -247,6 +247,7 @@ const BOUND: readonly (readonly [string, (key: string) => string, (key: string) 
   ['mod.open:picker', () => 'anyhost.palette', same],
   ['tab.close', () => 'anyhost.close', same],
   ['tab.new', () => 'anyhost.new', same],
+  ['space.new', () => 'anyhost.new', same],
   ['tab.new', () => 'tab.new', (key) => (key.includes('shift-') || key.includes('alt-') ? undefined : withModifier(key, 'alt'))],
   ['tab.new', () => 'anyhost.reopen', (key) => withModifier(key, key.includes('shift-') ? 'alt' : 'shift')],
   ['tab.next', (key) => (isTabKey(key) ? 'anyhost.recent' : 'anyhost.next'), same],

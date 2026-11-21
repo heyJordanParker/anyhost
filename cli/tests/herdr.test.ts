@@ -200,6 +200,16 @@ test("in the anyhost layout the new-tab key starts a session as the sidebar's Ne
   })
 })
 
+test('in the anyhost layout the new-space key starts a session in the project on screen, as the new-tab key does, so no space outside a project opens', async () => {
+  const herdr = join(temporaryFolder(), 'herdr-app')
+  mkdirSync(herdr, { recursive: true })
+  writeFileSync(join(herdr, 'keys.json'), JSON.stringify({ global: { 'cmd-n': 'space.new' } }))
+
+  await installHerdr(join(herdr, 'herdr.json'), herdr)
+
+  expect(jsonOf(join(herdr, 'keys.json'))).toEqual({ global: { 'cmd-n': 'space.new' }, 'layout:anyhost': { 'cmd-n': 'anyhost.new' } })
+})
+
 test('no keys file is written where the Herdr app has not made one, so it still installs its own', async () => {
   const herdr = join(temporaryFolder(), 'herdr-app')
   mkdirSync(herdr, { recursive: true })

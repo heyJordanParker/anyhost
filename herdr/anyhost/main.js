@@ -253,7 +253,7 @@ const hashed = new Map();
 const hex12 = (text) => hashed.get(text) ?? hashed.set(text, createHash("sha256").update(text).digest("hex").slice(0, 12)).get(text);
 const hasWorktrees = (key) => key !== NONE && key !== TEMPORARY;
 const spaceOf = (key, checkout) => (key === TEMPORARY ? "anyhost-temporary" : key === NONE ? "anyhost-none" : `anyhost-w-${hex12(checkout)}`);
-const projectSpaceBefore = (key) => `anyhost-p-${hex12(key)}`;
+const isWorkspace = (space) => space === "anyhost-temporary" || space === "anyhost-none" || space.startsWith("anyhost-w-");
 const placedSpace = (on, id) => (on ? `${on}/${id}` : id);
 const stripOf = (pills, discarded) => {
   const after = new Map();
@@ -2339,7 +2339,7 @@ export default class Anyhost extends View {
     this.reportShown(live);
     this.readBranches(cx, model);
     this.parkLeaving(model, live);
-    this.moveFromProjectSpaces(model, live);
+    this.moveIntoWorkspaces(model, live);
     this.fillShownWorkspace(live);
     this.nameTabs(model);
     this.nameSpaces(model);
@@ -2553,22 +2553,17 @@ export default class Anyhost extends View {
     return this.data.devices.find((d) => d.herdr === herdr)?.name ?? null;
   }
 
-  moveFromProjectSpaces(model, live) {
-    const stranded = live.all.filter((x) => (x.labels?.["herdr.space"] ?? "").startsWith("anyhost-p-") && !this.moves.has(x.address));
+  moveIntoWorkspaces(model, live) {
+    const stranded = live.all.filter((x) => x.labels?.["herdr.space"] && !isWorkspace(x.labels["herdr.space"]) && !this.moves.has(x.address));
     if (stranded.length === 0) return;
-    const projects = new Map([...new Set(model.rows.map((r) => r.projectKey))].map((key) => [projectSpaceBefore(key), key]));
+    const folderAt = new Map(panes().map((p) => [p.terminal, p.cwd ?? ""]));
     for (const x of stranded) {
-      const placed = x.labels["herdr.space"];
-      const tab = x.labels?.["herdr.tab"] || idOf();
-      const r = model.byKey.get(x.labels?.[SESSION_LABEL] || x.labels?.[VIEW_LABEL] || "");
-      if (r) {
-        this.moveTerminal(x.address, { space: r.space, tab });
-        continue;
-      }
-      const key = projects.get(placed);
+      const tab = x.labels["herdr.tab"] || idOf();
       const machine = this.machineAt(x.address);
-      const worktree = key && machine ? this.worktreeToShow(key, machine) : null;
-      if (worktree) this.moveTerminal(x.address, { space: spaceOf(key, worktree.folder), tab });
+      const folder = folderAt.get(x.address) ?? "";
+      const holder = model.rows.filter((r) => r.kind === "own" && !r.deleted && hasWorktrees(r.projectKey) && r.machine === machine && isUnder(folder, r.checkout)).sort((a, b) => b.checkout.length - a.checkout.length)[0];
+      const space = (model.byKey.get(x.labels[SESSION_LABEL] || x.labels[VIEW_LABEL] || "") ?? holder)?.space;
+      if (space) this.moveTerminal(x.address, { space, tab });
     }
   }
 
@@ -5525,7 +5520,6 @@ export default class Anyhost extends View {
     const actions = [
       { id: "new", icon: "square-pen", title: current ? `New session in ${current.name}` : "New session", run: close(() => this.newHere()) },
       { id: "tab", icon: "plus", title: "New tab", run: close(() => run("tab.new")) },
-      { id: "space", icon: "folder-plus", title: "New space", run: close(() => run("space.new")) },
       { id: "board", icon: `${OWN}/kanban`, title: `Board · ${current ? current.name : "All projects"}`, run: close(() => this.openBoard(p.current)) },
     ].filter((a) => has(a.title));
     const shownProjects = projects
