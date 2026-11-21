@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.1] - 2026-11-21
+
+### Fixed
+- When anyhost's program dies while its machine stays up, the work it started ends with it, so the restarted program is the only one writing this machine's sessions, and your other machines no longer count the machine connected because of it.
+
 ## [0.11.0] - 2026-11-21
 
 ### Added
