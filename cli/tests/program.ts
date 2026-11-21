@@ -217,10 +217,10 @@ export async function machineFor(relay: MemoryRelay, device: Device, person: Rec
   return { env, socket: join(env.XDG_STATE_HOME, 'anyhost', 'serve.sock'), folder, token }
 }
 
-export async function serveOn(env: Record<string, string>): Promise<{ readonly address: string; readonly child: Subprocess; readonly logged: () => string }> {
+export async function serveOn(env: Record<string, string>): Promise<{ readonly address: string; readonly child: Subprocess; readonly logged: () => string; readonly logEnded: Promise<void> }> {
   const child = spawnForTest(['bun', CLI, 'serve'], { env, stdout: 'pipe', stderr: 'pipe' })
   let logged = ''
-  void (async () => {
+  const logEnded = (async () => {
     const text = new TextDecoder()
     for await (const chunk of child.stderr) {
       process.stderr.write(chunk)
@@ -235,7 +235,7 @@ export async function serveOn(env: Record<string, string>): Promise<{ readonly a
     printed += decoder.decode(value)
   }
   reader.releaseLock()
-  return { address: printed.slice(0, printed.indexOf('\n')), child, logged: () => logged }
+  return { address: printed.slice(0, printed.indexOf('\n')), child, logged: () => logged, logEnded }
 }
 
 export async function anyhostOn(env: Record<string, string>, args: readonly string[], input = ''): Promise<{ readonly code: number; readonly out: string; readonly err: string }> {

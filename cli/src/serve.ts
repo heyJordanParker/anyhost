@@ -1,7 +1,9 @@
 import type { Subprocess } from 'bun'
+import { once } from 'node:events'
 import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
+import { createInterface } from 'node:readline'
 import { provide, type Usage } from '@cmodjs/core/mod.js'
 import { connect, NotHeld } from '@cmodjs/core/rpc.js'
 import { Activity, type Shown } from './activity.ts'
@@ -13,7 +15,7 @@ import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTer
 import { PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
 import { activityOf, deleteAgent, forkAgent, keepHere, sessionOf, move, noteWaiting, placeSession, receiveDelete, receiveFork, receiveList, receiveReleased, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
-import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type RelayState, type Written } from './relay.ts'
+import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type Relay, type RelayState, type Written } from './relay.ts'
 import { readSession } from './resume.ts'
 import { HOOK_EVENTS, type AgentStatus, type DeviceRef, type HookEvent, type Routed } from '../../relay/protocol.ts'
 import { agentsOf, indexesIn, indexKeyOf, type Agent, type ListRead } from './sessions.ts'
@@ -322,10 +324,17 @@ function keepUpkeep(capture: Capture, upkeep: Upkeep): void {
 const ownCommand = (): string[] => (import.meta.dir.startsWith('/$bunfs/') ? [process.execPath] : [process.execPath, join(import.meta.dir, 'main.ts')])
 
 export async function work(device: Device): Promise<void> {
-  const job = (await Bun.stdin.json()) as Job
+  let relay: Relay | undefined
+  const end = (): never => {
+    relay?.close()
+    process.exit(1)
+  }
+  const program = createInterface({ input: process.stdin }).once('close', end)
+  const [line] = (await once(program, 'line')) as [string]
+  const job = JSON.parse(line) as Job
   const endAtClosedOutput = (error: NodeJS.ErrnoException): void => {
     if (error.code !== 'EPIPE') throw error
-    process.exit(1)
+    end()
   }
   process.stdout.on('error', endAtClosedOutput)
   const say = (line: JobLine): void => {
@@ -336,7 +345,7 @@ export async function work(device: Device): Promise<void> {
     }
   }
   const roots = rootsHere()
-  const relay = connectRelay({ login: async () => job.login, forget: async () => undefined, device, roots, isPatient: true })
+  relay = connectRelay({ login: async () => job.login, forget: async () => undefined, device, roots, isPatient: true })
   relay.on('written', (written) => say({ written }))
   const capture = openCapture(relay, device, roots, { readsCode: false, onReleased: (session, holder) => say({ released: [session, holder] }) })
   capture.dataFolders = job.dataFolders
@@ -356,6 +365,7 @@ export async function work(device: Device): Promise<void> {
   } catch (error) {
     say({ error: error instanceof Error ? error.message : String(error) })
   } finally {
+    program.off('close', end).close()
     relay.close()
   }
 }
@@ -450,7 +460,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     const login = await relayLogin()
     if (login === undefined) throw new Error('This machine is not joined to your relay, so anyhost uploads nothing.')
     const job: Job = { login, dataFolders: capture.dataFolders, isEveryWrite: queue.uploadEvery === 0, ...work }
-    const child = Bun.spawn([...ownCommand(), 'work'], { env: process.env, stdin: new TextEncoder().encode(JSON.stringify(job)), stdout: 'pipe', stderr: 'inherit' })
+    const child = Bun.spawn([...ownCommand(), 'work'], { env: process.env, stdin: new ReadableStream({ start: (controller) => controller.enqueue(new TextEncoder().encode(`${JSON.stringify(job)}\n`)) }), stdout: 'pipe', stderr: 'inherit' })
     let answer: JobLine | undefined
     let failure = ''
     const heard = (line: string): void => {

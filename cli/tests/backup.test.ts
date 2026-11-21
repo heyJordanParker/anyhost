@@ -2,8 +2,9 @@ import { expect, onTestFinished, setSystemTime, test } from 'bun:test'
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSessions } from '../src/capture.ts'
+import { commandOf } from '../src/claude.ts'
 import { failTest, memoryRelay, noCode, until, welcomed } from './memory.ts'
-import { CLI, decoder, HOST, hookOn, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, PASS_MS, problemsOn, ranAnHourAgo, roots, serveOn, SESSION, spawnForTest } from './program.ts'
+import { childrenOf, CLI, decoder, HOST, hookOn, isUploaded, isWatcherProblem, LAPTOP, machineFor, OTHER_SESSION, PASS_MS, problemsOn, ranAnHourAgo, roots, serveOn, SESSION, spawnForTest } from './program.ts'
 
 test("a session whose first capture is over 1 MiB uploads in a job, and its working folder's code goes up after it with no later change", async () => {
   const relay = await memoryRelay()
@@ -42,12 +43,37 @@ test('a job whose service stopped reading ends quietly as it reports, as its rep
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST)
   const job = { login: { url: relay.url, token: host.token }, dataFolders: [], isEveryWrite: false, upload: { session: SESSION, tool: 'claude', paths: [] } }
-  const child = spawnForTest([process.execPath, CLI, 'work'], { env: host.env, stdin: new Blob([JSON.stringify(job)]), stdout: 'pipe', stderr: 'pipe' })
+  const child = spawnForTest([process.execPath, CLI, 'work'], { env: host.env, stdin: new ReadableStream({ start: (controller) => controller.enqueue(new TextEncoder().encode(`${JSON.stringify(job)}\n`)) }), stdout: 'pipe', stderr: 'pipe' })
   await child.stdout.cancel()
 
   expect(await Promise.race([child.exited.then(() => 'ended'), Bun.sleep(10_000).then(() => 'running')])).toBe('ended')
   expect(await new Response(child.stderr).text()).not.toContain('EPIPE')
 })
+
+test('a job ends at once when its program dies by SIGKILL in the middle of it, so no orphan writes the database or holds the relay as the machine', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const uploading = Promise.withResolvers<void>()
+  relay.before = (op) => {
+    if (!JSON.stringify(op).includes(SESSION)) return undefined
+    uploading.resolve()
+    return new Promise(() => undefined)
+  }
+  const served = await serveOn(laptop.env)
+  const transcript = join(laptop.env['HOME'] ?? '', '.claude', 'projects', '-work', `${SESSION}.jsonl`)
+  mkdirSync(dirname(transcript), { recursive: true })
+  const progress = Array.from({ length: 2000 }, (_, at) => `{"type":"progress","sessionId":"${SESSION}","line":${at},"text":"${'x'.repeat(1100)}"}\n`).join('')
+  writeFileSync(transcript, `{"type":"user","sessionId":"${SESSION}","message":{"role":"user","content":"Plan the trip"}}\n${progress}`)
+  await uploading.promise
+  const jobs = childrenOf(served.child.pid).filter((child) => commandOf(child).endsWith(' work'))
+  expect(jobs).toHaveLength(1)
+
+  const killed = Date.now()
+  process.kill(served.child.pid, 'SIGKILL')
+  await served.logEnded
+
+  expect(Date.now() - killed).toBeLessThan(5000)
+}, 30_000)
 
 test("the program's start stats every captured file, and uploads a line a quiet session gained while the program did not run", async () => {
   const relay = await memoryRelay()
