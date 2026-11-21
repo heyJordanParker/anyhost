@@ -41,10 +41,12 @@ const placementIn = ({ device, wanted, spec, error }: HolderRow): Placement => (
 })
 
 export function followHolders(relay: Relay, db: Database, onChanged: (changes: readonly Claimed[]) => Promise<void> = async () => undefined): Holders {
-  const changedHere = (): number => db.query<{ changed: number }, []>('select changed from holders_changed').get()?.changed ?? 0
+  const storedChange = (): number => db.query<{ changed: number }, []>('select changed from holders_changed').get()?.changed ?? 0
+  let heard = storedChange()
   const apply = async (changes: readonly Claimed[]): Promise<void> => {
     db.transaction(() => {
-      for (const { session, device, wanted, spec, error = '', changed } of changes) {
+      const stored = storedChange()
+      for (const { session, device, wanted, spec, error = '', changed } of changes.filter((change) => change.changed > stored)) {
         if (device === '' && wanted === '' && spec === undefined && error === '') db.query('delete from holders where session = ?').run(session)
         else
           db.query('insert into holders (session, device, wanted, spec, error) values (?, ?, ?, ?, ?) on conflict (session) do update set device = excluded.device, wanted = excluded.wanted, spec = excluded.spec, error = excluded.error').run(
@@ -56,17 +58,20 @@ export function followHolders(relay: Relay, db: Database, onChanged: (changes: r
           )
         db.query('update holders_changed set changed = ?').run(changed)
       }
-    })()
+    }).immediate()
+    heard = Math.max(heard, ...changes.map(({ changed }) => changed))
     if (changes.length > 0) await onChanged(changes)
   }
-  const startAgain = (): void =>
+  const startAgain = (): void => {
     db.transaction(() => {
       db.run('delete from holders')
       db.run('update holders_changed set changed = 0')
     })()
+    heard = 0
+  }
   const readChanges = async (): Promise<void> => {
     for (;;) {
-      const since = changedHere()
+      const since = heard
       const { changes, last } = await relay.runOne({ op: 'changes', since })
       if (last < since) {
         startAgain()
@@ -92,13 +97,12 @@ export function followHolders(relay: Relay, db: Database, onChanged: (changes: r
   }
   const readFailed = (error: unknown): void => console.error(`${new Date().toISOString()} anyhost could not read which machine holds each session: ${String(error)}`)
   relay.on('welcome', ({ changed }) => {
-    if (changed !== changedHere()) void catchUp().catch(readFailed)
+    if (changed !== heard) void catchUp().catch(readFailed)
     else isCaughtUp = true
   })
   relay.on('claimed', (claimed) => {
-    const since = changedHere()
-    if (claimed.changed <= since) return
-    if (claimed.changed === since + 1 && reading === undefined) void apply([claimed]).catch(readFailed)
+    if (claimed.changed <= heard) return
+    if (claimed.changed === heard + 1 && reading === undefined) void apply([claimed]).catch(readFailed)
     else void catchUp().catch(readFailed)
   })
   const known = (): ReadonlyMap<string, string> => new Map(db.query<{ session: string; device: string }, []>("select session, device from holders where device != ''").all().map(({ session, device }) => [session, device]))

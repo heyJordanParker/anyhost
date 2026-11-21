@@ -1,8 +1,10 @@
 import { expect, test } from 'bun:test'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { openDatabase } from '../src/capture.ts'
+import { followHolders } from '../src/claims.ts'
 import { memoryRelay, until, welcomed } from './memory.ts'
-import { claimOn, CLI, copiesOn, decoder, isUploaded, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, SESSION, spawnForTest, stepsOf, WORKER, workerOn } from './program.ts'
+import { claimOn, CLI, copiesOn, decoder, DESKTOP, isUploaded, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, SESSION, spawnForTest, stepsOf, WORKER, workerOn } from './program.ts'
 
 test('a move to a worker that took the claim and then goes offline waits, saying so in its line and in anyhost move, which Ctrl-C leaves running, and Keep it here takes the session back', async () => {
   const relay = await memoryRelay()
@@ -104,6 +106,36 @@ test('Keep it here while the move waits for the turn to end keeps the session he
   expect((await claimOn(laptop.socket)).machine).toBeUndefined()
   expect(laptop.claude.exitCode).toBeNull()
   expect((await postTo(laptop.socket, '/move/keep', { session: SESSION })).status).toBe(400)
+}, 60_000)
+
+test("Keep it here that another process on the laptop's database hears first still drops the move once the program hears it", async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  await workerOn(relay)
+  const kept = Promise.withResolvers<void>()
+  const dropped = Promise.withResolvers<void>()
+  let isKept = false
+  followHolders(relay.connect(DESKTOP, roots('/home/desktop')), openDatabase(join(laptop.env['XDG_STATE_HOME'] ?? '', 'anyhost')), async (changes) => {
+    for (const { session, device, wanted } of changes) {
+      if (session !== SESSION) continue
+      if (wanted === LAPTOP.id) {
+        isKept = true
+        kept.resolve()
+      } else if (isKept && wanted === '' && device === LAPTOP.id) dropped.resolve()
+    }
+  })
+  const hear = relay.withholdClaimed(LAPTOP.id)
+  laptop.status('busy')
+
+  expect((await postTo(laptop.socket, '/move', { session: SESSION, machine: WORKER.name })).body['step']).toBe('waiting')
+  expect((await postTo(laptop.socket, '/move/keep', { session: SESSION })).status).toBe(200)
+  await kept.promise
+  hear()
+  await dropped.promise
+
+  expect((await relay.claims()).get(SESSION)).toBe(LAPTOP.id)
+  expect(await relay.wanted()).toEqual(new Map())
+  expect(laptop.claude.exitCode).toBeNull()
 }, 60_000)
 
 test("Keep it here while a session that keeps writing uploads ends the move's drains, so the session's puts come at the program's uploadEvery from then on", async () => {

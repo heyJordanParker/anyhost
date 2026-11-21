@@ -20,6 +20,7 @@ type Bucket = Awaited<ReturnType<Miniflare['getR2Bucket']>>
 type Asked = { readonly ops: readonly Op[]; readonly refused: readonly (readonly [number, Result])[]; readonly puts: readonly { readonly index: number; readonly key: string; readonly body: Uint8Array }[] }
 type Front = {
   readonly headers: Record<string, string>
+  readonly joinedAs: string | undefined
   readonly queued: (string | Uint8Array)[]
   readonly asked: Map<number, Asked>
   pool?: WebSocket
@@ -58,7 +59,7 @@ export type MemoryRelay = {
   holdNext(t: string): Promise<() => void>
   loseNext(device: string, t: string): Promise<void>
   dropNext(device: string, t: string): Promise<void>
-  withholdClaimed(device: string): void
+  withholdClaimed(device: string): () => void
   disconnect(device: string, kept?: number): () => void
   silence(device: string): () => void
   connect(device: Device, roots: MachineRoots): Relay
@@ -135,6 +136,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
   const origin = (await miniflare.ready).origin
   const [objects, pool] = await Promise.all([miniflare.getR2Bucket('BUCKET'), miniflare.unsafeGetDurableObjectStorage(WORKER, 'Pool', { name: 'pool' })])
   const tokens = new Map<string, Promise<string>>()
+  const bearers = new Map<string, string>()
   const clients: Relay[] = []
   const fronts = new Set<ServerWebSocket<Front>>()
   let atOnce = 0
@@ -204,7 +206,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
   }
   let holding: { readonly t: string; readonly heard: (release: () => void) => void } | undefined
   let losing: { readonly device: string; readonly t: string; readonly lost: () => void; readonly isKept: boolean } | undefined
-  const withheld = new Set<string>()
+  const withheld = new Map<string, (() => void)[]>()
   const disconnected = new Set<string>()
   const fromMachine = (front: ServerWebSocket<Front>, message: string | Uint8Array): void => {
     if (front.data.isSilent === true) return
@@ -234,8 +236,9 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       }
       const headers = forwarded(request, url)
       if (request.headers.get('upgrade') === 'websocket') {
-        for (const device of disconnected) if (request.headers.get('authorization') === `Bearer ${await tokens.get(device)}`) return new Response(`${device} has no network.`, { status: 503 })
-        if (server.upgrade(request, { data: { headers, queued: [], asked: new Map(), up: Promise.resolve(), down: Promise.resolve() } })) return undefined
+        const joinedAs = bearers.get(request.headers.get('authorization') ?? '')
+        if (joinedAs !== undefined && disconnected.has(joinedAs)) return new Response(`${joinedAs} has no network.`, { status: 503 })
+        if (server.upgrade(request, { data: { headers, joinedAs, queued: [], asked: new Map(), up: Promise.resolve(), down: Promise.resolve() } })) return undefined
         return new Response('The front opened no WebSocket.', { status: 400 })
       }
       const { pathname, search } = new URL(request.url)
@@ -268,7 +271,8 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
           if (data !== 'pong') {
             const message = JSON.parse(data) as { readonly t: string; readonly device?: { readonly id: string } }
             if (message.t === 'welcome' && message.device !== undefined) front.data.device = message.device.id
-            if (withheld.has(front.data.device ?? '') && message.t === 'claimed') return
+            const held = withheld.get(front.data.device ?? '')
+            if (held !== undefined && message.t === 'claimed') return void held.push(() => toMachine(front, data))
             if (losing !== undefined && front.data.device === losing.device && message.t === losing.t) {
               const { lost, isKept } = losing
               losing = undefined
@@ -347,6 +351,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
         const answer = await fetch(`${origin}/v1/join`, { method: 'POST', body: JSON.stringify({ invite, device: { ...device, roots } }) })
         const joined = (await answer.json()) as { readonly token?: string; readonly message?: string }
         if (joined.token === undefined) throw new Error(`The relay refused to join ${device.name}: ${joined.message}`)
+        bearers.set(`Bearer ${joined.token}`, device.id)
         return joined.token
       })()
       tokens.set(device.id, token)
@@ -361,7 +366,14 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
     holdNext: (t) => new Promise((heard) => void (holding = { t, heard })),
     loseNext: (device, t) => new Promise((lost) => void (losing = { device, t, lost, isKept: false })),
     dropNext: (device, t) => new Promise((lost) => void (losing = { device, t, lost, isKept: true })),
-    withholdClaimed: (device) => void withheld.add(device),
+    withholdClaimed(device) {
+      const held: (() => void)[] = []
+      withheld.set(device, held)
+      return () => {
+        withheld.delete(device)
+        for (const hear of held.splice(0)) hear()
+      }
+    },
     disconnect(device, kept = 0) {
       disconnected.add(device)
       for (const front of [...fronts].filter((each) => each.data.device === device).slice(kept)) front.terminate()
@@ -369,7 +381,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
     },
     silence(device) {
       disconnected.add(device)
-      const silent = [...fronts].filter((front) => front.data.device === device)
+      const silent = [...fronts].filter((front) => front.data.device === device || front.data.joinedAs === device)
       for (const front of silent) front.data.isSilent = true
       return () => {
         disconnected.delete(device)

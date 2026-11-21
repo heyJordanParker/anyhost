@@ -1,8 +1,10 @@
 import { expect, test } from 'bun:test'
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { openDatabase } from '../src/capture.ts'
+import { followHolders } from '../src/claims.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
-import { anyhostOn, CLI, decoder, killMachine, LAPTOP, machineFor, runsOn, sentOn, serveOn, spawnForTest, startedOn, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
+import { anyhostOn, CLI, decoder, DESKTOP, killMachine, LAPTOP, machineFor, roots, runsOn, sentOn, serveOn, spawnForTest, startedOn, trust, trustedIn, tripOn, WORKER, workerOn } from './program.ts'
 
 test('anyhost new starts a session on the worker in a terminal of herdr-core in its clone of the same repository, as the machine the session wants', async () => {
   const relay = await memoryRelay()
@@ -89,6 +91,37 @@ test('anyhost new whose laptop sleeps as the worker marks the start done prints 
   expect(code).toBe(0)
   expect(runsOn(worker.folder)).toHaveLength(1)
 }, 90_000)
+
+test("anyhost new whose laptop sleeps while another process on the laptop's database hears the start done prints the session once the laptop wakes and exits 0", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const worker = await workerOn(relay)
+  await serveOn(laptop.env)
+  const checkout = tripOn(laptop)
+  const marking = Promise.withResolvers<void>()
+  const marked = Promise.withResolvers<void>()
+  const heard = Promise.withResolvers<void>()
+  relay.before = (op) => {
+    if (op.op !== 'want' || op.device !== '' || op.if?.wanted !== WORKER.id) return undefined
+    marking.resolve()
+    return marked.promise
+  }
+  followHolders(relay.connect(DESKTOP, roots('/home/desktop')), openDatabase(join(laptop.env['XDG_STATE_HOME'] ?? '', 'anyhost')), async (changes) => {
+    if (changes.some(({ device, wanted }) => device === WORKER.id && wanted === '')) heard.resolve()
+  })
+
+  const started = spawnForTest(['bun', CLI, 'new', WORKER.name, join(checkout, 'plans')], { env: laptop.env, stdout: 'pipe', stderr: 'pipe' })
+  await marking.promise
+  const wake = relay.silence(LAPTOP.id)
+  marked.resolve()
+  await heard.promise
+  wake()
+  const [code, out] = await Promise.all([started.exited, new Response(started.stdout).text()])
+
+  expect(out).toBe(`${WORKER.name} started ${startedOn(worker).slice(0, 8)} in a terminal of herdr-core there.\n`)
+  expect(code).toBe(0)
+  expect(runsOn(worker.folder)).toHaveLength(1)
+}, 60_000)
 
 test("anyhost new while its program's relay is not connected says what it waits for, and starts the session once the relay connects", async () => {
   const relay = await memoryRelay()

@@ -341,8 +341,11 @@ async function reconcile(capture: Capture, session: string, here: MoveHere): Pro
   const id = session.slice(0, 8)
   if (moving !== undefined && !isFinal(moving) && moving.step !== 'moving' && placement.wanted !== moving.wanted) moving.keeping.abort()
   if (placement.device === device.id && !isHere(placement.wanted)) {
-    if (moving !== undefined && (!isFinal(moving) || (moving.wanted === placement.wanted && moving.keeping.signal.aborted))) return
-    const target = (await devicesOf(relay)).get(placement.wanted)
+    const isMoveStarted = (started: Moving | undefined): boolean => started !== undefined && (!isFinal(started) || (started.wanted === placement.wanted && started.keeping.signal.aborted))
+    if (isMoveStarted(moving)) return
+    const devices = await devicesOf(relay)
+    if (isMoveStarted(here.moves.get(session))) return
+    const target = devices.get(placement.wanted)
     if (target === undefined || !target.connected || target.removedAt !== undefined) return await want(relay, session, '', { error: `${target?.name ?? placement.wanted} is offline`, if: placement.wanted })
     await drainTo(capture, session, target, here)
     return
@@ -443,8 +446,7 @@ export async function startNew(capture: Capture, machine: string, cwd: string, p
       void devicesOf(relay).then(async (devices) => {
         if (devices.get(target.id)?.connected === true || !here.placed.has(placed)) return
         stop()
-        await want(relay, session, '', { if: target.id })
-        reject(new Error(`${machine} went offline before it answered. anyhost list shows whether a session started there.`))
+        await want(relay, session, '', { if: target.id }).then(() => reject(new Error(`${machine} went offline before it answered. anyhost list shows whether a session started there.`)), reject)
       }, () => undefined)
     }, CONNECTED_MS)
     here.placed.add(placed)
