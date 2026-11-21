@@ -358,6 +358,14 @@ export const dataFolderOn = (machine: { readonly env: Record<string, string> }, 
   writeFileSync(cmod, readFileSync(cmod, 'utf8').replace(UNKNOWN_CMOD_COMMAND, `"data --json") printf '%s' '${JSON.stringify([{ mod, folder }])}' ;;\n  ${UNKNOWN_CMOD_COMMAND}`))
   return folder
 }
+export const transcriptsReadOn = (machine: { readonly env: Record<string, string> }, answers: Readonly<Record<string, unknown>>): string => {
+  const seen = temporaryFolder()
+  for (const [part, answer] of Object.entries(answers)) writeFileSync(join(seen, `${part}.json`), JSON.stringify(answer))
+  const cmod = join(machine.env['XDG_DATA_HOME'] ?? '', 'cmod', 'programs', 'cmod')
+  const read = `echo "$*" >> '${seen}/argv.log'; part="$3"; while [ $# -gt 0 ]; do [ "$1" = --transcripts ] && cp -R "$2/projects" '${seen}/'"$part"; shift; done; cat '${seen}/'"$part.json"`
+  writeFileSync(cmod, readFileSync(cmod, 'utf8').replace(UNKNOWN_CMOD_COMMAND, `"sessions read "*) ${read} ;;\n  ${UNKNOWN_CMOD_COMMAND}`))
+  return seen
+}
 
 type Rpc = { readonly jsonrpc: '2.0'; readonly id?: number | string; readonly method?: string; readonly params?: unknown; readonly result?: unknown; readonly error?: { readonly code: number; readonly message: string } }
 export type Heard = { readonly event: string; readonly payload: unknown }

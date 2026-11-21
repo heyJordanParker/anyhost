@@ -3,7 +3,8 @@ import { slashCommand } from '../node_modules/@cmodjs/core/jobs/slash-command.js
 import { Prompt, Reply, type Mod, type ProcessSpawnOptions, type Subprocess } from '../node_modules/@cmodjs/core/mod.js'
 import { testMod } from '../node_modules/@cmodjs/core/testing.js'
 import { anyhost } from '../src/mod.js'
-import { connectStep, type AnyhostState } from '../src/pages/machines.js'
+import { connectStep } from '../src/connect.js'
+import type { AnyhostState } from '../src/state.js'
 
 type Spawned = ProcessSpawnOptions & { readonly argv: readonly string[] }
 type Ended = Awaited<Subprocess['result']>

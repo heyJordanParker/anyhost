@@ -3,7 +3,7 @@ import { expect, onTestFinished, test } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { Activity } from '../src/activity.ts'
-import { compressHot, forgetUnstarted, journalOf, openCapture, openDatabase, QUIET_MS, recordFolder, recordSummary, relistSessions, seal, sealQuiet, untoldOf, writeIndex, type Capture } from '../src/capture.ts'
+import { compressHot, forgetUnstarted, journalOf, openCapture, openDatabase, QUIET_MS, recordFolder, recordSummary, recordSummaryFrom, relistSessions, seal, sealQuiet, untoldOf, writeIndex, type Capture } from '../src/capture.ts'
 import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
@@ -380,6 +380,20 @@ test('a session whose transcript an agent deleted lists as deleted, and one whos
   await writeIndex(capture)
 
   expect([before, (await listSessions(capture)).map(({ deleted }) => deleted)]).toEqual([[false], [true]])
+})
+
+test('a session one machine summarized and has not uploaded yet lists on another machine as a session, not as deleted', async () => {
+  const relay = await memoryRelay()
+  const session = 'aaaaaaaa-0000-0000-0000-000000000001'
+  const a = captureOn(mac, relay)
+  const b = captureOn(server, relay)
+  const transcript = transcriptOf(a.roots, session, 'Plan the release')
+  await recordSummaryFrom(a.capture, session, 'claude', [transcript])
+  relay.refuse = (op) => (op.op === 'put' && op.key.startsWith(`journals/${session}/`) ? 'R2 is down' : undefined)
+  await expect(uploadFiles(a.capture, session, transcript)).rejects.toThrow('R2 is down')
+  await writeIndex(a.capture)
+
+  expect((await listSessions(b.capture)).map(({ id, deleted }) => ({ id, deleted }))).toEqual([{ id: session, deleted: false }])
 })
 
 test('a restore of a deleted session brings its transcript back as it was before the deletion, so it lists as a session again', async () => {

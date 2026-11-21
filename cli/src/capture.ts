@@ -2012,16 +2012,21 @@ export const forgetUnstarted =(db: Database, id: string): void => void db.query(
 const IS_TRANSCRIPT = "files.session = sessions.id and (files.path like '%' || sessions.id || '.jsonl' or files.path like '%' || sessions.id || '.jsonl.zst')"
 const TRANSCRIPT_GONE = `(exists (select 1 from files where ${IS_TRANSCRIPT}) and not exists (select 1 from files where ${IS_TRANSCRIPT} and files.sha256 != ''))`
 
-export const isDeleted = (db: Database, session: string): boolean =>
-  db.query<{ deleted: number }, [string]>(`select ${TRANSCRIPT_GONE} as deleted from sessions where id = ?`).get(session)?.deleted === 1
+const isDeletedRow = (db: Database, { id, gone }: { readonly id: string; readonly gone: number }): boolean =>
+  gone === 1 && !db.query<{ path: string }, [string]>(`select files.path from files join sessions on ${IS_TRANSCRIPT} where sessions.id = ?`).all(id).some(({ path }) => existsSync(path))
+
+export function isDeleted(db: Database, session: string): boolean {
+  const row = db.query<{ id: string; gone: number }, [string]>(`select id, ${TRANSCRIPT_GONE} as gone from sessions where id = ?`).get(session)
+  return row !== null && isDeletedRow(db, row)
+}
 
 function indexOf(db: Database): IndexedSession[] {
   return db
-    .query<SessionRow & { deleted: number }, []>(`select *, ${TRANSCRIPT_GONE} as deleted from sessions order by last_activity desc`)
+    .query<SessionRow & { gone: number }, []>(`select *, ${TRANSCRIPT_GONE} as gone from sessions order by last_activity desc`)
     .all()
     .map((row) => ({
       id: row.id, tool: row.tool, title: row.title, named: row.title_rank >= NAMED_RANK, firstPrompt: row.first_prompt, cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder,
-      entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source, size: row.size, deleted: row.deleted === 1,
+      entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source, size: row.size, deleted: isDeletedRow(db, row),
     }))
 }
 

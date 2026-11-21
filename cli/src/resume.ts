@@ -1,13 +1,14 @@
 import { Database, type SQLQueryBindings } from 'bun:sqlite'
 import { existsSync } from 'node:fs'
-import { appendFile, mkdir, open, readdir, rm, stat } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, open, readdir, rename, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type * as Protocol from '../../relay/protocol.ts'
 import { basesOf, checkoutOf, checkoutOfEntry, continueJournal, isCodePart, journalOf, linesOf, markUntold, recordForkStarts, recordSource, recordSummary, sha256, stopJournal, tailOf, workingFolderOf, writeIndex, type Capture, type FileState, type IndexedSession, type RecordHeader } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { claudeStart, resumeArgv, resumedOf, statusOf } from './claude.ts'
 import { cloneRemote } from './code.ts'
-import { dataFolders, devicesOf, rootsHere, type MachineRoots } from './device.ts'
+import { cmod, dataFolders, devicesOf, rootsHere, type MachineRoots } from './device.ts'
 import { relocate, type Roots } from './relocate.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
 import { codexState, filesUnder, historyOf, linesFiles, ownerOf, transcriptOf, transcriptTailOf, type Tool } from './transcript.ts'
@@ -62,6 +63,15 @@ function writersOf(devices: ReadonlyMap<string, Protocol.Device>, indexes: Reado
     const roots = devices.get(device)?.roots
     if (roots === undefined) throw new Error(`The session ${session.id} holds records of the device ${device}, and the relay knows no machine of that id, so anyhost cannot rewrite its paths.`)
     return { ...roots, checkout: checkout ?? checkoutOfEntry(indexes.get(device)?.find((entry) => entry.id === session.id) ?? session, roots.home) }
+  }
+}
+
+function relocatedTo(rootsOf: (writer: Writer) => Roots, to: Roots): (header: RecordHeader) => string {
+  const named = new Map<string, string>()
+  return (writer) => {
+    const key = `${writer.device}\0${writer.checkout ?? ''}\0${writer.path}`
+    if (!named.has(key)) named.set(key, relocate(NOTHING, writer.path, rootsOf(writer), to).path)
+    return named.get(key) ?? writer.path
   }
 }
 
@@ -246,12 +256,7 @@ export async function restore(capture: Capture, id: string, options: { take: boo
   const provisional: Roots = { ...roots, checkout: checkoutOfEntry({ ...session, cwd: folder }, roots.home) }
   const staging = join(dirname(db.filename), 'restore', id)
   await rm(staging, { recursive: true, force: true })
-  const named = new Map<string, string>()
-  const replayed = await downloadJournal(relay, id, staging, (writer) => {
-    const key = `${writer.device}\0${writer.checkout ?? ''}\0${writer.path}`
-    if (!named.has(key)) named.set(key, relocate(NOTHING, writer.path, rootsOf(writer), provisional).path)
-    return named.get(key) ?? writer.path
-  }, basesOf(db))
+  const replayed = await downloadJournal(relay, id, staging, relocatedTo(rootsOf, provisional), basesOf(db))
   const writers: Writers = { rootsOf, tracked: await trackedFilesOf(replayed, id) }
   const jobs = `${join(roots.claudeHome, 'jobs')}/`
   const files = [...replayed.files].filter(([path]) => !path.startsWith(jobs))
@@ -323,12 +328,38 @@ export async function restoreData(capture: Capture, mod: string, from: string): 
   const staging = join(dirname(db.filename), 'restore', history)
   await rm(staging, { recursive: true, force: true })
   try {
-    const replayed = await downloadJournal(relay, history, staging, (writer) => relocate(NOTHING, writer.path, rootsOf(writer), here).path, basesOf(db))
+    const replayed = await downloadJournal(relay, history, staging, relocatedTo(rootsOf, here), basesOf(db))
     const writers: Writers = { rootsOf, tracked: new Map() }
     for (const file of replayed.files.values()) await checkFile(file, writers)
     for (const file of replayed.files.values()) await placeFile(historyOf(mod, device.id), file, writers, here)
     return { folder: data.folder, files: replayed.files.size }
   } finally {
     await rm(staging, { recursive: true, force: true })
+  }
+}
+
+const flagsOf = ({ all, ...options }: Readonly<Record<string, unknown>>): string[] => [
+  ...Object.entries(options).flatMap(([name, value]) => (value === undefined ? [] : [`--${name}`, String(value)])),
+  ...(all === true ? ['--nested'] : []),
+]
+
+export async function readSession(capture: Capture, session: ListedSession, part: string, options: Readonly<Record<string, unknown>>): Promise<unknown> {
+  const { relay, db } = capture
+  const devices = await devicesOf(relay)
+  const rootsOf = writersOf(devices, await indexesOf(relay, devices.keys()), session)
+  const folder = await mkdtemp(join(tmpdir(), 'anyhost-read-'))
+  try {
+    const claudeHome = join(folder, 'claude')
+    const projects = join(claudeHome, 'projects')
+    const replayed = await downloadJournal(relay, session.id, join(folder, 'journal'), relocatedTo(rootsOf, { ...rootsOf({ device: session.device }), claudeHome }), basesOf(db))
+    await mkdir(projects, { recursive: true })
+    for (const [path, file] of replayed.files) {
+      if (!path.startsWith(`${projects}/`)) continue
+      await mkdir(dirname(path), { recursive: true })
+      await rename(file.staged, path)
+    }
+    return JSON.parse(await cmod(['sessions', 'read', part, session.id, '--transcripts', claudeHome, ...flagsOf(options), '--json']))
+  } finally {
+    await rm(folder, { recursive: true, force: true })
   }
 }

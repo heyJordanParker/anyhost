@@ -183,7 +183,7 @@ const withSessions = (node: Node): Node => {
 }
 
 const TOASTS: Node = { id: 'toasts', content: { mod: 'anyhost', props: { view: 'toasts' } }, edge: 'top', align: 'end' }
-const CMOD_DOCK: Node = { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views' } } }
+const CMOD_DOCK: Node = { id: 'cmod', type: 'block', content: { mod: 'cmod', props: { show: 'views', block: 'cmod' } } }
 
 const anyhostLayoutOf = (main: Node): Node => ({ ...withSessions(main), toast: MOD, terminal_menu: MOD })
 

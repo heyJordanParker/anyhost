@@ -316,6 +316,7 @@ async function deploy(cloudflare: Cloudflare, login: Login, account: Account, na
     ],
     ...(setupCode === undefined ? { keep_bindings: ['secret_text'] } : {}),
     ...(isFirst ? { migrations: { new_tag: 'v1', new_sqlite_classes: ['Pool'] } } : {}),
+    code_update_strategy: { mode: 'immediate' },
   }
   const form = new FormData()
   form.set('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }))
@@ -413,7 +414,7 @@ export function connectForStep(device: Device, names: RelayNames = RELAY, cloudf
   }
 }
 
-export async function updateRelay(names: RelayNames = RELAY, cloudflare: Cloudflare = CLOUDFLARE): Promise<void> {
+export async function updateRelay(names: RelayNames = RELAY, cloudflare: Cloudflare = CLOUDFLARE): Promise<boolean> {
   const login = await loginOf(cloudflare)
   const { holding } = await accountsHolding(cloudflare, login, names.worker)
   const [account, ...more] = holding
@@ -422,8 +423,12 @@ export async function updateRelay(names: RelayNames = RELAY, cloudflare: Cloudfl
   }
   const url = await relayUrlOf(cloudflare, login, account, names.worker)
   const health = await healthAt(cloudflare, url, login.say)
-  if (!needsUpload(health)) return login.say(`${url} runs relay ${health.relay} at protocol ${health.protocol}, which needs no upload of this anyhost's, so anyhost uploads nothing.`)
+  if (!needsUpload(health)) {
+    login.say(`${url} runs relay ${health.relay} at protocol ${health.protocol}, which needs no upload of this anyhost's, so anyhost uploads nothing.`)
+    return false
+  }
   await deploy(cloudflare, login, account, { worker: names.worker, bucket: health.bucket }, false, undefined)
+  return true
 }
 
 export async function join(link: string, device: Device, cloudflare: Cloudflare = CLOUDFLARE): Promise<string> {
