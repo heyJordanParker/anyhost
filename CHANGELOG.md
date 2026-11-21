@@ -2,6 +2,21 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.0] - 2026-11-21
+
+### Added
+- cmod's tools read the messages and usage of a session whose machine is off, from your Cloudflare account.
+
+### Changed
+- anyhost needs cmod 8.1.0 or newer. cmod reads, types into and shows a session's terminal itself, so anyhost no longer does it for cmod.
+- A view a session opens shows in the Views panel of the anyhost layout.
+- A new relay takes over at once when anyhost uploads it, so your machines link to each other within seconds instead of after five minutes.
+
+### Fixed
+- A session another machine just started no longer shows as deleted until its first upload lands.
+- An archived session an agent puts on screen keeps running while it shows.
+- A machine whose relay still answers with an older version no longer reconnects to it many times a second.
+
 ## [0.10.0] - 2026-11-21
 
 ### Added

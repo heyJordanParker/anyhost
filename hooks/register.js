@@ -279,7 +279,7 @@ function readHotkeys(hotkeys) {
     throw new Error(`package.json "cmod.hotkeys" is not a map of hotkeys to their title and optional default combo. ${fix}`);
   return { hotkeys: checkHotkeys('package.json "cmod"', hotkeys) };
 }
-var coreVersion = "8.0.0";
+var coreVersion = "8.1.0";
 var oldestCmodVersion = "8.0.0";
 function hotkeyCommand(mod, hotkey) {
   return `${mod}--${hotkey}`;
@@ -6318,11 +6318,11 @@ function createUi({ name, claude, router, report, announce, mod, borrowed, nextD
     widgets: { add: addWidget },
     styles: { add: addStyle },
     asked,
-    async answerInput(run, passOn) {
+    async answerInput(run, passInput) {
       const before = unheldRequests;
       const answer = await asked(run);
       if (unheldRequests > before)
-        await passOn();
+        await passInput();
       return answer;
     },
     answer(method, input, caller) {
@@ -8641,7 +8641,9 @@ async function startMod($, eventInput, passOn) {
       browser: () => $.env.get("BROWSER"),
       sshConnection: () => $.env.get("SSH_CONNECTION"),
       display: () => $.env.get("DISPLAY"),
-      waylandDisplay: () => $.env.get("WAYLAND_DISPLAY")
+      waylandDisplay: () => $.env.get("WAYLAND_DISPLAY"),
+      herdrTerminal: () => $.env.get("HC_TERMINAL_ID"),
+      herdrSocket: () => $.env.get("HC_TERMINAL_SOCKET")
     },
     device: { read: () => readDevice(claude) },
     cmod: { call: (input) => $.cmod.call(input) }
@@ -8655,8 +8657,8 @@ function routeToMod(_$, eventInput, passOn) {
 function routeFailure(_$, eventInput, passOn) {
   return lifecycle.caught(passOn.event, eventInput, (passed) => passOn(passed), passOn);
 }
-var withCaller = (eventInput, passOn) => ({ ...eventInput, caller: passOn.origin.plugin });
-var withoutCaller = (passOn) => (passed) => passOn(Object.fromEntries(Object.entries(passed).filter(([key]) => key !== "caller")));
+var withCaller = (eventInput, next) => ({ ...eventInput, caller: next.origin.plugin });
+var withoutCaller = (next) => (passed) => next(Object.fromEntries(Object.entries(passed).filter(([key]) => key !== "caller")));
 function routeCallToMod(_$, eventInput, passOn) {
   return lifecycle.route("cmod.call", withCaller(eventInput, passOn), withoutCaller(passOn), passOn.signal);
 }
@@ -9107,11 +9109,7 @@ function resultOf2(value) {
   return JSON.stringify(value);
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-qOJhFD/release/src/pages/machines.tsx
-var initialState = {
-  memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null }
-};
-var CONNECT_WAIT_MS = 15000;
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-SWbb06/release/src/program.ts
 var READY_MS = 1e4;
 var FOLLOW_MS = 1000;
 var programs = new WeakMap;
@@ -9150,287 +9148,8 @@ async function askProgram(mod, path, body) {
     throw new Error(read?.message ?? `The anyhost program answered ${answer.status}: ${answer.text}`);
   return read;
 }
-var pause = (mod, ms) => new Promise((resolve) => void mod.after(ms, resolve));
-function follow(mod) {
-  if (mod.state.memory.isFollowing)
-    return;
-  mod.state.memory.isFollowing = true;
-  const timer = mod.every(FOLLOW_MS, async () => {
-    const status = await askProgram(mod, "/status").catch((error) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`, { level: "warning" }));
-    if (status === undefined)
-      return;
-    const { connecting, joining } = status;
-    mod.state.memory.connecting = connecting ?? null;
-    mod.state.memory.joining = joining ?? null;
-    if (connecting?.is === "running")
-      return;
-    timer.stop();
-    mod.state.memory.isFollowing = false;
-  });
-}
-async function connectAsk(mod, path, body) {
-  const answered = await askProgram(mod, path, body).catch((error) => ({ is: "failed", lines: mod.state.memory.connecting?.lines ?? [], error: messageOf(error) }));
-  mod.state.memory.connecting = answered;
-  if (answered.is === "running")
-    follow(mod);
-}
-async function joinWith(mod, link) {
-  mod.state.memory.joined = await askProgram(mod, "/join", { link }).catch((error) => ({ problem: messageOf(error) }));
-  if ("url" in mod.state.memory.joined)
-    mod.state.memory.joining = null;
-}
-async function needsStep(mod) {
-  const started = Date.now();
-  for (;; ) {
-    const status = await askProgram(mod, "/status").catch((error) => {
-      if (error instanceof NoAnswer)
-        return Date.now() - started < CONNECT_WAIT_MS ? undefined : null;
-      throw error;
-    });
-    if (status === null)
-      return false;
-    if (status === undefined) {
-      await pause(mod, 250);
-      continue;
-    }
-    const { relay, connecting, joining } = status;
-    if (connecting?.is === "running")
-      follow(mod);
-    mod.state.memory.joining = joining ?? null;
-    if (joining?.is === "running" || relay.state === "connecting" && Date.now() - started < CONNECT_WAIT_MS) {
-      await pause(mod, 250);
-      continue;
-    }
-    mod.state.memory.relayState = relay.state;
-    const isRemoved = relay.state === "unjoined";
-    mod.state.memory.connecting = isRemoved && connecting?.is === "joined" ? null : connecting ?? null;
-    if (isRemoved && mod.state.memory.joined !== null && "url" in mod.state.memory.joined)
-      mod.state.memory.joined = null;
-    return isRemoved || relay.state === "outdated" && (status.needsLogin === true || connecting?.is === "joined");
-  }
-}
-var connectStep = {
-  id: "machines",
-  title: "Connect your machines",
-  render: (mod) => /* @__PURE__ */ h(ConnectView, {
-    mod
-  }),
-  isDone: async (mod) => !await needsStep(mod)
-};
-function ConnectView({ mod }) {
-  const { connecting, joined, joining } = mod.state.memory;
-  return /* @__PURE__ */ h(Box, {
-    flexDirection: "column",
-    gap: 1
-  }, /* @__PURE__ */ h(Text, {
-    wrap: "wrap"
-  }, "anyhost keeps every session of every machine in your own Cloudflare account, through a relay it sets up there. Connect each machine once."), /* @__PURE__ */ h(Box, {
-    flexDirection: "column"
-  }, /* @__PURE__ */ h(Text, {
-    bold: true
-  }, "On your first machine, or any machine with your Cloudflare login"), connecting !== null && connecting.is !== "failed" ? null : /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
-    key: "connect",
-    plain: true,
-    onPress: () => connectAsk(mod, "/connect", {})
-  }, /* @__PURE__ */ h(Text, {
-    color: "claude"
-  }, connecting?.is === "failed" ? "[Connect Cloudflare again]" : "[Connect Cloudflare]"))), connecting === null ? null : /* @__PURE__ */ h(ConnectingView, {
-    mod,
-    connecting
-  }), connecting?.is === "joined" && mod.state.memory.relayState === "outdated" ? /* @__PURE__ */ h(Text, {
-    wrap: "wrap"
-  }, "Cloudflare still runs your relay's older version, for up to 5 minutes after the upload. Press Finish once it runs the new one.") : null), /* @__PURE__ */ h(Box, {
-    flexDirection: "column"
-  }, /* @__PURE__ */ h(Text, {
-    bold: true
-  }, "On every other machine"), /* @__PURE__ */ h(Text, {
-    wrap: "wrap"
-  }, "Add it from /machines on a joined machine, which installs anyhost here over ssh, or ask Claude there to add it. A machine it can't reach over ssh joins here with the command anyhost machines --invite prints there."), joining === null ? null : joining.is === "running" ? /* @__PURE__ */ h(Text, {
-    dimColor: true,
-    wrap: "wrap"
-  }, "Joining with the invite link of the install command") : /* @__PURE__ */ h(Box, {
-    flexDirection: "column"
-  }, /* @__PURE__ */ h(Text, {
-    color: "error",
-    wrap: "wrap"
-  }, `The invite link of the install command joined no relay: ${joining.error}`), /* @__PURE__ */ h(Text, {
-    wrap: "wrap"
-  }, "anyhost tries a link once. Add this machine again from /machines on a joined machine.")), /* @__PURE__ */ h(Input, {
-    key: "invite",
-    label: "› ",
-    placeholder: "cmod install … --option 'join=https://…/v1/join#…'",
-    submitLabel: "join",
-    onSubmit: (link) => void joinWith(mod, link)
-  }), joined === null ? null : ("url" in joined) ? /* @__PURE__ */ h(Text, {
-    color: "success"
-  }, `✔ Joined ${joined.url}`) : /* @__PURE__ */ h(Text, {
-    color: "error",
-    wrap: "wrap"
-  }, joined.problem)));
-}
-function ConnectingView({ mod, connecting }) {
-  return /* @__PURE__ */ h(Box, {
-    flexDirection: "column"
-  }, connecting.lines.map((line) => /* @__PURE__ */ h(Text, {
-    dimColor: true,
-    wrap: "wrap"
-  }, line)), connecting.accounts === undefined ? null : /* @__PURE__ */ h(Box, {
-    flexDirection: "column"
-  }, /* @__PURE__ */ h(Text, null, "Your Cloudflare login reaches several accounts. Pick the one your relay goes in:"), connecting.accounts.map((account) => /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
-    key: `account-${account.id}`,
-    plain: true,
-    onPress: () => connectAsk(mod, "/connect/account", { id: account.id })
-  }, `[${account.name}]`)))), connecting.r2Page === undefined ? null : /* @__PURE__ */ h(Box, {
-    gap: 2
-  }, /* @__PURE__ */ h(Button, {
-    key: "r2-page",
-    plain: true,
-    href: connecting.r2Page
-  }, "[Open Cloudflare's R2 page]"), /* @__PURE__ */ h(Text, null, "Turn R2 on there, then press Next."), /* @__PURE__ */ h(Button, {
-    key: "r2-next",
-    plain: true,
-    onPress: () => connectAsk(mod, "/connect/r2", {})
-  }, "[Next]")), connecting.is === "joined" ? /* @__PURE__ */ h(Text, {
-    color: "success"
-  }, "✔ This machine is joined to your relay.") : null, connecting.error === undefined ? null : /* @__PURE__ */ h(Text, {
-    color: "error",
-    wrap: "wrap"
-  }, connecting.error));
-}
-function momentOf(iso) {
-  const at = new Date(iso);
-  const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
-}
-async function act(mod, work) {
-  mod.state.memory.problem = null;
-  await work().catch((error) => void (mod.state.memory.problem = messageOf(error)));
-}
-async function showMachines(mod) {
-  await act(mod, async () => void (mod.state.memory.machines = await askProgram(mod, "/machines")));
-}
-async function toggleMachines(mod, view) {
-  if (!view.isOpen) {
-    mod.state.memory.isAdding = false;
-    mod.state.memory.removing = null;
-    showMachines(mod);
-  }
-  await view.toggle({ focus: true });
-}
-var addMachine = (mod, target) => act(mod, async () => {
-  await askProgram(mod, "/machines/add", { target: target.trim() });
-  await showMachines(mod);
-});
-var remove = (mod, id) => act(mod, async () => {
-  await askProgram(mod, "/machines/remove", { id });
-  mod.state.memory.removing = null;
-  await showMachines(mod);
-});
-var machinesView = {
-  id: "machines",
-  title: "Machines",
-  render: (mod) => {
-    const { machines, isAdding, removing, problem } = mod.state.memory;
-    return /* @__PURE__ */ h(Box, {
-      flexDirection: "column",
-      gap: 1,
-      paddingX: 1
-    }, machines === null ? /* @__PURE__ */ h(Text, {
-      dimColor: true
-    }, problem === null ? "Reading your machines" : "") : /* @__PURE__ */ h(MachineList, {
-      mod,
-      machines,
-      removing
-    }), machines?.adding.map(({ target, error }) => error === undefined ? /* @__PURE__ */ h(Text, {
-      key: `adding-${target}`,
-      dimColor: true
-    }, `Adding ${target}: anyhost installs there and joins it`) : /* @__PURE__ */ h(Text, {
-      key: `adding-${target}`,
-      color: "error",
-      wrap: "wrap"
-    }, `${target} was not added: ${error}`)), !isAdding ? /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
-      key: "add",
-      plain: true,
-      onPress: () => void (mod.state.memory.isAdding = true)
-    }, /* @__PURE__ */ h(Text, {
-      color: "claude"
-    }, "[Add a machine]"))) : /* @__PURE__ */ h(Box, {
-      flexDirection: "column"
-    }, machines === null || machines.candidates.length === 0 ? null : /* @__PURE__ */ h(Box, {
-      gap: 2
-    }, /* @__PURE__ */ h(Text, {
-      dimColor: true
-    }, "On your Tailscale network:"), machines.candidates.map(({ target, online }) => /* @__PURE__ */ h(Button, {
-      key: `candidate-${target}`,
-      plain: true,
-      onPress: () => addMachine(mod, target)
-    }, /* @__PURE__ */ h(Text, {
-      color: online ? "claude" : undefined,
-      dimColor: !online
-    }, `[${target}]`)))), /* @__PURE__ */ h(Input, {
-      key: "target",
-      label: "› ",
-      placeholder: "how ssh reaches it: devbox, me@10.0.0.7",
-      submitLabel: "add",
-      onSubmit: (target) => void addMachine(mod, target)
-    })), problem === null ? null : /* @__PURE__ */ h(Text, {
-      color: "error",
-      wrap: "wrap"
-    }, problem));
-  }
-};
-function MachineList({ mod, machines, removing }) {
-  const width = Math.max(...machines.machines.map(({ name }) => name.length));
-  const kind = ({ os, arch }) => `${os}-${arch}`;
-  const kindWidth = Math.max(...machines.machines.map((machine) => kind(machine).length));
-  return /* @__PURE__ */ h(Box, {
-    flexDirection: "column"
-  }, machines.machines.map((machine) => /* @__PURE__ */ h(Box, {
-    key: machine.id,
-    flexDirection: "column"
-  }, /* @__PURE__ */ h(Box, {
-    gap: 2
-  }, /* @__PURE__ */ h(Box, {
-    flexShrink: 0
-  }, /* @__PURE__ */ h(Text, {
-    bold: machine.id === machines.here
-  }, machine.name.padEnd(width))), /* @__PURE__ */ h(Box, {
-    flexShrink: 0
-  }, /* @__PURE__ */ h(Text, {
-    dimColor: true
-  }, kind(machine).padEnd(kindWidth))), machine.connected ? /* @__PURE__ */ h(Text, {
-    color: "success"
-  }, "connected") : /* @__PURE__ */ h(Text, {
-    dimColor: true
-  }, `last seen ${momentOf(machine.seenAt)}`), machine.id === machines.here ? /* @__PURE__ */ h(Text, {
-    dimColor: true
-  }, "this machine") : /* @__PURE__ */ h(Button, {
-    key: `remove-${machine.id}`,
-    plain: true,
-    dimColor: true,
-    onPress: () => void (mod.state.memory.removing = machine.id)
-  }, "[Remove]")), removing !== machine.id ? null : /* @__PURE__ */ h(Box, {
-    flexDirection: "column",
-    paddingLeft: 2
-  }, /* @__PURE__ */ h(Text, {
-    wrap: "wrap"
-  }, `Remove ${machine.name}? It stops uploading at once, and its sessions stay listed and resumable here. Add a machine joins it again.`), /* @__PURE__ */ h(Box, {
-    gap: 2
-  }, /* @__PURE__ */ h(Button, {
-    key: `remove-yes-${machine.id}`,
-    plain: true,
-    onPress: () => remove(mod, machine.id)
-  }, /* @__PURE__ */ h(Text, {
-    color: "error"
-  }, "[Remove]")), /* @__PURE__ */ h(Button, {
-    key: `remove-no-${machine.id}`,
-    plain: true,
-    dimColor: true,
-    onPress: () => void (mod.state.memory.removing = null)
-  }, "[Cancel]"))))));
-}
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-qOJhFD/release/src/agents.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-SWbb06/release/src/agents.ts
 var AGENT = { type: "string", description: "The agent id, or its first 8 characters." };
 var WAKES = "An idle agent takes the message at once, works, and rests again on its own.";
 function agentTools(mod) {
@@ -9644,7 +9363,296 @@ function agentTools(mod) {
   ];
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-qOJhFD/release/src/mod.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-SWbb06/release/src/connect.tsx
+var CONNECT_WAIT_MS = 15000;
+var pause = (mod, ms) => new Promise((resolve) => void mod.after(ms, resolve));
+function follow(mod) {
+  if (mod.state.memory.isFollowing)
+    return;
+  mod.state.memory.isFollowing = true;
+  const timer = mod.every(FOLLOW_MS, async () => {
+    const status = await askProgram(mod, "/status").catch((error) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`, { level: "warning" }));
+    if (status === undefined)
+      return;
+    const { connecting, joining } = status;
+    mod.state.memory.connecting = connecting ?? null;
+    mod.state.memory.joining = joining ?? null;
+    if (connecting?.is === "running")
+      return;
+    timer.stop();
+    mod.state.memory.isFollowing = false;
+  });
+}
+async function connectAsk(mod, path, body) {
+  const answered = await askProgram(mod, path, body).catch((error) => ({ is: "failed", lines: mod.state.memory.connecting?.lines ?? [], error: messageOf(error) }));
+  mod.state.memory.connecting = answered;
+  if (answered.is === "running")
+    follow(mod);
+}
+async function joinWith(mod, link) {
+  mod.state.memory.joined = await askProgram(mod, "/join", { link }).catch((error) => ({ problem: messageOf(error) }));
+  if ("url" in mod.state.memory.joined)
+    mod.state.memory.joining = null;
+}
+async function needsStep(mod) {
+  const started = Date.now();
+  for (;; ) {
+    const status = await askProgram(mod, "/status").catch((error) => {
+      if (error instanceof NoAnswer)
+        return Date.now() - started < CONNECT_WAIT_MS ? undefined : null;
+      throw error;
+    });
+    if (status === null)
+      return false;
+    if (status === undefined) {
+      await pause(mod, 250);
+      continue;
+    }
+    const { relay, connecting, joining } = status;
+    if (connecting?.is === "running")
+      follow(mod);
+    mod.state.memory.joining = joining ?? null;
+    if (joining?.is === "running" || relay.state === "connecting" && Date.now() - started < CONNECT_WAIT_MS) {
+      await pause(mod, 250);
+      continue;
+    }
+    mod.state.memory.relayState = relay.state;
+    const isRemoved = relay.state === "unjoined";
+    mod.state.memory.connecting = isRemoved && connecting?.is === "joined" ? null : connecting ?? null;
+    if (isRemoved && mod.state.memory.joined !== null && "url" in mod.state.memory.joined)
+      mod.state.memory.joined = null;
+    return isRemoved || relay.state === "outdated" && (status.needsLogin === true || connecting?.is === "joined");
+  }
+}
+var connectStep = {
+  id: "machines",
+  title: "Connect your machines",
+  render: (mod) => /* @__PURE__ */ h(ConnectView, {
+    mod
+  }),
+  isDone: async (mod) => !await needsStep(mod)
+};
+function ConnectView({ mod }) {
+  const { connecting, joined, joining } = mod.state.memory;
+  return /* @__PURE__ */ h(Box, {
+    flexDirection: "column",
+    gap: 1
+  }, /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, "anyhost keeps every session of every machine in your own Cloudflare account, through a relay it sets up there. Connect each machine once."), /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Text, {
+    bold: true
+  }, "On your first machine, or any machine with your Cloudflare login"), connecting !== null && connecting.is !== "failed" ? null : /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
+    key: "connect",
+    plain: true,
+    onPress: () => connectAsk(mod, "/connect", {})
+  }, /* @__PURE__ */ h(Text, {
+    color: "claude"
+  }, connecting?.is === "failed" ? "[Connect Cloudflare again]" : "[Connect Cloudflare]"))), connecting === null ? null : /* @__PURE__ */ h(ConnectingView, {
+    mod,
+    connecting
+  }), connecting?.is === "joined" && mod.state.memory.relayState === "outdated" ? /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, "Cloudflare still runs your relay's older version, for up to 5 minutes after the upload. Press Finish once it runs the new one.") : null), /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Text, {
+    bold: true
+  }, "On every other machine"), /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, "Add it from /machines on a joined machine, which installs anyhost here over ssh, or ask Claude there to add it. A machine it can't reach over ssh joins here with the command anyhost machines --invite prints there."), joining === null ? null : joining.is === "running" ? /* @__PURE__ */ h(Text, {
+    dimColor: true,
+    wrap: "wrap"
+  }, "Joining with the invite link of the install command") : /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Text, {
+    color: "error",
+    wrap: "wrap"
+  }, `The invite link of the install command joined no relay: ${joining.error}`), /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, "anyhost tries a link once. Add this machine again from /machines on a joined machine.")), /* @__PURE__ */ h(Input, {
+    key: "invite",
+    label: "› ",
+    placeholder: "cmod install … --option 'join=https://…/v1/join#…'",
+    submitLabel: "join",
+    onSubmit: (link) => void joinWith(mod, link)
+  }), joined === null ? null : ("url" in joined) ? /* @__PURE__ */ h(Text, {
+    color: "success"
+  }, `✔ Joined ${joined.url}`) : /* @__PURE__ */ h(Text, {
+    color: "error",
+    wrap: "wrap"
+  }, joined.problem)));
+}
+function ConnectingView({ mod, connecting }) {
+  return /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, connecting.lines.map((line) => /* @__PURE__ */ h(Text, {
+    dimColor: true,
+    wrap: "wrap"
+  }, line)), connecting.accounts === undefined ? null : /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Text, null, "Your Cloudflare login reaches several accounts. Pick the one your relay goes in:"), connecting.accounts.map((account) => /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
+    key: `account-${account.id}`,
+    plain: true,
+    onPress: () => connectAsk(mod, "/connect/account", { id: account.id })
+  }, `[${account.name}]`)))), connecting.r2Page === undefined ? null : /* @__PURE__ */ h(Box, {
+    gap: 2
+  }, /* @__PURE__ */ h(Button, {
+    key: "r2-page",
+    plain: true,
+    href: connecting.r2Page
+  }, "[Open Cloudflare's R2 page]"), /* @__PURE__ */ h(Text, null, "Turn R2 on there, then press Next."), /* @__PURE__ */ h(Button, {
+    key: "r2-next",
+    plain: true,
+    onPress: () => connectAsk(mod, "/connect/r2", {})
+  }, "[Next]")), connecting.is === "joined" ? /* @__PURE__ */ h(Text, {
+    color: "success"
+  }, "✔ This machine is joined to your relay.") : null, connecting.error === undefined ? null : /* @__PURE__ */ h(Text, {
+    color: "error",
+    wrap: "wrap"
+  }, connecting.error));
+}
+
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-SWbb06/release/src/state.ts
+var initialState = {
+  memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null }
+};
+
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-SWbb06/release/src/views/machines.tsx
+function momentOf(iso) {
+  const at = new Date(iso);
+  const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
+}
+async function act(mod, work) {
+  mod.state.memory.problem = null;
+  await work().catch((error) => void (mod.state.memory.problem = messageOf(error)));
+}
+async function showMachines(mod) {
+  await act(mod, async () => void (mod.state.memory.machines = await askProgram(mod, "/machines")));
+}
+async function toggleMachines(mod, view) {
+  if (!view.isOpen) {
+    mod.state.memory.isAdding = false;
+    mod.state.memory.removing = null;
+    showMachines(mod);
+  }
+  await view.toggle({ focus: true });
+}
+var addMachine = (mod, target) => act(mod, async () => {
+  await askProgram(mod, "/machines/add", { target: target.trim() });
+  await showMachines(mod);
+});
+var remove = (mod, id) => act(mod, async () => {
+  await askProgram(mod, "/machines/remove", { id });
+  mod.state.memory.removing = null;
+  await showMachines(mod);
+});
+var machinesView = {
+  id: "machines",
+  title: "Machines",
+  render: (mod) => {
+    const { machines, isAdding, removing, problem } = mod.state.memory;
+    return /* @__PURE__ */ h(Box, {
+      flexDirection: "column",
+      gap: 1,
+      paddingX: 1
+    }, machines === null ? /* @__PURE__ */ h(Text, {
+      dimColor: true
+    }, problem === null ? "Reading your machines" : "") : /* @__PURE__ */ h(MachineList, {
+      mod,
+      machines,
+      removing
+    }), machines?.adding.map(({ target, error }) => error === undefined ? /* @__PURE__ */ h(Text, {
+      key: `adding-${target}`,
+      dimColor: true
+    }, `Adding ${target}: anyhost installs there and joins it`) : /* @__PURE__ */ h(Text, {
+      key: `adding-${target}`,
+      color: "error",
+      wrap: "wrap"
+    }, `${target} was not added: ${error}`)), !isAdding ? /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
+      key: "add",
+      plain: true,
+      onPress: () => void (mod.state.memory.isAdding = true)
+    }, /* @__PURE__ */ h(Text, {
+      color: "claude"
+    }, "[Add a machine]"))) : /* @__PURE__ */ h(Box, {
+      flexDirection: "column"
+    }, machines === null || machines.candidates.length === 0 ? null : /* @__PURE__ */ h(Box, {
+      gap: 2
+    }, /* @__PURE__ */ h(Text, {
+      dimColor: true
+    }, "On your Tailscale network:"), machines.candidates.map(({ target, online }) => /* @__PURE__ */ h(Button, {
+      key: `candidate-${target}`,
+      plain: true,
+      onPress: () => addMachine(mod, target)
+    }, /* @__PURE__ */ h(Text, {
+      color: online ? "claude" : undefined,
+      dimColor: !online
+    }, `[${target}]`)))), /* @__PURE__ */ h(Input, {
+      key: "target",
+      label: "› ",
+      placeholder: "how ssh reaches it: devbox, me@10.0.0.7",
+      submitLabel: "add",
+      onSubmit: (target) => void addMachine(mod, target)
+    })), problem === null ? null : /* @__PURE__ */ h(Text, {
+      color: "error",
+      wrap: "wrap"
+    }, problem));
+  }
+};
+function MachineList({ mod, machines, removing }) {
+  const width = Math.max(...machines.machines.map(({ name }) => name.length));
+  const kind = ({ os, arch }) => `${os}-${arch}`;
+  const kindWidth = Math.max(...machines.machines.map((machine) => kind(machine).length));
+  return /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, machines.machines.map((machine) => /* @__PURE__ */ h(Box, {
+    key: machine.id,
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Box, {
+    gap: 2
+  }, /* @__PURE__ */ h(Box, {
+    flexShrink: 0
+  }, /* @__PURE__ */ h(Text, {
+    bold: machine.id === machines.here
+  }, machine.name.padEnd(width))), /* @__PURE__ */ h(Box, {
+    flexShrink: 0
+  }, /* @__PURE__ */ h(Text, {
+    dimColor: true
+  }, kind(machine).padEnd(kindWidth))), machine.connected ? /* @__PURE__ */ h(Text, {
+    color: "success"
+  }, "connected") : /* @__PURE__ */ h(Text, {
+    dimColor: true
+  }, `last seen ${momentOf(machine.seenAt)}`), machine.id === machines.here ? /* @__PURE__ */ h(Text, {
+    dimColor: true
+  }, "this machine") : /* @__PURE__ */ h(Button, {
+    key: `remove-${machine.id}`,
+    plain: true,
+    dimColor: true,
+    onPress: () => void (mod.state.memory.removing = machine.id)
+  }, "[Remove]")), removing !== machine.id ? null : /* @__PURE__ */ h(Box, {
+    flexDirection: "column",
+    paddingLeft: 2
+  }, /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, `Remove ${machine.name}? It stops uploading at once, and its sessions stay listed and resumable here. Add a machine joins it again.`), /* @__PURE__ */ h(Box, {
+    gap: 2
+  }, /* @__PURE__ */ h(Button, {
+    key: `remove-yes-${machine.id}`,
+    plain: true,
+    onPress: () => remove(mod, machine.id)
+  }, /* @__PURE__ */ h(Text, {
+    color: "error"
+  }, "[Remove]")), /* @__PURE__ */ h(Button, {
+    key: `remove-no-${machine.id}`,
+    plain: true,
+    dimColor: true,
+    onPress: () => void (mod.state.memory.removing = null)
+  }, "[Cancel]"))))));
+}
+
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-SWbb06/release/src/mod.ts
 var MACHINES_EVERY_MS = 1e4;
 var PROMPT_ASK_MS = 1500;
 var PROMPT_MS = 3000;
@@ -9831,7 +9839,7 @@ var anyhost = defineMod({
   }
 });
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-qOJhFD/release/hooks/register.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-SWbb06/release/hooks/register.ts
 function register(addHook, options) {
   registerMod(addHook, anyhost, options);
 }
