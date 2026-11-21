@@ -2,6 +2,15 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.5] - 2026-11-21
+
+### Changed
+- New session opens on one search field, as the palette does: type to filter your projects, or type a folder such as `~/Developer/` to pick from the folders in it on the chosen machine. Choose folder… opens the Mac's folder picker. The field edits text as every other anyhost field does.
+- anyhost needs cmod 8.3.3 or newer, whose service keeps answering while it rebuilds its session index.
+
+### Fixed
+- An archive, a pin or any other mark reaches a machine within a second also when that machine joined moments before, instead of at its next read up to 25 seconds later.
+
 ## [0.11.4] - 2026-11-21
 
 ### Changed
