@@ -5,7 +5,7 @@
     "": {
       "name": "anyhost",
       "dependencies": {
-        "@cmodjs/core": "^8.1.0",
+        "@cmodjs/core": "^8.2.0",
       },
       "devDependencies": {
         "@types/bun": "^1.4.4",
@@ -16,7 +16,7 @@
   "packages": {
     "@babel/runtime": ["@babel/runtime@7.29.15", "", {}, "sha512-304gsbbGVmQc+cNGHzwHBlqepYdWLKj3VXCQBGt/EGcV7PUPfKI7kAUNW1FZEOCwlQiLvQjg1JEaAlRQ616h+Q=="],
 
-    "@cmodjs/core": ["@cmodjs/core@8.1.0", "", { "dependencies": { "bun-types": "^1.4.2", "json-schema-to-ts": "^3.1.1" } }, "sha512-BXZZpFC3ngdbmdCgD0ae+05+10HsVIM7p0iPS/WEF3cOkzOcMcA65D45erppZd3Vnz1CJ9POECBAzD/egmQyfA=="],
+    "@cmodjs/core": ["@cmodjs/core@8.2.0", "", { "dependencies": { "bun-types": "^1.4.2", "json-schema-to-ts": "^3.1.1" } }, "sha512-vo6FXiiXz7uUSVlIrmsdEAcH9QwfMQHD5sHw7KuiYYMEapMZxRVO2tadudE5ddptwARuFmzbkxK/kYQ+M0ylTA=="],
 
     "@types/bun": ["@types/bun@1.4.4", "", { "dependencies": { "bun-types": "1.4.4" } }, "sha512-9wkRDXUXK124pEnAutE6n/l18j+i9GC5IAHK8TmX/2nlySETmky0OU6yL5U8pW1AoKh++AN9auDCr647BfurjQ=="],
 

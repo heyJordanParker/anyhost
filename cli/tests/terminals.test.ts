@@ -7,7 +7,7 @@ import type { Status } from '../src/serve.ts'
 import { shellsOf } from '../src/hc.ts'
 import { familyOf, lastFolderOf, transcriptTailOf } from '../src/transcript.ts'
 import { memoryRelay, until } from './memory.ts'
-import { anyhostOn, coreEvent, coreSays, decoder, hookOn, LAPTOP, logOf, machineFor, OTHER_SESSION, postTo, runningOn, sentOn, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn, workerOn } from './program.ts'
+import { anyhostOn, cmodServeOf, coreEvent, coreSays, decoder, hookOn, LAPTOP, logOf, machineFor, OTHER_SESSION, postTo, runningOn, sentOn, serveOn, SESSION, sharedIn, spawnForTest, temporaryFolder, terminalIn, withCmod, workerOn } from './program.ts'
 
 const SHELL = ['/bin/zsh', '-l']
 const CLAUDE = ['claude']
@@ -156,6 +156,34 @@ test('an open or a message restarts an idle session\'s stop time, as T3 Code tou
   await until(() => hasEnded(unopened), 'the unopened idle session ending', 45_000)
 
   expect(hasEnded(opened)).toBe(false)
+}, 90_000)
+
+test("a press or a show cmod makes in an idle session's terminal restarts its stop time and a show to a place other than peek or hide brings back an archived session, also after cmod serve starts again", async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const cwd = join(laptop.env['HOME'] ?? '', 'work')
+  mkdirSync(cwd, { recursive: true })
+  const anHourAgo = Date.now() - 3_600_000
+  const pressed = claudeIn(laptop, 't0', OTHER_SESSION, 'idle', anHourAgo)
+  const shown = claudeIn(laptop, 't1', THIRD_SESSION, 'idle', anHourAgo)
+  const untouched = claudeIn(laptop, 't2', SESSION, 'idle', anHourAgo)
+  coreSays(laptop.folder, { seq: 1, terminals: [] })
+  const cmod = cmodServeOf(laptop)
+  await serveOn(withCmod({ ...laptop.env, ANYHOST_STOP_MS: '120000' }))
+  await hookOn(laptop.socket, 'started', cwd, FOURTH_SESSION)
+  expect((await postTo(laptop.socket, '/agents/archive', { session: FOURTH_SESSION, archived: true })).status).toBe(200)
+
+  await cmod.listens('cmod/Terminal', 'Pressed')
+  await cmod.tell('cmod/Terminal', 'Pressed', { session: OTHER_SESSION })
+  cmod.restart()
+  await cmod.listens('cmod/Terminal', 'Shown')
+  await cmod.tell('cmod/Terminal', 'Shown', { session: THIRD_SESSION, place: 'peek' })
+  await cmod.tell('cmod/Terminal', 'Shown', { session: FOURTH_SESSION, place: 'focus' })
+  for (const [address, session] of [['t0', OTHER_SESSION], ['t1', THIRD_SESSION], ['t2', SESSION]] as const) coreSays(laptop.folder, coreEvent('created', address, terminalIn(address, CLAUDE, { 'anyhost.session': session })))
+  await untouched.exited
+
+  expect([hasEnded(pressed), hasEnded(shown)]).toEqual([false, false])
+  expect((await sharedIn(relay)).archived?.[FOURTH_SESSION]?.archived).toBe(false)
 }, 90_000)
 
 test("a session another machine archived stops here at the next backup, and one a screen shows, as cmod's show_session puts it on screen, stays while it shows", async () => {

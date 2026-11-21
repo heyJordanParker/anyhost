@@ -4,7 +4,7 @@ import { rmSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
-import { provide, type Usage } from '@cmodjs/core/mod.js'
+import { provide, providers, type Usage } from '@cmodjs/core/mod.js'
 import { connect, NotHeld } from '@cmodjs/core/rpc.js'
 import { Activity, type Shown } from './activity.ts'
 import { changedFiles, countedRelay, forgetUnstarted, indexForkStarts, recordName, isHeavyUpload, isUpkeepDue, journalOf, openCapture, recordFolder, recordSource, recordSummaryFrom, relistSessions, openDatabase, QUIET_MS, rewriteNext, readsKeptIn, keptAnswer, rewriteProgress, sealQuiet, sessionsOf, startCode, startLineOffsets, untoldOf, uploadSessions, writeIndex, type Capture, type Changed, type Fleet, type Problems } from './capture.ts'
@@ -1545,6 +1545,15 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
           for (const { agent, machine } of held) if (machine.id === changed.id) sessions.tell('Change', { session: agent.id, part: 'running' })
         }, readFailed(`the sessions of ${changed.name}`)),
       )
+      void providers('cmod/Terminal').then((terminals) => {
+        for (const terminal of terminals.filter((each) => each.mod === 'cmod' && each.device.id === device.id)) {
+          terminal.onPressed(({ session }) => void mover.touched.set(session, Date.now()))
+          terminal.onShown(({ session, place }) => {
+            mover.touched.set(session, Date.now())
+            if (place !== 'peek' && place !== 'hide') restoreOpened(session)
+          })
+        }
+      }, readFailed("cmod serve's providers of cmod/Terminal"))
     },
     (error: unknown) => console.error(`${new Date().toISOString()} anyhost provides nothing to cmod, as connect() failed: ${error instanceof Error ? error.message : String(error)}`),
   )

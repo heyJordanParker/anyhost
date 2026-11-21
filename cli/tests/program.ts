@@ -382,9 +382,14 @@ export function cmodServeOf(machine: { readonly env: Record<string, string> }) {
   const events = new Map<string, string>()
   const heard: Heard[] = []
   const provided: string[] = []
+  const listening: { readonly id: string; readonly name: string; readonly event: string }[] = []
+  const terminals = [{ mod: 'cmod', program: 'cmod', device: { id: machine.env['ANYHOST_DEVICE_ID'], name: machine.env['ANYHOST_DEVICE_NAME'] } }]
   const watchers = new Set<() => void>()
   let poll: ((messages: Rpc[]) => void) | undefined
   let asked = 0
+  let told = 0
+  let polls = 0
+  let starts = 1
   const changed = (): void => {
     for (const watcher of watchers) watcher()
   }
@@ -414,8 +419,9 @@ export function cmodServeOf(machine: { readonly env: Record<string, string> }) {
     const params = (message.params ?? {}) as Record<string, unknown>
     if (message.method === '$/on') heard.push({ event: events.get(String(params['id'])) ?? '', payload: params['payload'] })
     if (message.method === '$/provide') provided.push(String(params['interface']))
-    if (message.method === '$/provide' && message.id !== undefined) send({ jsonrpc: '2.0', id: message.id, result: {} })
-    else if (message.method !== undefined && message.id !== undefined) send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `The stand-in for cmod serve answers no ${message.method}.` } })
+    if (message.method === '$/listen') listening.push({ id: String(params['id']), name: String(params['interface']), event: String(params['event']) })
+    const answer = message.method === '$/provide' || message.method === '$/listen' ? {} : message.method === '$/providers' ? (params['interface'] === 'cmod/Terminal' ? terminals : []) : undefined
+    if (message.method !== undefined && message.id !== undefined) send(answer === undefined ? { jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `The stand-in for cmod serve answers no ${message.method}.` } } : { jsonrpc: '2.0', id: message.id, result: answer })
     if (message.method === undefined && message.id !== undefined) answers.get(message.id)?.(message)
     changed()
   }
@@ -424,10 +430,16 @@ export function cmodServeOf(machine: { readonly env: Record<string, string> }) {
     unix: join(store, 'serve.sock'),
     idleTimeout: 0,
     async fetch(request) {
-      if (new URL(request.url).pathname === '/rpc/connect') return Response.json({ connection: 'anyhost' })
+      const { pathname } = new URL(request.url)
+      if (pathname === '/rpc/connect') return Response.json({ connection: `anyhost-${starts}` })
+      if (pathname !== `/rpc/anyhost-${starts}`) return new Response(null, { status: 410 })
       if (request.method === 'POST') {
         for (const message of [await request.json()].flat() as Rpc[]) receive(message)
         return new Response(null, { status: 204 })
+      }
+      if (request.method === 'GET') {
+        polls += 1
+        changed()
       }
       if (request.method === 'DELETE' || outbox.length > 0) return Response.json(outbox.splice(0))
       return Response.json(await new Promise<Rpc[]>((resolve) => void (poll = resolve)))
@@ -438,6 +450,21 @@ export function cmodServeOf(machine: { readonly env: Record<string, string> }) {
     heard,
     once,
     provides: (name: string): Promise<void> => once(() => provided.includes(name)),
+    listens: (name: string, event: string): Promise<void> => once(() => listening.some((each) => each.name === name && each.event === event)),
+    tell(name: string, event: string, payload: unknown): Promise<void> {
+      const readAt = polls + (poll === undefined ? 2 : 1)
+      for (const { id } of listening.filter((each) => each.name === name && each.event === event)) send({ jsonrpc: '2.0', method: '$/on', params: { id, payload, cursor: String((told += 1)) } })
+      return once(() => polls >= readAt)
+    },
+    restart(): void {
+      starts += 1
+      told = 0
+      for (const kept of [outbox, provided, listening]) kept.length = 0
+      const waiting = poll
+      poll = undefined
+      waiting?.([])
+      changed()
+    },
     async listen(name: string, event: string): Promise<void> {
       const id = `on-${name}-${event}`
       events.set(id, event)

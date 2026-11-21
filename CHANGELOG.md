@@ -2,6 +2,14 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.2] - 2026-11-21
+
+### Changed
+- anyhost needs cmod 8.2.0 or newer.
+
+### Fixed
+- A session an agent shows or types into through cmod stays running while the Herdr window is in the background, and a show takes it out of the archive.
+
 ## [0.11.1] - 2026-11-21
 
 ### Fixed
