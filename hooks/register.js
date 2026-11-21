@@ -1,55 +1,9840 @@
-var Ma=/^[A-Za-z][A-Za-z0-9_]{0,63}$/;var Ia=/^(?:(?:ctrl|alt|shift|meta)\+){1,2}(?:[a-z0-9]|f(?:[1-9]|1[0-2])|tab|enter|escape|space|backspace|delete|up|down|left|right|home|end|pageup|pagedown|[`\-=[\]\\;',./])$/;var ko=["ctrl","alt","shift","meta"];function La(e){if(typeof e!=="string"||!Ia.test(e))return false;const t=e.split("+").slice(0,-1);return t.every((n,s)=>s===0||ko.indexOf(n)>ko.indexOf(t[s-1]))}function $n(e,t){const n=new Map;for(const[s,r]of Object.entries(t)){const o=`${e}: hotkeys.${s}`;if(!Ma.test(s))throw new Error(`${o} is not a hotkey name. Use letters, digits, and _, starting with a letter.`);if(r.title.trim()==="")throw new Error(`${o} needs a title, the label Settings shows beside its combo.`);if(r.default===undefined)continue;if(!La(r.default))throw new Error(`${o} defaults to "${String(r.default)}", which is not a combo. Give one or two of ctrl, alt, shift, meta in that order, then a key, such as "ctrl+q" or "ctrl+shift+k".`);const i=n.get(r.default);if(i!==undefined)throw new Error(`${o} defaults to ${r.default}, which hotkeys.${i} has too. Give each hotkey its own combo.`);n.set(r.default,s)}return t}function mt(e){if(e.length<=1)return e.join("");return`${e.slice(0,-1).join(", ")} and ${e.at(-1)}`}function xn(e){return e.split(`
-`).find((t)=>t.trim()!=="")?.trim()??""}function se(e){return e instanceof Error?e.message:String(e)}function Xe(e,t){const n=e===null?"was stopped by a signal":`exited ${e}`;const s=t.trim().replace(/[.!?]+$/,"");return s?`${n}: ${s}`:n}var Na=["network","run","files","config"];var Co=["conversation","prompt","model","tasks","tools","approve"];var So=[...Na,...Co];var Da=/^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/;var Fa=/^[A-Za-z0-9][A-Za-z0-9._+-]*$/;var Ba=/^\d+\.\d+\.\d+$/;var Wa=/^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z0-9_@-]+)*$/;var Ha={network:'a host alone, such as "api.github.com", or a socket path, such as "/var/run/docker.sock"',run:`a program's command, such as "gh"`,files:'a path that starts with ~/ or /, such as "~/.zshrc"',config:`a Claude Code setting's name, or a key path inside one, such as "cleanupPeriodDays" or "env.ANTHROPIC_BASE_URL"`};var bn=/^[A-Za-z0-9][A-Za-z0-9._-]*$/;function kt(e){const t=e["XDG_DATA_HOME"];const n=e["HOME"];if(t)return`${t}/cmod`;if(!n)throw new Error("Neither XDG_DATA_HOME nor HOME is set, so the cmod store has no folder. Set HOME.");return`${n}/.local/share/cmod`}function vn(e,t){return`${e}/records/${ht(t)}.json`}function ls(e,t,n){return`${e}/bin/${ht(t)}/${n}/${t}`}function Eo(e,t,n){return`${ls(e,t,n)}.linked`}async function _o(e,t,n){if(n.program===null)return;const s=await Promise.all([ls(t,n.program,n.version),Eo(t,n.program,n.version)].map(e));const r=s.filter((o)=>o!==undefined);return r.length===0?undefined:Math.max(...r)}function Po(e,t){return e.program!==null&&(t===undefined||t>Date.parse(e.installedAt))}async function To(e,t){if(!await e.exists(`${t}/programs/cmod`))return;const n=(await e.list(`${t}/bin/cmod`)).filter((s)=>Ba.test(s)).toSorted((s,r)=>On(s,r)?-1:1);for(const s of n)if(await e.exists(ls(t,"cmod",s))||await e.exists(Eo(t,"cmod",s)))return s;return}function us(e,t){return`${e}/data/${ht(t)}`}function za(e,t){const n=e["CLAUDE_CONFIG_DIR"];const s=e["HOME"];if(n)return`${n}/cmods/${ht(t)}`;if(!s)throw new Error(`Neither CLAUDE_CONFIG_DIR nor HOME is set, so ${t} has no config folder. Set HOME.`);return`${s}/.claude/cmods/${ht(t)}`}function kn(e,t,n){return[{tier:"system",folder:za(e,t)},{tier:"project",folder:`${n}/.claude/cmods/${ht(t)}`}]}function ht(e){if(!bn.test(e)||e.includes("..")){throw new Error(`"${e}" is not a plugin name: use letters, digits, ".", "_", and "-", starting with a letter or digit.`)}return e}async function fs(e,t,n){const s=vn(t,n);const r=await e(s);if(r===undefined)return;return Ua(r,s)}function Ua(e,t){const n=`Delete ${t} and run cmod setup on the plugin again.`;let s;try{s=JSON.parse(e)}catch(m){throw new Error(`${t} is not JSON (${se(m)}). ${n}`)}if(!Le(s))throw new Error(`${t} is not a cmod install record. ${n}`);for(const m of["name","version","root","installedAt","scriptsSha256"]){if(typeof s[m]!=="string")throw new Error(`${t} has no "${m}" text. ${n}`)}const r=s["uninstall"];if(r!==null&&typeof r!=="string")throw new Error(`${t} has an "uninstall" that is neither a path nor null. ${n}`);const o=s["program"];if(o!==null&&typeof o!=="string")throw new Error(`${t} has a "program" that is neither a command name nor null. ${n}`);const i=s["keys"]??{};if(!Le(i)||Object.values(i).some((m)=>typeof m!=="string"))throw new Error(`${t} has "keys" that are not key bindings. ${n}`);const c=s["permissions"]??null;if(c!==null&&!Oo(c))throw new Error(`${t} has "permissions" that are not a list of permissions. ${n}`);const d=s["grantedOnUpdate"]??[];if(!Oo(d))throw new Error(`${t} has a "grantedOnUpdate" that is not a list of permissions. ${n}`);const f=s["installedBy"]??null;if(f!==null&&!(Le(f)&&(f["session"]===null||typeof f["session"]==="string")&&typeof f["pid"]==="number"))throw new Error(`${t} has an "installedBy" that names no session and process. ${n}`);return{name:s["name"],version:s["version"],root:s["root"],installedAt:s["installedAt"],scriptsSha256:s["scriptsSha256"],uninstall:r,program:o,keys:i,permissions:c,grantedOnUpdate:d,installedBy:f}}function Ro(e){if(e===undefined)return;if(!Le(e))throw new Error("package.json is not a JSON object.");const t=e["cmod"];if(t===undefined)return;if(!Le(t))throw new Error('package.json has a "cmod" key that is not an object. Write "cmod": { "install": "./setup/install.sh", "uninstall": "./setup/uninstall.sh" }.');const n=t["program"];if(n!==undefined&&(typeof n!=="string"||!bn.test(n)))throw new Error(`package.json "cmod.program" must be the program's command, such as "hello".`);const s=t["approve"];if(s!==undefined&&s!==true)throw new Error(`package.json "cmod.approve" is ${JSON.stringify(s)}. Write "approve": true, or leave it out.`);const r=Ga(t);return{...Ao(t,"install"),...Ao(t,"uninstall"),...n===undefined?{}:{program:n},...Ka(t["hotkeys"]),...s===true||r.includes("approve")?{approve:true}:{},...r.length===0?{}:{permissions:r}}}function Ga(e){const t=e["permissions"];if(t===undefined)return[];const n='package.json "cmod.permissions"';if(!Le(t))throw new Error(`${n} must be an object, such as { "network": ["api.github.com"], "prompt": true }.`);const s=[];for(const[r,o]of Object.entries(t)){if(!So.includes(r))throw new Error(`${n} names "${r}", which is not a permission. Use ${mt(So.map((c)=>`"${c}"`))}.`);if(Co.includes(r)){if(o!==true)throw new Error(`${n} sets "${r}" to ${JSON.stringify(o)}. Write "${r}": true, or leave it out.`);s.push(r);continue}if(r==="run"&&o==="*"){s.push("run:*");continue}const i={network:'["api.github.com"]',run:'["gh"], or "*" for any program',files:'["~/.zshrc"]',config:'["cleanupPeriodDays"]'}[r];if(!Array.isArray(o)||o.length===0||!o.every((c)=>typeof c==="string"))throw new Error(`${n} sets "${r}" to ${JSON.stringify(o)}. Write a list, such as "${r}": ${i}.`);for(const c of o){const d=/^(~\/|\/)/.test(c)&&!c.split("/").includes("..");const f={network:Da.test(c)||d,run:Fa.test(c),files:d,config:Wa.test(c)}[r];if(f!==true)throw new Error(`${n} lists "${c}" under "${r}". Write ${Ha[r]}.`);s.push(`${r}:${c}`)}}return s}var ps="Install it in Plugins.";var Lt="Set it in /config, where Claude Code keeps it in your keychain.";var jo="cmod:pendingSteps";var Mo="cmod:finishSteps";function Ja(e,t){return`${e}/instances/${ht(t)}`}function Io(e,t,n){return`${Ja(e,t)}/${n}.json`}function Lo(e,t){return`${e}/services/${ht(t)}`}function No(e,t){if(e.browser==="true")return;if(e.browser)return[e.browser,t];if(e.sshConnection)return;if(e.os==="darwin")return["open",t];return e.display||e.waylandDisplay?["xdg-open",t]:undefined}function Ka(e){if(e===undefined)return{};const t="cmod check writes it from the hotkeys defineMod declares, so run cmod check.";if(!Le(e)||!Object.values(e).every((n)=>Le(n)&&typeof n["title"]==="string"&&(n["default"]===undefined||typeof n["default"]==="string")))throw new Error(`package.json "cmod.hotkeys" is not a map of hotkeys to their title and optional default combo. ${t}`);return{hotkeys:$n('package.json "cmod"',e)}}var Yt="6.2.1";var Nt="6.1.0";function Sn(e,t){return`${e}--${t}`}function Do(e){const t=Le(e)&&Array.isArray(e["bindings"])?e["bindings"]:[];const n=new Map;for(const s of t){if(!Le(s)||s["context"]!=="Chat"||!Le(s["bindings"]))continue;for(const[r,o]of Object.entries(s["bindings"]))if(typeof o==="string"&&o.startsWith("command:"))n.set(o.slice("command:".length),r)}return n}function Ao(e,t){const n=e[t];if(n===undefined)return{};if(typeof n!=="string"||n.trim()==="")throw new Error(`package.json "cmod.${t}" must be a command, such as "./setup/${t}.sh".`);if(/[\n\t]/.test(n))throw new Error(`package.json "cmod.${t}" holds a line break or a tab. Write one command, such as "./setup/${t}.sh".`);const s=Fo(n).find((r)=>Bo(r)===".");if(s!==undefined)throw new Error(`package.json "cmod.${t}" names ${s}, a script at the plugin root. Move it into a folder, such as ./setup/${t}.sh: cmod runs the steps again whenever anything in a script's folder changes.`);return{[t]:n}}function Fo(e){const t=e.split(/[\s;&|()<>]+/).map((n)=>n.replace(/^['"]|['"]$/g,"")).filter((n)=>n.includes("/")&&!n.startsWith("-")&&!n.startsWith("/")&&!n.startsWith("~")&&!n.startsWith("$")&&!n.includes("=")&&!n.split("/").includes(".."));return[...new Set(t)]}function Bo(e){return e.slice(0,e.lastIndexOf("/"))}async function Wo(e,t){const n=new Set;for(const o of["install","uninstall"]){const i=e[o];if(i===undefined)continue;const c=[];for(const d of Fo(i)){if(await t.read(d)!==undefined)c.push(Bo(d))}if(c.length===0)throw new Error(`package.json "cmod.${o}" runs "${i}", which names no script file in the mod, so cmod cannot tell when what it runs changes. Put the commands in a script, such as ./setup/${o}.sh.`);for(const d of c)n.add(d)}let s=[e.install??"",e.uninstall??"",e.program??"",...e.hotkeys===undefined?[]:[JSON.stringify(Object.entries(e.hotkeys).sort())],...e.permissions===undefined?[]:[JSON.stringify([...e.permissions].sort())]].join("\x00");for(const o of[...n].sort()){for(const i of(await t.list(o)).sort()){const c=`${o}/${i}`;const d=await t.read(c);if(d===undefined)throw new Error(`${c} links to a folder or to nothing, so cmod cannot tell when it changes. Point the link at a file, or delete it.`);s+=`\x00${c}\x00${d}`}}const r=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(s));return[...new Uint8Array(r)].map((o)=>o.toString(16).padStart(2,"0")).join("")}function An(e){const t=/^progress (\d+) (\d+)(?: (.*))?$/.exec(e);if(t!==null)return{type:"progress",done:Number(t[1]),total:Number(t[2]),label:t[3]??""};const n=/^needs-consent (\S+)\t([^\t]*)\t([^\t]*)(?:\t(.*))?$/.exec(e);if(n!==null){const[c="",...d]=(n[4]??"").split("\t");return{type:"needs-consent",sha256:n[1],install:n[2],uninstall:n[3],hotkeys:c,permissions:d.filter((f)=>f!=="")}}const s=/^done (\S+)(?: (\S+))?$/.exec(e);if(s!==null)return{type:"done",name:s[1],...s[2]===undefined?{}:{version:s[2]}};const r=/^missing (\S+)$/.exec(e);if(r!==null)return{type:"missing",name:r[1]};const o=/^failed (-?\d+)(?:\t(.*))?$/.exec(e);if(o!==null)return{type:"failed",code:Number(o[1]),message:o[2]??""};const i=/^retries (changed|later)$/.exec(e);if(i!==null)return{type:"retries",when:i[1]};return{type:"log",text:e.replace(/^log /,"")}}function On(e,t){const n=e.split(".").map(Number);const s=t.split(".").map(Number);for(let r=0;r<Math.max(n.length,s.length);r+=1){const o=(n[r]??0)-(s[r]??0);if(o!==0)return o>0}return true}function Le(e){return typeof e==="object"&&e!==null&&!Array.isArray(e)}function Oo(e){return Array.isArray(e)&&e.every((t)=>typeof t==="string")}var gt="task";var st="taskStart";var Dt="taskEnd";var St="note";var Va=new RegExp(`<(${bn.source.slice(1,-1)})_mod>\\n([\\s\\S]*?)\\n</\\1_mod>`,"g");function ot(e,t){return`<${e}_mod>
-${t}
-</${e}_mod>`}var wt="person";var Cn="mod";var Ho="schedule";var zo="channel";var Uo="sdk";var Go="engine";var qa=["human","composer","bridge","slack-ping"];var Xa=["peer","peer-send-message","coordinator","projects-relay","observer","observer-activity"];function En(e,t){const n=Le(e)?e:{};const s=typeof n["kind"]==="string"?n["kind"]:undefined;if(s===undefined)return{type:t?gt:wt};if(qa.includes(s))return{type:wt};if(Xa.includes(s))return{type:"session"};if(s==="auto-continuation")return{type:Go};if(s==="plugin"&&typeof n["name"]==="string")return{type:Cn,name:n["name"],...n["asUser"]===true?{as:wt}:{}};if(s==="scheduled-trigger")return{type:Ho};if(s==="channel"&&typeof n["server"]==="string")return{type:zo,name:n["server"]};if(s==="sdk")return{type:Uo};if(s==="task-notification")return{type:gt};return{type:t?gt:wt}}var At="toolCall";var Ot="toolResult";var qe="message";var _n="contextStart";var en="contextEnd";var Ft="turnStart";var Ct="turnEnd";var Pn="goalChange";var Zo="fork";var Qo=50;var Tn="session";var Et={Message:"message",Prompt:"prompt",Note:"note",Reply:"reply",ToolCall:"toolCall",ToolResult:"toolResult",Skill:"skill",InstructionFile:"instructionFile",AttachedFile:"attachedFile",Notice:"notice",ContextStart:"contextStart",ContextEnd:"contextEnd",TurnStart:"turnStart",TurnEnd:"turnEnd",TaskStart:"taskStart",TaskEnd:"taskEnd",GoalChange:"goalChange",UsageChange:"usageChange"};var Yo=["Prompt","Note","Skill","InstructionFile","AttachedFile","Reply","ToolCall","ToolResult","Notice","TaskStart","TurnEnd","ContextEnd"];var hs={ProjectSetup:{on:"Setup",before:"Setup"},SessionStart:{on:"SessionStart",before:"SessionStart"},SessionEnd:{on:"SessionEnd"},ModelChange:{on:"PostModelSwitch",before:"PreModelSwitch"},CwdChange:{on:"CwdChanged"},DirectoryAdd:{on:"DirectoryAdded"},WorktreeCreate:{on:"WorktreeCreate",before:"WorktreeCreate"},WorktreeRemove:{on:"WorktreeRemove"},Notification:{on:"Notification"},Elicitation:{on:"Elicitation",before:"Elicitation"},ElicitationResponse:{on:"ElicitationResult",before:"ElicitationResult"},PermissionCheck:{on:"tool.check",before:"tool.check"},PermissionRequest:{on:"PermissionRequest",before:"PermissionRequest"},PermissionDenial:{on:"PermissionDenied",before:"PermissionDenied"},ToolBatch:{on:"PostToolBatch",before:"PostToolBatch"},TodoCreate:{on:"TaskCreated",before:"TaskCreated"},TodoComplete:{on:"TaskCompleted",before:"TaskCompleted"},ReplyDisplay:{on:"MessageDisplay",before:"MessageDisplay"}};function rt(e,t){if(t instanceof RegExp)return e!==undefined&&e!==null&&t.test(String(e));if(Array.isArray(t))return t.some((n)=>rt(e,n));if(typeof t!=="object"||t===null)return e===t;if(Array.isArray(e))return e.some((n)=>rt(n,t));if(typeof e!=="object"||e===null)return false;return Object.entries(t).every(([n,s])=>s===undefined||rt(e[n],s))}function Rn(e){if(e instanceof RegExp)return{regexp:e.source,flags:e.flags};if(Array.isArray(e))return e.map(Rn);if(typeof e!=="object"||e===null)return e;return Object.fromEntries(Object.entries(e).filter(([,t])=>t!==undefined).map(([t,n])=>[t,Rn(n)]))}var tc=Object.create;var{getPrototypeOf:nc,defineProperty:er,getOwnPropertyNames:sc}=Object;var tr=Object.prototype.hasOwnProperty;function oc(e){return this[e]}var rc;var ic;var ac=(e,t,n)=>{var s=e!=null&&typeof e==="object";if(s){var r=t?rc??=new WeakMap:ic??=new WeakMap,o=r.get(e);if(o)return o}n=e!=null?tc(nc(e)):{};let i=t||!e||!e.__esModule||!tr.call(e,"default")?er(n,"default",{value:e,enumerable:true}):n;if(e&&typeof e==="object"||typeof e==="function"){for(let c of sc(e))if(!tr.call(i,c))er(i,c,{get:oc.bind(e,c),enumerable:true})}if(s)r.set(e,i);return i};var Pt=(e,t)=>()=>(t||e((t={exports:{}}).exports,t),t.exports);var jn=Pt(function(e,t){var n={DOT_LITERAL:"\\.",PLUS_LITERAL:"\\+",QMARK_LITERAL:"\\?",SLASH_LITERAL:"\\/",ONE_CHAR:"(?=.)",QMARK:"[^/]",END_ANCHOR:"(?:\\/|$)",DOTS_SLASH:"\\.{1,2}(?:\\/|$)",NO_DOT:"(?!\\.)",NO_DOTS:"(?!(?:^|\\/)\\.{1,2}(?:\\/|$))",NO_DOT_SLASH:"(?!\\.{0,1}(?:\\/|$))",NO_DOTS_SLASH:"(?!\\.{1,2}(?:\\/|$))",QMARK_NO_DOT:"[^.\\/]",STAR:"[^/]*?",START_ANCHOR:"(?:^|\\/)",SEP:"/"},s={...n,SLASH_LITERAL:"[\\\\/]",QMARK:"[^\\\\/]",STAR:"[^\\\\/]*?",DOTS_SLASH:"\\.{1,2}(?:[\\\\/]|$)",NO_DOT:"(?!\\.)",NO_DOTS:"(?!(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))",NO_DOT_SLASH:"(?!\\.{0,1}(?:[\\\\/]|$))",NO_DOTS_SLASH:"(?!\\.{1,2}(?:[\\\\/]|$))",QMARK_NO_DOT:"[^.\\\\/]",START_ANCHOR:"(?:^|[\\\\/])",END_ANCHOR:"(?:[\\\\/]|$)",SEP:"\\"},r={__proto__:null,alnum:"a-zA-Z0-9",alpha:"a-zA-Z",ascii:"\\x00-\\x7F",blank:" \\t",cntrl:"\\x00-\\x1F\\x7F",digit:"0-9",graph:"\\x21-\\x7E",lower:"a-z",print:"\\x20-\\x7E ",punct:"\\-!\"#$%&'()\\*+,./:;<=>?@[\\]^_`{|}~",space:" \\t\\r\\n\\v\\f",upper:"A-Z",word:"A-Za-z0-9_",xdigit:"A-Fa-f0-9"};t.exports={DEFAULT_MAX_EXTGLOB_RECURSION:0,MAX_LENGTH:65536,POSIX_REGEX_SOURCE:r,REGEX_BACKSLASH:/\\(?![*+?^${}(|)[\]])/g,REGEX_NON_SPECIAL_CHARS:/^[^@![\].,$*+?^{}()|\\/]+/,REGEX_SPECIAL_CHARS:/[-*+?.^${}(|)[\]]/,REGEX_SPECIAL_CHARS_BACKREF:/(\\?)((\W)(\3*))/g,REGEX_SPECIAL_CHARS_GLOBAL:/([-*+?.^${}(|)[\]])/g,REGEX_REMOVE_BACKSLASH:/(?:\[.*?[^\\]\]|\\(?=.))/g,REPLACEMENTS:{__proto__:null,"***":"*","**/**":"**","**/**/**":"**"},CHAR_0:48,CHAR_9:57,CHAR_UPPERCASE_A:65,CHAR_LOWERCASE_A:97,CHAR_UPPERCASE_Z:90,CHAR_LOWERCASE_Z:122,CHAR_LEFT_PARENTHESES:40,CHAR_RIGHT_PARENTHESES:41,CHAR_ASTERISK:42,CHAR_AMPERSAND:38,CHAR_AT:64,CHAR_BACKWARD_SLASH:92,CHAR_CARRIAGE_RETURN:13,CHAR_CIRCUMFLEX_ACCENT:94,CHAR_COLON:58,CHAR_COMMA:44,CHAR_DOT:46,CHAR_DOUBLE_QUOTE:34,CHAR_EQUAL:61,CHAR_EXCLAMATION_MARK:33,CHAR_FORM_FEED:12,CHAR_FORWARD_SLASH:47,CHAR_GRAVE_ACCENT:96,CHAR_HASH:35,CHAR_HYPHEN_MINUS:45,CHAR_LEFT_ANGLE_BRACKET:60,CHAR_LEFT_CURLY_BRACE:123,CHAR_LEFT_SQUARE_BRACKET:91,CHAR_LINE_FEED:10,CHAR_NO_BREAK_SPACE:160,CHAR_PERCENT:37,CHAR_PLUS:43,CHAR_QUESTION_MARK:63,CHAR_RIGHT_ANGLE_BRACKET:62,CHAR_RIGHT_CURLY_BRACE:125,CHAR_RIGHT_SQUARE_BRACKET:93,CHAR_SEMICOLON:59,CHAR_SINGLE_QUOTE:39,CHAR_SPACE:32,CHAR_TAB:9,CHAR_UNDERSCORE:95,CHAR_VERTICAL_LINE:124,CHAR_ZERO_WIDTH_NOBREAK_SPACE:65279,extglobChars(o){return{"!":{type:"negate",open:"(?:(?!(?:",close:`))${o.STAR})`},"?":{type:"qmark",open:"(?:",close:")?"},"+":{type:"plus",open:"(?:",close:")+"},"*":{type:"star",open:"(?:",close:")*"},"@":{type:"at",open:"(?:",close:")"}}},globChars(o){return o===true?s:n}}});var gs=Pt(function(e){var{REGEX_BACKSLASH:t,REGEX_REMOVE_BACKSLASH:n,REGEX_SPECIAL_CHARS:s,REGEX_SPECIAL_CHARS_GLOBAL:r}=jn();e.isObject=(o)=>o!==null&&typeof o==="object"&&!Array.isArray(o);e.hasRegexChars=(o)=>s.test(o);e.isRegexChar=(o)=>o.length===1&&e.hasRegexChars(o);e.escapeRegex=(o)=>o.replace(r,"\\$1");e.toPosixSlashes=(o)=>o.replace(t,"/");e.isWindows=()=>{if(typeof navigator<"u"&&navigator.platform){let o=navigator.platform.toLowerCase();return o==="win32"||o==="windows"}return false};e.removeBackslashes=(o)=>o.replace(n,(i)=>i==="\\"?"":i);e.escapeLast=(o,i,c)=>{let d=o.lastIndexOf(i,c);if(d===-1)return o;if(o[d-1]==="\\")return e.escapeLast(o,i,d-1);return`${o.slice(0,d)}\\${o.slice(d)}`};e.removePrefix=(o,i={})=>{let c=o;if(c.startsWith("./"))c=c.slice(2),i.prefix="./";return c};e.wrapOutput=(o,i={},c={})=>{let d=c.contains?"":"^",f=c.contains?"":"$",m=`${d}(?:${o})${f}`;if(i.negated===true)m=`(?:^(?!${m}).*$)`;return m};e.basename=(o,{windows:i}={})=>{let c=o.split(i?/[\\/]/:"/"),d=c[c.length-1];if(d==="")return c[c.length-2];return d}});var cc=Pt(function(e,t){var n=gs(),{CHAR_ASTERISK:s,CHAR_AT:r,CHAR_BACKWARD_SLASH:o,CHAR_COMMA:i,CHAR_DOT:c,CHAR_EXCLAMATION_MARK:d,CHAR_FORWARD_SLASH:f,CHAR_LEFT_CURLY_BRACE:m,CHAR_LEFT_PARENTHESES:x,CHAR_LEFT_SQUARE_BRACKET:O,CHAR_PLUS:v,CHAR_QUESTION_MARK:y,CHAR_RIGHT_CURLY_BRACE:R,CHAR_RIGHT_PARENTHESES:D,CHAR_RIGHT_SQUARE_BRACKET:z}=jn(),X=(k)=>k===f||k===o,G=(k)=>{if(k.isPrefix!==true)k.depth=k.isGlobstar?1/0:1},H=(k,B)=>{let b=B||{},Q=k.length-1,Z=b.parts===true||b.tokens===true||b.scanToEnd===true,T=[],j=[],I=[],q=k,te=-1,K=0,he=0,we=false,S=false,W=false,J=false,N=false,V=false,re=false,ce=false,ie=false,xe=false,ye=0,Ee,ne,le={value:"",depth:0,isGlob:false},L=()=>te>=Q,me=()=>q.charCodeAt(te+1),Ce=()=>(Ee=ne,q.charCodeAt(++te));while(te<Q){ne=Ce();let pe;if(ne===o){if(re=le.backslashes=true,ne=Ce(),ne===m)V=true;continue}if(V===true||ne===m){ye++;while(L()!==true&&(ne=Ce())){if(ne===o){re=le.backslashes=true,Ce();continue}if(ne===m){ye++;continue}if(V!==true&&ne===c&&(ne=Ce())===c){if(we=le.isBrace=true,W=le.isGlob=true,xe=true,Z===true)continue;break}if(V!==true&&ne===i){if(we=le.isBrace=true,W=le.isGlob=true,xe=true,Z===true)continue;break}if(ne===R){if(ye--,ye===0){V=false,we=le.isBrace=true,xe=true;break}}}if(Z===true)continue;break}if(ne===f){if(T.push(te),j.push(le),le={value:"",depth:0,isGlob:false},xe===true)continue;if(Ee===c&&te===K+1){K+=2;continue}he=te+1;continue}if(b.noext!==true){if((ne===v||ne===r||ne===s||ne===y||ne===d)===true&&me()===x){if(W=le.isGlob=true,J=le.isExtglob=true,xe=true,ne===d&&te===K)ie=true;if(Z===true){let Se=0;while(L()!==true&&(ne=Ce())){if(ne===o){re=le.backslashes=true,Ce();continue}if(ne===x){Se++;continue}if(ne===D&&--Se===0){xe=true;break}}continue}break}}if(ne===s){if(Ee===s)N=le.isGlobstar=true;if(W=le.isGlob=true,xe=true,Z===true)continue;break}if(ne===y){if(W=le.isGlob=true,xe=true,Z===true)continue;break}if(ne===O){while(L()!==true&&(pe=Ce())){if(pe===o){re=le.backslashes=true,Ce();continue}if(pe===z){S=le.isBracket=true,W=le.isGlob=true,xe=true;break}}if(Z===true)continue;break}if(b.nonegate!==true&&ne===d&&te===K){ce=le.negated=true,K++;continue}if(b.noparen!==true&&ne===x){if(W=le.isGlob=true,Z===true){let Se=1;while(L()!==true&&(ne=Ce())){if(ne===o){re=le.backslashes=true,Ce();continue}if(ne===x){Se++;continue}if(ne===D&&--Se===0){xe=true;break}}continue}break}if(W===true){if(xe=true,Z===true)continue;break}}if(b.noext===true)J=false,W=false;let be=q,P="",M="";if(K>0)P=q.slice(0,K),q=q.slice(K),he-=K;if(be&&W===true&&he>0)be=q.slice(0,he),M=q.slice(he);else if(W===true)be="",M=q;else be=q;if(be&&be!==""&&be!=="/"&&be!==q){if(X(be.charCodeAt(be.length-1)))be=be.slice(0,-1)}if(b.unescape===true){if(M)M=n.removeBackslashes(M);if(be&&re===true)be=n.removeBackslashes(be)}let Re={prefix:P,input:k,start:K,base:be,glob:M,isBrace:we,isBracket:S,isGlob:W,isExtglob:J,isGlobstar:N,negated:ce,negatedExtglob:ie};if(b.tokens===true){if(Re.maxDepth=0,!X(ne))j.push(le);Re.tokens=j}if(b.parts===true||b.tokens===true){let pe;for(let Pe=0;Pe<T.length;Pe++){let ue=pe!==undefined?pe+1:K,oe=T[Pe],$e=k.slice(ue,oe);if(b.tokens){if(Pe===0&&K!==0)j[Pe].isPrefix=true,j[Pe].value=P;else j[Pe].value=$e;G(j[Pe]),Re.maxDepth+=j[Pe].depth}if(oe>=K)I.push($e),pe=oe}let Se=pe!==undefined?pe+1:K,Y=k.slice(Se);if(I.push(Y),b.tokens&&pe&&pe+1<k.length)j[j.length-1].value=Y,G(j[j.length-1]),Re.maxDepth+=j[j.length-1].depth;Re.slashes=T,Re.parts=I}return Re};t.exports=H});var dc=Pt(function(e,t){var n=jn(),s=gs(),{MAX_LENGTH:r,POSIX_REGEX_SOURCE:o,REGEX_NON_SPECIAL_CHARS:i,REGEX_SPECIAL_CHARS_BACKREF:c,REPLACEMENTS:d}=n,f=(k,B)=>{if(typeof B.expandRange==="function")return B.expandRange(...k,B);k.sort();let b=`[${k.join("-")}]`;try{new RegExp(b)}catch(Q){return k.map((Z)=>s.escapeRegex(Z)).join("..")}return b},m=(k,B)=>`Missing ${k}: "${B}" - use "\\\\${B}" to match literal characters`,x=(k)=>{let B=[],b=0,Q=0,Z=0,T="",j=false;for(let I of k){if(j===true){T+=I,j=false;continue}if(I==="\\"){T+=I,j=true;continue}if(I==='"'){Z=Z===1?0:1,T+=I;continue}if(Z===0){if(I==="[")b++;else if(I==="]"&&b>0)b--;else if(b===0){if(I==="(")Q++;else if(I===")"&&Q>0)Q--;else if(I==="|"&&Q===0){B.push(T),T="";continue}}}T+=I}return B.push(T),B},O=(k)=>{let B=false;for(let b of k){if(B===true){B=false;continue}if(b==="\\"){B=true;continue}if(/[?*+@!()[\]{}]/.test(b))return false}return true},v=(k)=>{let B=k.trim(),b=true;while(b===true)if(b=false,/^@\([^\\()[\]{}|]+\)$/.test(B))B=B.slice(2,-1),b=true;if(!O(B))return;return B.replace(/\\(.)/g,"$1")},y=(k)=>{let B=k.map(v).filter(Boolean);for(let b=0;b<B.length;b++)for(let Q=b+1;Q<B.length;Q++){let Z=B[b],T=B[Q],j=Z[0];if(!j||Z!==j.repeat(Z.length)||T!==j.repeat(T.length))continue;if(Z===T||Z.startsWith(T)||T.startsWith(Z))return true}return false},R=(k,B=true)=>{if(k[0]!=="+"&&k[0]!=="*"||k[1]!=="(")return;let b=0,Q=0,Z=0,T=false;for(let j=1;j<k.length;j++){let I=k[j];if(T===true){T=false;continue}if(I==="\\"){T=true;continue}if(I==='"'){Z=Z===1?0:1;continue}if(Z===1)continue;if(I==="["){b++;continue}if(I==="]"&&b>0){b--;continue}if(b>0)continue;if(I==="("){Q++;continue}if(I===")"){if(Q--,Q===0){if(B===true&&j!==k.length-1)return;return{type:k[0],body:k.slice(2,j),end:j}}}}},D=(k)=>`${k.length===1?s.escapeRegex(k[0]):`[${k.map((B)=>s.escapeRegex(B)).join("")}]`}*`,z=(k)=>{let B=0,b=[];while(B<k.length){let Q=R(k.slice(B),false);if(!Q||Q.type!=="*")return;let Z=x(Q.body).map((j)=>j.trim());if(Z.length!==1)return;let T=v(Z[0]);if(!T||T.length!==1)return;b.push(T),B+=Q.end+1}if(b.length<1)return;return b},X=(k)=>{let B=0,b=k.trim(),Q=R(b);while(Q)B++,b=Q.body.trim(),Q=R(b);return B},G=(k,B)=>{if(B.maxExtglobRecursion===false)return{risky:false};let b=typeof B.maxExtglobRecursion==="number"?B.maxExtglobRecursion:n.DEFAULT_MAX_EXTGLOB_RECURSION,Q=x(k).map((I)=>I.trim());if(Q.length>1){if(Q.some((I)=>I==="")||Q.some((I)=>/^[*?]+$/.test(I))||y(Q))return{risky:true}}let Z=[],T=false,j=true;for(let I of Q){let q=z(I);if(q){T=true,Z.push(...q);continue}let te=v(I);if(te&&te.length===1){Z.push(te);continue}if(j=false,X(I)>b)return{risky:true}}if(T)return j?{risky:true,safeOutput:D([...new Set(Z)])}:{risky:true};return{risky:false}},H=(k,B)=>{if(typeof k!=="string")throw TypeError("Expected a string");k=d[k]||k;let b={...B},Q=typeof b.maxLength==="number"?Math.min(r,b.maxLength):r,Z=k.length;if(Z>Q)throw SyntaxError(`Input length: ${Z}, exceeds maximum allowed length: ${Q}`);let T={type:"bos",value:"",output:b.prepend||""},j=[T],I=b.capture?"":"?:",q=n.globChars(b.windows),te=n.extglobChars(q),{DOT_LITERAL:K,PLUS_LITERAL:he,SLASH_LITERAL:we,ONE_CHAR:S,DOTS_SLASH:W,NO_DOT:J,NO_DOT_SLASH:N,NO_DOTS_SLASH:V,QMARK:re,QMARK_NO_DOT:ce,STAR:ie,START_ANCHOR:xe}=q,ye=(a)=>`(${I}(?:(?!${xe}${a.dot?W:K}).)*?)`,Ee=b.dot?"":J,ne=b.dot?re:ce,le=b.bash===true?ye(b):ie;if(b.capture)le=`(${le})`;if(typeof b.noext==="boolean")b.noextglob=b.noext;let L={input:k,index:-1,start:0,dot:b.dot===true,consumed:"",output:"",prefix:"",backtrack:false,negated:false,brackets:0,braces:0,parens:0,quotes:0,globstar:false,tokens:j};k=s.removePrefix(k,L),Z=k.length;let me=[],Ce=[],be=[],P=T,M,Re=()=>L.index===Z-1,pe=L.peek=(a=1)=>k[L.index+a],Se=L.advance=()=>k[++L.index]||"",Y=()=>k.slice(L.index+1),Pe=(a="",w=0)=>{L.consumed+=a,L.index+=w},ue=(a)=>{L.output+=a.output!=null?a.output:a.value,Pe(a.value)},oe=()=>{let a=1;while(pe()==="!"&&(pe(2)!=="("||pe(3)==="?"))Se(),L.start++,a++;if(a%2===0)return false;return L.negated=true,L.start++,true},$e=(a)=>{L[a]++,be.push(a)},p=(a)=>{L[a]--,be.pop()},u=(a)=>{if(P.type==="globstar"){let w=L.braces>0&&(a.type==="comma"||a.type==="brace"),g=a.extglob===true||me.length&&(a.type==="pipe"||a.type==="paren");if(a.type!=="slash"&&a.type!=="paren"&&!w&&!g)L.output=L.output.slice(0,-P.output.length),P.type="star",P.value="*",P.output=le,L.output+=P.output}if(me.length&&a.type!=="paren")me[me.length-1].inner+=a.value;if(a.value||a.output)ue(a);if(P&&P.type==="text"&&a.type==="text"){P.output=(P.output||P.value)+a.value,P.value+=a.value;return}a.prev=P,j.push(a),P=a},A=(a,w)=>{let g={...te[w],conditions:1,inner:""};g.prev=P,g.parens=L.parens,g.output=L.output,g.startIndex=L.index,g.tokensIndex=j.length;let C=(b.capture?"(":"")+g.open;$e("parens"),u({type:a,value:w,output:L.output?"":S}),u({type:"paren",extglob:true,value:Se(),output:C}),me.push(g)},l=(a)=>{let w=k.slice(a.startIndex,L.index+1),g=k.slice(a.startIndex+2,L.index),C=G(g,b);if((a.type==="plus"||a.type==="star")&&C.risky){let ee=C.safeOutput?(a.output?"":S)+(b.capture?`(${C.safeOutput})`:C.safeOutput):undefined,ae=j[a.tokensIndex];ae.type="text",ae.value=w,ae.output=ee||s.escapeRegex(w);for(let ve=a.tokensIndex+1;ve<j.length;ve++)j[ve].value="",j[ve].output="",delete j[ve].suffix;L.output=a.output+ae.output,L.backtrack=true,u({type:"paren",extglob:true,value:M,output:""}),p("parens");return}let E=a.close+(b.capture?")":""),U;if(a.type==="negate"){let ee=le;if(a.inner&&a.inner.length>1&&a.inner.includes("/"))ee=ye(b);if(ee!==le||Re()||/^\)+$/.test(Y()))E=a.close=`)$))${ee}`;if(a.inner.includes("*")&&(U=Y())&&/^\.[^\\/.]+$/.test(U)){let ae=H(U,{...B,fastpaths:false}).output;E=a.close=`)${ae})${ee})`}if(a.prev.type==="bos")L.negatedExtglob=true}u({type:"paren",extglob:true,value:M,output:E}),p("parens")};if(b.fastpaths!==false&&!/(^[*!]|[/()[\]{}"])/.test(k)){let a=false,w=k.replace(c,(g,C,E,U,ee,ae)=>{if(U==="\\")return a=true,g;if(U==="?"){if(C)return C+U+(ee?re.repeat(ee.length):"");if(ae===0)return ne+(ee?re.repeat(ee.length):"");return re.repeat(E.length)}if(U===".")return K.repeat(E.length);if(U==="*"){if(C)return C+U+(ee?le:"");return le}return C?g:`\\${g}`});if(a===true)if(b.unescape===true)w=w.replace(/\\/g,"");else w=w.replace(/\\+/g,(g)=>g.length%2===0?"\\\\":g?"\\":"");if(w===k&&b.contains===true)return L.output=k,L;return L.output=s.wrapOutput(w,L,B),L}while(!Re()){if(M=Se(),M==="\x00")continue;if(M==="\\"){let g=pe();if(g==="/"&&b.bash!==true)continue;if(g==="."||g===";")continue;if(!g){M+="\\",u({type:"text",value:M});continue}let C=/^\\+/.exec(Y()),E=0;if(C&&C[0].length>2){if(E=C[0].length,L.index+=E,E%2!==0)M+="\\"}if(b.unescape===true)M=Se();else M+=Se();if(L.brackets===0){u({type:"text",value:M});continue}}if(L.brackets>0&&(M!=="]"||P.value==="["||P.value==="[^")){if(b.posix!==false&&M===":"){let g=P.value.slice(1);if(g.includes("[")){if(P.posix=true,g.includes(":")){let C=P.value.lastIndexOf("["),E=P.value.slice(0,C),U=P.value.slice(C+2),ee=o[U];if(ee){if(P.value=E+ee,L.backtrack=true,Se(),!T.output&&j.indexOf(P)===1)T.output=S;continue}}}}if(M==="["&&pe()!==":"||M==="-"&&pe()==="]")M=`\\${M}`;if(M==="]"&&(P.value==="["||P.value==="[^"))M=`\\${M}`;if(b.posix===true&&M==="!"&&P.value==="[")M="^";P.value+=M,ue({value:M});continue}if(L.quotes===1&&M!=='"'){M=s.escapeRegex(M),P.value+=M,ue({value:M});continue}if(M==='"'){if(L.quotes=L.quotes===1?0:1,b.keepQuotes===true)u({type:"text",value:M});continue}if(M==="("){$e("parens"),u({type:"paren",value:M});continue}if(M===")"){if(L.parens===0&&b.strictBrackets===true)throw SyntaxError(m("opening","("));let g=me[me.length-1];if(g&&L.parens===g.parens+1){l(me.pop());continue}u({type:"paren",value:M,output:L.parens?")":"\\)"}),p("parens");continue}if(M==="["){if(b.nobracket===true||!Y().includes("]")){if(b.nobracket!==true&&b.strictBrackets===true)throw SyntaxError(m("closing","]"));M=`\\${M}`}else $e("brackets");u({type:"bracket",value:M});continue}if(M==="]"){if(b.nobracket===true||P&&P.type==="bracket"&&P.value.length===1){u({type:"text",value:M,output:`\\${M}`});continue}if(L.brackets===0){if(b.strictBrackets===true)throw SyntaxError(m("opening","["));u({type:"text",value:M,output:`\\${M}`});continue}p("brackets");let g=P.value.slice(1);if(P.posix!==true&&g[0]==="^"&&!g.includes("/"))M=`/${M}`;if(P.value+=M,ue({value:M}),b.literalBrackets===false||s.hasRegexChars(g))continue;let C=s.escapeRegex(P.value);if(L.output=L.output.slice(0,-P.value.length),b.literalBrackets===true){L.output+=C,P.value=C;continue}P.value=`(${I}${C}|${P.value})`,L.output+=P.value;continue}if(M==="{"&&b.nobrace!==true){$e("braces");let g={type:"brace",value:M,output:"(",outputIndex:L.output.length,tokensIndex:L.tokens.length};Ce.push(g),u(g);continue}if(M==="}"){let g=Ce[Ce.length-1];if(b.nobrace===true||!g){u({type:"text",value:M,output:M});continue}let C=")";if(g.dots===true){let E=j.slice(),U=[];for(let ee=E.length-1;ee>=0;ee--){if(j.pop(),E[ee].type==="brace")break;if(E[ee].type!=="dots")U.unshift(E[ee].value)}C=f(U,b),L.backtrack=true}if(g.comma!==true&&g.dots!==true){let E=L.output.slice(0,g.outputIndex),U=L.tokens.slice(g.tokensIndex);g.value=g.output="\\{",M=C="\\}",L.output=E;for(let ee of U)L.output+=ee.output||ee.value}u({type:"brace",value:M,output:C}),p("braces"),Ce.pop();continue}if(M==="|"){if(me.length>0)me[me.length-1].conditions++;u({type:"text",value:M});continue}if(M===","){let g=M,C=Ce[Ce.length-1];if(C&&be[be.length-1]==="braces")C.comma=true,g="|";u({type:"comma",value:M,output:g});continue}if(M==="/"){if(P.type==="dot"&&L.index===L.start+1){L.start=L.index+1,L.consumed="",L.output="",j.pop(),P=T;continue}u({type:"slash",value:M,output:we});continue}if(M==="."){if(L.braces>0&&P.type==="dot"){if(P.value===".")P.output=K;let g=Ce[Ce.length-1];P.type="dots",P.output+=M,P.value+=M,g.dots=true;continue}if(L.braces+L.parens===0&&P.type!=="bos"&&P.type!=="slash"){u({type:"text",value:M,output:K});continue}u({type:"dot",value:M,output:K});continue}if(M==="?"){if(!(P&&P.value==="(")&&b.noextglob!==true&&pe()==="("&&pe(2)!=="?"){A("qmark",M);continue}if(P&&P.type==="paren"){let g=pe(),C=M;if(P.value==="("&&!/[!=<:]/.test(g)||g==="<"&&!/<([!=]|\w+>)/.test(Y()))C=`\\${M}`;u({type:"text",value:M,output:C});continue}if(b.dot!==true&&(P.type==="slash"||P.type==="bos")){u({type:"qmark",value:M,output:ce});continue}u({type:"qmark",value:M,output:re});continue}if(M==="!"){if(b.noextglob!==true&&pe()==="("){if(pe(2)!=="?"||!/[!=<:]/.test(pe(3))){A("negate",M);continue}}if(b.nonegate!==true&&L.index===0){oe();continue}}if(M==="+"){if(b.noextglob!==true&&pe()==="("&&pe(2)!=="?"){A("plus",M);continue}if(P&&P.value==="("||b.regex===false){u({type:"plus",value:M,output:he});continue}if(P&&(P.type==="bracket"||P.type==="paren"||P.type==="brace")||L.parens>0){u({type:"plus",value:M});continue}u({type:"plus",value:he});continue}if(M==="@"){if(b.noextglob!==true&&pe()==="("&&pe(2)!=="?"){u({type:"at",extglob:true,value:M,output:""});continue}u({type:"text",value:M});continue}if(M!=="*"){if(M==="$"||M==="^")M=`\\${M}`;let g=i.exec(Y());if(g)M+=g[0],L.index+=g[0].length;u({type:"text",value:M});continue}if(P&&(P.type==="globstar"||P.star===true)){P.type="star",P.star=true,P.value+=M,P.output=le,L.backtrack=true,L.globstar=true,Pe(M);continue}let a=Y();if(b.noextglob!==true&&/^\([^?]/.test(a)){A("star",M);continue}if(P.type==="star"){if(b.noglobstar===true){Pe(M);continue}let g=P.prev,C=g.prev,E=g.type==="slash"||g.type==="bos",U=C&&(C.type==="star"||C.type==="globstar");if(b.bash===true&&(!E||a[0]&&a[0]!=="/")){u({type:"star",value:M,output:""});continue}let ee=L.braces>0&&(g.type==="comma"||g.type==="brace"),ae=me.length&&(g.type==="pipe"||g.type==="paren");if(!E&&g.type!=="paren"&&!ee&&!ae){u({type:"star",value:M,output:""});continue}while(a.slice(0,3)==="/**"){let Ae=k[L.index+4];if(Ae&&Ae!=="/")break;a=a.slice(3),Pe("/**",3)}let ve=Re()||L.parens>0&&a===")".repeat(L.parens)&&!me.some((Ae)=>Ae.type==="negate");if(g.type==="bos"&&Re()){P.type="globstar",P.value+=M,P.output=ye(b),L.output=P.output,L.globstar=true,Pe(M);continue}if(g.type==="slash"&&g.prev.type!=="bos"&&!U&&ve){L.output=L.output.slice(0,-(g.output+P.output).length),g.output=`(?:${g.output}`,P.type="globstar",P.output=ye(b)+(b.strictSlashes?")":"|$)"),P.value+=M,L.globstar=true,L.output+=g.output+P.output,Pe(M);continue}if(g.type==="slash"&&g.prev.type!=="bos"&&a[0]==="/"){let Ae=a[1]!==undefined?"|$":"";L.output=L.output.slice(0,-(g.output+P.output).length),g.output=`(?:${g.output}`,P.type="globstar",P.output=`${ye(b)}${we}|${we}${Ae})`,P.value+=M,L.output+=g.output+P.output,L.globstar=true,Pe(M+Se()),u({type:"slash",value:"/",output:""});continue}if(g.type==="bos"&&a[0]==="/"){P.type="globstar",P.value+=M,P.output=`(?:^|${we}|${ye(b)}${we})`,L.output=P.output,L.globstar=true,Pe(M+Se()),u({type:"slash",value:"/",output:""});continue}L.output=L.output.slice(0,-P.output.length),P.type="globstar",P.output=ye(b),P.value+=M,L.output+=P.output,L.globstar=true,Pe(M);continue}let w={type:"star",value:M,output:le};if(b.bash===true){if(w.output=".*?",P.type==="bos"||P.type==="slash")w.output=Ee+w.output;u(w);continue}if(P&&(P.type==="bracket"||P.type==="paren")&&b.regex===true){w.output=M,u(w);continue}if(L.index===L.start||P.type==="slash"||P.type==="dot"){if(P.type==="dot")L.output+=N,P.output+=N;else if(b.dot===true)L.output+=V,P.output+=V;else L.output+=Ee,P.output+=Ee;if(pe()!=="*")L.output+=S,P.output+=S}u(w)}while(L.brackets>0){if(b.strictBrackets===true)throw SyntaxError(m("closing","]"));L.output=s.escapeLast(L.output,"["),p("brackets")}while(L.parens>0){if(b.strictBrackets===true)throw SyntaxError(m("closing",")"));L.output=s.escapeLast(L.output,"("),p("parens")}while(L.braces>0){if(b.strictBrackets===true)throw SyntaxError(m("closing","}"));L.output=s.escapeLast(L.output,"{"),p("braces")}if(b.strictSlashes!==true&&(P.type==="star"||P.type==="bracket"))u({type:"maybe_slash",value:"",output:`${we}?`});if(L.backtrack===true){L.output="";for(let a of L.tokens)if(L.output+=a.output!=null?a.output:a.value,a.suffix)L.output+=a.suffix}return L};H.fastpaths=(k,B)=>{let b={...B},Q=typeof b.maxLength==="number"?Math.min(r,b.maxLength):r,Z=k.length;if(Z>Q)throw SyntaxError(`Input length: ${Z}, exceeds maximum allowed length: ${Q}`);k=d[k]||k;let{DOT_LITERAL:T,SLASH_LITERAL:j,ONE_CHAR:I,DOTS_SLASH:q,NO_DOT:te,NO_DOTS:K,NO_DOTS_SLASH:he,STAR:we,START_ANCHOR:S}=n.globChars(b.windows),W=b.dot?K:te,J=b.dot?he:te,N=b.capture?"":"?:",V={negated:false,prefix:""},re=b.bash===true?".*?":we;if(b.capture)re=`(${re})`;let ce=(Ee)=>{if(Ee.noglobstar===true)return re;return`(${N}(?:(?!${S}${Ee.dot?q:T}).)*?)`},ie=(Ee)=>{switch(Ee){case"*":return`${W}${I}${re}`;case".*":return`${T}${I}${re}`;case"*.*":return`${W}${re}${T}${I}${re}`;case"*/*":return`${W}${re}${j}${I}${J}${re}`;case"**":return W+ce(b);case"**/*":return`(?:${W}${ce(b)}${j})?${J}${I}${re}`;case"**/*.*":return`(?:${W}${ce(b)}${j})?${J}${re}${T}${I}${re}`;case"**/.*":return`(?:${W}${ce(b)}${j})?${T}${I}${re}`;default:{let ne=/^(.*?)\.(\w+)$/.exec(Ee);if(!ne)return;let le=ie(ne[1]);if(!le)return;return le+T+ne[2]}}},xe=s.removePrefix(k,V),ye=ie(xe);if(ye&&b.strictSlashes!==true)ye+=`${j}?`;return ye};t.exports=H});var lc=Pt(function(e,t){var n=cc(),s=dc(),r=gs(),o=jn(),i=(d)=>d&&typeof d==="object"&&!Array.isArray(d),c=(d,f,m=false)=>{if(Array.isArray(d)){let X=d.map((G)=>c(G,f,m));return(G)=>{for(let H of X){let k=H(G);if(k)return k}return false}}let x=i(d)&&d.tokens&&d.input;if(d===""||typeof d!=="string"&&!x)throw TypeError("Expected pattern to be a non-empty string");let O=f||{},v=O.windows,y=x?c.compileRe(d,f):c.makeRe(d,f,false,true),R=y.state;delete y.state;let D=()=>false;if(O.ignore){let X={...f,ignore:null,onMatch:null,onResult:null};D=c(O.ignore,X,m)}let z=(X,G=false)=>{let{isMatch:H,match:k,output:B}=c.test(X,y,f,{glob:d,posix:v}),b={glob:d,state:R,regex:y,posix:v,input:X,output:B,match:k,isMatch:H};if(typeof O.onResult==="function")O.onResult(b);if(H===false)return b.isMatch=false,G?b:false;if(D(X)){if(typeof O.onIgnore==="function")O.onIgnore(b);return b.isMatch=false,G?b:false}if(typeof O.onMatch==="function")O.onMatch(b);return G?b:true};if(m)z.state=R;return z};c.test=(d,f,m,{glob:x,posix:O}={})=>{if(typeof d!=="string")throw TypeError("Expected input to be a string");if(d==="")return{isMatch:false,output:""};let v=m||{},y=v.format||(O?r.toPosixSlashes:null),R=d===x,D=R&&y?y(d):d;if(R===false)D=y?y(d):d,R=D===x;if(R===false||v.capture===true)if(v.matchBase===true||v.basename===true)R=c.matchBase(d,f,m,O);else R=f.exec(D);return{isMatch:Boolean(R),match:R,output:D}};c.matchBase=(d,f,m,x=m&&m.windows)=>(f instanceof RegExp?f:c.makeRe(f,m)).test(r.basename(d,{windows:x}));c.isMatch=(d,f,m)=>c(f,m)(d);c.parse=(d,f)=>{if(Array.isArray(d))return d.map((m)=>c.parse(m,f));return s(d,{...f,fastpaths:false})};c.scan=(d,f)=>n(d,f);c.compileRe=(d,f,m=false,x=false)=>{if(m===true)return d.output;let O=f||{},v=O.contains?"":"^",y=O.contains?"":"$",R=`${v}(?:${d.output})${y}`;if(d&&d.negated===true)R=`^(?!${R}).*$`;let D=c.toRegex(R,f);if(x===true)D.state=d;return D};c.makeRe=(d,f={},m=false,x=false)=>{if(!d||typeof d!=="string")throw TypeError("Expected a non-empty string");let O={negated:false,fastpaths:true};if(f.fastpaths!==false&&(d[0]==="."||d[0]==="*"))O.output=s.fastpaths(d,f);if(!O.output)O=s(d,f);return c.compileRe(O,f,m,x)};c.toRegex=(d,f)=>{try{let m=f||{};return new RegExp(d,m.flags||(m.nocase?"i":""))}catch(m){if(f&&f.debug===true)throw m;return/$^/}};c.constants=o;t.exports=c});var uc=Pt(function(e,t){var n=["||","&&",";;&",";;",";&","|&","<(",">(","<<<","<<-","<<",">>",">&",">|","&>>","&>","<&","<>","&",";","(",")","|","<",">"],s=/[\n\r\u2028\u2029]/,r=/[\s#!"$&'():;<=>@\\^`|~]/g;t.exports=function(o){var i=false;return o.map(function(c){if(i&&typeof c==="string"&&s.test(c))throw TypeError("a token after a `comment` must not contain line terminators");if(c==="")return"''";if(c&&typeof c==="object"){if("op"in c&&c.op==="glob"){if(typeof c.pattern!=="string")throw TypeError("glob token requires a string `pattern`");if(s.test(c.pattern))throw TypeError("glob `pattern` must not contain line terminators");if(c.pattern==="")return"''";return c.pattern.replace(r,"\\$&")}if("op"in c&&typeof c.op==="string"){if(n.indexOf(c.op)<0)throw TypeError("invalid `op` value: "+JSON.stringify(c.op));return c.op.replace(/[\s\S]/g,"\\$&")}if("comment"in c&&typeof c.comment==="string"){if(s.test(c.comment))throw TypeError("`comment` must not contain line terminators");return i=true,"#"+c.comment}throw TypeError("unrecognized object token shape")}if(/'/.test(c)&&/!/.test(c))return"'"+c.replace(/'/g,`'"'"'`)+"'";if(/["\s\\]/.test(c)&&!/'/.test(c))return"'"+c+"'";if(/["'\s]/.test(c))return'"'+c.replace(/(["\\$`])/g,"\\$1")+'"';return String(c).replace(/([A-Za-z]:)?([#!"$&'()*,:;<=>?@[\\\]^`{|}~])/g,"$1\\$2")}).join(" ")}});var fc=Pt(function(e,t){var n="(?:"+["\\|\\|","\\&(?:\\&|>>?)",";;\\&?","[;|]\\&","\\<\\(","\\<\\<\\<","\\<\\<-","\\<\\<(?!\\()",">>",">[&|(]","<[&>]","[&;()|<>]"].join("|")+")",s=new RegExp("^"+n+"$"),r="|&;()<> \\t",o="'([^']*?)'",i="(?:\\\\[\\s\\S]|[^\\\\'])*?",c="\\$'"+i+"'",d=new RegExp("\\$'"+i+"(?:(')|\\\\?$)","g"),f="abeEfnrtv",m=`\x07\b\x1B\x1B\f
-\r	\v`,x=/^#$/,O="'",v='"',y="$",R="",D=4294967296;for(z=0;z<4;z++)R+=(D*Math.random()).toString(16);var z,X=new RegExp("^"+R);function G(T,j){var I=j.lastIndex,q=[],te;while(te=j.exec(T))if(q[q.length]=te,j.lastIndex===te.index)j.lastIndex+=1;return j.lastIndex=I,q}function H(T,j,I){var q=typeof T==="function"?T(I):T[I];if(typeof q>"u"&&I!="")q="";else if(typeof q>"u")q="$";if(typeof q==="object")return j+R+JSON.stringify(q)+R;return j+q}var k=/\\([0-7]{1,3}|x[\dA-Fa-f]{1,2}|u[\dA-Fa-f]{1,4}|U[\dA-Fa-f]{1,8}|c(?:\\\\|[\s\S])|[abeEfnrtv\\'"?])/g;function B(T,j){var I=j.charAt(0);if(I==="c"){var q=j.charAt(1);return q==="?"?"\u007f":String.fromCharCode(q.charCodeAt(0)&31)}if(I==="x"||I==="u"||I==="U"){var te=parseInt(j.slice(1),16);if(te>1114111)return T;return String.fromCharCode.apply(null,te>65535?[55232+(te>>10),56320+(te&1023)]:[te])}if(I>="0"&&I<="7")return String.fromCharCode(parseInt(j,8)&255);var K=f.indexOf(j);return K<0?j:m.charAt(K)}function b(T){return T.replace(k,B).split("\x00")[0]}function Q(T,j){return d.lastIndex=j,!!d.exec(T)[1]}function Z(T,j,I){if(!I)I={};var q=I.escape||"\\",te=I.splitUnquoted===true?` 	
-`:typeof I.splitUnquoted==="string"?I.splitUnquoted:"",K="(\\"+q+`['"$\\`+q+r+"]|\\$\\$|\\$(?!"+c.slice(2)+`)|[^\\s'"$`+r+"])+",he='"(?:\\'+q+'[\\s\\S]|[^"\\'+q+'])*"',we=new RegExp(["("+n+")","("+c+"|"+K+"|"+he+"|"+o+")+"].join("|"),"g"),S=G(T,we);if(S.length===0)return[];if(!j)j={};var W=false;return S.map(function(J){var N=J[0];if(!N||W)return;if(s.test(N))return{op:N};var V=false,re=false,ce="",ie=[],xe=false,ye=null,Ee=false,ne;function le(){ne+=1;var pe,Se,Y=N.charAt(ne);if(Y==="{"){if(ne+=1,N.charAt(ne)==="}")throw Error("Bad substitution: "+N.slice(ne-2,ne+1));var Pe=1;pe=ne;while(Pe>0&&pe<N.length){if(N.charAt(pe)==="{"&&N.charAt(pe-1)==="$")Pe+=1;else if(N.charAt(pe)==="}")Pe-=1;pe+=1}if(Pe!==0)throw Error("Bad substitution: "+N.slice(ne));pe-=1,Se=N.slice(ne,pe),ne=pe}else if(/[*@#?$!-]/.test(Y))Se=Y;else{var ue=N.slice(ne);if(pe=ue.match(/[^\w\d_]/),!pe)Se=ue,ne=N.length;else Se=ue.slice(0,pe.index),ne+=pe.index-1}return H(j,"",Se)}function L(){if(ye===null)return;if(ye===0){if(ce!=="")ie[ie.length]=ce,ce=""}else{ie[ie.length]=ce,ce="";for(var pe=1;pe<ye;pe+=1)ie[ie.length]=""}ye=null}for(ne=0;ne<N.length;ne++){var me=N.charAt(ne);if(te&&me!==y)L();if(Ee=Ee||!V&&(me==="*"||me==="?"),re)ce+=me,re=false;else if(V)if(me===V)V=false;else if(V==O)ce+=me;else if(me===q)if(ne+=1,me=N.charAt(ne),me===v||me===q||me===y)ce+=me;else ce+=q+me;else if(me===y)ce+=le();else ce+=me;else if(me===v||me===O)V=me,xe=true;else if(s.test(me))return{op:N};else if(x.test(me)){W=true;var Ce={comment:T.slice(J.index+ne+1)};if(ce.length)return[ce,Ce];return[Ce]}else if(me===q)re=true;else if(me===y&&N.charAt(ne+1)===O&&Q(N,ne))L(),xe=true,ce+=b(N.slice(ne+2,d.lastIndex-1)),ne=d.lastIndex-1;else if(me===y){var be=le();if(!te)ce+=be;else for(var P=0;P<be.length;P+=1){var M=be.charAt(P);if(te.indexOf(M)<0)L(),ce+=M;else if(ye===null)ye=M===" "||M==="\t"||M===`
-`?0:1;else if(M!==" "&&M!=="\t"&&M!==`
-`)ye+=1}}else ce+=me}if(Ee)return{op:"glob",pattern:ce};if(te){if(ye!==null&&ye>0){ie[ie.length]=ce,ce="";for(var Re=1;Re<ye;Re+=1)ie[ie.length]=""}if(ce!==""||xe&&ie.length===0)ie[ie.length]=ce;return ie}return ce}).reduce(function(J,N){if(typeof N>"u")return J;return[].concat(N).forEach(function(V){J[J.length]=V}),J},[])}t.exports=function(T,j,I){var q=Z(T,j,I);if(typeof j!=="function")return q;return q.reduce(function(te,K){if(typeof K==="object")return te[te.length]=K,te;var he=K.split(RegExp("("+R+".*?"+R+")","g"));if(he.length===1)return te[te.length]=he[0],te;return he.filter(Boolean).forEach(function(we){te[te.length]=X.test(we)?JSON.parse(we.split(R)[1]):we}),te},[])}});function tn(e,t){let n=typeof e;if(n!==typeof t)return false;if(Array.isArray(e)){if(!Array.isArray(t))return false;let s=e.length;if(s!==t.length)return false;for(let r=0;r<s;r++)if(!tn(e[r],t[r]))return false;return true}if(n==="object"){if(!e||!t)return e===t;let s=Object.keys(e),r=Object.keys(t);if(s.length!==r.length)return false;for(let o of s)if(!tn(e[o],t[o]))return false;return true}return e===t}function it(e){return encodeURI(pc(e))}function pc(e){return e.replace(/~/g,"~0").replace(/\//g,"~1")}var mc={prefixItems:true,items:true,allOf:true,anyOf:true,oneOf:true};var hc={$defs:true,definitions:true,properties:true,patternProperties:true,dependentSchemas:true};var gc={id:true,$id:true,$ref:true,$schema:true,$anchor:true,$vocabulary:true,$comment:true,default:true,enum:true,const:true,required:true,type:true,maximum:true,minimum:true,exclusiveMaximum:true,exclusiveMinimum:true,multipleOf:true,maxLength:true,minLength:true,pattern:true,format:true,maxItems:true,minItems:true,uniqueItems:true,maxProperties:true,minProperties:true};var wc=typeof self<"u"&&self.location&&self.location.origin!=="null"?new URL(self.location.origin+self.location.pathname+location.search):new URL("https://github.com/cfworker");function _t(e,t=Object.create(null),n=wc,s=""){if(e&&typeof e==="object"&&!Array.isArray(e)){let o=e.$id||e.id;if(o){let i=new URL(o,n.href);if(i.hash.length>1)t[i.href]=e;else if(i.hash="",s==="")n=i;else _t(e,t,n)}}else if(e!==true&&e!==false)return t;let r=n.href+(s?"#"+s:"");if(t[r]!==undefined)throw Error(`Duplicate schema URI "${r}".`);if(t[r]=e,e===true||e===false)return t;if(e.__absolute_uri__===undefined)Object.defineProperty(e,"__absolute_uri__",{enumerable:false,value:r});if(e.$ref&&e.__absolute_ref__===undefined){let o=new URL(e.$ref,n.href);o.hash=o.hash,Object.defineProperty(e,"__absolute_ref__",{enumerable:false,value:o.href})}if(e.$recursiveRef&&e.__absolute_recursive_ref__===undefined){let o=new URL(e.$recursiveRef,n.href);o.hash=o.hash,Object.defineProperty(e,"__absolute_recursive_ref__",{enumerable:false,value:o.href})}if(e.$anchor){let o=new URL("#"+e.$anchor,n.href);t[o.href]=e}for(let o in e){if(gc[o])continue;let i=`${s}/${it(o)}`,c=e[o];if(Array.isArray(c)){if(mc[o]){let d=c.length;for(let f=0;f<d;f++)_t(c[f],t,n,`${i}/${f}`)}}else if(hc[o])for(let d in c)_t(c[d],t,n,`${i}/${it(d)}`);else _t(c,t,n,i)}return t}var yc=/^(\d\d\d\d)-(\d\d)-(\d\d)$/;var $c=[0,31,28,31,30,31,30,31,31,30,31,30,31];var xc=/^(\d\d):(\d\d):(\d\d)(\.\d+)?(z|[+-]\d\d(?::?\d\d)?)?$/i;var bc=/^(?=.{1,253}\.?$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-0-9a-z]{0,61}[0-9a-z])?)*\.?$/i;var vc=/^(?:[a-z][a-z0-9+\-.]*:)?(?:\/?\/(?:(?:[a-z0-9\-._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:(?:[0-9a-f]{1,4}:){6}|::(?:[0-9a-f]{1,4}:){5}|(?:[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){4}|(?:(?:[0-9a-f]{1,4}:){0,1}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){3}|(?:(?:[0-9a-f]{1,4}:){0,2}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){2}|(?:(?:[0-9a-f]{1,4}:){0,3}[0-9a-f]{1,4})?::[0-9a-f]{1,4}:|(?:(?:[0-9a-f]{1,4}:){0,4}[0-9a-f]{1,4})?::)(?:[0-9a-f]{1,4}:[0-9a-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?))|(?:(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4})?::[0-9a-f]{1,4}|(?:(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4})?::)|[Vv][0-9a-f]+\.[a-z0-9\-._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)|(?:[a-z0-9\-._~!$&'"()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})*)*)?(?:\?(?:[a-z0-9\-._~!$&'"()*+,;=:@/?]|%[0-9a-f]{2})*)?(?:#(?:[a-z0-9\-._~!$&'"()*+,;=:@/?]|%[0-9a-f]{2})*)?$/i;var kc=/^(?:(?:[^\x00-\x20"'<>%\\^`{|}]|%[0-9a-f]{2})|\{[+#./;?&=,!@|]?(?:[a-z0-9_]|%[0-9a-f]{2})+(?::[1-9][0-9]{0,3}|\*)?(?:,(?:[a-z0-9_]|%[0-9a-f]{2})+(?::[1-9][0-9]{0,3}|\*)?)*\})*$/i;var Sc=/^(?:(?:https?|ftp):\/\/)(?:\S+(?::\S*)?@)?(?:(?!10(?:\.\d{1,3}){3})(?!127(?:\.\d{1,3}){3})(?!169\.254(?:\.\d{1,3}){2})(?!192\.168(?:\.\d{1,3}){2})(?!172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?:[1-9]\d?|1\d\d|2[01]\d|22[0-3])(?:\.(?:1?\d{1,2}|2[0-4]\d|25[0-5])){2}(?:\.(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-4]))|(?:(?:[a-z\u{00a1}-\u{ffff}0-9]+-?)*[a-z\u{00a1}-\u{ffff}0-9]+)(?:\.(?:[a-z\u{00a1}-\u{ffff}0-9]+-?)*[a-z\u{00a1}-\u{ffff}0-9]+)*(?:\.(?:[a-z\u{00a1}-\u{ffff}]{2,})))(?::\d{2,5})?(?:\/[^\s]*)?$/iu;var Ac=/^(?:urn:uuid:)?[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;var Oc=/^(?:\/(?:[^~/]|~0|~1)*)*$/;var Cc=/^#(?:\/(?:[a-z0-9_\-.!$&'()*+,;:=@]|%[0-9a-f]{2}|~0|~1)*)*$/i;var Ec=/^(?:0|[1-9][0-9]*)(?:#|(?:\/(?:[^~/]|~0|~1)*)*)$/;var _c=(e)=>{if(e[0]==='"')return false;let[t,n,...s]=e.split("@");if(!t||!n||s.length!==0||t.length>64||n.length>253)return false;if(t[0]==="."||t.endsWith(".")||t.includes(".."))return false;if(!/^[a-z0-9.-]+$/i.test(n)||!/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(t))return false;return n.split(".").every((r)=>/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i.test(r))};var Pc=/^(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$/;var Tc=/^((([0-9a-f]{1,4}:){7}([0-9a-f]{1,4}|:))|(([0-9a-f]{1,4}:){6}(:[0-9a-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9a-f]{1,4}:){5}(((:[0-9a-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9a-f]{1,4}:){4}(((:[0-9a-f]{1,4}){1,3})|((:[0-9a-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9a-f]{1,4}:){3}(((:[0-9a-f]{1,4}){1,4})|((:[0-9a-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9a-f]{1,4}:){2}(((:[0-9a-f]{1,4}){1,5})|((:[0-9a-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9a-f]{1,4}:){1}(((:[0-9a-f]{1,4}){1,6})|((:[0-9a-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9a-f]{1,4}){1,7})|((:[0-9a-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))$/i;var Rc=(e)=>e.length>1&&e.length<80&&(/^P\d+([.,]\d+)?W$/.test(e)||/^P[\dYMDTHS]*(\d[.,]\d+)?[YMDHS]$/.test(e)&&/^P([.,\d]+Y)?([.,\d]+M)?([.,\d]+D)?(T([.,\d]+H)?([.,\d]+M)?([.,\d]+S)?)?$/.test(e));function dt(e){return e.test.bind(e)}var nr={date:or,time:rr.bind(undefined,false),"date-time":Ic,duration:Rc,uri:Dc,"uri-reference":dt(vc),"uri-template":dt(kc),url:dt(Sc),email:_c,hostname:dt(bc),ipv4:dt(Pc),ipv6:dt(Tc),regex:Bc,uuid:dt(Ac),"json-pointer":dt(Oc),"json-pointer-uri-fragment":dt(Cc),"relative-json-pointer":dt(Ec)};function jc(e){return e%4===0&&(e%100!==0||e%400===0)}function or(e){let t=e.match(yc);if(!t)return false;let n=+t[1],s=+t[2],r=+t[3];return s>=1&&s<=12&&r>=1&&r<=(s==2&&jc(n)?29:$c[s])}function rr(e,t){let n=t.match(xc);if(!n)return false;let s=+n[1],r=+n[2],o=+n[3],i=!!n[5];return(s<=23&&r<=59&&o<=59||s==23&&r==59&&o==60)&&(!e||i)}var Mc=/t|\s/i;function Ic(e){let t=e.split(Mc);return t.length==2&&or(t[0])&&rr(true,t[1])}var Lc=/\/|:/;var Nc=/^(?:[a-z][a-z0-9+\-.]*:)(?:\/?\/(?:(?:[a-z0-9\-._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:(?:[0-9a-f]{1,4}:){6}|::(?:[0-9a-f]{1,4}:){5}|(?:[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){4}|(?:(?:[0-9a-f]{1,4}:){0,1}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){3}|(?:(?:[0-9a-f]{1,4}:){0,2}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){2}|(?:(?:[0-9a-f]{1,4}:){0,3}[0-9a-f]{1,4})?::[0-9a-f]{1,4}:|(?:(?:[0-9a-f]{1,4}:){0,4}[0-9a-f]{1,4})?::)(?:[0-9a-f]{1,4}:[0-9a-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?))|(?:(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4})?::[0-9a-f]{1,4}|(?:(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4})?::)|[Vv][0-9a-f]+\.[a-z0-9\-._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)|(?:[a-z0-9\-._~!$&'()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)(?:\?(?:[a-z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?(?:#(?:[a-z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?$/i;function Dc(e){return Lc.test(e)&&Nc.test(e)}var Fc=/[^\\]\\Z/;function Bc(e){if(Fc.test(e))return false;try{return new RegExp(e,"u"),true}catch(t){return false}}function Wc(e){let t=0,n=e.length,s=0,r;while(s<n)if(t++,r=e.charCodeAt(s++),r>=55296&&r<=56319&&s<n){if(r=e.charCodeAt(s),(r&64512)==56320)s++}return t}function ze(e,t,n="2019-09",s=_t(t),r=true,o=null,i="#",c="#",d=Object.create(null)){if(t===true)return{valid:true,errors:[]};if(t===false)return{valid:false,errors:[{instanceLocation:i,keyword:"false",keywordLocation:i,error:"False boolean schema."}]};let f=typeof e,m;switch(f){case"boolean":case"number":case"string":m=f;break;case"object":if(e===null)m="null";else if(Array.isArray(e))m="array";else m="object";break;default:throw Error(`Instances of "${f}" type are not supported.`)}let{$ref:x,$recursiveRef:O,$recursiveAnchor:v,type:y,const:R,enum:D,required:z,not:X,anyOf:G,allOf:H,oneOf:k,if:B,then:b,else:Q,format:Z,properties:T,patternProperties:j,additionalProperties:I,unevaluatedProperties:q,minProperties:te,maxProperties:K,propertyNames:he,dependentRequired:we,dependentSchemas:S,dependencies:W,prefixItems:J,items:N,additionalItems:V,unevaluatedItems:re,contains:ce,minContains:ie,maxContains:xe,minItems:ye,maxItems:Ee,uniqueItems:ne,minimum:le,maximum:L,exclusiveMinimum:me,exclusiveMaximum:Ce,multipleOf:be,minLength:P,maxLength:M,pattern:Re,__absolute_ref__:pe,__absolute_recursive_ref__:Se}=t,Y=[];if(v===true&&o===null)o=t;if(O==="#"){let ue=o===null?s[Se]:o,oe=`${c}/$recursiveRef`,$e=ze(e,o===null?t:o,n,s,r,ue,i,oe,d);if(!$e.valid)Y.push({instanceLocation:i,keyword:"$recursiveRef",keywordLocation:oe,error:"A subschema had errors."},...$e.errors)}if(x!==undefined){let ue=s[pe||x];if(ue===undefined){let p=`Unresolved $ref "${x}".`;if(pe&&pe!==x)p+=`  Absolute URI "${pe}".`;throw p+=`
+// node_modules/@cmodjs/core/hotkeys.js
+var hotkeyName = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+var comboShape = /^(?:(?:ctrl|alt|shift|meta)\+){1,2}(?:[a-z0-9]|f(?:[1-9]|1[0-2])|tab|enter|escape|space|backspace|delete|up|down|left|right|home|end|pageup|pagedown|[`\-=[\]\\;',./])$/;
+var order = ["ctrl", "alt", "shift", "meta"];
+function isCombo(value) {
+  if (typeof value !== "string" || !comboShape.test(value))
+    return false;
+  const modifiers = value.split("+").slice(0, -1);
+  return modifiers.every((each, index) => index === 0 || order.indexOf(each) > order.indexOf(modifiers[index - 1]));
+}
+function checkHotkeys(name, hotkeys) {
+  const combos = new Map;
+  for (const [key, declared] of Object.entries(hotkeys)) {
+    const at = `${name}: hotkeys.${key}`;
+    if (!hotkeyName.test(key))
+      throw new Error(`${at} is not a hotkey name. Use letters, digits, and _, starting with a letter.`);
+    if (declared.title.trim() === "")
+      throw new Error(`${at} needs a title, the label Settings shows beside its combo.`);
+    if (declared.default === undefined)
+      continue;
+    if (!isCombo(declared.default))
+      throw new Error(`${at} defaults to "${String(declared.default)}", which is not a combo. Give one or two of ctrl, alt, shift, meta in that order, then a key, such as "ctrl+q" or "ctrl+shift+k".`);
+    const taken = combos.get(declared.default);
+    if (taken !== undefined)
+      throw new Error(`${at} defaults to ${declared.default}, which hotkeys.${taken} has too. Give each hotkey its own combo.`);
+    combos.set(declared.default, key);
+  }
+  return hotkeys;
+}
+
+// node_modules/@cmodjs/core/utils/text.js
+function listed(items) {
+  if (items.length <= 1)
+    return items.join("");
+  return `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+}
+function firstLine(text) {
+  return text.split(`
+`).find((line) => line.trim() !== "")?.trim() ?? "";
+}
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function formatExit(code, reason) {
+  const exit = code === null ? "was stopped by a signal" : `exited ${code}`;
+  const clause = reason.trim().replace(/[.!?]+$/, "");
+  return clause ? `${exit}: ${clause}` : exit;
+}
+
+// node_modules/@cmodjs/core/records.js
+var listPermissions = ["network", "run", "files", "config"];
+var flagPermissions = ["conversation", "prompt", "model", "tasks", "tools", "approve"];
+var permissionNames = [...listPermissions, ...flagPermissions];
+var hostName = /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
+var programName = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+var releaseVersion = /^\d+\.\d+\.\d+$/;
+var settingPath = /^[A-Za-z][A-Za-z0-9]*(\.[A-Za-z0-9_@-]+)*$/;
+var listItemHint = {
+  network: 'a host alone, such as "api.github.com", or a socket path, such as "/var/run/docker.sock"',
+  run: `a program's command, such as "gh"`,
+  files: 'a path that starts with ~/ or /, such as "~/.zshrc"',
+  config: `a Claude Code setting's name, or a key path inside one, such as "cleanupPeriodDays" or "env.ANTHROPIC_BASE_URL"`
+};
+var pluginName = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+function xdgFolder(env, variable, underHome) {
+  const base = env[variable];
+  const home = env["HOME"];
+  if (base)
+    return `${base}/cmod`;
+  if (!home)
+    throw new Error(`Neither ${variable} nor HOME is set, so cmod has no folder there. Set HOME.`);
+  return `${home}/${underHome}/cmod`;
+}
+function storeFolder(env) {
+  return xdgFolder(env, "XDG_DATA_HOME", ".local/share");
+}
+function recordPath(store, name) {
+  return `${store}/records/${checkedName(name)}.json`;
+}
+function programPath(store, program, version) {
+  return `${store}/bin/${checkedName(program)}/${version}/${program}`;
+}
+function linkedProgramPath(store, program, version) {
+  return `${programPath(store, program, version)}.linked`;
+}
+async function programModifiedMs(modifiedMs, store, record) {
+  if (record.program === null)
+    return;
+  const times = await Promise.all([programPath(store, record.program, record.version), linkedProgramPath(store, record.program, record.version)].map(modifiedMs));
+  const found = times.filter((time) => time !== undefined);
+  return found.length === 0 ? undefined : Math.max(...found);
+}
+function isProgramNewer(record, programModifiedMs) {
+  return record.program !== null && (programModifiedMs === undefined || programModifiedMs > Date.parse(record.installedAt));
+}
+async function readCmodVersion(files, store) {
+  if (!await files.exists(`${store}/programs/cmod`))
+    return;
+  const newestFirst = (await files.list(`${store}/bin/cmod`)).filter((name) => releaseVersion.test(name)).toSorted((one, other) => isAtLeast(one, other) ? -1 : 1);
+  for (const version of newestFirst)
+    if (await files.exists(programPath(store, "cmod", version)) || await files.exists(linkedProgramPath(store, "cmod", version)))
+      return version;
+  return;
+}
+function dataFolder(store, name) {
+  return `${store}/data/${checkedName(name)}`;
+}
+function cacheFolder(env, name) {
+  return `${xdgFolder(env, "XDG_CACHE_HOME", ".cache")}/${checkedName(name)}`;
+}
+function configFolder(env, name) {
+  const configRoot = env["CLAUDE_CONFIG_DIR"];
+  const home = env["HOME"];
+  if (configRoot)
+    return `${configRoot}/cmods/${checkedName(name)}`;
+  if (!home)
+    throw new Error(`Neither CLAUDE_CONFIG_DIR nor HOME is set, so ${name} has no config folder. Set HOME.`);
+  return `${home}/.claude/cmods/${checkedName(name)}`;
+}
+function configFolders(env, name, root) {
+  return [
+    { tier: "system", folder: configFolder(env, name) },
+    { tier: "project", folder: projectConfigFolder(root, name) }
+  ];
+}
+function projectConfigFolder(root, name) {
+  return `${root}/.claude/cmods/${checkedName(name)}`;
+}
+function checkedName(name) {
+  if (!pluginName.test(name) || name.includes("..")) {
+    throw new Error(`"${name}" is not a plugin name: use letters, digits, ".", "_", and "-", starting with a letter or digit.`);
+  }
+  return name;
+}
+async function readRecord(read, store, name) {
+  const path = recordPath(store, name);
+  const text = await read(path);
+  if (text === undefined)
+    return;
+  return parseRecord(text, path);
+}
+function parseRecord(text, path) {
+  const fix = `Delete ${path} and run cmod setup on the plugin again.`;
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${path} is not JSON (${messageOf(error)}). ${fix}`);
+  }
+  if (!isObject(value))
+    throw new Error(`${path} is not a cmod install record. ${fix}`);
+  for (const key of ["name", "version", "root", "installedAt", "scriptsSha256"]) {
+    if (typeof value[key] !== "string")
+      throw new Error(`${path} has no "${key}" text. ${fix}`);
+  }
+  const uninstall = value["uninstall"];
+  if (uninstall !== null && typeof uninstall !== "string")
+    throw new Error(`${path} has an "uninstall" that is neither a path nor null. ${fix}`);
+  const program = value["program"];
+  if (program !== null && typeof program !== "string")
+    throw new Error(`${path} has a "program" that is neither a command name nor null. ${fix}`);
+  const keys = value["keys"] ?? {};
+  if (!isObject(keys) || Object.values(keys).some((command) => typeof command !== "string"))
+    throw new Error(`${path} has "keys" that are not key bindings. ${fix}`);
+  const permissions = value["permissions"] ?? null;
+  if (permissions !== null && !isTextList(permissions))
+    throw new Error(`${path} has "permissions" that are not a list of permissions. ${fix}`);
+  const grantedOnUpdate = value["grantedOnUpdate"] ?? [];
+  if (!isTextList(grantedOnUpdate))
+    throw new Error(`${path} has a "grantedOnUpdate" that is not a list of permissions. ${fix}`);
+  const installedBy = value["installedBy"] ?? null;
+  if (installedBy !== null && !(isObject(installedBy) && (installedBy["session"] === null || typeof installedBy["session"] === "string") && typeof installedBy["pid"] === "number"))
+    throw new Error(`${path} has an "installedBy" that names no session and process. ${fix}`);
+  return {
+    name: value["name"],
+    version: value["version"],
+    root: value["root"],
+    installedAt: value["installedAt"],
+    scriptsSha256: value["scriptsSha256"],
+    uninstall,
+    program,
+    keys,
+    permissions,
+    grantedOnUpdate,
+    installedBy
+  };
+}
+function readSteps(pkg) {
+  if (pkg === undefined)
+    return;
+  if (!isObject(pkg))
+    throw new Error("package.json is not a JSON object.");
+  const steps = pkg["cmod"];
+  if (steps === undefined)
+    return;
+  if (!isObject(steps))
+    throw new Error('package.json has a "cmod" key that is not an object. Write "cmod": { "install": "./setup/install.sh", "uninstall": "./setup/uninstall.sh" }.');
+  const program = steps["program"];
+  if (program !== undefined && (typeof program !== "string" || !pluginName.test(program)))
+    throw new Error(`package.json "cmod.program" must be the program's command, such as "hello".`);
+  const approve = steps["approve"];
+  if (approve !== undefined && approve !== true)
+    throw new Error(`package.json "cmod.approve" is ${JSON.stringify(approve)}. Write "approve": true, or leave it out.`);
+  const permissions = readPermissions(steps);
+  return {
+    ...readCommand(steps, "install"),
+    ...readCommand(steps, "uninstall"),
+    ...program === undefined ? {} : { program },
+    ...readHotkeys(steps["hotkeys"]),
+    ...approve === true || permissions.includes("approve") ? { approve: true } : {},
+    ...permissions.length === 0 ? {} : { permissions }
+  };
+}
+function readPermissions(steps) {
+  const declared = steps["permissions"];
+  if (declared === undefined)
+    return [];
+  const at = 'package.json "cmod.permissions"';
+  if (!isObject(declared))
+    throw new Error(`${at} must be an object, such as { "network": ["api.github.com"], "prompt": true }.`);
+  const items = [];
+  for (const [name, value] of Object.entries(declared)) {
+    if (!permissionNames.includes(name))
+      throw new Error(`${at} names "${name}", which is not a permission. Use ${listed(permissionNames.map((each) => `"${each}"`))}.`);
+    if (flagPermissions.includes(name)) {
+      if (value !== true)
+        throw new Error(`${at} sets "${name}" to ${JSON.stringify(value)}. Write "${name}": true, or leave it out.`);
+      items.push(name);
+      continue;
+    }
+    if (name === "run" && value === "*") {
+      items.push("run:*");
+      continue;
+    }
+    const example = { network: '["api.github.com"]', run: '["gh"], or "*" for any program', files: '["~/.zshrc"]', config: '["cleanupPeriodDays"]' }[name];
+    if (!Array.isArray(value) || value.length === 0 || !value.every((each) => typeof each === "string"))
+      throw new Error(`${at} sets "${name}" to ${JSON.stringify(value)}. Write a list, such as "${name}": ${example}.`);
+    for (const each of value) {
+      const isPath = /^(~\/|\/)/.test(each) && !each.split("/").includes("..");
+      const isValid = { network: hostName.test(each) || isPath, run: programName.test(each), files: isPath, config: settingPath.test(each) }[name];
+      if (isValid !== true)
+        throw new Error(`${at} lists "${each}" under "${name}". Write ${listItemHint[name]}.`);
+      items.push(`${name}:${each}`);
+    }
+  }
+  return items;
+}
+var installFix = "Install it in Plugins.";
+var secretFix = "Set it in /config, where Claude Code keeps it in your keychain.";
+var pendingStepsMethod = "cmod:pendingSteps";
+var finishStepsMethod = "cmod:finishSteps";
+function instanceFolder(store, mod) {
+  return `${store}/instances/${checkedName(mod)}`;
+}
+function instancePath(store, mod, executable) {
+  return `${instanceFolder(store, mod)}/${executable}.json`;
+}
+var processTypes = ["Interactive", "Background"];
+var interfaceName = /^[a-z0-9][\w.-]*\/[A-Z]\w*$/;
+function serviceFolder(store, mod) {
+  return `${store}/services/${checkedName(mod)}`;
+}
+function browserCommand(env, href) {
+  if (env.browser === "true")
+    return;
+  if (env.browser)
+    return [env.browser, href];
+  if (env.sshConnection)
+    return;
+  if (env.os === "darwin")
+    return ["open", href];
+  return env.display || env.waylandDisplay ? ["xdg-open", href] : undefined;
+}
+function readHotkeys(hotkeys) {
+  if (hotkeys === undefined)
+    return {};
+  const fix = "cmod check writes it from the hotkeys defineMod declares, so run cmod check.";
+  if (!isObject(hotkeys) || !Object.values(hotkeys).every((each) => isObject(each) && typeof each["title"] === "string" && (each["default"] === undefined || typeof each["default"] === "string")))
+    throw new Error(`package.json "cmod.hotkeys" is not a map of hotkeys to their title and optional default combo. ${fix}`);
+  return { hotkeys: checkHotkeys('package.json "cmod"', hotkeys) };
+}
+var coreVersion = "8.0.0";
+var oldestCmodVersion = "8.0.0";
+function hotkeyCommand(mod, hotkey) {
+  return `${mod}--${hotkey}`;
+}
+function boundCombos(keybindings) {
+  const blocks = isObject(keybindings) && Array.isArray(keybindings["bindings"]) ? keybindings["bindings"] : [];
+  const combos = new Map;
+  for (const block of blocks) {
+    if (!isObject(block) || block["context"] !== "Chat" || !isObject(block["bindings"]))
+      continue;
+    for (const [combo, action] of Object.entries(block["bindings"]))
+      if (typeof action === "string" && action.startsWith("command:"))
+        combos.set(action.slice("command:".length), combo);
+  }
+  return combos;
+}
+function readCommand(steps, key) {
+  const command = steps[key];
+  if (command === undefined)
+    return {};
+  if (typeof command !== "string" || command.trim() === "")
+    throw new Error(`package.json "cmod.${key}" must be a command, such as "./setup/${key}.sh".`);
+  if (/[\n\t]/.test(command))
+    throw new Error(`package.json "cmod.${key}" holds a line break or a tab. Write one command, such as "./setup/${key}.sh".`);
+  const atRoot = scriptPaths(command).find((path) => folderOf(path) === ".");
+  if (atRoot !== undefined)
+    throw new Error(`package.json "cmod.${key}" names ${atRoot}, a script at the plugin root. Move it into a folder, such as ./setup/${key}.sh: cmod runs the steps again whenever anything in a script's folder changes.`);
+  return { [key]: command };
+}
+function scriptPaths(command) {
+  const words = command.split(/[\s;&|()<>]+/).map((word) => word.replace(/^['"]|['"]$/g, "")).filter((word) => word.includes("/") && !word.startsWith("-") && !word.startsWith("/") && !word.startsWith("~") && !word.startsWith("$") && !word.includes("=") && !word.split("/").includes(".."));
+  return [...new Set(words)];
+}
+function folderOf(path) {
+  return path.slice(0, path.lastIndexOf("/"));
+}
+async function scriptsSha256(steps, files) {
+  const folders = new Set;
+  for (const key of ["install", "uninstall"]) {
+    const command = steps[key];
+    if (command === undefined)
+      continue;
+    const scriptFolders = [];
+    for (const path of scriptPaths(command)) {
+      if (await files.read(path) !== undefined)
+        scriptFolders.push(folderOf(path));
+    }
+    if (scriptFolders.length === 0)
+      throw new Error(`package.json "cmod.${key}" runs "${command}", which names no script file in the mod, so cmod cannot tell when what it runs changes. Put the commands in a script, such as ./setup/${key}.sh.`);
+    for (const folder of scriptFolders)
+      folders.add(folder);
+  }
+  let text = [
+    steps.install ?? "",
+    steps.uninstall ?? "",
+    steps.program ?? "",
+    ...steps.hotkeys === undefined ? [] : [JSON.stringify(Object.entries(steps.hotkeys).sort())],
+    ...steps.permissions === undefined ? [] : [JSON.stringify([...steps.permissions].sort())]
+  ].join("\x00");
+  for (const folder of [...folders].sort()) {
+    for (const name of (await files.list(folder)).sort()) {
+      const path = `${folder}/${name}`;
+      const content = await files.read(path);
+      if (content === undefined)
+        throw new Error(`${path} links to a folder or to nothing, so cmod cannot tell when it changes. Point the link at a file, or delete it.`);
+      text += `\x00${path}\x00${content}`;
+    }
+  }
+  const digest = await crypto.subtle.digest("SHA-256", Uint8Array.from(new TextEncoder().encode(text)));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function parseEvent(line) {
+  const progress = /^progress (\d+) (\d+)(?: (.*))?$/.exec(line);
+  if (progress !== null)
+    return { type: "progress", done: Number(progress[1]), total: Number(progress[2]), label: progress[3] ?? "" };
+  const consent = /^needs-consent (\S+)\t([^\t]*)\t([^\t]*)(?:\t(.*))?$/.exec(line);
+  if (consent !== null) {
+    const [hotkeys = "", ...permissions] = (consent[4] ?? "").split("\t");
+    return { type: "needs-consent", sha256: consent[1], install: consent[2], uninstall: consent[3], hotkeys, permissions: permissions.filter((item) => item !== "") };
+  }
+  const done = /^done (\S+)(?: (\S+))?$/.exec(line);
+  if (done !== null)
+    return { type: "done", name: done[1], ...done[2] === undefined ? {} : { version: done[2] } };
+  const missing = /^missing (\S+)$/.exec(line);
+  if (missing !== null)
+    return { type: "missing", name: missing[1] };
+  const failed = /^failed (-?\d+)(?:\t(.*))?$/.exec(line);
+  if (failed !== null)
+    return { type: "failed", code: Number(failed[1]), message: failed[2] ?? "" };
+  const retries = /^retries (changed|later)$/.exec(line);
+  if (retries !== null)
+    return { type: "retries", when: retries[1] };
+  return { type: "log", text: line.replace(/^log /, "") };
+}
+function isAtLeast(version, minimum) {
+  const parts = version.split(".").map(Number);
+  const least = minimum.split(".").map(Number);
+  for (let index = 0;index < Math.max(parts.length, least.length); index += 1) {
+    const difference = (parts[index] ?? 0) - (least[index] ?? 0);
+    if (difference !== 0)
+      return difference > 0;
+  }
+  return true;
+}
+function isObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isTextList(value) {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+// node_modules/@cmodjs/core/session/goal/task.js
+var Task = "task";
+var TaskStart = "taskStart";
+var TaskEnd = "taskEnd";
+
+// node_modules/@cmodjs/core/session/context/turn/message/note.js
+var Note = "note";
+var modNoteBlock = new RegExp(`<(${pluginName.source.slice(1, -1)})_mod>\\n([\\s\\S]*?)\\n</\\1_mod>`, "g");
+function modNote(mod, text) {
+  return `<${mod}_mod>
+${text}
+</${mod}_mod>`;
+}
+
+// node_modules/@cmodjs/core/session/context/turn/message/sender.js
+var Person = "person";
+var Mod = "mod";
+var Schedule = "schedule";
+var Channel = "channel";
+var Sdk = "sdk";
+var Engine = "engine";
+var personOrigins = ["human", "composer", "bridge", "slack-ping"];
+var sessionOrigins = ["peer", "peer-send-message", "coordinator", "projects-relay", "observer", "observer-activity"];
+function senderOf(origin, isInTask) {
+  const fields = isObject(origin) ? origin : {};
+  const kind = typeof fields["kind"] === "string" ? fields["kind"] : undefined;
+  if (kind === undefined)
+    return { type: isInTask ? Task : Person };
+  if (personOrigins.includes(kind))
+    return { type: Person };
+  if (sessionOrigins.includes(kind))
+    return { type: "session" };
+  if (kind === "auto-continuation")
+    return { type: Engine };
+  if (kind === "plugin" && typeof fields["name"] === "string")
+    return { type: Mod, name: fields["name"], ...fields["asUser"] === true ? { as: Person } : {} };
+  if (kind === "scheduled-trigger")
+    return { type: Schedule };
+  if (kind === "channel" && typeof fields["server"] === "string")
+    return { type: Channel, name: fields["server"] };
+  if (kind === "sdk")
+    return { type: Sdk };
+  if (kind === "task-notification")
+    return { type: Task };
+  return { type: isInTask ? Task : Person };
+}
+
+// node_modules/@cmodjs/core/session/context/turn/message/tool-call.js
+var ToolCall = "toolCall";
+
+// node_modules/@cmodjs/core/session/context/turn/message/tool-result.js
+var ToolResult = "toolResult";
+
+// node_modules/@cmodjs/core/session/context/turn/message/message.js
+var Message = "message";
+
+// node_modules/@cmodjs/core/session/context/context.js
+var ContextStart = "contextStart";
+var ContextEnd = "contextEnd";
+
+// node_modules/@cmodjs/core/session/context/turn/turn.js
+var TurnStart = "turnStart";
+var TurnEnd = "turnEnd";
+
+// node_modules/@cmodjs/core/session/goal/goal.js
+var GoalChange = "goalChange";
+
+// node_modules/@cmodjs/core/session/conversation.js
+var forkAgentType = "fork";
+var searchLimit = 50;
+
+// node_modules/@cmodjs/core/session/session.js
+var Session = "session";
+var sessionEvents = {
+  Message: "message",
+  Prompt: "prompt",
+  Note: "note",
+  Reply: "reply",
+  ToolCall: "toolCall",
+  ToolResult: "toolResult",
+  Skill: "skill",
+  InstructionFile: "instructionFile",
+  AttachedFile: "attachedFile",
+  Notice: "notice",
+  ContextStart: "contextStart",
+  ContextEnd: "contextEnd",
+  TurnStart: "turnStart",
+  TurnEnd: "turnEnd",
+  TaskStart: "taskStart",
+  TaskEnd: "taskEnd",
+  GoalChange: "goalChange",
+  UsageChange: "usageChange"
+};
+var beforeEvents = ["Prompt", "Note", "Skill", "InstructionFile", "AttachedFile", "Reply", "ToolCall", "ToolResult", "Notice", "TaskStart", "TurnEnd", "ContextEnd"];
+var processEvents = {
+  ProjectSetup: { on: "Setup", before: "Setup" },
+  SessionStart: { on: "SessionStart", before: "SessionStart" },
+  SessionEnd: { on: "SessionEnd" },
+  ModelChange: { on: "PostModelSwitch", before: "PreModelSwitch" },
+  CwdChange: { on: "CwdChanged" },
+  DirectoryAdd: { on: "DirectoryAdded" },
+  WorktreeCreate: { on: "WorktreeCreate", before: "WorktreeCreate" },
+  WorktreeRemove: { on: "WorktreeRemove" },
+  Notification: { on: "Notification" },
+  Elicitation: { on: "Elicitation", before: "Elicitation" },
+  ElicitationResponse: { on: "ElicitationResult", before: "ElicitationResult" },
+  PermissionCheck: { on: "tool.check", before: "tool.check" },
+  PermissionRequest: { on: "PermissionRequest", before: "PermissionRequest" },
+  PermissionDenial: { on: "PermissionDenied", before: "PermissionDenied" },
+  ToolBatch: { on: "PostToolBatch", before: "PostToolBatch" },
+  TodoCreate: { on: "TaskCreated", before: "TaskCreated" },
+  TodoComplete: { on: "TaskCompleted", before: "TaskCompleted" },
+  ReplyDisplay: { on: "MessageDisplay", before: "MessageDisplay" }
+};
+
+// node_modules/@cmodjs/core/utils/matcher.js
+function matches(value, matcher) {
+  if (matcher instanceof RegExp)
+    return value !== undefined && value !== null && matcher.test(String(value));
+  if (Array.isArray(matcher))
+    return matcher.some((each) => matches(value, each));
+  if (typeof matcher !== "object" || matcher === null)
+    return value === matcher;
+  if (Array.isArray(value))
+    return value.some((each) => matches(each, matcher));
+  if (typeof value !== "object" || value === null)
+    return false;
+  return Object.entries(matcher).every(([key, wanted]) => wanted === undefined || matches(value[key], wanted));
+}
+function sentMatcher(matcher) {
+  if (matcher instanceof RegExp)
+    return { regexp: matcher.source, flags: matcher.flags };
+  if (Array.isArray(matcher))
+    return matcher.map(sentMatcher);
+  if (typeof matcher !== "object" || matcher === null)
+    return matcher;
+  return Object.fromEntries(Object.entries(matcher).filter(([, value]) => value !== undefined).map(([key, value]) => [key, sentMatcher(value)]));
+}
+
+// node_modules/@cmodjs/core/vendor.js
+var Bt = Object.create;
+var { getPrototypeOf: jt, defineProperty: Ve, getOwnPropertyNames: Gt } = Object;
+var Ye = Object.prototype.hasOwnProperty;
+function Ut(e) {
+  return this[e];
+}
+var qt;
+var Ft;
+var Kt = (e, r, t) => {
+  var n = e != null && typeof e === "object";
+  if (n) {
+    var o = r ? qt ??= new WeakMap : Ft ??= new WeakMap, u = o.get(e);
+    if (u)
+      return u;
+  }
+  t = e != null ? Bt(jt(e)) : {};
+  let s = r || !e || !e.__esModule || !Ye.call(e, "default") ? Ve(t, "default", { value: e, enumerable: true }) : t;
+  if (e && typeof e === "object" || typeof e === "function") {
+    for (let i of Gt(e))
+      if (!Ye.call(s, i))
+        Ve(s, i, { get: Ut.bind(e, i), enumerable: true });
+  }
+  if (n)
+    o.set(e, s);
+  return s;
+};
+var me = (e, r) => () => (r || e((r = { exports: {} }).exports, r), r.exports);
+var Se = me(function(Qn, dt) {
+  var lt = { DOT_LITERAL: "\\.", PLUS_LITERAL: "\\+", QMARK_LITERAL: "\\?", SLASH_LITERAL: "\\/", ONE_CHAR: "(?=.)", QMARK: "[^/]", END_ANCHOR: "(?:\\/|$)", DOTS_SLASH: "\\.{1,2}(?:\\/|$)", NO_DOT: "(?!\\.)", NO_DOTS: "(?!(?:^|\\/)\\.{1,2}(?:\\/|$))", NO_DOT_SLASH: "(?!\\.{0,1}(?:\\/|$))", NO_DOTS_SLASH: "(?!\\.{1,2}(?:\\/|$))", QMARK_NO_DOT: "[^.\\/]", STAR: "[^/]*?", START_ANCHOR: "(?:^|\\/)", SEP: "/" }, wr = { ...lt, SLASH_LITERAL: "[\\\\/]", QMARK: "[^\\\\/]", STAR: "[^\\\\/]*?", DOTS_SLASH: "\\.{1,2}(?:[\\\\/]|$)", NO_DOT: "(?!\\.)", NO_DOTS: "(?!(?:^|[\\\\/])\\.{1,2}(?:[\\\\/]|$))", NO_DOT_SLASH: "(?!\\.{0,1}(?:[\\\\/]|$))", NO_DOTS_SLASH: "(?!\\.{1,2}(?:[\\\\/]|$))", QMARK_NO_DOT: "[^.\\\\/]", START_ANCHOR: "(?:^|[\\\\/])", END_ANCHOR: "(?:[\\\\/]|$)", SEP: "\\" }, Or = { __proto__: null, alnum: "a-zA-Z0-9", alpha: "a-zA-Z", ascii: "\\x00-\\x7F", blank: " \\t", cntrl: "\\x00-\\x1F\\x7F", digit: "0-9", graph: "\\x21-\\x7E", lower: "a-z", print: "\\x20-\\x7E ", punct: "\\-!\"#$%&'()\\*+,./:;<=>?@[\\]^_`{|}~", space: " \\t\\r\\n\\v\\f", upper: "A-Z", word: "A-Za-z0-9_", xdigit: "A-Fa-f0-9" };
+  dt.exports = { DEFAULT_MAX_EXTGLOB_RECURSION: 0, MAX_LENGTH: 65536, POSIX_REGEX_SOURCE: Or, REGEX_BACKSLASH: /\\(?![*+?^${}(|)[\]])/g, REGEX_NON_SPECIAL_CHARS: /^[^@![\].,$*+?^{}()|\\/]+/, REGEX_SPECIAL_CHARS: /[-*+?.^${}(|)[\]]/, REGEX_SPECIAL_CHARS_BACKREF: /(\\?)((\W)(\3*))/g, REGEX_SPECIAL_CHARS_GLOBAL: /([-*+?.^${}(|)[\]])/g, REGEX_REMOVE_BACKSLASH: /(?:\[.*?[^\\]\]|\\(?=.))/g, REPLACEMENTS: { __proto__: null, "***": "*", "**/**": "**", "**/**/**": "**" }, CHAR_0: 48, CHAR_9: 57, CHAR_UPPERCASE_A: 65, CHAR_LOWERCASE_A: 97, CHAR_UPPERCASE_Z: 90, CHAR_LOWERCASE_Z: 122, CHAR_LEFT_PARENTHESES: 40, CHAR_RIGHT_PARENTHESES: 41, CHAR_ASTERISK: 42, CHAR_AMPERSAND: 38, CHAR_AT: 64, CHAR_BACKWARD_SLASH: 92, CHAR_CARRIAGE_RETURN: 13, CHAR_CIRCUMFLEX_ACCENT: 94, CHAR_COLON: 58, CHAR_COMMA: 44, CHAR_DOT: 46, CHAR_DOUBLE_QUOTE: 34, CHAR_EQUAL: 61, CHAR_EXCLAMATION_MARK: 33, CHAR_FORM_FEED: 12, CHAR_FORWARD_SLASH: 47, CHAR_GRAVE_ACCENT: 96, CHAR_HASH: 35, CHAR_HYPHEN_MINUS: 45, CHAR_LEFT_ANGLE_BRACKET: 60, CHAR_LEFT_CURLY_BRACE: 123, CHAR_LEFT_SQUARE_BRACKET: 91, CHAR_LINE_FEED: 10, CHAR_NO_BREAK_SPACE: 160, CHAR_PERCENT: 37, CHAR_PLUS: 43, CHAR_QUESTION_MARK: 63, CHAR_RIGHT_ANGLE_BRACKET: 62, CHAR_RIGHT_CURLY_BRACE: 125, CHAR_RIGHT_SQUARE_BRACKET: 93, CHAR_SEMICOLON: 59, CHAR_SINGLE_QUOTE: 39, CHAR_SPACE: 32, CHAR_TAB: 9, CHAR_UNDERSCORE: 95, CHAR_VERTICAL_LINE: 124, CHAR_ZERO_WIDTH_NOBREAK_SPACE: 65279, extglobChars(e) {
+    return { "!": { type: "negate", open: "(?:(?!(?:", close: `))${e.STAR})` }, "?": { type: "qmark", open: "(?:", close: ")?" }, "+": { type: "plus", open: "(?:", close: ")+" }, "*": { type: "star", open: "(?:", close: ")*" }, "@": { type: "at", open: "(?:", close: ")" } };
+  }, globChars(e) {
+    return e === true ? wr : lt;
+  } };
+});
+var Te = me(function(kr) {
+  var { REGEX_BACKSLASH: vr, REGEX_REMOVE_BACKSLASH: Tr, REGEX_SPECIAL_CHARS: Ir, REGEX_SPECIAL_CHARS_GLOBAL: Cr } = Se();
+  kr.isObject = (e) => e !== null && typeof e === "object" && !Array.isArray(e);
+  kr.hasRegexChars = (e) => Ir.test(e);
+  kr.isRegexChar = (e) => e.length === 1 && kr.hasRegexChars(e);
+  kr.escapeRegex = (e) => e.replace(Cr, "\\$1");
+  kr.toPosixSlashes = (e) => e.replace(vr, "/");
+  kr.isWindows = () => {
+    if (typeof navigator < "u" && navigator.platform) {
+      let e = navigator.platform.toLowerCase();
+      return e === "win32" || e === "windows";
+    }
+    return false;
+  };
+  kr.removeBackslashes = (e) => e.replace(Tr, (r) => r === "\\" ? "" : r);
+  kr.escapeLast = (e, r, t) => {
+    let n = e.lastIndexOf(r, t);
+    if (n === -1)
+      return e;
+    if (e[n - 1] === "\\")
+      return kr.escapeLast(e, r, n - 1);
+    return `${e.slice(0, n)}\\${e.slice(n)}`;
+  };
+  kr.removePrefix = (e, r = {}) => {
+    let t = e;
+    if (t.startsWith("./"))
+      t = t.slice(2), r.prefix = "./";
+    return t;
+  };
+  kr.wrapOutput = (e, r = {}, t = {}) => {
+    let n = t.contains ? "" : "^", o = t.contains ? "" : "$", u = `${n}(?:${e})${o}`;
+    if (r.negated === true)
+      u = `(?:^(?!${u}).*$)`;
+    return u;
+  };
+  kr.basename = (e, { windows: r } = {}) => {
+    let t = e.split(r ? /[\\/]/ : "/"), n = t[t.length - 1];
+    if (n === "")
+      return t[t.length - 2];
+    return n;
+  };
+});
+var xt = me(function(Vn, _t) {
+  var Ce = Te(), { CHAR_ASTERISK: Be, CHAR_AT: Gr, CHAR_BACKWARD_SLASH: xe, CHAR_COMMA: Ur, CHAR_DOT: je, CHAR_EXCLAMATION_MARK: Ge, CHAR_FORWARD_SLASH: gt, CHAR_LEFT_CURLY_BRACE: Ue, CHAR_LEFT_PARENTHESES: Ie, CHAR_LEFT_SQUARE_BRACKET: qr, CHAR_PLUS: Fr, CHAR_QUESTION_MARK: ht, CHAR_RIGHT_CURLY_BRACE: Kr, CHAR_RIGHT_PARENTHESES: $t, CHAR_RIGHT_SQUARE_BRACKET: Wr } = Se(), mt = (e) => e === gt || e === xe, yt = (e) => {
+    if (e.isPrefix !== true)
+      e.depth = e.isGlobstar ? 1 / 0 : 1;
+  }, Xr = (e, r) => {
+    let t = r || {}, n = e.length - 1, o = t.parts === true || t.tokens === true || t.scanToEnd === true, u = [], s = [], i = [], h2 = e, N = -1, _ = 0, w = 0, M = false, K = false, g = false, k = false, ee = false, q = false, L = false, H = false, ne = false, X = false, T = 0, V, A, I = { value: "", depth: 0, isGlob: false }, a = () => N >= n, Q = () => h2.charCodeAt(N + 1), C = () => (V = A, h2.charCodeAt(++N));
+    while (N < n) {
+      A = C();
+      let P;
+      if (A === xe) {
+        if (L = I.backslashes = true, A = C(), A === Ue)
+          q = true;
+        continue;
+      }
+      if (q === true || A === Ue) {
+        T++;
+        while (a() !== true && (A = C())) {
+          if (A === xe) {
+            L = I.backslashes = true, C();
+            continue;
+          }
+          if (A === Ue) {
+            T++;
+            continue;
+          }
+          if (q !== true && A === je && (A = C()) === je) {
+            if (M = I.isBrace = true, g = I.isGlob = true, X = true, o === true)
+              continue;
+            break;
+          }
+          if (q !== true && A === Ur) {
+            if (M = I.isBrace = true, g = I.isGlob = true, X = true, o === true)
+              continue;
+            break;
+          }
+          if (A === Kr) {
+            if (T--, T === 0) {
+              q = false, M = I.isBrace = true, X = true;
+              break;
+            }
+          }
+        }
+        if (o === true)
+          continue;
+        break;
+      }
+      if (A === gt) {
+        if (u.push(N), s.push(I), I = { value: "", depth: 0, isGlob: false }, X === true)
+          continue;
+        if (V === je && N === _ + 1) {
+          _ += 2;
+          continue;
+        }
+        w = N + 1;
+        continue;
+      }
+      if (t.noext !== true) {
+        if ((A === Fr || A === Gr || A === Be || A === ht || A === Ge) === true && Q() === Ie) {
+          if (g = I.isGlob = true, k = I.isExtglob = true, X = true, A === Ge && N === _)
+            ne = true;
+          if (o === true) {
+            let te = 0;
+            while (a() !== true && (A = C())) {
+              if (A === xe) {
+                L = I.backslashes = true, C();
+                continue;
+              }
+              if (A === Ie) {
+                te++;
+                continue;
+              }
+              if (A === $t && --te === 0) {
+                X = true;
+                break;
+              }
+            }
+            continue;
+          }
+          break;
+        }
+      }
+      if (A === Be) {
+        if (V === Be)
+          ee = I.isGlobstar = true;
+        if (g = I.isGlob = true, X = true, o === true)
+          continue;
+        break;
+      }
+      if (A === ht) {
+        if (g = I.isGlob = true, X = true, o === true)
+          continue;
+        break;
+      }
+      if (A === qr) {
+        while (a() !== true && (P = C())) {
+          if (P === xe) {
+            L = I.backslashes = true, C();
+            continue;
+          }
+          if (P === Wr) {
+            K = I.isBracket = true, g = I.isGlob = true, X = true;
+            break;
+          }
+        }
+        if (o === true)
+          continue;
+        break;
+      }
+      if (t.nonegate !== true && A === Ge && N === _) {
+        H = I.negated = true, _++;
+        continue;
+      }
+      if (t.noparen !== true && A === Ie) {
+        if (g = I.isGlob = true, o === true) {
+          let J = 1;
+          while (a() !== true && (A = C())) {
+            if (A === xe) {
+              L = I.backslashes = true, C();
+              continue;
+            }
+            if (A === Ie) {
+              J++;
+              continue;
+            }
+            if (A === $t && --J === 0) {
+              X = true;
+              break;
+            }
+          }
+          continue;
+        }
+        break;
+      }
+      if (g === true) {
+        if (X = true, o === true)
+          continue;
+        break;
+      }
+    }
+    if (t.noext === true)
+      k = false, g = false;
+    let B = h2, l = "", f = "";
+    if (_ > 0)
+      l = h2.slice(0, _), h2 = h2.slice(_), w -= _;
+    if (B && g === true && w > 0)
+      B = h2.slice(0, w), f = h2.slice(w);
+    else if (g === true)
+      B = "", f = h2;
+    else
+      B = h2;
+    if (B && B !== "" && B !== "/" && B !== h2) {
+      if (mt(B.charCodeAt(B.length - 1)))
+        B = B.slice(0, -1);
+    }
+    if (t.unescape === true) {
+      if (f)
+        f = Ce.removeBackslashes(f);
+      if (B && L === true)
+        B = Ce.removeBackslashes(B);
+    }
+    let Y = { prefix: l, input: e, start: _, base: B, glob: f, isBrace: M, isBracket: K, isGlob: g, isExtglob: k, isGlobstar: ee, negated: H, negatedExtglob: ne };
+    if (t.tokens === true) {
+      if (Y.maxDepth = 0, !mt(A))
+        s.push(I);
+      Y.tokens = s;
+    }
+    if (t.parts === true || t.tokens === true) {
+      let P;
+      for (let W = 0;W < u.length; W++) {
+        let ue = P !== undefined ? P + 1 : _, $e = u[W], fe = e.slice(ue, $e);
+        if (t.tokens) {
+          if (W === 0 && _ !== 0)
+            s[W].isPrefix = true, s[W].value = l;
+          else
+            s[W].value = fe;
+          yt(s[W]), Y.maxDepth += s[W].depth;
+        }
+        if ($e >= _)
+          i.push(fe), P = $e;
+      }
+      let J = P !== undefined ? P + 1 : _, te = e.slice(J);
+      if (i.push(te), t.tokens && P && P + 1 < e.length)
+        s[s.length - 1].value = te, yt(s[s.length - 1]), Y.maxDepth += s[s.length - 1].depth;
+      Y.slashes = u, Y.parts = i;
+    }
+    return Y;
+  };
+  _t.exports = Xr;
+});
+var St = me(function(Yn, Et) {
+  var he = Se(), G = Te(), { MAX_LENGTH: ke, POSIX_REGEX_SOURCE: Qr, REGEX_NON_SPECIAL_CHARS: Zr, REGEX_SPECIAL_CHARS_BACKREF: Vr, REPLACEMENTS: At } = he, Yr = (e, r) => {
+    if (typeof r.expandRange === "function")
+      return r.expandRange(...e, r);
+    e.sort();
+    let t = `[${e.join("-")}]`;
+    try {
+      new RegExp(t);
+    } catch (n) {
+      return e.map((o) => G.escapeRegex(o)).join("..");
+    }
+    return t;
+  }, Ae = (e, r) => `Missing ${e}: "${r}" - use "\\\\${r}" to match literal characters`, Rt = (e) => {
+    let r = [], t = 0, n = 0, o = 0, u = "", s = false;
+    for (let i of e) {
+      if (s === true) {
+        u += i, s = false;
+        continue;
+      }
+      if (i === "\\") {
+        u += i, s = true;
+        continue;
+      }
+      if (i === '"') {
+        o = o === 1 ? 0 : 1, u += i;
+        continue;
+      }
+      if (o === 0) {
+        if (i === "[")
+          t++;
+        else if (i === "]" && t > 0)
+          t--;
+        else if (t === 0) {
+          if (i === "(")
+            n++;
+          else if (i === ")" && n > 0)
+            n--;
+          else if (i === "|" && n === 0) {
+            r.push(u), u = "";
+            continue;
+          }
+        }
+      }
+      u += i;
+    }
+    return r.push(u), r;
+  }, Jr = (e) => {
+    let r = false;
+    for (let t of e) {
+      if (r === true) {
+        r = false;
+        continue;
+      }
+      if (t === "\\") {
+        r = true;
+        continue;
+      }
+      if (/[?*+@!()[\]{}]/.test(t))
+        return false;
+    }
+    return true;
+  }, Fe = (e) => {
+    let r = e.trim(), t = true;
+    while (t === true)
+      if (t = false, /^@\([^\\()[\]{}|]+\)$/.test(r))
+        r = r.slice(2, -1), t = true;
+    if (!Jr(r))
+      return;
+    return r.replace(/\\(.)/g, "$1");
+  }, en = (e) => {
+    let r = e.map(Fe).filter(Boolean);
+    for (let t = 0;t < r.length; t++)
+      for (let n = t + 1;n < r.length; n++) {
+        let o = r[t], u = r[n], s = o[0];
+        if (!s || o !== s.repeat(o.length) || u !== s.repeat(u.length))
+          continue;
+        if (o === u || o.startsWith(u) || u.startsWith(o))
+          return true;
+      }
+    return false;
+  }, qe = (e, r = true) => {
+    if (e[0] !== "+" && e[0] !== "*" || e[1] !== "(")
+      return;
+    let t = 0, n = 0, o = 0, u = false;
+    for (let s = 1;s < e.length; s++) {
+      let i = e[s];
+      if (u === true) {
+        u = false;
+        continue;
+      }
+      if (i === "\\") {
+        u = true;
+        continue;
+      }
+      if (i === '"') {
+        o = o === 1 ? 0 : 1;
+        continue;
+      }
+      if (o === 1)
+        continue;
+      if (i === "[") {
+        t++;
+        continue;
+      }
+      if (i === "]" && t > 0) {
+        t--;
+        continue;
+      }
+      if (t > 0)
+        continue;
+      if (i === "(") {
+        n++;
+        continue;
+      }
+      if (i === ")") {
+        if (n--, n === 0) {
+          if (r === true && s !== e.length - 1)
+            return;
+          return { type: e[0], body: e.slice(2, s), end: s };
+        }
+      }
+    }
+  }, tn = (e) => `${e.length === 1 ? G.escapeRegex(e[0]) : `[${e.map((t) => G.escapeRegex(t)).join("")}]`}*`, rn = (e) => {
+    let r = 0, t = [];
+    while (r < e.length) {
+      let n = qe(e.slice(r), false);
+      if (!n || n.type !== "*")
+        return;
+      let o = Rt(n.body).map((s) => s.trim());
+      if (o.length !== 1)
+        return;
+      let u = Fe(o[0]);
+      if (!u || u.length !== 1)
+        return;
+      t.push(u), r += n.end + 1;
+    }
+    if (t.length < 1)
+      return;
+    return t;
+  }, nn = (e) => {
+    let r = 0, t = e.trim(), n = qe(t);
+    while (n)
+      r++, t = n.body.trim(), n = qe(t);
+    return r;
+  }, sn = (e, r) => {
+    if (r.maxExtglobRecursion === false)
+      return { risky: false };
+    let t = typeof r.maxExtglobRecursion === "number" ? r.maxExtglobRecursion : he.DEFAULT_MAX_EXTGLOB_RECURSION, n = Rt(e).map((i) => i.trim());
+    if (n.length > 1) {
+      if (n.some((i) => i === "") || n.some((i) => /^[*?]+$/.test(i)) || en(n))
+        return { risky: true };
+    }
+    let o = [], u = false, s = true;
+    for (let i of n) {
+      let h2 = rn(i);
+      if (h2) {
+        u = true, o.push(...h2);
+        continue;
+      }
+      let N = Fe(i);
+      if (N && N.length === 1) {
+        o.push(N);
+        continue;
+      }
+      if (s = false, nn(i) > t)
+        return { risky: true };
+    }
+    if (u)
+      return s ? { risky: true, safeOutput: tn([...new Set(o)]) } : { risky: true };
+    return { risky: false };
+  }, Ke = (e, r) => {
+    if (typeof e !== "string")
+      throw TypeError("Expected a string");
+    e = At[e] || e;
+    let t = { ...r }, n = typeof t.maxLength === "number" ? Math.min(ke, t.maxLength) : ke, o = e.length;
+    if (o > n)
+      throw SyntaxError(`Input length: ${o}, exceeds maximum allowed length: ${n}`);
+    let u = { type: "bos", value: "", output: t.prepend || "" }, s = [u], i = t.capture ? "" : "?:", h2 = he.globChars(t.windows), N = he.extglobChars(h2), { DOT_LITERAL: _, PLUS_LITERAL: w, SLASH_LITERAL: M, ONE_CHAR: K, DOTS_SLASH: g, NO_DOT: k, NO_DOT_SLASH: ee, NO_DOTS_SLASH: q, QMARK: L, QMARK_NO_DOT: H, STAR: ne, START_ANCHOR: X } = h2, T = (p) => `(${i}(?:(?!${X}${p.dot ? g : _}).)*?)`, V = t.dot ? "" : k, A = t.dot ? L : H, I = t.bash === true ? T(t) : ne;
+    if (t.capture)
+      I = `(${I})`;
+    if (typeof t.noext === "boolean")
+      t.noextglob = t.noext;
+    let a = { input: e, index: -1, start: 0, dot: t.dot === true, consumed: "", output: "", prefix: "", backtrack: false, negated: false, brackets: 0, braces: 0, parens: 0, quotes: 0, globstar: false, tokens: s };
+    e = G.removePrefix(e, a), o = e.length;
+    let Q = [], C = [], B = [], l = u, f, Y = () => a.index === o - 1, P = a.peek = (p = 1) => e[a.index + p], J = a.advance = () => e[++a.index] || "", te = () => e.slice(a.index + 1), W = (p = "", j = 0) => {
+      a.consumed += p, a.index += j;
+    }, ue = (p) => {
+      a.output += p.output != null ? p.output : p.value, W(p.value);
+    }, $e = () => {
+      let p = 1;
+      while (P() === "!" && (P(2) !== "(" || P(3) === "?"))
+        J(), a.start++, p++;
+      if (p % 2 === 0)
+        return false;
+      return a.negated = true, a.start++, true;
+    }, fe = (p) => {
+      a[p]++, B.push(p);
+    }, ae = (p) => {
+      a[p]--, B.pop();
+    }, R = (p) => {
+      if (l.type === "globstar") {
+        let j = a.braces > 0 && (p.type === "comma" || p.type === "brace"), d = p.extglob === true || Q.length && (p.type === "pipe" || p.type === "paren");
+        if (p.type !== "slash" && p.type !== "paren" && !j && !d)
+          a.output = a.output.slice(0, -l.output.length), l.type = "star", l.value = "*", l.output = I, a.output += l.output;
+      }
+      if (Q.length && p.type !== "paren")
+        Q[Q.length - 1].inner += p.value;
+      if (p.value || p.output)
+        ue(p);
+      if (l && l.type === "text" && p.type === "text") {
+        l.output = (l.output || l.value) + p.value, l.value += p.value;
+        return;
+      }
+      p.prev = l, s.push(p), l = p;
+    }, de = (p, j) => {
+      let d = { ...N[j], conditions: 1, inner: "" };
+      d.prev = l, d.parens = a.parens, d.output = a.output, d.startIndex = a.index, d.tokensIndex = s.length;
+      let O = (t.capture ? "(" : "") + d.open;
+      fe("parens"), R({ type: p, value: j, output: a.output ? "" : K }), R({ type: "paren", extglob: true, value: J(), output: O }), Q.push(d);
+    }, Re = (p) => {
+      let j = e.slice(p.startIndex, a.index + 1), d = e.slice(p.startIndex + 2, a.index), O = sn(d, t);
+      if ((p.type === "plus" || p.type === "star") && O.risky) {
+        let z = O.safeOutput ? (p.output ? "" : K) + (t.capture ? `(${O.safeOutput})` : O.safeOutput) : undefined, re = s[p.tokensIndex];
+        re.type = "text", re.value = j, re.output = z || G.escapeRegex(j);
+        for (let ie = p.tokensIndex + 1;ie < s.length; ie++)
+          s[ie].value = "", s[ie].output = "", delete s[ie].suffix;
+        a.output = p.output + re.output, a.backtrack = true, R({ type: "paren", extglob: true, value: f, output: "" }), ae("parens");
+        return;
+      }
+      let D = p.close + (t.capture ? ")" : ""), U;
+      if (p.type === "negate") {
+        let z = I;
+        if (p.inner && p.inner.length > 1 && p.inner.includes("/"))
+          z = T(t);
+        if (z !== I || Y() || /^\)+$/.test(te()))
+          D = p.close = `)$))${z}`;
+        if (p.inner.includes("*") && (U = te()) && /^\.[^\\/.]+$/.test(U)) {
+          let re = Ke(U, { ...r, fastpaths: false }).output;
+          D = p.close = `)${re})${z})`;
+        }
+        if (p.prev.type === "bos")
+          a.negatedExtglob = true;
+      }
+      R({ type: "paren", extglob: true, value: f, output: D }), ae("parens");
+    };
+    if (t.fastpaths !== false && !/(^[*!]|[/()[\]{}"])/.test(e)) {
+      let p = false, j = e.replace(Vr, (d, O, D, U, z, re) => {
+        if (U === "\\")
+          return p = true, d;
+        if (U === "?") {
+          if (O)
+            return O + U + (z ? L.repeat(z.length) : "");
+          if (re === 0)
+            return A + (z ? L.repeat(z.length) : "");
+          return L.repeat(D.length);
+        }
+        if (U === ".")
+          return _.repeat(D.length);
+        if (U === "*") {
+          if (O)
+            return O + U + (z ? I : "");
+          return I;
+        }
+        return O ? d : `\\${d}`;
+      });
+      if (p === true)
+        if (t.unescape === true)
+          j = j.replace(/\\/g, "");
+        else
+          j = j.replace(/\\+/g, (d) => d.length % 2 === 0 ? "\\\\" : d ? "\\" : "");
+      if (j === e && t.contains === true)
+        return a.output = e, a;
+      return a.output = G.wrapOutput(j, a, r), a;
+    }
+    while (!Y()) {
+      if (f = J(), f === "\x00")
+        continue;
+      if (f === "\\") {
+        let d = P();
+        if (d === "/" && t.bash !== true)
+          continue;
+        if (d === "." || d === ";")
+          continue;
+        if (!d) {
+          f += "\\", R({ type: "text", value: f });
+          continue;
+        }
+        let O = /^\\+/.exec(te()), D = 0;
+        if (O && O[0].length > 2) {
+          if (D = O[0].length, a.index += D, D % 2 !== 0)
+            f += "\\";
+        }
+        if (t.unescape === true)
+          f = J();
+        else
+          f += J();
+        if (a.brackets === 0) {
+          R({ type: "text", value: f });
+          continue;
+        }
+      }
+      if (a.brackets > 0 && (f !== "]" || l.value === "[" || l.value === "[^")) {
+        if (t.posix !== false && f === ":") {
+          let d = l.value.slice(1);
+          if (d.includes("[")) {
+            if (l.posix = true, d.includes(":")) {
+              let O = l.value.lastIndexOf("["), D = l.value.slice(0, O), U = l.value.slice(O + 2), z = Qr[U];
+              if (z) {
+                if (l.value = D + z, a.backtrack = true, J(), !u.output && s.indexOf(l) === 1)
+                  u.output = K;
+                continue;
+              }
+            }
+          }
+        }
+        if (f === "[" && P() !== ":" || f === "-" && P() === "]")
+          f = `\\${f}`;
+        if (f === "]" && (l.value === "[" || l.value === "[^"))
+          f = `\\${f}`;
+        if (t.posix === true && f === "!" && l.value === "[")
+          f = "^";
+        l.value += f, ue({ value: f });
+        continue;
+      }
+      if (a.quotes === 1 && f !== '"') {
+        f = G.escapeRegex(f), l.value += f, ue({ value: f });
+        continue;
+      }
+      if (f === '"') {
+        if (a.quotes = a.quotes === 1 ? 0 : 1, t.keepQuotes === true)
+          R({ type: "text", value: f });
+        continue;
+      }
+      if (f === "(") {
+        fe("parens"), R({ type: "paren", value: f });
+        continue;
+      }
+      if (f === ")") {
+        if (a.parens === 0 && t.strictBrackets === true)
+          throw SyntaxError(Ae("opening", "("));
+        let d = Q[Q.length - 1];
+        if (d && a.parens === d.parens + 1) {
+          Re(Q.pop());
+          continue;
+        }
+        R({ type: "paren", value: f, output: a.parens ? ")" : "\\)" }), ae("parens");
+        continue;
+      }
+      if (f === "[") {
+        if (t.nobracket === true || !te().includes("]")) {
+          if (t.nobracket !== true && t.strictBrackets === true)
+            throw SyntaxError(Ae("closing", "]"));
+          f = `\\${f}`;
+        } else
+          fe("brackets");
+        R({ type: "bracket", value: f });
+        continue;
+      }
+      if (f === "]") {
+        if (t.nobracket === true || l && l.type === "bracket" && l.value.length === 1) {
+          R({ type: "text", value: f, output: `\\${f}` });
+          continue;
+        }
+        if (a.brackets === 0) {
+          if (t.strictBrackets === true)
+            throw SyntaxError(Ae("opening", "["));
+          R({ type: "text", value: f, output: `\\${f}` });
+          continue;
+        }
+        ae("brackets");
+        let d = l.value.slice(1);
+        if (l.posix !== true && d[0] === "^" && !d.includes("/"))
+          f = `/${f}`;
+        if (l.value += f, ue({ value: f }), t.literalBrackets === false || G.hasRegexChars(d))
+          continue;
+        let O = G.escapeRegex(l.value);
+        if (a.output = a.output.slice(0, -l.value.length), t.literalBrackets === true) {
+          a.output += O, l.value = O;
+          continue;
+        }
+        l.value = `(${i}${O}|${l.value})`, a.output += l.value;
+        continue;
+      }
+      if (f === "{" && t.nobrace !== true) {
+        fe("braces");
+        let d = { type: "brace", value: f, output: "(", outputIndex: a.output.length, tokensIndex: a.tokens.length };
+        C.push(d), R(d);
+        continue;
+      }
+      if (f === "}") {
+        let d = C[C.length - 1];
+        if (t.nobrace === true || !d) {
+          R({ type: "text", value: f, output: f });
+          continue;
+        }
+        let O = ")";
+        if (d.dots === true) {
+          let D = s.slice(), U = [];
+          for (let z = D.length - 1;z >= 0; z--) {
+            if (s.pop(), D[z].type === "brace")
+              break;
+            if (D[z].type !== "dots")
+              U.unshift(D[z].value);
+          }
+          O = Yr(U, t), a.backtrack = true;
+        }
+        if (d.comma !== true && d.dots !== true) {
+          let D = a.output.slice(0, d.outputIndex), U = a.tokens.slice(d.tokensIndex);
+          d.value = d.output = "\\{", f = O = "\\}", a.output = D;
+          for (let z of U)
+            a.output += z.output || z.value;
+        }
+        R({ type: "brace", value: f, output: O }), ae("braces"), C.pop();
+        continue;
+      }
+      if (f === "|") {
+        if (Q.length > 0)
+          Q[Q.length - 1].conditions++;
+        R({ type: "text", value: f });
+        continue;
+      }
+      if (f === ",") {
+        let d = f, O = C[C.length - 1];
+        if (O && B[B.length - 1] === "braces")
+          O.comma = true, d = "|";
+        R({ type: "comma", value: f, output: d });
+        continue;
+      }
+      if (f === "/") {
+        if (l.type === "dot" && a.index === a.start + 1) {
+          a.start = a.index + 1, a.consumed = "", a.output = "", s.pop(), l = u;
+          continue;
+        }
+        R({ type: "slash", value: f, output: M });
+        continue;
+      }
+      if (f === ".") {
+        if (a.braces > 0 && l.type === "dot") {
+          if (l.value === ".")
+            l.output = _;
+          let d = C[C.length - 1];
+          l.type = "dots", l.output += f, l.value += f, d.dots = true;
+          continue;
+        }
+        if (a.braces + a.parens === 0 && l.type !== "bos" && l.type !== "slash") {
+          R({ type: "text", value: f, output: _ });
+          continue;
+        }
+        R({ type: "dot", value: f, output: _ });
+        continue;
+      }
+      if (f === "?") {
+        if (!(l && l.value === "(") && t.noextglob !== true && P() === "(" && P(2) !== "?") {
+          de("qmark", f);
+          continue;
+        }
+        if (l && l.type === "paren") {
+          let O = P(), D = f;
+          if (l.value === "(" && !/[!=<:]/.test(O) || O === "<" && !/<([!=]|\w+>)/.test(te()))
+            D = `\\${f}`;
+          R({ type: "text", value: f, output: D });
+          continue;
+        }
+        if (t.dot !== true && (l.type === "slash" || l.type === "bos")) {
+          R({ type: "qmark", value: f, output: H });
+          continue;
+        }
+        R({ type: "qmark", value: f, output: L });
+        continue;
+      }
+      if (f === "!") {
+        if (t.noextglob !== true && P() === "(") {
+          if (P(2) !== "?" || !/[!=<:]/.test(P(3))) {
+            de("negate", f);
+            continue;
+          }
+        }
+        if (t.nonegate !== true && a.index === 0) {
+          $e();
+          continue;
+        }
+      }
+      if (f === "+") {
+        if (t.noextglob !== true && P() === "(" && P(2) !== "?") {
+          de("plus", f);
+          continue;
+        }
+        if (l && l.value === "(" || t.regex === false) {
+          R({ type: "plus", value: f, output: w });
+          continue;
+        }
+        if (l && (l.type === "bracket" || l.type === "paren" || l.type === "brace") || a.parens > 0) {
+          R({ type: "plus", value: f });
+          continue;
+        }
+        R({ type: "plus", value: w });
+        continue;
+      }
+      if (f === "@") {
+        if (t.noextglob !== true && P() === "(" && P(2) !== "?") {
+          R({ type: "at", extglob: true, value: f, output: "" });
+          continue;
+        }
+        R({ type: "text", value: f });
+        continue;
+      }
+      if (f !== "*") {
+        if (f === "$" || f === "^")
+          f = `\\${f}`;
+        let d = Zr.exec(te());
+        if (d)
+          f += d[0], a.index += d[0].length;
+        R({ type: "text", value: f });
+        continue;
+      }
+      if (l && (l.type === "globstar" || l.star === true)) {
+        l.type = "star", l.star = true, l.value += f, l.output = I, a.backtrack = true, a.globstar = true, W(f);
+        continue;
+      }
+      let p = te();
+      if (t.noextglob !== true && /^\([^?]/.test(p)) {
+        de("star", f);
+        continue;
+      }
+      if (l.type === "star") {
+        if (t.noglobstar === true) {
+          W(f);
+          continue;
+        }
+        let d = l.prev, O = d.prev, D = d.type === "slash" || d.type === "bos", U = O && (O.type === "star" || O.type === "globstar");
+        if (t.bash === true && (!D || p[0] && p[0] !== "/")) {
+          R({ type: "star", value: f, output: "" });
+          continue;
+        }
+        let z = a.braces > 0 && (d.type === "comma" || d.type === "brace"), re = Q.length && (d.type === "pipe" || d.type === "paren");
+        if (!D && d.type !== "paren" && !z && !re) {
+          R({ type: "star", value: f, output: "" });
+          continue;
+        }
+        while (p.slice(0, 3) === "/**") {
+          let pe = e[a.index + 4];
+          if (pe && pe !== "/")
+            break;
+          p = p.slice(3), W("/**", 3);
+        }
+        let ie = Y() || a.parens > 0 && p === ")".repeat(a.parens) && !Q.some((pe) => pe.type === "negate");
+        if (d.type === "bos" && Y()) {
+          l.type = "globstar", l.value += f, l.output = T(t), a.output = l.output, a.globstar = true, W(f);
+          continue;
+        }
+        if (d.type === "slash" && d.prev.type !== "bos" && !U && ie) {
+          a.output = a.output.slice(0, -(d.output + l.output).length), d.output = `(?:${d.output}`, l.type = "globstar", l.output = T(t) + (t.strictSlashes ? ")" : "|$)"), l.value += f, a.globstar = true, a.output += d.output + l.output, W(f);
+          continue;
+        }
+        if (d.type === "slash" && d.prev.type !== "bos" && p[0] === "/") {
+          let pe = p[1] !== undefined ? "|$" : "";
+          a.output = a.output.slice(0, -(d.output + l.output).length), d.output = `(?:${d.output}`, l.type = "globstar", l.output = `${T(t)}${M}|${M}${pe})`, l.value += f, a.output += d.output + l.output, a.globstar = true, W(f + J()), R({ type: "slash", value: "/", output: "" });
+          continue;
+        }
+        if (d.type === "bos" && p[0] === "/") {
+          l.type = "globstar", l.value += f, l.output = `(?:^|${M}|${T(t)}${M})`, a.output = l.output, a.globstar = true, W(f + J()), R({ type: "slash", value: "/", output: "" });
+          continue;
+        }
+        a.output = a.output.slice(0, -l.output.length), l.type = "globstar", l.output = T(t), l.value += f, a.output += l.output, a.globstar = true, W(f);
+        continue;
+      }
+      let j = { type: "star", value: f, output: I };
+      if (t.bash === true) {
+        if (j.output = ".*?", l.type === "bos" || l.type === "slash")
+          j.output = V + j.output;
+        R(j);
+        continue;
+      }
+      if (l && (l.type === "bracket" || l.type === "paren") && t.regex === true) {
+        j.output = f, R(j);
+        continue;
+      }
+      if (a.index === a.start || l.type === "slash" || l.type === "dot") {
+        if (l.type === "dot")
+          a.output += ee, l.output += ee;
+        else if (t.dot === true)
+          a.output += q, l.output += q;
+        else
+          a.output += V, l.output += V;
+        if (P() !== "*")
+          a.output += K, l.output += K;
+      }
+      R(j);
+    }
+    while (a.brackets > 0) {
+      if (t.strictBrackets === true)
+        throw SyntaxError(Ae("closing", "]"));
+      a.output = G.escapeLast(a.output, "["), ae("brackets");
+    }
+    while (a.parens > 0) {
+      if (t.strictBrackets === true)
+        throw SyntaxError(Ae("closing", ")"));
+      a.output = G.escapeLast(a.output, "("), ae("parens");
+    }
+    while (a.braces > 0) {
+      if (t.strictBrackets === true)
+        throw SyntaxError(Ae("closing", "}"));
+      a.output = G.escapeLast(a.output, "{"), ae("braces");
+    }
+    if (t.strictSlashes !== true && (l.type === "star" || l.type === "bracket"))
+      R({ type: "maybe_slash", value: "", output: `${M}?` });
+    if (a.backtrack === true) {
+      a.output = "";
+      for (let p of a.tokens)
+        if (a.output += p.output != null ? p.output : p.value, p.suffix)
+          a.output += p.suffix;
+    }
+    return a;
+  };
+  Ke.fastpaths = (e, r) => {
+    let t = { ...r }, n = typeof t.maxLength === "number" ? Math.min(ke, t.maxLength) : ke, o = e.length;
+    if (o > n)
+      throw SyntaxError(`Input length: ${o}, exceeds maximum allowed length: ${n}`);
+    e = At[e] || e;
+    let { DOT_LITERAL: u, SLASH_LITERAL: s, ONE_CHAR: i, DOTS_SLASH: h2, NO_DOT: N, NO_DOTS: _, NO_DOTS_SLASH: w, STAR: M, START_ANCHOR: K } = he.globChars(t.windows), g = t.dot ? _ : N, k = t.dot ? w : N, ee = t.capture ? "" : "?:", q = { negated: false, prefix: "" }, L = t.bash === true ? ".*?" : M;
+    if (t.capture)
+      L = `(${L})`;
+    let H = (V) => {
+      if (V.noglobstar === true)
+        return L;
+      return `(${ee}(?:(?!${K}${V.dot ? h2 : u}).)*?)`;
+    }, ne = (V) => {
+      switch (V) {
+        case "*":
+          return `${g}${i}${L}`;
+        case ".*":
+          return `${u}${i}${L}`;
+        case "*.*":
+          return `${g}${L}${u}${i}${L}`;
+        case "*/*":
+          return `${g}${L}${s}${i}${k}${L}`;
+        case "**":
+          return g + H(t);
+        case "**/*":
+          return `(?:${g}${H(t)}${s})?${k}${i}${L}`;
+        case "**/*.*":
+          return `(?:${g}${H(t)}${s})?${k}${L}${u}${i}${L}`;
+        case "**/.*":
+          return `(?:${g}${H(t)}${s})?${u}${i}${L}`;
+        default: {
+          let A = /^(.*?)\.(\w+)$/.exec(V);
+          if (!A)
+            return;
+          let I = ne(A[1]);
+          if (!I)
+            return;
+          return I + u + A[2];
+        }
+      }
+    }, X = G.removePrefix(e, q), T = ne(X);
+    if (T && t.strictSlashes !== true)
+      T += `${s}?`;
+    return T;
+  };
+  Et.exports = Ke;
+});
+var wt = me(function(Jn, bt) {
+  var on = xt(), He = St(), Ne = Te(), un = Se(), an = (e) => e && typeof e === "object" && !Array.isArray(e), Z = (e, r, t = false) => {
+    if (Array.isArray(e)) {
+      let _ = e.map((M) => Z(M, r, t));
+      return (M) => {
+        for (let K of _) {
+          let g = K(M);
+          if (g)
+            return g;
+        }
+        return false;
+      };
+    }
+    let n = an(e) && e.tokens && e.input;
+    if (e === "" || typeof e !== "string" && !n)
+      throw TypeError("Expected pattern to be a non-empty string");
+    let o = r || {}, u = o.windows, s = n ? Z.compileRe(e, r) : Z.makeRe(e, r, false, true), i = s.state;
+    delete s.state;
+    let h2 = () => false;
+    if (o.ignore) {
+      let _ = { ...r, ignore: null, onMatch: null, onResult: null };
+      h2 = Z(o.ignore, _, t);
+    }
+    let N = (_, w = false) => {
+      let { isMatch: M, match: K, output: g } = Z.test(_, s, r, { glob: e, posix: u }), k = { glob: e, state: i, regex: s, posix: u, input: _, output: g, match: K, isMatch: M };
+      if (typeof o.onResult === "function")
+        o.onResult(k);
+      if (M === false)
+        return k.isMatch = false, w ? k : false;
+      if (h2(_)) {
+        if (typeof o.onIgnore === "function")
+          o.onIgnore(k);
+        return k.isMatch = false, w ? k : false;
+      }
+      if (typeof o.onMatch === "function")
+        o.onMatch(k);
+      return w ? k : true;
+    };
+    if (t)
+      N.state = i;
+    return N;
+  };
+  Z.test = (e, r, t, { glob: n, posix: o } = {}) => {
+    if (typeof e !== "string")
+      throw TypeError("Expected input to be a string");
+    if (e === "")
+      return { isMatch: false, output: "" };
+    let u = t || {}, s = u.format || (o ? Ne.toPosixSlashes : null), i = e === n, h2 = i && s ? s(e) : e;
+    if (i === false)
+      h2 = s ? s(e) : e, i = h2 === n;
+    if (i === false || u.capture === true)
+      if (u.matchBase === true || u.basename === true)
+        i = Z.matchBase(e, r, t, o);
+      else
+        i = r.exec(h2);
+    return { isMatch: Boolean(i), match: i, output: h2 };
+  };
+  Z.matchBase = (e, r, t, n = t && t.windows) => (r instanceof RegExp ? r : Z.makeRe(r, t)).test(Ne.basename(e, { windows: n }));
+  Z.isMatch = (e, r, t) => Z(r, t)(e);
+  Z.parse = (e, r) => {
+    if (Array.isArray(e))
+      return e.map((t) => Z.parse(t, r));
+    return He(e, { ...r, fastpaths: false });
+  };
+  Z.scan = (e, r) => on(e, r);
+  Z.compileRe = (e, r, t = false, n = false) => {
+    if (t === true)
+      return e.output;
+    let o = r || {}, u = o.contains ? "" : "^", s = o.contains ? "" : "$", i = `${u}(?:${e.output})${s}`;
+    if (e && e.negated === true)
+      i = `^(?!${i}).*$`;
+    let h2 = Z.toRegex(i, r);
+    if (n === true)
+      h2.state = e;
+    return h2;
+  };
+  Z.makeRe = (e, r = {}, t = false, n = false) => {
+    if (!e || typeof e !== "string")
+      throw TypeError("Expected a non-empty string");
+    let o = { negated: false, fastpaths: true };
+    if (r.fastpaths !== false && (e[0] === "." || e[0] === "*"))
+      o.output = He.fastpaths(e, r);
+    if (!o.output)
+      o = He(e, r);
+    return Z.compileRe(o, r, t, n);
+  };
+  Z.toRegex = (e, r) => {
+    try {
+      let t = r || {};
+      return new RegExp(e, t.flags || (t.nocase ? "i" : ""));
+    } catch (t) {
+      if (r && r.debug === true)
+        throw t;
+      return /$^/;
+    }
+  };
+  Z.constants = un;
+  bt.exports = Z;
+});
+var vt = me(function(es, Ot) {
+  var fn = ["||", "&&", ";;&", ";;", ";&", "|&", "<(", ">(", "<<<", "<<-", "<<", ">>", ">&", ">|", "&>>", "&>", "<&", "<>", "&", ";", "(", ")", "|", "<", ">"], We = /[\n\r\u2028\u2029]/, ln = /[\s#!"$&'():;<=>@\\^`|~]/g;
+  Ot.exports = function(r) {
+    var t = false;
+    return r.map(function(n) {
+      if (t && typeof n === "string" && We.test(n))
+        throw TypeError("a token after a `comment` must not contain line terminators");
+      if (n === "")
+        return "''";
+      if (n && typeof n === "object") {
+        if ("op" in n && n.op === "glob") {
+          if (typeof n.pattern !== "string")
+            throw TypeError("glob token requires a string `pattern`");
+          if (We.test(n.pattern))
+            throw TypeError("glob `pattern` must not contain line terminators");
+          if (n.pattern === "")
+            return "''";
+          return n.pattern.replace(ln, "\\$&");
+        }
+        if ("op" in n && typeof n.op === "string") {
+          if (fn.indexOf(n.op) < 0)
+            throw TypeError("invalid `op` value: " + JSON.stringify(n.op));
+          return n.op.replace(/[\s\S]/g, "\\$&");
+        }
+        if ("comment" in n && typeof n.comment === "string") {
+          if (We.test(n.comment))
+            throw TypeError("`comment` must not contain line terminators");
+          return t = true, "#" + n.comment;
+        }
+        throw TypeError("unrecognized object token shape");
+      }
+      if (/'/.test(n) && /!/.test(n))
+        return "'" + n.replace(/'/g, `'"'"'`) + "'";
+      if (/["\s\\]/.test(n) && !/'/.test(n))
+        return "'" + n + "'";
+      if (/["'\s]/.test(n))
+        return '"' + n.replace(/(["\\$`])/g, "\\$1") + '"';
+      return String(n).replace(/([A-Za-z]:)?([#!"$&'()*,:;<=>?@[\\\]^`{|}~])/g, "$1\\$2");
+    }).join(" ");
+  };
+});
+var Pt = me(function(ts, Lt) {
+  var Ht = "(?:" + ["\\|\\|", "\\&(?:\\&|>>?)", ";;\\&?", "[;|]\\&", "\\<\\(", "\\<\\<\\<", "\\<\\<-", "\\<\\<(?!\\()", ">>", ">[&|(]", "<[&>]", "[&;()|<>]"].join("|") + ")", Tt = new RegExp("^" + Ht + "$"), It = "|&;()<> \\t", dn = "'([^']*?)'", Nt = "(?:\\\\[\\s\\S]|[^\\\\'])*?", Ct = "\\$'" + Nt + "'", Pe = new RegExp("\\$'" + Nt + "(?:(')|\\\\?$)", "g"), pn = "abeEfnrtv", cn = `\x07\b\x1B\x1B\f
+\r	\v`, hn = /^#$/, Xe = "'", kt = '"', be = "$", ge = "", $n = 4294967296;
+  for (Le = 0;Le < 4; Le++)
+    ge += ($n * Math.random()).toString(16);
+  var Le, mn = new RegExp("^" + ge);
+  function yn(e, r) {
+    var t = r.lastIndex, n = [], o;
+    while (o = r.exec(e))
+      if (n[n.length] = o, r.lastIndex === o.index)
+        r.lastIndex += 1;
+    return r.lastIndex = t, n;
+  }
+  function gn(e, r, t) {
+    var n = typeof e === "function" ? e(t) : e[t];
+    if (typeof n > "u" && t != "")
+      n = "";
+    else if (typeof n > "u")
+      n = "$";
+    if (typeof n === "object")
+      return r + ge + JSON.stringify(n) + ge;
+    return r + n;
+  }
+  var _n = /\\([0-7]{1,3}|x[\dA-Fa-f]{1,2}|u[\dA-Fa-f]{1,4}|U[\dA-Fa-f]{1,8}|c(?:\\\\|[\s\S])|[abeEfnrtv\\'"?])/g;
+  function xn(e, r) {
+    var t = r.charAt(0);
+    if (t === "c") {
+      var n = r.charAt(1);
+      return n === "?" ? "\u007f" : String.fromCharCode(n.charCodeAt(0) & 31);
+    }
+    if (t === "x" || t === "u" || t === "U") {
+      var o = parseInt(r.slice(1), 16);
+      if (o > 1114111)
+        return e;
+      return String.fromCharCode.apply(null, o > 65535 ? [55232 + (o >> 10), 56320 + (o & 1023)] : [o]);
+    }
+    if (t >= "0" && t <= "7")
+      return String.fromCharCode(parseInt(r, 8) & 255);
+    var u = pn.indexOf(r);
+    return u < 0 ? r : cn.charAt(u);
+  }
+  function An(e) {
+    return e.replace(_n, xn).split("\x00")[0];
+  }
+  function Rn(e, r) {
+    return Pe.lastIndex = r, !!Pe.exec(e)[1];
+  }
+  function En(e, r, t) {
+    if (!t)
+      t = {};
+    var n = t.escape || "\\", o = t.splitUnquoted === true ? ` 	
+` : typeof t.splitUnquoted === "string" ? t.splitUnquoted : "", u = "(\\" + n + `['"$\\` + n + It + "]|\\$\\$|\\$(?!" + Ct.slice(2) + `)|[^\\s'"$` + It + "])+", s = '"(?:\\' + n + '[\\s\\S]|[^"\\' + n + '])*"', i = new RegExp(["(" + Ht + ")", "(" + Ct + "|" + u + "|" + s + "|" + dn + ")+"].join("|"), "g"), h2 = yn(e, i);
+    if (h2.length === 0)
+      return [];
+    if (!r)
+      r = {};
+    var N = false;
+    return h2.map(function(_) {
+      var w = _[0];
+      if (!w || N)
+        return;
+      if (Tt.test(w))
+        return { op: w };
+      var M = false, K = false, g = "", k = [], ee = false, q = null, L = false, H;
+      function ne() {
+        H += 1;
+        var C, B, l = w.charAt(H);
+        if (l === "{") {
+          if (H += 1, w.charAt(H) === "}")
+            throw Error("Bad substitution: " + w.slice(H - 2, H + 1));
+          var f = 1;
+          C = H;
+          while (f > 0 && C < w.length) {
+            if (w.charAt(C) === "{" && w.charAt(C - 1) === "$")
+              f += 1;
+            else if (w.charAt(C) === "}")
+              f -= 1;
+            C += 1;
+          }
+          if (f !== 0)
+            throw Error("Bad substitution: " + w.slice(H));
+          C -= 1, B = w.slice(H, C), H = C;
+        } else if (/[*@#?$!-]/.test(l))
+          B = l;
+        else {
+          var Y = w.slice(H);
+          if (C = Y.match(/[^\w\d_]/), !C)
+            B = Y, H = w.length;
+          else
+            B = Y.slice(0, C.index), H += C.index - 1;
+        }
+        return gn(r, "", B);
+      }
+      function X() {
+        if (q === null)
+          return;
+        if (q === 0) {
+          if (g !== "")
+            k[k.length] = g, g = "";
+        } else {
+          k[k.length] = g, g = "";
+          for (var C = 1;C < q; C += 1)
+            k[k.length] = "";
+        }
+        q = null;
+      }
+      for (H = 0;H < w.length; H++) {
+        var T = w.charAt(H);
+        if (o && T !== be)
+          X();
+        if (L = L || !M && (T === "*" || T === "?"), K)
+          g += T, K = false;
+        else if (M)
+          if (T === M)
+            M = false;
+          else if (M == Xe)
+            g += T;
+          else if (T === n)
+            if (H += 1, T = w.charAt(H), T === kt || T === n || T === be)
+              g += T;
+            else
+              g += n + T;
+          else if (T === be)
+            g += ne();
+          else
+            g += T;
+        else if (T === kt || T === Xe)
+          M = T, ee = true;
+        else if (Tt.test(T))
+          return { op: w };
+        else if (hn.test(T)) {
+          N = true;
+          var V = { comment: e.slice(_.index + H + 1) };
+          if (g.length)
+            return [g, V];
+          return [V];
+        } else if (T === n)
+          K = true;
+        else if (T === be && w.charAt(H + 1) === Xe && Rn(w, H))
+          X(), ee = true, g += An(w.slice(H + 2, Pe.lastIndex - 1)), H = Pe.lastIndex - 1;
+        else if (T === be) {
+          var A = ne();
+          if (!o)
+            g += A;
+          else
+            for (var I = 0;I < A.length; I += 1) {
+              var a = A.charAt(I);
+              if (o.indexOf(a) < 0)
+                X(), g += a;
+              else if (q === null)
+                q = a === " " || a === "\t" || a === `
+` ? 0 : 1;
+              else if (a !== " " && a !== "\t" && a !== `
+`)
+                q += 1;
+            }
+        } else
+          g += T;
+      }
+      if (L)
+        return { op: "glob", pattern: g };
+      if (o) {
+        if (q !== null && q > 0) {
+          k[k.length] = g, g = "";
+          for (var Q = 1;Q < q; Q += 1)
+            k[k.length] = "";
+        }
+        if (g !== "" || ee && k.length === 0)
+          k[k.length] = g;
+        return k;
+      }
+      return g;
+    }).reduce(function(_, w) {
+      if (typeof w > "u")
+        return _;
+      return [].concat(w).forEach(function(M) {
+        _[_.length] = M;
+      }), _;
+    }, []);
+  }
+  Lt.exports = function(r, t, n) {
+    var o = En(r, t, n);
+    if (typeof t !== "function")
+      return o;
+    return o.reduce(function(u, s) {
+      if (typeof s === "object")
+        return u[u.length] = s, u;
+      var i = s.split(RegExp("(" + ge + ".*?" + ge + ")", "g"));
+      if (i.length === 1)
+        return u[u.length] = i[0], u;
+      return i.filter(Boolean).forEach(function(h2) {
+        u[u.length] = mn.test(h2) ? JSON.parse(h2.split(ge)[1]) : h2;
+      }), u;
+    }, []);
+  };
+});
+function _e(e, r) {
+  let t = typeof e;
+  if (t !== typeof r)
+    return false;
+  if (Array.isArray(e)) {
+    if (!Array.isArray(r))
+      return false;
+    let n = e.length;
+    if (n !== r.length)
+      return false;
+    for (let o = 0;o < n; o++)
+      if (!_e(e[o], r[o]))
+        return false;
+    return true;
+  }
+  if (t === "object") {
+    if (!e || !r)
+      return e === r;
+    let n = Object.keys(e), o = Object.keys(r);
+    if (n.length !== o.length)
+      return false;
+    for (let s of n)
+      if (!_e(e[s], r[s]))
+        return false;
+    return true;
+  }
+  return e === r;
+}
+function oe(e) {
+  return encodeURI(Wt(e));
+}
+function Wt(e) {
+  return e.replace(/~/g, "~0").replace(/\//g, "~1");
+}
+var Xt = { prefixItems: true, items: true, allOf: true, anyOf: true, oneOf: true };
+var Qt = { $defs: true, definitions: true, properties: true, patternProperties: true, dependentSchemas: true };
+var Zt = { id: true, $id: true, $ref: true, $schema: true, $anchor: true, $vocabulary: true, $comment: true, default: true, enum: true, const: true, required: true, type: true, maximum: true, minimum: true, exclusiveMaximum: true, exclusiveMinimum: true, multipleOf: true, maxLength: true, minLength: true, pattern: true, format: true, maxItems: true, minItems: true, uniqueItems: true, maxProperties: true, minProperties: true };
+var Vt = typeof self < "u" && self.location && self.location.origin !== "null" ? new URL(self.location.origin + self.location.pathname + location.search) : new URL("https://github.com/cfworker");
+function ce(e, r = Object.create(null), t = Vt, n = "") {
+  if (e && typeof e === "object" && !Array.isArray(e)) {
+    let u = e.$id || e.id;
+    if (u) {
+      let s = new URL(u, t.href);
+      if (s.hash.length > 1)
+        r[s.href] = e;
+      else if (s.hash = "", n === "")
+        t = s;
+      else
+        ce(e, r, t);
+    }
+  } else if (e !== true && e !== false)
+    return r;
+  let o = t.href + (n ? "#" + n : "");
+  if (r[o] !== undefined)
+    throw Error(`Duplicate schema URI "${o}".`);
+  if (r[o] = e, e === true || e === false)
+    return r;
+  if (e.__absolute_uri__ === undefined)
+    Object.defineProperty(e, "__absolute_uri__", { enumerable: false, value: o });
+  if (e.$ref && e.__absolute_ref__ === undefined) {
+    let u = new URL(e.$ref, t.href);
+    u.hash = u.hash, Object.defineProperty(e, "__absolute_ref__", { enumerable: false, value: u.href });
+  }
+  if (e.$recursiveRef && e.__absolute_recursive_ref__ === undefined) {
+    let u = new URL(e.$recursiveRef, t.href);
+    u.hash = u.hash, Object.defineProperty(e, "__absolute_recursive_ref__", { enumerable: false, value: u.href });
+  }
+  if (e.$anchor) {
+    let u = new URL("#" + e.$anchor, t.href);
+    r[u.href] = e;
+  }
+  for (let u in e) {
+    if (Zt[u])
+      continue;
+    let s = `${n}/${oe(u)}`, i = e[u];
+    if (Array.isArray(i)) {
+      if (Xt[u]) {
+        let h2 = i.length;
+        for (let N = 0;N < h2; N++)
+          ce(i[N], r, t, `${s}/${N}`);
+      }
+    } else if (Qt[u])
+      for (let h2 in i)
+        ce(i[h2], r, t, `${s}/${oe(h2)}`);
+    else
+      ce(i, r, t, s);
+  }
+  return r;
+}
+var Yt = /^(\d\d\d\d)-(\d\d)-(\d\d)$/;
+var Jt = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+var er = /^(\d\d):(\d\d):(\d\d)(\.\d+)?(z|[+-]\d\d(?::?\d\d)?)?$/i;
+var tr = /^(?=.{1,253}\.?$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[-0-9a-z]{0,61}[0-9a-z])?)*\.?$/i;
+var rr = /^(?:[a-z][a-z0-9+\-.]*:)?(?:\/?\/(?:(?:[a-z0-9\-._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:(?:[0-9a-f]{1,4}:){6}|::(?:[0-9a-f]{1,4}:){5}|(?:[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){4}|(?:(?:[0-9a-f]{1,4}:){0,1}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){3}|(?:(?:[0-9a-f]{1,4}:){0,2}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){2}|(?:(?:[0-9a-f]{1,4}:){0,3}[0-9a-f]{1,4})?::[0-9a-f]{1,4}:|(?:(?:[0-9a-f]{1,4}:){0,4}[0-9a-f]{1,4})?::)(?:[0-9a-f]{1,4}:[0-9a-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?))|(?:(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4})?::[0-9a-f]{1,4}|(?:(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4})?::)|[Vv][0-9a-f]+\.[a-z0-9\-._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)|(?:[a-z0-9\-._~!$&'"()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[a-z0-9\-._~!$&'"()*+,;=:@]|%[0-9a-f]{2})*)*)?(?:\?(?:[a-z0-9\-._~!$&'"()*+,;=:@/?]|%[0-9a-f]{2})*)?(?:#(?:[a-z0-9\-._~!$&'"()*+,;=:@/?]|%[0-9a-f]{2})*)?$/i;
+var nr = /^(?:(?:[^\x00-\x20"'<>%\\^`{|}]|%[0-9a-f]{2})|\{[+#./;?&=,!@|]?(?:[a-z0-9_]|%[0-9a-f]{2})+(?::[1-9][0-9]{0,3}|\*)?(?:,(?:[a-z0-9_]|%[0-9a-f]{2})+(?::[1-9][0-9]{0,3}|\*)?)*\})*$/i;
+var sr = /^(?:(?:https?|ftp):\/\/)(?:\S+(?::\S*)?@)?(?:(?!10(?:\.\d{1,3}){3})(?!127(?:\.\d{1,3}){3})(?!169\.254(?:\.\d{1,3}){2})(?!192\.168(?:\.\d{1,3}){2})(?!172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?:[1-9]\d?|1\d\d|2[01]\d|22[0-3])(?:\.(?:1?\d{1,2}|2[0-4]\d|25[0-5])){2}(?:\.(?:[1-9]\d?|1\d\d|2[0-4]\d|25[0-4]))|(?:(?:[a-z\u{00a1}-\u{ffff}0-9]+-?)*[a-z\u{00a1}-\u{ffff}0-9]+)(?:\.(?:[a-z\u{00a1}-\u{ffff}0-9]+-?)*[a-z\u{00a1}-\u{ffff}0-9]+)*(?:\.(?:[a-z\u{00a1}-\u{ffff}]{2,})))(?::\d{2,5})?(?:\/[^\s]*)?$/iu;
+var or = /^(?:urn:uuid:)?[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+var ur = /^(?:\/(?:[^~/]|~0|~1)*)*$/;
+var ir = /^#(?:\/(?:[a-z0-9_\-.!$&'()*+,;:=@]|%[0-9a-f]{2}|~0|~1)*)*$/i;
+var ar = /^(?:0|[1-9][0-9]*)(?:#|(?:\/(?:[^~/]|~0|~1)*)*)$/;
+var fr = (e) => {
+  if (e[0] === '"')
+    return false;
+  let [r, t, ...n] = e.split("@");
+  if (!r || !t || n.length !== 0 || r.length > 64 || t.length > 253)
+    return false;
+  if (r[0] === "." || r.endsWith(".") || r.includes(".."))
+    return false;
+  if (!/^[a-z0-9.-]+$/i.test(t) || !/^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+$/i.test(r))
+    return false;
+  return t.split(".").every((o) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i.test(o));
+};
+var lr = /^(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)$/;
+var dr = /^((([0-9a-f]{1,4}:){7}([0-9a-f]{1,4}|:))|(([0-9a-f]{1,4}:){6}(:[0-9a-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9a-f]{1,4}:){5}(((:[0-9a-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9a-f]{1,4}:){4}(((:[0-9a-f]{1,4}){1,3})|((:[0-9a-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9a-f]{1,4}:){3}(((:[0-9a-f]{1,4}){1,4})|((:[0-9a-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9a-f]{1,4}:){2}(((:[0-9a-f]{1,4}){1,5})|((:[0-9a-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9a-f]{1,4}:){1}(((:[0-9a-f]{1,4}){1,6})|((:[0-9a-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9a-f]{1,4}){1,7})|((:[0-9a-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))$/i;
+var pr = (e) => e.length > 1 && e.length < 80 && (/^P\d+([.,]\d+)?W$/.test(e) || /^P[\dYMDTHS]*(\d[.,]\d+)?[YMDHS]$/.test(e) && /^P([.,\d]+Y)?([.,\d]+M)?([.,\d]+D)?(T([.,\d]+H)?([.,\d]+M)?([.,\d]+S)?)?$/.test(e));
+function le(e) {
+  return e.test.bind(e);
+}
+var Me = { date: Je, time: et.bind(undefined, false), "date-time": $r, duration: pr, uri: gr, "uri-reference": le(rr), "uri-template": le(nr), url: le(sr), email: fr, hostname: le(tr), ipv4: le(lr), ipv6: le(dr), regex: xr, uuid: le(or), "json-pointer": le(ur), "json-pointer-uri-fragment": le(ir), "relative-json-pointer": le(ar) };
+function cr(e) {
+  return e % 4 === 0 && (e % 100 !== 0 || e % 400 === 0);
+}
+function Je(e) {
+  let r = e.match(Yt);
+  if (!r)
+    return false;
+  let t = +r[1], n = +r[2], o = +r[3];
+  return n >= 1 && n <= 12 && o >= 1 && o <= (n == 2 && cr(t) ? 29 : Jt[n]);
+}
+function et(e, r) {
+  let t = r.match(er);
+  if (!t)
+    return false;
+  let n = +t[1], o = +t[2], u = +t[3], s = !!t[5];
+  return (n <= 23 && o <= 59 && u <= 59 || n == 23 && o == 59 && u == 60) && (!e || s);
+}
+var hr = /t|\s/i;
+function $r(e) {
+  let r = e.split(hr);
+  return r.length == 2 && Je(r[0]) && et(true, r[1]);
+}
+var mr = /\/|:/;
+var yr = /^(?:[a-z][a-z0-9+\-.]*:)(?:\/?\/(?:(?:[a-z0-9\-._~!$&'()*+,;=:]|%[0-9a-f]{2})*@)?(?:\[(?:(?:(?:(?:[0-9a-f]{1,4}:){6}|::(?:[0-9a-f]{1,4}:){5}|(?:[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){4}|(?:(?:[0-9a-f]{1,4}:){0,1}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){3}|(?:(?:[0-9a-f]{1,4}:){0,2}[0-9a-f]{1,4})?::(?:[0-9a-f]{1,4}:){2}|(?:(?:[0-9a-f]{1,4}:){0,3}[0-9a-f]{1,4})?::[0-9a-f]{1,4}:|(?:(?:[0-9a-f]{1,4}:){0,4}[0-9a-f]{1,4})?::)(?:[0-9a-f]{1,4}:[0-9a-f]{1,4}|(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?))|(?:(?:[0-9a-f]{1,4}:){0,5}[0-9a-f]{1,4})?::[0-9a-f]{1,4}|(?:(?:[0-9a-f]{1,4}:){0,6}[0-9a-f]{1,4})?::)|[Vv][0-9a-f]+\.[a-z0-9\-._~!$&'()*+,;=:]+)\]|(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)|(?:[a-z0-9\-._~!$&'()*+,;=]|%[0-9a-f]{2})*)(?::\d*)?(?:\/(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*|\/(?:(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)?|(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})+(?:\/(?:[a-z0-9\-._~!$&'()*+,;=:@]|%[0-9a-f]{2})*)*)(?:\?(?:[a-z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?(?:#(?:[a-z0-9\-._~!$&'()*+,;=:@/?]|%[0-9a-f]{2})*)?$/i;
+function gr(e) {
+  return mr.test(e) && yr.test(e);
+}
+var _r = /[^\\]\\Z/;
+function xr(e) {
+  if (_r.test(e))
+    return false;
+  try {
+    return new RegExp(e, "u"), true;
+  } catch (r) {
+    return false;
+  }
+}
+function tt(e) {
+  let r = 0, t = e.length, n = 0, o;
+  while (n < t)
+    if (r++, o = e.charCodeAt(n++), o >= 55296 && o <= 56319 && n < t) {
+      if (o = e.charCodeAt(n), (o & 64512) == 56320)
+        n++;
+    }
+  return r;
+}
+function F(e, r, t = "2019-09", n = ce(r), o = true, u = null, s = "#", i = "#", h2 = Object.create(null)) {
+  if (r === true)
+    return { valid: true, errors: [] };
+  if (r === false)
+    return { valid: false, errors: [{ instanceLocation: s, keyword: "false", keywordLocation: s, error: "False boolean schema." }] };
+  let N = typeof e, _;
+  switch (N) {
+    case "boolean":
+    case "number":
+    case "string":
+      _ = N;
+      break;
+    case "object":
+      if (e === null)
+        _ = "null";
+      else if (Array.isArray(e))
+        _ = "array";
+      else
+        _ = "object";
+      break;
+    default:
+      throw Error(`Instances of "${N}" type are not supported.`);
+  }
+  let { $ref: w, $recursiveRef: M, $recursiveAnchor: K, type: g, const: k, enum: ee, required: q, not: L, anyOf: H, allOf: ne, oneOf: X, if: T, then: V, else: A, format: I, properties: a, patternProperties: Q, additionalProperties: C, unevaluatedProperties: B, minProperties: l, maxProperties: f, propertyNames: Y, dependentRequired: P, dependentSchemas: J, dependencies: te, prefixItems: W, items: ue, additionalItems: $e, unevaluatedItems: fe, contains: ae, minContains: R, maxContains: de, minItems: Re, maxItems: p, uniqueItems: j, minimum: d, maximum: O, exclusiveMinimum: D, exclusiveMaximum: U, multipleOf: z, minLength: re, maxLength: ie, pattern: pe, __absolute_ref__: we, __absolute_recursive_ref__: zt } = r, m = [];
+  if (K === true && u === null)
+    u = r;
+  if (M === "#") {
+    let E = u === null ? n[zt] : u, x = `${i}/$recursiveRef`, v = F(e, u === null ? r : u, t, n, o, E, s, x, h2);
+    if (!v.valid)
+      m.push({ instanceLocation: s, keyword: "$recursiveRef", keywordLocation: x, error: "A subschema had errors." }, ...v.errors);
+  }
+  if (w !== undefined) {
+    let x = n[we || w];
+    if (x === undefined) {
+      let c = `Unresolved $ref "${w}".`;
+      if (we && we !== w)
+        c += `  Absolute URI "${we}".`;
+      throw c += `
 Known schemas:
-- ${Object.keys(s).join(`
-- `)}`,Error(p)}let oe=`${c}/$ref`,$e=ze(e,ue,n,s,r,o,i,oe,d);if(!$e.valid)Y.push({instanceLocation:i,keyword:"$ref",keywordLocation:oe,error:"A subschema had errors."},...$e.errors);if(n==="4"||n==="7")return{valid:Y.length===0,errors:Y}}if(Array.isArray(y)){let ue=y.length,oe=false;for(let $e=0;$e<ue;$e++)if(m===y[$e]||y[$e]==="integer"&&m==="number"&&e%1===0&&e===e){oe=true;break}if(!oe)Y.push({instanceLocation:i,keyword:"type",keywordLocation:`${c}/type`,error:`Instance type "${m}" is invalid. Expected "${y.join('", "')}".`})}else if(y==="integer"){if(m!=="number"||e%1||e!==e)Y.push({instanceLocation:i,keyword:"type",keywordLocation:`${c}/type`,error:`Instance type "${m}" is invalid. Expected "${y}".`})}else if(y!==undefined&&m!==y)Y.push({instanceLocation:i,keyword:"type",keywordLocation:`${c}/type`,error:`Instance type "${m}" is invalid. Expected "${y}".`});if(R!==undefined){if(m==="object"||m==="array"){if(!tn(e,R))Y.push({instanceLocation:i,keyword:"const",keywordLocation:`${c}/const`,error:`Instance does not match ${JSON.stringify(R)}.`})}else if(e!==R)Y.push({instanceLocation:i,keyword:"const",keywordLocation:`${c}/const`,error:`Instance does not match ${JSON.stringify(R)}.`})}if(D!==undefined){if(m==="object"||m==="array"){if(!D.some((ue)=>tn(e,ue)))Y.push({instanceLocation:i,keyword:"enum",keywordLocation:`${c}/enum`,error:`Instance does not match any of ${JSON.stringify(D)}.`})}else if(!D.some((ue)=>e===ue))Y.push({instanceLocation:i,keyword:"enum",keywordLocation:`${c}/enum`,error:`Instance does not match any of ${JSON.stringify(D)}.`})}if(X!==undefined){let ue=`${c}/not`;if(ze(e,X,n,s,r,o,i,ue).valid)Y.push({instanceLocation:i,keyword:"not",keywordLocation:ue,error:'Instance matched "not" schema.'})}let Pe=[];if(G!==undefined){let ue=`${c}/anyOf`,oe=Y.length,$e=false;for(let p=0;p<G.length;p++){let u=G[p],A=Object.create(d),l=ze(e,u,n,s,r,v===true?o:null,i,`${ue}/${p}`,A);if(Y.push(...l.errors),$e=$e||l.valid,l.valid)Pe.push(A)}if($e)Y.length=oe;else Y.splice(oe,0,{instanceLocation:i,keyword:"anyOf",keywordLocation:ue,error:"Instance does not match any subschemas."})}if(H!==undefined){let ue=`${c}/allOf`,oe=Y.length,$e=true;for(let p=0;p<H.length;p++){let u=H[p],A=Object.create(d),l=ze(e,u,n,s,r,v===true?o:null,i,`${ue}/${p}`,A);if(Y.push(...l.errors),$e=$e&&l.valid,l.valid)Pe.push(A)}if($e)Y.length=oe;else Y.splice(oe,0,{instanceLocation:i,keyword:"allOf",keywordLocation:ue,error:"Instance does not match every subschema."})}if(k!==undefined){let ue=`${c}/oneOf`,oe=Y.length,$e=k.filter((p,u)=>{let A=Object.create(d),l=ze(e,p,n,s,r,v===true?o:null,i,`${ue}/${u}`,A);if(Y.push(...l.errors),l.valid)Pe.push(A);return l.valid}).length;if($e===1)Y.length=oe;else Y.splice(oe,0,{instanceLocation:i,keyword:"oneOf",keywordLocation:ue,error:`Instance does not match exactly one subschema (${$e} matches).`})}if(m==="object"||m==="array")Object.assign(d,...Pe);if(B!==undefined){let ue=`${c}/if`;if(ze(e,B,n,s,r,o,i,ue,d).valid){if(b!==undefined){let oe=ze(e,b,n,s,r,o,i,`${c}/then`,d);if(!oe.valid)Y.push({instanceLocation:i,keyword:"if",keywordLocation:ue,error:'Instance does not match "then" schema.'},...oe.errors)}}else if(Q!==undefined){let oe=ze(e,Q,n,s,r,o,i,`${c}/else`,d);if(!oe.valid)Y.push({instanceLocation:i,keyword:"if",keywordLocation:ue,error:'Instance does not match "else" schema.'},...oe.errors)}}if(m==="object"){if(z!==undefined){for(let p of z)if(!(p in e))Y.push({instanceLocation:i,keyword:"required",keywordLocation:`${c}/required`,error:`Instance does not have required property "${p}".`})}let ue=Object.keys(e);if(te!==undefined&&ue.length<te)Y.push({instanceLocation:i,keyword:"minProperties",keywordLocation:`${c}/minProperties`,error:`Instance does not have at least ${te} properties.`});if(K!==undefined&&ue.length>K)Y.push({instanceLocation:i,keyword:"maxProperties",keywordLocation:`${c}/maxProperties`,error:`Instance does not have at least ${K} properties.`});if(he!==undefined){let p=`${c}/propertyNames`;for(let u in e){let A=`${i}/${it(u)}`,l=ze(u,he,n,s,r,o,A,p);if(!l.valid)Y.push({instanceLocation:i,keyword:"propertyNames",keywordLocation:p,error:`Property name "${u}" does not match schema.`},...l.errors)}}if(we!==undefined){let p=`${c}/dependantRequired`;for(let u in we)if(u in e){let A=we[u];for(let l of A)if(!(l in e))Y.push({instanceLocation:i,keyword:"dependentRequired",keywordLocation:p,error:`Instance has "${u}" but does not have "${l}".`})}}if(S!==undefined)for(let p in S){let u=`${c}/dependentSchemas`;if(p in e){let A=ze(e,S[p],n,s,r,o,i,`${u}/${it(p)}`,d);if(!A.valid)Y.push({instanceLocation:i,keyword:"dependentSchemas",keywordLocation:u,error:`Instance has "${p}" but does not match dependant schema.`},...A.errors)}}if(W!==undefined){let p=`${c}/dependencies`;for(let u in W)if(u in e){let A=W[u];if(Array.isArray(A)){for(let l of A)if(!(l in e))Y.push({instanceLocation:i,keyword:"dependencies",keywordLocation:p,error:`Instance has "${u}" but does not have "${l}".`})}else{let l=ze(e,A,n,s,r,o,i,`${p}/${it(u)}`);if(!l.valid)Y.push({instanceLocation:i,keyword:"dependencies",keywordLocation:p,error:`Instance has "${u}" but does not match dependant schema.`},...l.errors)}}}let oe=Object.create(null),$e=false;if(T!==undefined){let p=`${c}/properties`;for(let u in T){if(!(u in e))continue;let A=`${i}/${it(u)}`,l=ze(e[u],T[u],n,s,r,o,A,`${p}/${it(u)}`);if(l.valid)d[u]=oe[u]=true;else if($e=r,Y.push({instanceLocation:i,keyword:"properties",keywordLocation:p,error:`Property "${u}" does not match schema.`},...l.errors),$e)break}}if(!$e&&j!==undefined){let p=`${c}/patternProperties`;for(let u in j){let A=new RegExp(u,"u"),l=j[u];for(let a in e){if(!A.test(a))continue;let w=`${i}/${it(a)}`,g=ze(e[a],l,n,s,r,o,w,`${p}/${it(u)}`);if(g.valid)d[a]=oe[a]=true;else $e=r,Y.push({instanceLocation:i,keyword:"patternProperties",keywordLocation:p,error:`Property "${a}" matches pattern "${u}" but does not match associated schema.`},...g.errors)}}}if(!$e&&I!==undefined){let p=`${c}/additionalProperties`;for(let u in e){if(oe[u])continue;let A=`${i}/${it(u)}`,l=ze(e[u],I,n,s,r,o,A,p);if(l.valid)d[u]=true;else $e=r,Y.push({instanceLocation:i,keyword:"additionalProperties",keywordLocation:p,error:`Property "${u}" does not match additional properties schema.`},...l.errors)}}else if(!$e&&q!==undefined){let p=`${c}/unevaluatedProperties`;for(let u in e)if(!d[u]){let A=`${i}/${it(u)}`,l=ze(e[u],q,n,s,r,o,A,p);if(l.valid)d[u]=true;else Y.push({instanceLocation:i,keyword:"unevaluatedProperties",keywordLocation:p,error:`Property "${u}" does not match unevaluated properties schema.`},...l.errors)}}}else if(m==="array"){if(Ee!==undefined&&e.length>Ee)Y.push({instanceLocation:i,keyword:"maxItems",keywordLocation:`${c}/maxItems`,error:`Array has too many items (${e.length} > ${Ee}).`});if(ye!==undefined&&e.length<ye)Y.push({instanceLocation:i,keyword:"minItems",keywordLocation:`${c}/minItems`,error:`Array has too few items (${e.length} < ${ye}).`});let ue=e.length,oe=0,$e=false;if(J!==undefined){let p=`${c}/prefixItems`,u=Math.min(J.length,ue);for(;oe<u;oe++){let A=ze(e[oe],J[oe],n,s,r,o,`${i}/${oe}`,`${p}/${oe}`);if(d[oe]=true,!A.valid){if($e=r,Y.push({instanceLocation:i,keyword:"prefixItems",keywordLocation:p,error:"Items did not match schema."},...A.errors),$e)break}}}if(N!==undefined){let p=`${c}/items`;if(Array.isArray(N)){let u=Math.min(N.length,ue);for(;oe<u;oe++){let A=ze(e[oe],N[oe],n,s,r,o,`${i}/${oe}`,`${p}/${oe}`);if(d[oe]=true,!A.valid){if($e=r,Y.push({instanceLocation:i,keyword:"items",keywordLocation:p,error:"Items did not match schema."},...A.errors),$e)break}}}else for(;oe<ue;oe++){let u=ze(e[oe],N,n,s,r,o,`${i}/${oe}`,p);if(d[oe]=true,!u.valid){if($e=r,Y.push({instanceLocation:i,keyword:"items",keywordLocation:p,error:"Items did not match schema."},...u.errors),$e)break}}if(!$e&&V!==undefined){let u=`${c}/additionalItems`;for(;oe<ue;oe++){let A=ze(e[oe],V,n,s,r,o,`${i}/${oe}`,u);if(d[oe]=true,!A.valid)$e=r,Y.push({instanceLocation:i,keyword:"additionalItems",keywordLocation:u,error:"Items did not match additional items schema."},...A.errors)}}}if(ce!==undefined)if(ue===0&&ie===undefined)Y.push({instanceLocation:i,keyword:"contains",keywordLocation:`${c}/contains`,error:"Array is empty. It must contain at least one item matching the schema."});else if(ie!==undefined&&ue<ie)Y.push({instanceLocation:i,keyword:"minContains",keywordLocation:`${c}/minContains`,error:`Array has less items (${ue}) than minContains (${ie}).`});else{let p=`${c}/contains`,u=Y.length,A=0;for(let l=0;l<ue;l++){let a=ze(e[l],ce,n,s,r,o,`${i}/${l}`,p);if(a.valid)d[l]=true,A++;else Y.push(...a.errors)}if(A>=(ie||0))Y.length=u;if(ie===undefined&&xe===undefined&&A===0)Y.splice(u,0,{instanceLocation:i,keyword:"contains",keywordLocation:p,error:"Array does not contain item matching schema."});else if(ie!==undefined&&A<ie)Y.push({instanceLocation:i,keyword:"minContains",keywordLocation:`${c}/minContains`,error:`Array must contain at least ${ie} items matching schema. Only ${A} items were found.`});else if(xe!==undefined&&A>xe)Y.push({instanceLocation:i,keyword:"maxContains",keywordLocation:`${c}/maxContains`,error:`Array may contain at most ${xe} items matching schema. ${A} items were found.`})}if(!$e&&re!==undefined){let p=`${c}/unevaluatedItems`;for(oe;oe<ue;oe++){if(d[oe])continue;let u=ze(e[oe],re,n,s,r,o,`${i}/${oe}`,p);if(d[oe]=true,!u.valid)Y.push({instanceLocation:i,keyword:"unevaluatedItems",keywordLocation:p,error:"Items did not match unevaluated items schema."},...u.errors)}}if(ne)for(let p=0;p<ue;p++){let u=e[p],A=typeof u==="object"&&u!==null;for(let l=0;l<ue;l++){if(p===l)continue;let a=e[l];if(u===a||A&&(typeof a==="object"&&a!==null)&&tn(u,a))Y.push({instanceLocation:i,keyword:"uniqueItems",keywordLocation:`${c}/uniqueItems`,error:`Duplicate items at indexes ${p} and ${l}.`}),p=Number.MAX_SAFE_INTEGER,l=Number.MAX_SAFE_INTEGER}}}else if(m==="number"){if(n==="4"){if(le!==undefined&&(me===true&&e<=le||e<le))Y.push({instanceLocation:i,keyword:"minimum",keywordLocation:`${c}/minimum`,error:`${e} is less than ${me?"or equal to ":""} ${le}.`});if(L!==undefined&&(Ce===true&&e>=L||e>L))Y.push({instanceLocation:i,keyword:"maximum",keywordLocation:`${c}/maximum`,error:`${e} is greater than ${Ce?"or equal to ":""} ${L}.`})}else{if(le!==undefined&&e<le)Y.push({instanceLocation:i,keyword:"minimum",keywordLocation:`${c}/minimum`,error:`${e} is less than ${le}.`});if(L!==undefined&&e>L)Y.push({instanceLocation:i,keyword:"maximum",keywordLocation:`${c}/maximum`,error:`${e} is greater than ${L}.`});if(me!==undefined&&e<=me)Y.push({instanceLocation:i,keyword:"exclusiveMinimum",keywordLocation:`${c}/exclusiveMinimum`,error:`${e} is less than ${me}.`});if(Ce!==undefined&&e>=Ce)Y.push({instanceLocation:i,keyword:"exclusiveMaximum",keywordLocation:`${c}/exclusiveMaximum`,error:`${e} is greater than or equal to ${Ce}.`})}if(be!==undefined){let ue=e%be;if(Math.abs(0-ue)>=0.00000011920929&&Math.abs(be-ue)>=0.00000011920929)Y.push({instanceLocation:i,keyword:"multipleOf",keywordLocation:`${c}/multipleOf`,error:`${e} is not a multiple of ${be}.`})}}else if(m==="string"){let ue=P===undefined&&M===undefined?0:Wc(e);if(P!==undefined&&ue<P)Y.push({instanceLocation:i,keyword:"minLength",keywordLocation:`${c}/minLength`,error:`String is too short (${ue} < ${P}).`});if(M!==undefined&&ue>M)Y.push({instanceLocation:i,keyword:"maxLength",keywordLocation:`${c}/maxLength`,error:`String is too long (${ue} > ${M}).`});if(Re!==undefined&&!new RegExp(Re,"u").test(e))Y.push({instanceLocation:i,keyword:"pattern",keywordLocation:`${c}/pattern`,error:"String does not match pattern."});if(Z!==undefined&&nr[Z]&&!nr[Z](e))Y.push({instanceLocation:i,keyword:"format",keywordLocation:`${c}/format`,error:`String does not match format "${Z}".`})}return{valid:Y.length===0,errors:Y}}class ws{schema;draft;shortCircuit;lookup;constructor(e,t="2019-09",n=true){this.schema=e,this.draft=t,this.shortCircuit=n,this.lookup=_t(e)}validate(e){return ze(e,this.schema,this.draft,this.lookup,this.shortCircuit)}addSchema(e,t){if(t)e={...e,$id:t};_t(e,this.lookup)}}var Hc=/^[A-Za-z]:\//;function ir(e=""){if(!e)return e;return e.replace(/\\/g,"/").replace(Hc,(t)=>t.toUpperCase())}var zc=/^[/\\](?![/\\])|^[/\\]{2}(?!\.)|^[A-Za-z]:[/\\]/;function Uc(){return"/"}var at=function(...e){e=e.map((s)=>ir(s));let t="",n=false;for(let s=e.length-1;s>=-1&&!n;s--){let r=s>=0?e[s]:Uc();if(!r||r.length===0)continue;t=`${r}/${t}`,n=sr(r)}if(t=Gc(t,!n),n&&!sr(t))return`/${t}`;return t.length>0?t:"."};function Gc(e,t){let n="",s=0,r=-1,o=0,i=null;for(let c=0;c<=e.length;++c){if(c<e.length)i=e[c];else if(i==="/")break;else i="/";if(i==="/"){if(r===c-1||o===1);else if(o===2){if(n.length<2||s!==2||n[n.length-1]!=="."||n[n.length-2]!=="."){if(n.length>2){let d=n.lastIndexOf("/");if(d===-1)n="",s=0;else n=n.slice(0,d),s=n.length-1-n.lastIndexOf("/");r=c,o=0;continue}else if(n.length>0){n="",s=0,r=c,o=0;continue}}if(t)n+=n.length>0?"/..":"..",s=2}else{if(n.length>0)n+=`/${e.slice(r+1,c)}`;else n=e.slice(r+1,c);s=c-r-1}r=c,o=0}else if(i==="."&&o!==-1)++o;else o=-1}return n}var sr=function(e){return zc.test(e)};var Ze=function(e,t){let n=ir(e).split("/"),s="";for(let r=n.length-1;r>=0;r--){let o=n[r];if(o){s=o;break}}return t&&s.endsWith(t)?s.slice(0,-t.length):s};var Jc=ac(lc(),1);var Bf=uc();var Mn=fc();var In=Jc.default;var Vc=/(?:^|: )(?:ENOENT|ENOTDIR)\b/;function nn(e){return Vc.test(se(e))}function Ne(e){return(t)=>{if(nn(t))return e;throw t}}var sn=/^(~|\$HOME|\$CLAUDE_CONFIG_DIR)(?=\/|$)/;function Ln(e,t,n=`${t}/.claude`){const s=sn.exec(e)?.[0];if(s===undefined)return e;return`${s==="$CLAUDE_CONFIG_DIR"?n:t}${e.slice(s.length)}`}function ys(e,t){if(t===e)return"";const n=e==="/"?"/":`${e}/`;return t.startsWith(n)?t.slice(n.length):undefined}var $s=600000;var ar={ms:30000,job:"tool"};var qc=1e4;var Dn=1e4;class on extends Error{}var Nn=globalThis;function xs(e,t,n){const s=typeof n[1]==="function";const r=s?n[1]:n[0];const o=(s?n[2]:n[1])??{};if(typeof r!=="function")throw new Error(`${e}: ${t} takes a listener, or a matcher and then a listener.`);const{timeoutMs:i,onFailure:c}=o;if(i!==undefined&&(typeof i!=="number"||!Number.isInteger(i)||i<=0||i>$s))throw new Error(`${e}: ${t}'s timeoutMs is ${String(i)}. Give a whole number of milliseconds above 0 and at most ${$s}.`);if(c!==undefined&&c!=="pass"&&c!=="refuse")throw new Error(`${e}: ${t}'s onFailure is ${String(c)}. Give 'pass' or 'refuse'.`);return{matcher:s?n[0]:undefined,listener:r,options:o}}async function cr(e,t,{timeoutMs:n=qc},s,r){const o=new AbortController;const i=await e.now()+n;s.throwIfAborted();let c;let d=()=>{return};const f=new Promise((m,x)=>{c=Nn.setTimeout(()=>{o.abort();x(new on(`${t} passed its ${n/1000} s timeout`))},n);d=()=>x(s.reason);s.addEventListener("abort",d,{once:true})});try{return await Promise.race([Promise.resolve().then(()=>r({deadline:i,signal:AbortSignal.any([o.signal,s])})),f])}finally{Nn.clearTimeout(c);s.removeEventListener("abort",d)}}var Xc=1000;function rn(e,t){if(t===undefined)return e;return new Promise((n,s)=>{let r;const o=()=>void(r=Nn.setTimeout(()=>s(t.reason),Xc));if(t.aborted)o();else t.addEventListener("abort",o,{once:true});e.then(n,s).finally(()=>{Nn.clearTimeout(r);t.removeEventListener("abort",o)})})}function Bt(e,{ms:t,job:n},s,r){return new Promise((o,i)=>{const c=n===undefined?`its ${t/1000} s deadline`:`the ${t/1000} s deadline of ${n}`;const d=e.clock.after(t,()=>i(new Error(`${s} passed ${c}`)));r.then((f)=>{d.cancel();o(f)},(f)=>{d.cancel();i(f)})})}var Ie="cmod";var dr="cmod:isLoaded";async function lr(e,t,n){const s=Object.hasOwn(t,n.method)?t[n.method]:undefined;if(s===undefined)return{deny:`${e} has no method ${n.method}.`};try{return{value:await s(n.input)}}catch(r){return{deny:`${e}: ${se(r)}`}}}function ur(e,t){const n=(s)=>new Proxy({},{get:(r,o)=>typeof o==="string"&&o!=="then"?(i)=>t(`mod.dependencies.${s}.${o}`,e.cmod.call({to:s,method:o,input:i})):undefined});return new Proxy({},{get:(s,r)=>typeof r==="string"&&r!=="then"?n(r):undefined})}function Fn(e){const t=`${e.plugin.name}: $.cmod.call: `;const n=(s)=>e.cmod.call(s).catch((r)=>{const o=se(r);throw o.startsWith(t)?new Error(o.slice(t.length),{cause:r}):r});return{...e,cmod:{call:n}}}function bs(e,t){const n=e.plugin.name;const s=async(r)=>{if(r.to!==n)return e.cmod.call(r);const o=await t.dispatch("cmod.call",{...r,caller:n},async()=>({deny:`${n} has no method ${r.method}.`}));if(o.deny!==undefined)throw new Error(o.deny);return o.value};return{...e,cmod:{call:s}}}function Bn(e){return`${e} is installing. Try again when it's ready.`}function Wt(e,t){return se(t).endsWith(Bn(e))}function Zc(e){return`${e} did not answer in time, so Claude Code went on without it.`}var vs=`it ran past the ${Dn/1000} s Claude Code gives a hook`;function ks(e){const t=[Bn(""),Zc(""),`: ${vs}`];for(let n=e;n!==undefined;n=n instanceof Error?n.cause:undefined){const s=se(n);if(t.some((r)=>s.endsWith(r)))return true}return false}var Ss=["tool","tool_use_id","consent","agentId"];function Wn(e){return Object.fromEntries(Object.entries(e).filter(([t])=>!Ss.includes(t)))}function fr(e,t){let n;const s=new Map;const r=(o)=>{if(o.agent_id===undefined)n=o.agent_type};t.add("classic.SessionStart",(o,i)=>{r(o);return i(o)});t.add("classic.UserPromptSubmit",(o,i)=>{r(o);return i(o)});t.add("tool.call",async(o,i)=>{if(o.agentId===undefined)return i(o);s.set(o.tool_use_id,o.agentId);try{return await i(o)}finally{s.delete(o.tool_use_id)}});return{async agentOf(o){const i=o===undefined?undefined:s.get(o);const c=i===undefined?n:(await e.agent.list()).find((d)=>d.id===i)?.type;return{...i===undefined?{}:{agentId:i},...c===undefined?{}:{agentType:c}}}}}function td(e,t){if(e.type===qe&&t.output!==undefined&&e.message.type===Ot)return{...e,message:{...e.message,output:t.output}};if(e.type===qe&&t.text!==undefined)return{...e,message:{...e.message,text:t.text}};if(e.type===qe&&t.input!==undefined&&e.message.type===At)return{...e,message:{...e.message,input:t.input}};if(e.type===st){const{agentType:n,model:s}=t.owner??{};return{...e,task:{...e.task,...t.title===undefined?{}:{title:t.title},...n===undefined?{}:{agentType:n},...s===undefined?{}:{model:s}}}}return e}var Hn=(e,t)=>`${e}${Object.entries(Et).find(([,n])=>n===t)?.[0]??t}`;var Ht={prompt:["text","note","title","refuse"],note:["text"],skill:["text"],instructionFile:["text","refuse"],attachedFile:["text","refuse"],reply:["text"],toolCall:["input","result","refuse","note"],toolResult:["output","isError","note"],notice:["text"],taskStart:["prompt","title","owner","isAsync","refuse"],turnEnd:["refuse","note"],contextEnd:["refuse","summary"]};function As(e,t,n,s){return Os(Hn("before",e),Ht[e],["refuse","result"],t,n,s,td)}function zn(e,t,n){if(n===undefined||n===null||n===false)return;if(typeof n!=="object"||Array.isArray(n))throw new Error(`it answered ${JSON.stringify(n)}, but ${e} takes an object or nothing: ${t.map((r)=>`{ ${r} }`).join(", ")||"no answer"}.`);const s=Object.keys(n).filter((r)=>!t.includes(r));if(s.length>0)throw new Error(`it answered ${s.join(" and ")}, which ${e} does not take. It takes ${t.map((r)=>`{ ${r} }`).join(", ")||"no answer"}.`);return n}async function Os(e,t,n,s,r,o,i=(c)=>c){let c=s;let d;for(const f of r){try{const m=zn(e,t,await f(c));if(typeof m!=="object"||m===null)continue;const x=m;const O=[d?.["note"],x["note"]].filter((v)=>typeof v==="string");d={...d,...x,...O.length===0?{}:{note:O.join(`
+- ${Object.keys(n).join(`
+- `)}`, Error(c);
+    }
+    let v = `${i}/$ref`, y = F(e, x, t, n, o, u, s, v, h2);
+    if (!y.valid)
+      m.push({ instanceLocation: s, keyword: "$ref", keywordLocation: v, error: "A subschema had errors." }, ...y.errors);
+    if (t === "4" || t === "7")
+      return { valid: m.length === 0, errors: m };
+  }
+  if (Array.isArray(g)) {
+    let E = g.length, x = false;
+    for (let v = 0;v < E; v++)
+      if (_ === g[v] || g[v] === "integer" && _ === "number" && e % 1 === 0 && e === e) {
+        x = true;
+        break;
+      }
+    if (!x)
+      m.push({ instanceLocation: s, keyword: "type", keywordLocation: `${i}/type`, error: `Instance type "${_}" is invalid. Expected "${g.join('", "')}".` });
+  } else if (g === "integer") {
+    if (_ !== "number" || e % 1 || e !== e)
+      m.push({ instanceLocation: s, keyword: "type", keywordLocation: `${i}/type`, error: `Instance type "${_}" is invalid. Expected "${g}".` });
+  } else if (g !== undefined && _ !== g)
+    m.push({ instanceLocation: s, keyword: "type", keywordLocation: `${i}/type`, error: `Instance type "${_}" is invalid. Expected "${g}".` });
+  if (k !== undefined) {
+    if (_ === "object" || _ === "array") {
+      if (!_e(e, k))
+        m.push({ instanceLocation: s, keyword: "const", keywordLocation: `${i}/const`, error: `Instance does not match ${JSON.stringify(k)}.` });
+    } else if (e !== k)
+      m.push({ instanceLocation: s, keyword: "const", keywordLocation: `${i}/const`, error: `Instance does not match ${JSON.stringify(k)}.` });
+  }
+  if (ee !== undefined) {
+    if (_ === "object" || _ === "array") {
+      if (!ee.some((E) => _e(e, E)))
+        m.push({ instanceLocation: s, keyword: "enum", keywordLocation: `${i}/enum`, error: `Instance does not match any of ${JSON.stringify(ee)}.` });
+    } else if (!ee.some((E) => e === E))
+      m.push({ instanceLocation: s, keyword: "enum", keywordLocation: `${i}/enum`, error: `Instance does not match any of ${JSON.stringify(ee)}.` });
+  }
+  if (L !== undefined) {
+    let E = `${i}/not`;
+    if (F(e, L, t, n, o, u, s, E).valid)
+      m.push({ instanceLocation: s, keyword: "not", keywordLocation: E, error: 'Instance matched "not" schema.' });
+  }
+  let Oe = [];
+  if (H !== undefined) {
+    let E = `${i}/anyOf`, x = m.length, v = false;
+    for (let y = 0;y < H.length; y++) {
+      let c = H[y], b = Object.create(h2), S = F(e, c, t, n, o, K === true ? u : null, s, `${E}/${y}`, b);
+      if (m.push(...S.errors), v = v || S.valid, S.valid)
+        Oe.push(b);
+    }
+    if (v)
+      m.length = x;
+    else
+      m.splice(x, 0, { instanceLocation: s, keyword: "anyOf", keywordLocation: E, error: "Instance does not match any subschemas." });
+  }
+  if (ne !== undefined) {
+    let E = `${i}/allOf`, x = m.length, v = true;
+    for (let y = 0;y < ne.length; y++) {
+      let c = ne[y], b = Object.create(h2), S = F(e, c, t, n, o, K === true ? u : null, s, `${E}/${y}`, b);
+      if (m.push(...S.errors), v = v && S.valid, S.valid)
+        Oe.push(b);
+    }
+    if (v)
+      m.length = x;
+    else
+      m.splice(x, 0, { instanceLocation: s, keyword: "allOf", keywordLocation: E, error: "Instance does not match every subschema." });
+  }
+  if (X !== undefined) {
+    let E = `${i}/oneOf`, x = m.length, v = X.filter((y, c) => {
+      let b = Object.create(h2), S = F(e, y, t, n, o, K === true ? u : null, s, `${E}/${c}`, b);
+      if (m.push(...S.errors), S.valid)
+        Oe.push(b);
+      return S.valid;
+    }).length;
+    if (v === 1)
+      m.length = x;
+    else
+      m.splice(x, 0, { instanceLocation: s, keyword: "oneOf", keywordLocation: E, error: `Instance does not match exactly one subschema (${v} matches).` });
+  }
+  if (_ === "object" || _ === "array")
+    Object.assign(h2, ...Oe);
+  if (T !== undefined) {
+    let E = `${i}/if`;
+    if (F(e, T, t, n, o, u, s, E, h2).valid) {
+      if (V !== undefined) {
+        let v = F(e, V, t, n, o, u, s, `${i}/then`, h2);
+        if (!v.valid)
+          m.push({ instanceLocation: s, keyword: "if", keywordLocation: E, error: 'Instance does not match "then" schema.' }, ...v.errors);
+      }
+    } else if (A !== undefined) {
+      let v = F(e, A, t, n, o, u, s, `${i}/else`, h2);
+      if (!v.valid)
+        m.push({ instanceLocation: s, keyword: "if", keywordLocation: E, error: 'Instance does not match "else" schema.' }, ...v.errors);
+    }
+  }
+  if (_ === "object") {
+    if (q !== undefined) {
+      for (let y of q)
+        if (!(y in e))
+          m.push({ instanceLocation: s, keyword: "required", keywordLocation: `${i}/required`, error: `Instance does not have required property "${y}".` });
+    }
+    let E = Object.keys(e);
+    if (l !== undefined && E.length < l)
+      m.push({ instanceLocation: s, keyword: "minProperties", keywordLocation: `${i}/minProperties`, error: `Instance does not have at least ${l} properties.` });
+    if (f !== undefined && E.length > f)
+      m.push({ instanceLocation: s, keyword: "maxProperties", keywordLocation: `${i}/maxProperties`, error: `Instance does not have at least ${f} properties.` });
+    if (Y !== undefined) {
+      let y = `${i}/propertyNames`;
+      for (let c in e) {
+        let b = `${s}/${oe(c)}`, S = F(c, Y, t, n, o, u, b, y);
+        if (!S.valid)
+          m.push({ instanceLocation: s, keyword: "propertyNames", keywordLocation: y, error: `Property name "${c}" does not match schema.` }, ...S.errors);
+      }
+    }
+    if (P !== undefined) {
+      let y = `${i}/dependantRequired`;
+      for (let c in P)
+        if (c in e) {
+          let b = P[c];
+          for (let S of b)
+            if (!(S in e))
+              m.push({ instanceLocation: s, keyword: "dependentRequired", keywordLocation: y, error: `Instance has "${c}" but does not have "${S}".` });
+        }
+    }
+    if (J !== undefined)
+      for (let y in J) {
+        let c = `${i}/dependentSchemas`;
+        if (y in e) {
+          let b = F(e, J[y], t, n, o, u, s, `${c}/${oe(y)}`, h2);
+          if (!b.valid)
+            m.push({ instanceLocation: s, keyword: "dependentSchemas", keywordLocation: c, error: `Instance has "${y}" but does not match dependant schema.` }, ...b.errors);
+        }
+      }
+    if (te !== undefined) {
+      let y = `${i}/dependencies`;
+      for (let c in te)
+        if (c in e) {
+          let b = te[c];
+          if (Array.isArray(b)) {
+            for (let S of b)
+              if (!(S in e))
+                m.push({ instanceLocation: s, keyword: "dependencies", keywordLocation: y, error: `Instance has "${c}" but does not have "${S}".` });
+          } else {
+            let S = F(e, b, t, n, o, u, s, `${y}/${oe(c)}`);
+            if (!S.valid)
+              m.push({ instanceLocation: s, keyword: "dependencies", keywordLocation: y, error: `Instance has "${c}" but does not match dependant schema.` }, ...S.errors);
+          }
+        }
+    }
+    let x = Object.create(null), v = false;
+    if (a !== undefined) {
+      let y = `${i}/properties`;
+      for (let c in a) {
+        if (!(c in e))
+          continue;
+        let b = `${s}/${oe(c)}`, S = F(e[c], a[c], t, n, o, u, b, `${y}/${oe(c)}`);
+        if (S.valid)
+          h2[c] = x[c] = true;
+        else if (v = o, m.push({ instanceLocation: s, keyword: "properties", keywordLocation: y, error: `Property "${c}" does not match schema.` }, ...S.errors), v)
+          break;
+      }
+    }
+    if (!v && Q !== undefined) {
+      let y = `${i}/patternProperties`;
+      for (let c in Q) {
+        let b = new RegExp(c, "u"), S = Q[c];
+        for (let se in e) {
+          if (!b.test(se))
+            continue;
+          let Qe = `${s}/${oe(se)}`, Ze = F(e[se], S, t, n, o, u, Qe, `${y}/${oe(c)}`);
+          if (Ze.valid)
+            h2[se] = x[se] = true;
+          else
+            v = o, m.push({ instanceLocation: s, keyword: "patternProperties", keywordLocation: y, error: `Property "${se}" matches pattern "${c}" but does not match associated schema.` }, ...Ze.errors);
+        }
+      }
+    }
+    if (!v && C !== undefined) {
+      let y = `${i}/additionalProperties`;
+      for (let c in e) {
+        if (x[c])
+          continue;
+        let b = `${s}/${oe(c)}`, S = F(e[c], C, t, n, o, u, b, y);
+        if (S.valid)
+          h2[c] = true;
+        else
+          v = o, m.push({ instanceLocation: s, keyword: "additionalProperties", keywordLocation: y, error: `Property "${c}" does not match additional properties schema.` }, ...S.errors);
+      }
+    } else if (!v && B !== undefined) {
+      let y = `${i}/unevaluatedProperties`;
+      for (let c in e)
+        if (!h2[c]) {
+          let b = `${s}/${oe(c)}`, S = F(e[c], B, t, n, o, u, b, y);
+          if (S.valid)
+            h2[c] = true;
+          else
+            m.push({ instanceLocation: s, keyword: "unevaluatedProperties", keywordLocation: y, error: `Property "${c}" does not match unevaluated properties schema.` }, ...S.errors);
+        }
+    }
+  } else if (_ === "array") {
+    if (p !== undefined && e.length > p)
+      m.push({ instanceLocation: s, keyword: "maxItems", keywordLocation: `${i}/maxItems`, error: `Array has too many items (${e.length} > ${p}).` });
+    if (Re !== undefined && e.length < Re)
+      m.push({ instanceLocation: s, keyword: "minItems", keywordLocation: `${i}/minItems`, error: `Array has too few items (${e.length} < ${Re}).` });
+    let E = e.length, x = 0, v = false;
+    if (W !== undefined) {
+      let y = `${i}/prefixItems`, c = Math.min(W.length, E);
+      for (;x < c; x++) {
+        let b = F(e[x], W[x], t, n, o, u, `${s}/${x}`, `${y}/${x}`);
+        if (h2[x] = true, !b.valid) {
+          if (v = o, m.push({ instanceLocation: s, keyword: "prefixItems", keywordLocation: y, error: "Items did not match schema." }, ...b.errors), v)
+            break;
+        }
+      }
+    }
+    if (ue !== undefined) {
+      let y = `${i}/items`;
+      if (Array.isArray(ue)) {
+        let c = Math.min(ue.length, E);
+        for (;x < c; x++) {
+          let b = F(e[x], ue[x], t, n, o, u, `${s}/${x}`, `${y}/${x}`);
+          if (h2[x] = true, !b.valid) {
+            if (v = o, m.push({ instanceLocation: s, keyword: "items", keywordLocation: y, error: "Items did not match schema." }, ...b.errors), v)
+              break;
+          }
+        }
+      } else
+        for (;x < E; x++) {
+          let c = F(e[x], ue, t, n, o, u, `${s}/${x}`, y);
+          if (h2[x] = true, !c.valid) {
+            if (v = o, m.push({ instanceLocation: s, keyword: "items", keywordLocation: y, error: "Items did not match schema." }, ...c.errors), v)
+              break;
+          }
+        }
+      if (!v && $e !== undefined) {
+        let c = `${i}/additionalItems`;
+        for (;x < E; x++) {
+          let b = F(e[x], $e, t, n, o, u, `${s}/${x}`, c);
+          if (h2[x] = true, !b.valid)
+            v = o, m.push({ instanceLocation: s, keyword: "additionalItems", keywordLocation: c, error: "Items did not match additional items schema." }, ...b.errors);
+        }
+      }
+    }
+    if (ae !== undefined)
+      if (E === 0 && R === undefined)
+        m.push({ instanceLocation: s, keyword: "contains", keywordLocation: `${i}/contains`, error: "Array is empty. It must contain at least one item matching the schema." });
+      else if (R !== undefined && E < R)
+        m.push({ instanceLocation: s, keyword: "minContains", keywordLocation: `${i}/minContains`, error: `Array has less items (${E}) than minContains (${R}).` });
+      else {
+        let y = `${i}/contains`, c = m.length, b = 0;
+        for (let S = 0;S < E; S++) {
+          let se = F(e[S], ae, t, n, o, u, `${s}/${S}`, y);
+          if (se.valid)
+            h2[S] = true, b++;
+          else
+            m.push(...se.errors);
+        }
+        if (b >= (R || 0))
+          m.length = c;
+        if (R === undefined && de === undefined && b === 0)
+          m.splice(c, 0, { instanceLocation: s, keyword: "contains", keywordLocation: y, error: "Array does not contain item matching schema." });
+        else if (R !== undefined && b < R)
+          m.push({ instanceLocation: s, keyword: "minContains", keywordLocation: `${i}/minContains`, error: `Array must contain at least ${R} items matching schema. Only ${b} items were found.` });
+        else if (de !== undefined && b > de)
+          m.push({ instanceLocation: s, keyword: "maxContains", keywordLocation: `${i}/maxContains`, error: `Array may contain at most ${de} items matching schema. ${b} items were found.` });
+      }
+    if (!v && fe !== undefined) {
+      let y = `${i}/unevaluatedItems`;
+      for (x;x < E; x++) {
+        if (h2[x])
+          continue;
+        let c = F(e[x], fe, t, n, o, u, `${s}/${x}`, y);
+        if (h2[x] = true, !c.valid)
+          m.push({ instanceLocation: s, keyword: "unevaluatedItems", keywordLocation: y, error: "Items did not match unevaluated items schema." }, ...c.errors);
+      }
+    }
+    if (j)
+      for (let y = 0;y < E; y++) {
+        let c = e[y], b = typeof c === "object" && c !== null;
+        for (let S = 0;S < E; S++) {
+          if (y === S)
+            continue;
+          let se = e[S];
+          if (c === se || b && (typeof se === "object" && se !== null) && _e(c, se))
+            m.push({ instanceLocation: s, keyword: "uniqueItems", keywordLocation: `${i}/uniqueItems`, error: `Duplicate items at indexes ${y} and ${S}.` }), y = Number.MAX_SAFE_INTEGER, S = Number.MAX_SAFE_INTEGER;
+        }
+      }
+  } else if (_ === "number") {
+    if (t === "4") {
+      if (d !== undefined && (D === true && e <= d || e < d))
+        m.push({ instanceLocation: s, keyword: "minimum", keywordLocation: `${i}/minimum`, error: `${e} is less than ${D ? "or equal to " : ""} ${d}.` });
+      if (O !== undefined && (U === true && e >= O || e > O))
+        m.push({ instanceLocation: s, keyword: "maximum", keywordLocation: `${i}/maximum`, error: `${e} is greater than ${U ? "or equal to " : ""} ${O}.` });
+    } else {
+      if (d !== undefined && e < d)
+        m.push({ instanceLocation: s, keyword: "minimum", keywordLocation: `${i}/minimum`, error: `${e} is less than ${d}.` });
+      if (O !== undefined && e > O)
+        m.push({ instanceLocation: s, keyword: "maximum", keywordLocation: `${i}/maximum`, error: `${e} is greater than ${O}.` });
+      if (D !== undefined && e <= D)
+        m.push({ instanceLocation: s, keyword: "exclusiveMinimum", keywordLocation: `${i}/exclusiveMinimum`, error: `${e} is less than ${D}.` });
+      if (U !== undefined && e >= U)
+        m.push({ instanceLocation: s, keyword: "exclusiveMaximum", keywordLocation: `${i}/exclusiveMaximum`, error: `${e} is greater than or equal to ${U}.` });
+    }
+    if (z !== undefined) {
+      let E = e % z;
+      if (Math.abs(0 - E) >= 0.00000011920929 && Math.abs(z - E) >= 0.00000011920929)
+        m.push({ instanceLocation: s, keyword: "multipleOf", keywordLocation: `${i}/multipleOf`, error: `${e} is not a multiple of ${z}.` });
+    }
+  } else if (_ === "string") {
+    let E = re === undefined && ie === undefined ? 0 : tt(e);
+    if (re !== undefined && E < re)
+      m.push({ instanceLocation: s, keyword: "minLength", keywordLocation: `${i}/minLength`, error: `String is too short (${E} < ${re}).` });
+    if (ie !== undefined && E > ie)
+      m.push({ instanceLocation: s, keyword: "maxLength", keywordLocation: `${i}/maxLength`, error: `String is too long (${E} > ${ie}).` });
+    if (pe !== undefined && !new RegExp(pe, "u").test(e))
+      m.push({ instanceLocation: s, keyword: "pattern", keywordLocation: `${i}/pattern`, error: "String does not match pattern." });
+    if (I !== undefined && Me[I] && !Me[I](e))
+      m.push({ instanceLocation: s, keyword: "format", keywordLocation: `${i}/format`, error: `String does not match format "${I}".` });
+  }
+  return { valid: m.length === 0, errors: m };
+}
 
-`)}};if(n.some((v)=>x[v]!==undefined))return d;c=i(c,m)}catch(m){o(m)}}return d}function pr(e){const t=e.trim();return t===""?undefined:t.slice(t.lastIndexOf(`
-`)+1).trim()}function Un(e,t){const n=pr(e)??"";const s=`cmod ${t}: `;return n.startsWith(s)?n.slice(s.length):n}async function Tt(e,t){let n="";let s="";let r=await e.next();while(r.done!==true){if(r.value.stream==="stderr"){s=pr(r.value.text)??s}else{const o=`${n}${r.value.text}`.split(`
-`);n=o.pop()??"";for(const i of o)t(i)}r=await e.next()}if(n!=="")t(n);return{code:r.value.code,lastError:s}}function Gn(e,t,n,s={}){return e.process.spawn({argv:["cmod",...t],env:{...s,CLAUDE_CODE_SESSION_ID:n}})}async function Cs(e,t,n){const s=await e.clock.now();const r=await e.fs.list(t).catch(Ne([]));const o=await Promise.all(r.map(async({name:i})=>(await e.fs.stat(`${t}/${i}`).catch(Ne(undefined)))?.mtimeMs??0));return o.some((i)=>s-i<n)}async function zt(e){const t=kt({HOME:await e.env.home(),XDG_DATA_HOME:await e.env.dataHome()});return To({list:async(n)=>(await e.fs.list(n).catch(Ne([]))).map((s)=>s.name),exists:async(n)=>await e.fs.stat(n).catch(Ne(undefined))!==undefined},t)}async function Es(e,t,n){const s=[];const{code:r,lastError:o}=await Tt(Gn(e,t,n),(i)=>void s.push(i));if(r!==0)throw new Error(Un(o,t[0])||`cmod ${t.slice(0,2).join(" ")} ${Xe(r,"")}.`);return s.join(`
-`)}function nd(e,t){let n=()=>{return};let s=()=>{return};const r=new Promise((i,c)=>{n=i;s=c});r.catch(()=>{return});const o=async function*(){try{await e;const i=yield*t();n(i);return i}finally{s(new Error("cmod: the stream closed before the program ended."))}}();return Object.assign(o,{result:r})}function mr(e){let t;let n=new Set;let s;const r=(i)=>{const[c,...d]=i;return t!==undefined&&c!==undefined&&(c==="cmod"||n.has(c))?[`${t}/${c}`,...d]:i};const o=(i)=>i[0]==="cmod"?s:undefined;return{claude:{...e,process:{run:(i,c)=>{const d=o(i);return d===undefined?e.process.run(r(i),c):d.then(()=>e.process.run(r(i),c))},spawn:(i)=>{const c=o(i.argv);const d=()=>e.process.spawn({...i,argv:r(i.argv)});return c===undefined?d():nd(c,d)}}},waitFor(i){const c=i.then(()=>{if(s===c)s=undefined});c.catch(()=>{return});s=c},async refresh(){const[i,c]=await Promise.all([e.env.home(),e.env.dataHome()]);const d=`${kt({HOME:i,XDG_DATA_HOME:c})}/programs`;n=new Set((await e.fs.list(d).catch(Ne([]))).map((f)=>f.name));t=d}}}var hr=/\u0001(\d+)\u0001/g;var gr=/[0-9]+(?=[<>])/y;var Is=/^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/;var Ls=/[$`]/;var sd=/^\$HOME(?=\/|$)/;var od=/^-[A-Za-z0-9]{2,}$/;var rd=";&|()<>";var id=new Set([">",">>",">|","&>","&>>",">&","<","<>","<&","<<<"]);var ad=new Set([">",">>",">|","&>","&>>","<>"]);var cd=new Set([";","&","&&","||","|","|&"]);var dd=new Set([";;",";&",";;&"]);var vr=new Set(["if","then","else","elif","fi","do","done","while","until","esac","{","}","!"]);var ld=new Set(["sh","bash","zsh"]);var ud=new Set(["-exec","-execdir","-ok","-okdir"]);var fd=new Set(["-C","-c","--git-dir","--work-tree","--namespace","--config-env","--super-prefix","--attr-source"]);var pd=new Set(["find","java","javac","go","gcc","g++","clang","clang++","swift","swiftc","xcodebuild","xcrun","ffmpeg","ffprobe","openssl","plutil","defaults","security","codesign"]);var _s={valued:"efmABCdD",longValued:["--regexp","--file","--max-count","--after-context","--before-context","--context","--directories","--devices","--binary-files","--label","--include","--exclude","--exclude-dir","--exclude-from"],scriptOptions:["-e","-f","--regexp","--file"]};var js={valued:"fFvi",longValued:["--file","--field-separator","--assign","--include","--source"],scriptOptions:["-f","--file","--source"],takesAssignments:true,inPlaceOptions:["-i","--include"]};var Ms={valued:"efl",optional:"iI",longValued:["--expression","--file","--line-length"],scriptOptions:["-e","-f","--expression","--file"],inPlaceOptions:["-i","-I","--in-place"]};var wr={valued:"eEIMmF",optional:"ixdDC",scriptOptions:["-e","-E"],inPlaceOptions:["-i"]};var md=new Map([["tee",{}],["rm",{}],["touch",{valued:"drt",longValued:["--date","--reference","--time"]}],["truncate",{valued:"sr",longValued:["--size","--reference"]}]]);var Ps={valued:"tS",longValued:["--target-directory","--suffix"],targetOptions:["-t","--target-directory"]};var hd=new Map([["cp",{...Ps,sources:"reads"}],["mv",{...Ps,sources:"writes"}],["ln",{...Ps,sources:undefined,linksHere:true}],["rsync",{valued:"efBTM",longValued:["--rsh","--rsync-path","--filter","--exclude","--include","--exclude-from","--include-from","--files-from","--temp-dir","--compare-dest","--copy-dest","--link-dest","--backup-dir","--suffix","--chmod","--chown","--usermap","--groupmap","--timeout","--contimeout","--bwlimit","--log-file","--log-file-format","--out-format","--password-file","--port","--sockopts","--max-size","--min-size","--max-delete","--partial-dir","--block-size","--modify-window","--iconv","--checksum-choice","--compress-choice","--compress-level","--remote-option","--info","--debug","--address","--write-batch","--only-write-batch","--read-batch","--protocol","--skip-compress"],sources:"reads",skipsRemote:true}]]);var gd=new Map([["curl",{valued:"AbcCdDeEFHKmoPQrTtuUwxXyYz",longValued:["--url","--data","--data-raw","--data-binary","--data-urlencode","--data-ascii","--json","--form","--form-string","--header","--proxy-header","--user","--user-agent","--referer","--output","--output-dir","--cookie","--cookie-jar","--request","--proxy","--proxy-user","--preproxy","--noproxy","--max-time","--connect-timeout","--retry","--retry-delay","--retry-max-time","--range","--continue-at","--upload-file","--write-out","--cert","--cert-type","--key","--key-type","--cacert","--capath","--ciphers","--config","--dump-header","--interface","--limit-rate","--max-filesize","--max-redirs","--resolve","--connect-to","--oauth2-bearer","--aws-sigv4","--unix-socket","--abstract-unix-socket","--variable","--url-query","--trace","--trace-ascii","--stderr","--keepalive-time","--local-port","--dns-servers","--doh-url","--quote","--telnet-option","--time-cond","--speed-limit","--speed-time","--etag-save","--etag-compare","--hsts","--alt-svc","--mail-from","--mail-rcpt","--mail-auth","--pass","--proto","--proto-redir","--pubkey","--socks4","--socks4a","--socks5","--socks5-hostname"]}],["wget",{valued:"aoeiBtOTwQPlARDIXU",longValued:["--output-file","--append-output","--execute","--input-file","--base","--tries","--output-document","--timeout","--dns-timeout","--connect-timeout","--read-timeout","--wait","--waitretry","--quota","--limit-rate","--directory-prefix","--level","--accept","--reject","--domains","--exclude-domains","--include-directories","--exclude-directories","--user-agent","--header","--user","--password","--http-user","--http-password","--post-data","--post-file","--body-data","--body-file","--method","--referer","--load-cookies","--save-cookies","--certificate","--private-key","--ca-certificate","--ca-directory","--bind-address","--cut-dirs","--default-page","--restrict-file-names","--local-encoding","--remote-encoding"]}]]);var wd={valued:"cgGsw",longValued:["--command","--session-command","--group","--supp-group","--shell","--whitelist-environment"]};var yd=["-c","--command","--session-command"];var kr=new Map([["cat",{}],["head",{valued:"nc",longValued:["--lines","--bytes"]}],["tail",{valued:"ncbs",longValued:["--lines","--bytes","--pid","--sleep-interval","--max-unchanged-stats"]}],["less",{valued:"bhjkoOpPtTxyz"}],["grep",_s],["egrep",_s],["fgrep",_s],["rg",{valued:"efgtTmABCjMrEd",longValued:["--regexp","--file","--glob","--iglob","--type","--type-not","--type-add","--max-count","--after-context","--before-context","--context","--threads","--max-columns","--replace","--encoding","--max-depth","--max-filesize","--sort","--sortr","--pre","--pre-glob","--engine","--ignore-file","--path-separator","--context-separator","--field-match-separator","--field-context-separator"],scriptOptions:["-e","-f","--regexp","--file"]}],["awk",js],["gawk",js],["sed",Ms],["gsed",Ms]]);var Ns=new Map([["sudo",{valued:"CDghpRrTtUu",longValued:["--close-from","--chdir","--group","--host","--prompt","--chroot","--role","--type","--command-timeout","--other-user","--user"],stops:["-e","--edit","-l","--list","-v","--validate","-V","--version","-K","--remove-timestamp"],folderOptions:["-D","--chdir"],takesAssignments:true}],["env",{valued:"aCPSu",longValued:["--argv0","--chdir","--split-string","--unset"],folderOptions:["-C","--chdir"],codeOptions:["-S","--split-string"],takesAssignments:true}],["doas",{valued:"aCu",stops:["-C","-L"]}],["timeout",{valued:"ks",longValued:["--kill-after","--signal"],leadingOperands:1}],["flock",{valued:"wEc",longValued:["--timeout","--wait","--conflict-exit-code","--command"],codeOptions:["-c","--command"],leadingOperands:1}],["stdbuf",{valued:"ioe",longValued:["--input","--output","--error"]}],["watch",{valued:"nq",optional:"d",longValued:["--interval","--equexit"],shellUnless:["-x","--exec"]}],["nohup",{}],["nice",{valued:"n",longValued:["--adjustment"]}],["time",{valued:"fo",longValued:["--format","--output"]}],["exec",{valued:"a"}],["command",{stops:["-v","-V"]}],["xargs",{valued:"aEdILnPs",optional:"eil",longValued:["--arg-file","--delimiter","--max-args","--max-chars","--max-procs","--process-slot-var"]}]]);var $d=new Map([["python",["-c"]],["python2",["-c"]],["python3",["-c"]],["node",["-e","--eval","-p","--print"]],["bun",["-e","--eval","-p","--print"]],["deno",["eval"]],["ruby",["-e"]],["perl",["-e","-E"]],["php",["-r"]],["lua",["-e"]],["osascript",["-e"]]]);function Ds(e){const t={commands:[],writes:[],reads:[],fetches:[],isFullyParsed:true};Rt(e,"",t);return t}function Rt(e,t,n){if(e.includes("\x01")){n.isFullyParsed=false;return}try{const{text:s,markers:r}=Fs(e,0,false);kd(Mn(s,(o)=>o===""?undefined:`$${o}`),r,t,n)}catch(s){if(!(s instanceof SyntaxError)&&!(s instanceof Error&&s.message.startsWith("Bad substitution: ")))throw s;n.isFullyParsed=false}}function Fs(e,t,n){const s=[];const r=[];const o=(x)=>`\x01${s.push(x)-1}\x01`;let i="";let c=0;let d=0;let f=t;let m=true;while(f<e.length){const x=e.charAt(f);const O=e.charAt(f+1);if(x===`
-`){i+=" ; ";f=vd(e,f+1,r.splice(0));m=true;continue}if(x===" "||x==="\t"){i+=x;f+=1;m=true;continue}if(x==="#"){if(m)f=Ar(e,f);else{i+="\\#";f+=1}continue}if(x==="\\"){if(O==="")throw new SyntaxError("The line ends with a backslash.");if(O!==`
-`){i+=x+O;m=false}f+=2;continue}if(x==="'"||x==="$"&&O==="'"){const y=Hs(e,f+(x==="$"?2:1),"'",x==="$");i+=e.slice(f,y+1);f=y+1;m=false;continue}if(x==='"'){const y=xd(e,f,o);i+=y.text;f=y.end;m=false;continue}const v=Bs(e,f);if(v!==undefined){i+=o(v);f=v.end;m=false;continue}if((x==="<"||x===">")&&O==="("){const y=Fs(e,f+2,true).end;i+=o({raw:e.slice(f,y+1),code:[e.slice(f+2,y)]});f=y+1;m=false;continue}if(x==="("&&O==="("&&m){const y=Sr(e,f+2);if(y!==undefined){if(Ws(e.slice(f+2,y-2)).length>0)throw new SyntaxError("An arithmetic command runs a substitution.");f=y;continue}}if(e.startsWith("<<<",f)){i+="<<<";f+=3;m=true;continue}if(x==="<"&&O==="<"){const y=bd(e,f);r.push(y);i+=` <<< ${o(y.marker)} `;f=y.end;m=true;continue}if(m){gr.lastIndex=f;const y=gr.exec(e);if(y!==null){f+=y[0].length;continue}if(yr(e,f,"case"))d+=1;if(yr(e,f,"esac")&&d>0)d-=1}if(x==="(")c+=1;if(x===")"){if(c>0)c-=1;else if(d===0){if(!n)throw new SyntaxError("The line closes a parenthesis it never opened.");if(r.length>0)throw new SyntaxError("A heredoc inside a substitution has no body.");return{text:i,markers:s,end:f}}}i+=x;f+=1;m=rd.includes(x)}if(n)throw new SyntaxError("A substitution is never closed.");if(c>0)throw new SyntaxError("A parenthesis is never closed.");if(r.length>0)throw new SyntaxError("A heredoc has no body.");return{text:i,markers:s,end:f}}function xd(e,t,n){let s='"';let r=t+1;while(r<e.length){const o=e.charAt(r);if(o==='"')return{text:`${s}"`,end:r+1};if(o==="\\"){if(e.charAt(r+1)!==`
-`)s+=e.slice(r,r+2);r+=2;continue}const i=Bs(e,r);if(i!==undefined){s+=n(i);r=i.end;continue}s+=o;r+=1}throw new SyntaxError("A double quote is never closed.")}function Bs(e,t){if(e.startsWith("$((",t)){const n=Sr(e,t+3);if(n!==undefined)return{raw:e.slice(t,n),code:Ws(e.slice(t+3,n-2)),end:n}}if(e.startsWith("$(",t)){const n=Fs(e,t+2,true).end;return{raw:e.slice(t,n+1),code:[e.slice(t+2,n)],end:n+1}}if(e.charAt(t)==="`"){const n=Hs(e,t+1,"`",true);return{raw:e.slice(t,n+1),code:[e.slice(t+1,n).replace(/\\([\\`$])/g,"$1")],end:n+1}}return}function Ws(e){const t=[];let n=0;while(n<e.length){if(e.charAt(n)==="\\"){n+=2;continue}const s=Bs(e,n);if(s===undefined)n+=1;else{t.push(...s.code);n=s.end}}return t}function Sr(e,t){let n=0;for(let s=t;s<e.length;s+=1){const r=e.charAt(s);if(r==="(")n+=1;if(r!==")")continue;if(n>0)n-=1;else return e.charAt(s+1)===")"?s+2:undefined}throw new SyntaxError("An arithmetic expansion is never closed.")}function Hs(e,t,n,s){for(let r=t;r<e.length;r+=1){const o=e.charAt(r);if(s&&o==="\\")r+=1;else if(o===n)return r}throw new SyntaxError(`A ${n} quote is never closed.`)}function Ar(e,t){const n=e.indexOf(`
-`,t);return n<0?e.length:n}function yr(e,t,n){return e.startsWith(n,t)&&/^$|[\s;&|()<>]/.test(e.charAt(t+n.length))}function bd(e,t){let n=t+2;const s=e.charAt(n)==="-";if(s)n+=1;while(e.charAt(n)===" "||e.charAt(n)==="\t")n+=1;let r="";let o=false;while(n<e.length&&!/[\s;&|()<>]/.test(e.charAt(n))){const i=e.charAt(n);if(i==="'"||i==='"'){const c=Hs(e,n+1,i,i==='"');r+=e.slice(n+1,c);o=true;n=c+1}else if(i==="\\"){r+=e.charAt(n+1);o=true;n+=2}else{r+=i;n+=1}}if(r==="")throw new SyntaxError("A heredoc has no delimiter.");return{delimiter:r,stripsTabs:s,isQuoted:o,marker:{raw:"",code:[]},end:n}}function vd(e,t,n){let s=t;for(const r of n){const o=[];for(;;){if(s>=e.length)throw new SyntaxError(`The heredoc ${r.delimiter} never ends.`);const i=Ar(e,s);const c=r.stripsTabs?e.slice(s,i).replace(/^\t+/,""):e.slice(s,i);s=i+1;if(c===r.delimiter)break;o.push(c)}r.marker.raw=o.join(`
-`);r.marker.code=r.isQuoted?[]:Ws(r.marker.raw)}return s}function kd(e,t,n,s){let r=n;const o=[];let i=Ts(undefined);let c;for(let d=0;d<e.length;d+=1){const f=e[d];if(typeof f!=="string"&&"comment"in f)throw new SyntaxError("The line holds a comment the scanner left.");if(Rs(f)){const y=$r(f,t,r,s);if(c==="header"){if(y.text==="in")c="pattern"}else if(c==="pattern"){if(y.text==="esac")c=undefined}else if(y.text==="case"&&i.words.every((R)=>vr.has(R.text))){c="header"}else i.words.push(y);continue}const m=f.op;if(id.has(m)){const y=e[d+1];if(y===undefined||!Rs(y))throw new SyntaxError(`The redirection ${m} has no target.`);d+=1;i.redirects.push({operator:m,target:$r(y,t,r,s)});continue}if(c!==undefined){if(c==="pattern"&&m===")")c=undefined;continue}const x=e[d+1];if(m==="("&&i.words.length===1&&x!==undefined&&!Rs(x)&&"op"in x&&x.op===")"){i=Ts(undefined);d+=1;continue}const O=s.commands.length;r=xr(i,m,r,s);const v=s.commands.length>O?s.commands.length-1:undefined;i=Ts(m==="|"||m==="|&"?{writer:v}:undefined);if(m==="(")o.push(r);else if(m===")"){const y=o.pop();if(y===undefined)throw new SyntaxError("The line closes a subshell it never opened.");r=y}else if(dd.has(m))c="pattern";else if(!cd.has(m))throw new SyntaxError(`The parser does not know the operator ${m}.`)}xr(i,";",r,s)}function Ts(e){return{words:[],redirects:[],pipe:e}}function Rs(e){return typeof e==="string"||"op"in e&&e.op==="glob"}function $r(e,t,n,s){const r=typeof e==="string"?e:e.pattern;for(const o of r.matchAll(hr)){for(const i of t[Number(o[1])].code)Rt(i,n,s)}return{text:r.replace(hr,(o,i)=>t[Number(i)].raw),isGlob:typeof e!=="string",isDynamic:/[$\u0001]/.test(Ze(r))}}function xr(e,t,n,s){for(const y of e.redirects)Ad(y,n,s);const r=Sd(e.words);const[o,...i]=r;if(o===undefined||o.text==="for"||o.text==="select")return n;const c=e.redirects.findLast((y)=>y.operator==="<<<");const d=c!==undefined?{type:"text",text:c.target.text}:e.pipe!==undefined?{type:"pipe"}:undefined;const f=s.commands.length;const m=Kn(o,i,n,d,s);const x=s.commands[f];const O=e.pipe?.writer;if(x!==undefined&&O!==undefined&&c===undefined)s.commands[f]={...x,input:O};const v=e.pipe!==undefined||t==="|"||t==="|&"||t==="&";return m===undefined||v?n:m}function Sd(e){let t=0;for(;;){const n=e[t]?.text;if(n===undefined)break;if(n==="function")t+=2;else if(vr.has(n)||Is.test(n))t+=1;else break}return e.slice(t)}function Ad({operator:e,target:t},n,s){if(e==="<"||e==="<>")ut(s,"reads",t,n);if(ad.has(e)||e===">&"&&!/^([0-9]+|-)$/.test(t.text))ut(s,"writes",t,n)}function Kn(e,t,n,s,r){if(e.isDynamic||e.isGlob)r.isFullyParsed=false;const o=Ze(e.text);if(o==="git")Od(e,t,n,r);else if(o==="find")Cd(e,t,n,r);else if(Ns.has(o))Td(e,o,t,n,s,r);else{const i=Us(o,t);const c=r.commands.push({argv:[e.text,...i],folder:n})-1;Rd(o,t,i,n,s,r);zs(c,r);if(o==="cd")return Fd(t,n)}return}function Od(e,t,n,s){let r=0;let o=n;for(let i=t[0]?.text;i?.startsWith("-")===true;i=t[r]?.text){if(i==="-C")o=Vn(o,t[r+1]?.text??"");if(i==="-c"&&/^alias\.[^=]*=\s*!/i.test(t[r+1]?.text??""))s.isFullyParsed=false;r+=fd.has(i)?2:1}s.commands.push({argv:[e.text,...Us("git",t.slice(r))],folder:o})}function Cd(e,t,n,s){const r=[];const o=[];for(let d=0;d<t.length;d+=1){const f=t[d].text;if(!ud.has(f)){r.push(f);continue}const m=t.findIndex((x,O)=>O>d&&(x.text===";"||x.text==="+"));o.push(t.slice(d+1,m<0?t.length:m));d=m<0?t.length:m}const i=s.commands.push({argv:[e.text,...r],folder:n})-1;const c=Pd(t);if(r.includes("-delete"))for(const d of c)ut(s,"writes",d,n);for(const d of o)Ed(d,c,n,s);zs(i,s)}function Ed(e,t,n,s){const[r,...o]=e;if(r===undefined)return;const i=s.reads.length;const c=s.writes.length;Kn(r,o,n,undefined,s);if(!e.some((d)=>d.text.includes("{}")))return;s.reads.splice(i);s.writes.splice(c);for(const d of t){const f={commands:[],reads:s.reads,writes:s.writes,fetches:[],isFullyParsed:true};const[m,...x]=e.map((O)=>_d(O,d));Kn(m,x,n,undefined,f);if(!f.isFullyParsed)s.isFullyParsed=false}}function _d(e,t){if(!e.text.includes("{}"))return e;return{text:e.text.replaceAll("{}",t.text),isGlob:e.isGlob||t.isGlob,isDynamic:e.isDynamic||t.isDynamic}}function Pd(e){let t=0;for(let r=e[0]?.text;r==="-D"||/^-([HLP]|O\d*)$/.test(r??"");r=e[t]?.text)t+=r==="-D"?2:1;const n=e.findIndex((r,o)=>o>=t&&/^[-(!),]/.test(r.text));const s=e.slice(t,n<0?e.length:n);return s.length>0?s:[Jn(".")]}function Td(e,t,n,s,r,o){const i=Ns.get(t);if(t==="xargs"&&r?.type!=="text")o.isFullyParsed=false;const{options:c,operands:d}=lt(n,i,true);let f=n.length-d.length;if(c.some((G)=>i.stops?.includes(G.name)===true))f=n.length;f+=i.leadingOperands??0;while(i.takesAssignments===true&&Is.test(n[f]?.text??""))f+=1;const m=i.codeOptions?.includes(n[f]?.text??"")===true;const x=o.commands.push({argv:[e.text,...Us(t,n.slice(0,f))],folder:s})-1;const O=c.findLast((G)=>i.folderOptions?.includes(G.name)===true)?.value;const v=O===undefined?s:Vn(s,O.text);const y=m?n[f+1]:c.findLast((G)=>i.codeOptions?.includes(G.name)===true)?.value;const R=n.slice(m?f+2:f);const D=i.shellUnless!==undefined&&!c.some((G)=>i.shellUnless?.includes(G.name)===true);const[z,...X]=R;if(y!==undefined||D)Rt([...y===undefined?[]:[y],...R].map((G)=>G.text).join(" "),v,o);else if(z!==undefined)Kn(z,X,v,r,o);zs(x,o)}function zs(e,t){for(const n of t.commands.slice(e+1))n.runner??=e}function Rd(e,t,n,s,r,o){const i=kr.get(e);const c=md.get(e);const d=hd.get(e);const f=gd.get(e);const m=$d.get(e);if(e==="eval")o.isFullyParsed=false;else if(ld.has(e))jd(t,s,r,o);else if(e==="ssh")Md(t,r,o);else if(e==="su")Id(t,s,o);else if(e==="source"||e===".")ut(o,"reads",lt(t,{},true).operands[0],s);else if(e==="dd")for(const x of t.filter((O)=>O.text.startsWith("of=")))ut(o,"writes",{...x,text:x.text.slice(3)},s);else if(c!==undefined)for(const x of lt(t,c,false).operands)ut(o,"writes",x,s);else if(d!==undefined)Nd(d,t,s,o);else if(i!==undefined)br(i,t,s,o);else if(f!==undefined)Ld(f,t,o);else if(m!==undefined){if(e==="perl"&&lt(t,wr,false).options.some((v)=>v.name==="-i"))br(wr,t,s,o);const x=t.find((v)=>!v.text.startsWith("-")||v.text==="-");const O=r?.type==="pipe"&&(x===undefined||x.text==="-");if(n.some((v)=>m.includes(v))||r?.type==="text"||O)o.isFullyParsed=false}}function jd(e,t,n,s){const{options:r,operands:o}=lt(e,{valued:"oO",longValued:["--rcfile","--init-file"]},true);const i=o[0];if(r.some((c)=>c.name==="-c")){if(i!==undefined)Rt(i.text,t,s)}else if(i===undefined||r.some((c)=>c.name==="-s"))Or(n,t,s)}function Md(e,t,n){const{operands:s}=lt(e,{valued:"BbcDEeFIiJLlmOoPpQRSWw"},true);const r=s.slice(1);if(r.length>0)Rt(r.map((o)=>o.text).join(" "),"~",n);else if(s.length>0)Or(t,"~",n)}function Id(e,t,n){const s=lt(e,wd,false).options.findLast((r)=>yd.includes(r.name))?.value;if(s!==undefined)Rt(s.text,t,n)}function Ld(e,t,n){const{options:s,operands:r}=lt(t,e,false);const o=[...s.filter((i)=>i.name==="--url").flatMap((i)=>i.value===undefined?[]:[i.value]),...r];for(const i of o)n.fetches.push(/^[a-z][a-z0-9+.-]*:\/\//i.test(i.text)?i.text:`http://${i.text}`)}function Or(e,t,n){if(e?.type==="text")Rt(e.text,t,n);if(e?.type==="pipe")n.isFullyParsed=false}function Nd(e,t,n,s){const{options:r,operands:o}=lt(t,e,false);const i=r.findLast((x)=>e.targetOptions?.includes(x.name)===true)?.value;const c=o[0];if(e.linksHere===true&&i===undefined&&o.length===1&&c!==undefined){ut(s,"writes",{...c,text:Ze(c.text)},n);return}const d=i??o.at(-1);const f=i===undefined?o.slice(0,-1):o;if(d===undefined||f.length===0)return;const m=(x)=>e.skipsRemote!==true||!/^[^/]*:/.test(x.text);for(const x of f.filter(m)){if(e.sources!==undefined)ut(s,e.sources,x,n);if(m(d)&&!x.isGlob&&!d.isGlob)Cr(s,"writes",`${d.text.replace(/\/+$/,"")}/${Ze(x.text)}`,n)}if(m(d))ut(s,"writes",d,n)}function br(e,t,n,s){const{options:r,operands:o}=lt(t,e,false);const i=r.find((d)=>e.inPlaceOptions?.includes(d.name)===true&&(e!==js||d.value?.text==="inplace"));let c=o;if(e===Ms&&i!==undefined&&i.value===undefined){const d=c[0]?.text;const f=r.some((m)=>e.scriptOptions?.includes(m.name)===true);if(d===""||!f&&d!==undefined&&/^\.[\w.-]*$/.test(d))c=c.slice(1)}if(e.scriptOptions!==undefined&&!r.some((d)=>e.scriptOptions?.includes(d.name)===true))c=c.slice(1);if(e.takesAssignments===true)c=c.filter((d)=>!Is.test(d.text));for(const d of c)ut(s,i===undefined?"reads":"writes",d,n)}function lt(e,t,n){const s=[];const r=[];for(let o=0;o<e.length;o+=1){const i=e[o];const c=i.text;if(c==="--"){r.push(...e.slice(o+1));break}if(i.isGlob||c==="-"||!c.startsWith("-")){if(n){r.push(...e.slice(o));break}r.push(i);continue}if(c.startsWith("--")){const d=c.indexOf("=");if(d>=0)s.push({name:c.slice(0,d),value:Jn(c.slice(d+1))});else if(t.longValued?.includes(c)===true){s.push({name:c,value:e[o+1]});o+=1}else s.push({name:c,value:undefined});continue}for(let d=1;d<c.length;d+=1){const f=c.charAt(d);const m=c.slice(d+1);if(t.optional?.includes(f)===true){s.push({name:`-${f}`,value:m===""?undefined:Jn(m)});break}if(t.valued?.includes(f)===true){if(m!=="")s.push({name:`-${f}`,value:Jn(m)});else{s.push({name:`-${f}`,value:e[o+1]});o+=1}break}s.push({name:`-${f}`,value:undefined})}}return{options:s,operands:r}}function Us(e,t){const n=t.map((i)=>i.text);if(pd.has(e))return n;const s=kr.get(e)??Ns.get(e);const r=`${s?.valued??""}${s?.optional??""}`;const o=n.indexOf("--");return n.flatMap((i,c)=>o>=0&&c>o||!od.test(i)?[i]:Dd(i,r))}function Dd(e,t){const n=[];for(let s=1;s<e.length;s+=1){const r=e.charAt(s);if(t.includes(r)&&s<e.length-1)return[...n,`-${e.slice(s)}`];n.push(`-${r}`)}return n}function Fd(e,t){const n=e.find((s)=>!s.text.startsWith("-")||s.text==="-");if(n===undefined)return"~";return Vn(t,n.text==="-"?"$OLDPWD":n.text)}function ut(e,t,n,s){if(n!==undefined&&!n.isGlob)Cr(e,t,n.text,s)}function Cr(e,t,n,s){if(n===""||n.startsWith("/dev/"))return;const r=Vn(s,n);if(Ls.test(r.replace(sd,"")))e.isFullyParsed=false;e[t].push(r)}function Vn(e,t){return e===""||/^(\/|~|\$HOME(\/|$))/.test(t)?t:`${e}/${t}`}function Jn(e){return{text:e,isGlob:false,isDynamic:false}}function Er(e,t){const{fs:n}=t;const s=(i,c=t.cwd)=>at(c,Ln(i,t.home,t.configRoot));const r=(i)=>({path:s(i),contents:undefined});const o={shell:undefined,reads:[],writes:[],urls:[],subagent:undefined};if(e.tool==="Bash"){const i=Qe(e,"command");const c=Ds(i);const d=c.commands.map(({argv:f,folder:m})=>({argv:f,folder:s(m)}));o.shell={line:i,commands:d,isFullyParsed:c.isFullyParsed};o.reads=c.reads.map(r);o.writes=c.writes.map(r);o.urls=c.fetches}else if(e.tool==="PowerShell"){o.shell={line:Qe(e,"command"),commands:[],isFullyParsed:false}}else if(e.tool==="Edit"){const i=s(Qe(e,"file_path"));o.writes=[{path:i,contents:Gs(()=>Bd(e,i,n))}]}else if(e.tool==="Write"){const i=s(Qe(e,"file_path"));const c=Qe(e,"content");o.writes=[{path:i,contents:Gs(async()=>an(c,await Ks(i,n)))}]}else if(e.tool==="NotebookEdit"){const i=s(Qe(e,"notebook_path"));o.writes=[{path:i,contents:Gs(async()=>an(undefined,await Ks(i,n)))}]}else if(e.tool==="Read"){o.reads=[r(Qe(e,"file_path"))]}else if(e.tool==="Grep"){o.reads=[r(Js(e,"path")??"")]}else if(e.tool==="Glob"){const i=s(Js(e,"path")??"");o.reads=[{path:s(Qe(e,"pattern"),i),contents:undefined}]}else if(e.tool==="WebFetch"){o.urls=[Qe(e,"url")]}else if(e.tool==="Agent"){o.subagent=Js(e,"subagent_type")??"general-purpose"}return o}async function Bd(e,t,n){const s=await Ks(t,n);const r=Qe(e,"old_string");const o=Qe(e,"new_string");if(r==="")return an(s===undefined||s===""?o:undefined,s);if(s===undefined||!s.includes(r))return an(undefined,s);const i=Vs(e,"replace_all")===true?s.split(r).join(o):s.replace(r,()=>o);return an(i,s)}async function Ks(e,t){const n=await t.stat(e).catch(Ne(undefined));return n?.kind==="file"?t.read(e):undefined}function an(e,t){return{...e===undefined?{}:{content:e},...t===undefined?{}:{previousContent:t}}}function Gs(e){let t;return()=>t??=e()}function Vs(e,t){return e.input[t]}class qn extends Error{}function Qe(e,t){const n=Vs(e,t);if(typeof n!=="string")throw new qn(`The ${e.tool} call has no text field ${t}.`);return n}function Js(e,t){return Vs(e,t)===undefined?undefined:Qe(e,t)}function _r(e,t,n){const s=async(r,o)=>{const i=await Promise.resolve().then(()=>t(r,o.signal)).catch((c)=>{n({id:`hook:${e}`,message:`The ${e} listener failed`,error:c});return});if(i===undefined)return o(r);return jr(await o(r),i)};return s}function Pr(e){const t=async(n,s,r)=>{const o=await e(n,s);return o===undefined?undefined:jr(await r(n),o)};return t}var Wd=/^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;var Hd=/^Base directory for this skill: [^\n]*\n\n/;function Tr(e){return async(t,n)=>{const{name:s,root:r}=e.plugin;if(!t.skill.startsWith(`${s}:`))return n(t);const o=t.skill.slice(s.length+1);const i=`${r}/skills`;if(!await e.fs.exists(i)||!(await e.fs.list(i)).some((d)=>d.name===o))return n(t);if((await e.fs.stat(`${i}/${o}`)).kind!=="dir")return n(t);const c={HOME:await e.env.home(),CLAUDE_CONFIG_DIR:await e.env.configHome()};for(const{folder:d}of kn(c,s,await e.session.root()).toReversed()){const f=`${d}/skills/${o}/SKILL.md`;if(await e.fs.exists(f))return{text:`${Hd.exec(t.text)?.[0]??""}${(await e.fs.read(f)).replace(Wd,"")}`}}return n(t)}}async function Rr(e,t,n,s,r){try{const{home:o,configRoot:i}=await n;if(o===undefined)throw new Error("HOME is not set, so ~ in a path has no meaning.");const{shell:c,reads:d,writes:f}=Er(s,{cwd:r,home:o,...i===undefined?{}:{configRoot:i},fs:t.fs});const m=(v)=>v.map(({path:y})=>y).filter((y)=>c===undefined||!Ls.test(y));const x=(v)=>(y)=>{if(!nn(y))t.ui.warn("call:files",`${e}: the ${s.tool} call reads ${v}, which could not be checked: ${se(y)}`);return};const O=await Promise.all(m(d).map(async(v)=>(await t.fs.stat(v).catch(x(v)))?.kind==="file"?[v]:[]));return{read:O.flat(),changed:m(f)}}catch(o){if(!(o instanceof qn))t.ui.warn("call:files",`${e}: the ${s.tool} call lists no files: ${se(o)}`);return{read:[],changed:[]}}}function jr(e,t){const n={...e,...t};const s=[...e["additionalContext"]??[],...t["additionalContext"]??[]];if(s.length>0)n["additionalContext"]=s;return n}var Ut="*";var We={sessions:"cmod:sessions",search:"cmod:search",messages:"cmod:messages",turns:"cmod:turns",contexts:"cmod:contexts",tasks:"cmod:tasks",goal:"cmod:goal",updateGoal:"cmod:updateGoal",subscribe:"cmod:subscribe",watchBefore:"cmod:watchBefore",act:"cmod:act",changed:"cmod:changed",before:"cmod:before",sessionColor:"cmod:sessionColor"};async function Lr(e){const[t,n]=await Promise.all([e.session.model(),e.session.usage()]);const{tokens:s,window:r,percent:o}=n.context;const i=n.rateLimits.map(({kind:c,percentUsed:d,resetsAt:f})=>({type:c,percent:d,...f===undefined?{}:{resetsAt:f}}));return{model:t,contextWindow:{...s===undefined?{}:{tokenCount:s},size:r,...o===undefined?{}:{percent:o}},rateLimits:i,...n.cost===undefined?{}:{cost:{usd:n.cost.usd}}}}function Xs(e){if(e.type===qe)return e.message;if("turn"in e)return e.turn;if("context"in e)return e.context;if("task"in e){const{id:t,title:n,agentType:s,model:r,openedBy:o,openedAt:i,closedAt:c,isBackground:d,forkedFrom:f}=e.task;const m={id:t,title:n,...s===undefined?{}:{agentType:s},...r===undefined?{}:{model:r},...f===undefined?{}:{forkedFrom:f},startedAt:i};return{id:t,title:n,openedBy:o,openedAt:i,...c===undefined?{}:{closedAt:c},...d===true?{isBackground:d}:{},owner:m}}if("usage"in e)return e.usage;return e.goal}function Nr(e,t,n){const s=n.type===qe?e===qe||e===n.message.type:e===n.type;return s&&(t===undefined||rt(Xs(n),t))}function Dr(e){if(e.type===qe)return e.message.task;if(e.type===st||e.type===Dt)return e.task.id===""?e.task.parent:e.task.id;if(e.type===Ft||e.type===Ct)return e.turn.prompt.task;if(e.type===_n||e.type===en)return e.context.task;if(e.type===Pn)return e.goal.task;return}function zd(e){if(e.type===st||e.type===Dt)return e.task.parent;return Dr(e)}function Ud(e){if(e.type===qe)return e.message.context;if(e.type===Ft||e.type===Ct)return e.turn.context;if(e.type===_n||e.type===en)return e.context.number;if(e.type===st||e.type===Dt)return e.task.context;return}function cn(e,t,n,s){if(e.session!==undefined&&e.session!==t)return false;const r=Dr(n);if(e.isAgent===true)return(n.type===st||n.type===Dt?n.task.parent:r)===e.task;if(e.task!==undefined&&(r===undefined||!s(r,e.task)))return false;if(e.context!==undefined&&(Ud(n)!==e.context||zd(n)!==e.task))return false;if(e.turn===undefined)return true;if(n.type===qe)return n.message.turn===e.turn;return(n.type===Ft||n.type===Ct)&&n.turn.prompt.id===e.turn}function Gd(e,t){return`${e}: ${t} hears Claude Code's permission check, so hooks/register.ts must call registerPermissionCheck(addHook) after registerMod.`}function Fr({name:e,claude:t,report:n,hookOn:s,routeOn:r,permissionRoutes:o}){const i=(p,u)=>t.cmod.call({to:Ie,method:p,input:u});const c=new Map;const d=new Map;const f=new Set;const m=new Map;const x=new Map;const O=new Map;let v={id:"",title:"",project:"",cwd:"",model:"",startedAt:"",lastAt:"",isRunning:true};let y={session:""};const R=({color:p,...u})=>y.session===u.id&&y.color!==undefined?{...u,color:y.color}:u;const D=(p)=>p.session??Ut;const z=(p)=>{if(f.has(p))return;f.add(p);Promise.resolve().then(async()=>{f.delete(p);const u=(a)=>[...a.get(p)??[]].map(({event:w,matcher:g,options:C,scope:E})=>({event:w,matcher:g===undefined?undefined:Rn(g),...C.onFailure==="refuse"?{onFailure:"refuse",scope:E}:{}}));const A=[...c.get(p)??[],...d.get(p)??[]].some(({scope:a})=>a.task!==undefined||a.isGoal===true);const l=[...u(c),...A?[{event:st}]:[]];await i(We.subscribe,{session:p,subscriptions:l}).catch((a)=>n(`sessions:${p}`,`Hears nothing from ${p===Ut?"the other sessions":`session ${p}`}`,a));await i(We.watchBefore,{session:p,subscriptions:u(d)}).catch((a)=>n(`before:${p}`,`Changes nothing in ${p===Ut?"the other sessions":`session ${p}`}`,a))})};const X=(p)=>{const u=m.get(p);if(u!==undefined)return u;const A=x.get(p);if(A!==undefined)return A;const l=i(We.tasks,{session:p,all:true}).then((a)=>{const w=new Map(a.map((g)=>[g.id,g.parent]));m.set(p,w);return w}).finally(()=>x.delete(p));x.set(p,l);return l};const G=(p)=>(u,A)=>{for(let l=u,a=0;l!==undefined&&a<64;l=p?.get(l),a+=1)if(l===A)return true;return false};const H=({scope:p},u,A)=>{if(p.task===undefined||p.isAgent===true)return cn(p,u,A,G(undefined));const l=X(u);if(l instanceof Map)return cn(p,u,A,G(l));return l.then((a)=>cn(p,u,A,G(a)),(a)=>{n(`tasks:${u}`,"Could not read the tasks it listens under",a);return false})};const k=(p,u)=>{if(u.type!==st)return;m.get(p)?.set(u.task.id,u.task.parent);x.get(p)?.then((A)=>A.set(u.task.id,u.task.parent),(A)=>t.ui.warn("tasks:read",`${e}: the tasks of ${p} stay unread until the next change: ${se(A)}`))};const B=(p,u,A,l,a,w)=>{const g=D(u);const C={scope:u,event:A,method:l,...xs(e,l,a)};const E=p.get(g)??new Set;E.add(C);p.set(g,E);w(g);return{remove(){for(const[U,ee]of p){if(!ee.delete(C))continue;if(ee.size===0)p.delete(U);w(U);return}}}};const b=(p,u,A)=>p.onFailure==="refuse"&&u.includes("refuse")?{refuse:`${e}: ${se(A)}`}:undefined;const Q=(p,u,A,l,a=[])=>cr(t.clock,p,u,A,l).catch((w)=>{if(A.aborted||w instanceof on&&!p.startsWith("before"))return;n(`session:${p}`,`The ${p} listener failed`,w);return b(u,a,w)});const Z=(p,u,A)=>[...d.get(p)??[],...A?d.get(Ut)??[]:[]].filter((l)=>l.event===u);const T=async(p,u,A)=>(p.matcher===undefined||rt(Xs(A),p.matcher))&&await H(p,u,A);const j=async(p,u,A,l,a)=>{const w=Z(p,u,l).map((C)=>async(E)=>{if(!await T(C,p,E))return;const U=await V(p,E);return Q(C.method,C.options,a,async(ee)=>zn(C.method,Ht[u],await C.listener(U,ee)),Ht[u])});const g=await As(u,A,w,(C)=>n(`session:${Hn("before",u)}`,`The ${Hn("before",u)} listener failed`,C));return g?.note===undefined?g:{...g,note:ot(e,g.note)}};const I=(p,u,A)=>{const l=(a,w,g)=>(...C)=>{if(A!==undefined)throw new Error(`${e}: ${A} has ended, so its ${w} never fires. Listen on its Session.`);return B(a,p(),g,w,C,z)};return Object.fromEntries([...Object.entries(Et).map(([a,w])=>[`on${a}`,l(c,`on${a}`,w)]),...u?Yo.map((a)=>[`before${a}`,l(d,`before${a}`,Et[a])]):[]])};let q;const te=async(p)=>{if(p.type!==At&&p.type!==Ot)return p;q??=Promise.all([t.env.home(),t.env.configHome()]).then(([u,A])=>({home:u,configRoot:A}));return{...p,files:await Rr(e,t,q,{tool:p.name,input:p.input},p.cwd)}};const K=async(p,u)=>Promise.all((await i(p,u)).map(te));const he=(p,u)=>({async*[Symbol.asyncIterator](){let A=p["before"];for(;;){const l=await K(We.search,{...p,...A===undefined?{}:{before:A}});for(const w of l)if(u===undefined||rt(w,u))yield w;const a=l.at(-1);if(a===undefined||l.length<Qo)return;A={session:a.session,id:a.id}}}});const we=(p,u)=>({search:(A,l)=>he({text:A,...p},l),...I(()=>p,true,u)});const S=(p,u)=>{const A=u.prompt.task??p.task;return{...u,...we({...p,...A===undefined?{}:{task:A},turn:u.prompt.id},u.closedAt===undefined?undefined:`turn ${u.prompt.id}`),messages:()=>K(We.messages,{session:p.session,turn:u.prompt.id,...A===undefined?{}:{task:A}}),abort:async()=>{if(u.closedAt!==undefined)throw new Error(`${e}: turn ${u.prompt.id} has ended, so there is nothing to abort.`);const l=p.session??v.id;await re(l,"abort",{turn:u.prompt.id},A===undefined?undefined:{session:l,task:A})}}};const W=(p,u)=>{const A={...p.session===undefined?{}:{session:p.session},...u.task===undefined?{}:{task:u.task}};return{...u,...we({...A,context:u.number},u.closedAt===undefined?undefined:`context ${u.number}`),turns:async()=>(await i(We.turns,{...A,context:u.number})).map((l)=>S(A,l))}};const J=(p,u)=>{const A=u.isBackground===true?{session:u.id}:{session:p,task:u.id};return{id:u.id,title:u.title,openedBy:u.openedBy,openedAt:u.openedAt,...u.closedAt===undefined?{}:{closedAt:u.closedAt},...u.status===undefined?{}:{status:u.status},...u.name===undefined?{}:{name:u.name},...u.spawnedBy===undefined?{}:{spawnedBy:u.spawnedBy},...u.isBackground===true?{isBackground:true}:{},owner:ye(p,u),...we({session:p,task:u.id}),search:(l,a)=>he({text:l,...A},a),tasks:async()=>(await i(We.tasks,A)).map((l)=>J(A.session,l)),messages:()=>K(We.messages,A)}};const N=(p)=>({search:(u,A)=>he({text:u,...p()},A),...I(()=>({...p(),isGoal:true}),true),text:async()=>(await i(We.goal,p())).text,tasks:async()=>{const{session:u=v.id,task:A}=p();return(await i(We.tasks,{session:u,...A===undefined?{}:{task:A}})).map((l)=>J(u,l))},update:async({text:u})=>{if(u.trim()==="")throw new Error(`${e}: a goal needs text.`);const{session:A=v.id,task:l}=p();await i(We.updateGoal,{session:A,...l===undefined?{}:{task:l},text:u})}});const V=async(p,u)=>{const A={session:p};if(u.type===qe)return te(u.message);if("turn"in u)return S(A,u.turn);if("context"in u)return W(A,u.context);if("task"in u)return J(p,u.task);if("usage"in u)return u.usage;const{task:l}=u.goal;return N(()=>({session:p,...l===undefined?{}:{task:l}}))};const re=(p,u,A,l)=>i(We.act,{session:l?.session??p,action:u,input:A,...l===undefined?{}:{task:l.task}});const ce=async({type:p,text:u,as:A})=>{if(p===St){if(A!==undefined)throw new Error(`${e}: a Note is always from this mod, so it takes no as.`);const a=await t.session.append({message:{type:"user",content:[{type:"text",text:ot(e,u)}]}});if(a.deny!==undefined)throw new Error(`${e}: Claude Code refused the note: ${a.deny}`);return}const l=await t.prompt.submit({text:u,...A===wt?{asUser:true}:{}});if("drop"in l&&typeof l.drop==="string")throw new Error(`${e}: Claude Code dropped the prompt: ${l.drop}`)};const ie=async()=>[...await t.session.surfaces()];const xe=(p,u,A=u!==undefined)=>{const l=()=>p().id;const a=()=>u===undefined&&l()===v.id;const w=()=>u===undefined?{session:l(),isAgent:true}:{session:u.session,task:u.task,isAgent:true};const g=()=>u===undefined?{session:l()}:{session:u.session,task:u.task};const C=async(ae={})=>(await i(We.turns,{...g(),...ae})).map((ve)=>S(g(),ve));const E=async()=>(await i(We.contexts,g())).map((ae)=>W(g(),ae));const U={get id(){return p().id},get title(){return p().title},get color(){return p().color},get project(){return p().project},get agentType(){return p().agentType},get model(){return p().model},get cwd(){return p().cwd},get isRunning(){return p().isRunning},get startedAt(){return p().startedAt},get lastAt(){return p().lastAt},get forkedFrom(){return p().forkedFrom},search:(ae,ve)=>we(w()).search(ae,ve),...I(w,true),goal:N(g),context:async()=>{const ae=await E();const ve=ae.at(-1);if(ve===undefined)throw new Error(`${e}: session ${l()} has no context yet.`);return ve},contexts:E,turn:async()=>{const[ae]=await C({last:1});return ae?.closedAt===undefined?ae:undefined},turns:C,messages:(ae={})=>K(We.messages,{...g(),...ae}),usage:async()=>a()?Lr(t):re(l(),"usage",null,u),surfaces:async()=>a()?ie():re(l(),"surfaces",null,u),async send(ae){if(ae.text.trim()==="")throw new Error(`${e}: send needs text.`);if(a()&&ae.as!==Tn)return ce(ae);await re(l(),"send",ae,u)}};if(A)return U;const ee=async(ae)=>J(l(),await ae.catch((ve)=>Promise.reject(new Error(`${e}: ${se(ve)}`))));return Object.assign(U,{startTask:(ae)=>ee(ae.isBackground===true?re(l(),"startBackgroundTask",ae):a()?Zs(t,ae):re(l(),"startTask",ae)),fork:(ae)=>ee(a()?Zs(t,ae,v.id):re(l(),"fork",ae)),clone:(ae)=>ee(re(l(),"clone",ae)),callTool:async(ae)=>await te(await re(l(),"callTool",ae))})};const ye=(p,u)=>{const A=p===v.id?v:O.get(p);const l=u.isBackground===true;return xe(()=>({id:u.id,title:u.title,project:A?.project??"",...u.agentType===undefined?{}:{agentType:u.agentType},model:u.model??"",cwd:A?.cwd??"",isRunning:u.closedAt===undefined&&(l||(A?.isRunning??true)),startedAt:u.openedAt,lastAt:u.closedAt??u.openedAt,...u.forkedFrom===undefined?{}:{forkedFrom:u.forkedFrom}}),l?undefined:{session:p,task:u.id},true)};const Ee=new Map;const ne=(p,u)=>[...Ee.get(p)??[]].filter(({matcher:A,isEveryAgent:l})=>(u["task"]===undefined||l)&&(A===undefined||rt(u,A)));const le=async(p,u,A)=>{const l=ne(p,u);if(!p.startsWith("before")){await Promise.all(l.map(({listener:g,options:C})=>Q(p,C,A,(E)=>g(u,E))));return}const a=L(p);const w=l.map(({listener:g,options:C})=>()=>Q(p,C,A,async(E)=>zn(p,a,await g(u,E)),a));return Os(p,a,["refuse"],undefined,w,(g)=>n(`session:${p}`,`The ${p} listener failed`,g))};const L=(p)=>Vd[p.slice("before".length)]??[];const me=(p,u,A)=>ne(p,u).map((l)=>b(l.options,L(p),A)).find((l)=>l!==undefined);const Ce=async(p)=>{const u=(await t.command.list()).find((A)=>A.name===p.command)?.source;return{session:v.id,cwd:v.cwd,name:p.command,args:p.args,...Ye({source:u}),from:En(p.origin,false)}};const be={beforeRun:new Set,onRun:new Set};for(const[p,u]of Object.entries(be))Ee.set(p,u);r?.("command.run",async(p,u)=>{if(be.beforeRun.size===0&&be.onRun.size===0)return u(p);const A=await Ce(p);const l=be.beforeRun.size===0?undefined:await le("beforeRun",A,u.signal);if(typeof l?.["refuse"]==="string")return{text:l["refuse"]};if(typeof l?.["result"]==="string")return{text:l["result"],...typeof l["exitCode"]==="number"?{exitCode:l["exitCode"]}:{}};const a=typeof l?.["args"]==="string"?l["args"]:p.args;const w=await u(a===p.args?p:{...p,args:a});le("onRun",{...A,args:a},u.signal);return typeof l?.["note"]==="string"?{...w,context:[...w.context??[],ot(e,l["note"])]}:w},async(p,u)=>{const A=be.beforeRun.size===0?undefined:me("beforeRun",await Ce(p),u);return A===undefined?undefined:{text:A.refuse}});const P=(p,u)=>{if(s===undefined||r===undefined)throw new Error(`${e}: ${p} works only in a mod's own session.`);const A=p.startsWith("before");if(u==="PermissionCheck"||u==="PermissionRequest"){const g=o?.();if(g===undefined)throw new Error(Gd(e,p));return g(p,{raise:le,refusalFor:me,hookOn:s,routeOn:r,current:()=>v})}const l=hs[u];const a=(A?l.before:undefined)??l.on;if(p==="beforeSessionStart")r("session.compact",pe);if(p==="beforeModelChange")s(l.on,()=>{const g=M.splice(0);return g.length===0?undefined:{additionalContext:g}});const w=(g,C)=>{const E=me(p,Qs(u,g),C);return E===undefined?undefined:qs(e,u,E)};return s(a,async(g,C)=>{const E=Qs(u,g);if(u==="SessionStart"&&E["source"]==="compact"){if(!A)return;const ee=Re?.agentId;const ae=ee===undefined?await t.session.model():undefined;const ve=await le(p,{...E,...Ye({task:ee,model:ae,title:v.title||undefined})},C);if(ve===undefined)return;return qs(e,u,ee===undefined?ve:Ye({note:ve["note"]}))}if(!A){le(p,E,C);return}if(u==="ModelChange")M.splice(0);const U=await le(p,E,C);if(U===undefined)return;if(u==="ModelChange"&&typeof U["note"]==="string"&&U["refuse"]===undefined)M.push(ot(e,U["note"]));return qs(e,u,U)},A?w:undefined)};const M=[];let Re;const pe=async(p,u)=>{Re=p;try{return await u(p)}finally{if(Re===p)Re=undefined}};const Se=(p,u,A=false)=>{const l=xs(e,p,u);const a={...l,options:p==="beforePermissionRequest"?{...l.options,onFailure:"refuse"}:l.options,isEveryAgent:A};const w=Ee.get(p)??new Set;if(!Ee.has(p)){P(p,p.replace(/^(on|before)/,""));Ee.set(p,w)}w.add(a);return{remove:()=>void w.delete(a)}};const Y=()=>Object.fromEntries(Object.entries(hs).flatMap(([p,u])=>[`on${p}`,..."before"in u?[`before${p}`]:[]]).map((p)=>[p,(...u)=>Se(p,u)]));const Pe=xe(()=>v);const ue=Object.assign(Pe,Y(),{goal:Object.assign(Pe.goal,{beforeSessionStart:(...p)=>Se("beforeSessionStart",p,true)}),async scrollTo(p,u){const{deny:A}=await t.ui.scroll({to:{requestId:p.id},...u?.block===undefined?{}:{block:u.block}});if(A!==undefined)throw new Error(`${e}: Claude Code did not scroll to the message: ${A}`)},caption:(p,u)=>t.ui.notice(p.callId,u)});const oe=I(()=>({}),false);const $e=(p,u,A,l,a)=>{const w=Z(p,u,l).filter((g)=>cn(g.scope,p,A,G(m.get(p)))&&(g.matcher===undefined||rt(Xs(A),g.matcher)));return w.map((g)=>b(g.options,Ht[u],a)).find((g)=>g!==undefined)};return{sessions:{get current(){return ue},list:async(p={})=>(await i(We.sessions,p)).map((u)=>{if(u.id!==v.id){O.set(u.id,u);return xe(()=>O.get(u.id)??u)}if(v.title==="")v={...v,title:u.title};return ue}),search:(p,u,A={})=>he({text:p,...Xd(A)},u),...oe},changed(p,u,A,l){k(p,u);let a;for(const w of A?[p,Ut]:[p]){for(const g of c.get(w)??[]){const{event:C,method:E,matcher:U,listener:ee,options:ae}=g;const ve=()=>{a??=V(p,u);a.then((Be)=>Q(E,ae,l,(_)=>ee(Be,_))).catch((Be)=>n(`session:${E}`,`The ${E} listener failed`,Be))};const Ae=Nr(C,U,u)&&H(g,p,u);if(Ae===true)ve();else if(Ae!==false)Ae.then((Be)=>Be&&ve())}}},answerBefore:j,failedBefore:$e,raise:le,listen:Se,turn:(p)=>S({session:v.id},p),follow(p){const u=p.id!==v.id&&v.id!=="";const A=v.id;v=R({...p,title:p.title||(p.id===v.id?v.title:""),isRunning:true,lastAt:new Date().toISOString()});if(!u)return;for(const l of[c,d]){const a=l.get(A);if(a===undefined)continue;l.delete(A);for(const w of a)if(w.scope.session===A)w.scope={...w.scope,session:v.id};l.set(v.id,new Set([...l.get(v.id)??[],...a]))}m.delete(A);z(A);z(v.id)},recolor(p){y=p;v=R(v)}}}var yt=(e)=>typeof e==="object"&&e!==null&&!Array.isArray(e)?e:{};var Ye=(e)=>Object.fromEntries(Object.entries(e).filter(([,t])=>t!==undefined));var Jd=(e)=>Ye({session:e["session_id"],task:e["agent_id"],agentType:e["agent_type"],cwd:e["cwd"],permissionMode:e["permission_mode"]});var Mr=(e)=>e===undefined?undefined:{name:String(yt(e)["name"]),source:String(yt(e)["source"])};var Kd=(e)=>({model:e["to_model"],previous:e["from_model"],requested:e["requested_model"]??undefined,source:e["source"],contextTokenCount:e["context_tokens"],isCacheWarm:e["prompt_cache_warm"],cacheTtl:e["cache_ttl"],cacheWriteUsd:e["estimated_cache_write_usd"],pricing:e["pricing"]});var Vd={Run:["args","note","result","exitCode","refuse"],ProjectSetup:["note"],SessionStart:["note","title","reloadSkills","firstPrompt"],ModelChange:["ask","refuse","note"],WorktreeCreate:["result"],Elicitation:["refuse"],ElicitationResponse:["refuse"],PermissionCheck:["allow","ask","refuse"],PermissionRequest:["allow","input","updates","refuse","interrupt"],PermissionDenial:["retry"],ToolBatch:["note"],TodoCreate:["refuse"],TodoComplete:["refuse"],ReplyDisplay:["text"]};var Ir=(e)=>({id:e["task_id"],subject:e["task_subject"],description:e["task_description"],teammate:e["teammate_name"]});var qd={ProjectSetup:(e)=>({trigger:e["trigger"]}),SessionStart:(e)=>({source:e["source"],model:e["model"],title:e["session_title"]||undefined,idleSeconds:e["seconds_since_last_response"],contextTokenCount:e["context_tokens"],isCacheWarm:e["prompt_cache_likely_expired"]===undefined?undefined:e["prompt_cache_likely_expired"]!==true,cacheWriteUsd:e["estimated_cache_write_usd"]}),SessionEnd:(e)=>({reason:e["reason"]==="prompt_input_exit"?"exit":e["reason"]}),ModelChange:Kd,CwdChange:(e)=>({cwd:e["new_cwd"]??e["cwd"],previous:e["old_cwd"]}),DirectoryAdd:(e)=>({directory:e["directory"],source:e["source"]==="slash_command"?"command":"sdk"}),WorktreeCreate:(e)=>({name:e["name"]}),WorktreeRemove:(e)=>({path:e["worktree_path"]}),Notification:(e)=>({text:e["message"],title:e["title"],type:e["notification_type"]}),Elicitation:(e)=>({id:e["elicitation_id"],server:e["mcp_server_name"],text:e["message"],mode:e["mode"],url:e["url"],schema:e["requested_schema"]}),ElicitationResponse:(e)=>({id:e["elicitation_id"],server:e["mcp_server_name"],mode:e["mode"],action:e["action"],content:e["content"]}),PermissionRequest:(e)=>({name:e["tool_name"],input:yt(e["tool_input"]),suggestions:e["permission_suggestions"]??[],mcpServer:Mr(e["mcp_server"])}),PermissionDenial:(e)=>({name:e["tool_name"],input:yt(e["tool_input"]),callId:e["tool_use_id"],reason:e["reason"],mcpServer:Mr(e["mcp_server"])}),ToolBatch:(e)=>({calls:(Array.isArray(e["tool_calls"])?e["tool_calls"]:[]).map((t)=>{const n=yt(t);return Ye({callId:n["tool_use_id"],name:n["tool_name"],input:yt(n["tool_input"]),output:n["tool_response"]})})}),TodoCreate:Ir,TodoComplete:Ir,ReplyDisplay:(e)=>({replyId:e["message_id"],index:e["index"],isLast:e["final"],text:e["delta"]})};async function Zs(e,t,n){if(t.title.trim()==="")throw new Error("a task needs a title.");const{name:s,agentType:r,model:o,cwd:i}=n===undefined?t:{prompt:t.prompt,title:t.title,agentType:Zo};const c=await e.agent.spawn({prompt:t.prompt,description:t.title,...s===undefined?{}:{name:s},...r===undefined?{}:{subagentType:r},...o===undefined?{}:{model:o},...i===undefined?{}:{cwd:i}});if(c.deny!==undefined)throw new Error(`Claude Code refused the task: ${c.deny}`);if(c.agentId===undefined)throw new Error("Claude Code answered without starting a task.");return{id:c.agentId,title:t.title,...n===undefined?{agentType:r??"general-purpose"}:{forkedFrom:n},model:c.model,openedBy:"",openedAt:new Date().toISOString()}}function Qs(e,t){const n=yt(t);return{...Jd(n),...Ye(qd[e](n))}}function qs(e,t,n){const s=typeof n["refuse"]==="string"?n["refuse"]:undefined;const r=typeof n["note"]==="string"?[ot(e,n["note"])]:undefined;if(t==="SessionStart")return Ye({additionalContext:r,sessionTitle:n["title"],reloadSkills:n["reloadSkills"]===true?true:undefined,initialUserMessage:n["firstPrompt"]});if(t==="ModelChange"){if(s!==undefined)return{permissionDecision:"deny",permissionDecisionReason:s};return typeof n["ask"]==="string"?{permissionDecision:"ask",permissionDecisionReason:n["ask"]}:undefined}if(t==="ProjectSetup")return Ye({additionalContext:r});if(t==="WorktreeCreate")return Ye({worktreePath:n["result"]});if(t==="PermissionDenial")return n["retry"]===true?{retry:true}:undefined;if(t==="ToolBatch")return Ye({additionalContext:r});if(t==="ReplyDisplay")return Ye({displayContent:n["text"]});return s===undefined?undefined:{block:s}}function Xd({running:e,since:t,everyProject:n,before:s}){return{...e===undefined?{}:{running:e},...t===undefined?{}:{since:t},...n===undefined?{}:{everyProject:n},...s===undefined?{}:{before:{session:s.session,id:s.id}}}}var Em=new Set(["act","before","answer","watch","goal","taskEnd"]);var Zd="1fd8a8ee972047c4a89640fd51048522";var Qd=64;var Yd={Darwin:"darwin",Linux:"linux"};var el={arm64:"arm64",aarch64:"arm64",x86_64:"x64",amd64:"x64"};var tl=/"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/;var Ur=/^[0-9a-f]{32}$/;var Wr=["/etc/machine-id","/var/lib/dbus/machine-id"];class Gr extends Error{}async function Jr(e){const t=async(m)=>{const{exitCode:x,stdout:O,stderr:v}=await e.process.run(m);if(x!==0)throw new Error(`cmod could not read this computer: ${m.join(" ")} ${Xe(x,v)}`);return O.trim()};const[n="",s="",r=""]=(await t(["uname","-snm"])).split(/\s+/);const o=Yd[n];const i=el[r];if(o===undefined)throw new Error(`cmod reads the device of macOS and Linux, and this computer runs ${n}.`);if(i===undefined)throw new Error(`cmod reads the device of arm64 and x64 computers, and this one is ${r}.`);if(o==="linux")return{id:await Hr(await nl(e.fs)),name:s,os:o,arch:i};const[c,d]=await Promise.all([t(["ioreg","-rd1","-c","IOPlatformExpertDevice"]),t(["scutil","--get","LocalHostName"])]);const f=tl.exec(c)?.[1];if(f===undefined)throw new Error("cmod could not read this computer: ioreg -rd1 -c IOPlatformExpertDevice names no IOPlatformUUID.");return{id:await Hr(f.replaceAll("-","").toLowerCase()),name:d,os:o,arch:i}}async function nl(e){for(const t of Wr){const n=(await e.read(t).catch(Ne(""))).trim();if(Ur.test(n))return n}throw new Gr(`cmod could not read this computer: neither ${Wr.join(" nor ")} holds a machine id.`)}async function Hr(e){if(!Ur.test(e))throw new Error("cmod could not read this computer: its machine id is not 32 hex digits.");const t=(await sl(zr(e),zr(Zd))).slice(0,16);t[6]=(t[6]??0)&15|64;t[8]=(t[8]??0)&63|128;return[...t].map((n)=>n.toString(16).padStart(2,"0")).join("")}async function sl(e,t){const n=async(...r)=>new Uint8Array(await crypto.subtle.digest("SHA-256",Uint8Array.from(r.flatMap((o)=>[...o]))));const s=new Uint8Array(Qd);s.set(e);return n(s.map((r)=>r^92),await n(s.map((r)=>r^54),t))}function zr(e){return Uint8Array.from(e.match(/../g)??[],(t)=>Number.parseInt(t,16))}var Kr=1e4;async function Vr(e,t,n,s){const r=ol(await e.fs.read(`${t.root}/.claude-plugin/plugin.json`).catch(Ne(undefined)));const{program:o,hotkeys:i}=t.steps;const c=(await e.fs.list(`${t.root}/rules`).catch(Ne([]))).filter((f)=>f.kind==="file"&&f.name.endsWith(".md")).map((f)=>f.name.slice(0,-".md".length)).toSorted();const d=[Le(r)&&typeof r["description"]==="string"?r["description"]:undefined,n.length>0?`Adds ${mt(n)}.`:undefined,c.length>0?`Adds ${c.length} ${c.length===1?"rule":"rules"}: ${mt(c)}.`:undefined,o===undefined?undefined:`Installed the ${o} program.`,...Object.values(i??{}).flatMap(({title:f,default:m})=>m===undefined?[]:[`Binds ${m} to ${f}.`])].filter((f)=>f!==undefined);return{message:"Installed",...d.length===0?{}:{description:d.join(`
-`)},action:{label:"Settings",onClick:()=>s()}}}function ol(e){try{return e===undefined?undefined:JSON.parse(e)}catch(t){if(t instanceof SyntaxError)return;throw t}}var Ys;function Gt(e){Ys=e}function ct(){if(Ys===undefined)throw new Error("A mod's imports work once its setup runs. Call them from setup or from a hook, never at the top of a module.");return Ys}var qr=new WeakMap;function Xr(e,t){qr.set(e,t)}function $t(e){const t=qr.get(e);if(t===undefined)throw new Error("This mod has not started, so it reaches no Claude Code calls yet.");return t}class Ve extends Error{line;constructor(e,t){super(`line ${e}: ${t}`);this.line=e}}var rl=["md","markdown","mdx"];var il=["sh","bash","zsh","fish","py","rb","pl","r","yaml","yml","toml","ps1","nu","tcl","mk","conf","cfg","env"];var al=["ts","tsx","mts","cts","js","jsx","mjs","cjs","go","rs","swift","kt","kts","java","c","h","cc","cpp","hpp","cs","scala","dart","zig","jsonc","json5"];var cl=["lua","sql","hs","elm"];var dl=["Makefile","Dockerfile","Brewfile","Gemfile","Rakefile","Justfile","justfile"];var Zn=".meta";function Qr(e,t){const n=e.slice(e.lastIndexOf("/")+1);const s=n.lastIndexOf(".");const r=s<=0?"":n.slice(s+1).toLowerCase();if(rl.includes(r))return{type:"frontmatter"};if(il.includes(r)||dl.includes(n))return{type:"comment",prefix:"#"};if(al.includes(r))return{type:"comment",prefix:"//"};if(cl.includes(r))return{type:"comment",prefix:"--"};if(r===""&&t?.startsWith("#!")===true)return{type:"comment",prefix:"#"};return{type:"sidecar"}}function no(e,t){const n=e.split(`
-`);if(t.type==="comment"){const i=ti(n,t.prefix);return{metadata:i===undefined?{}:Zr(ni(i.lines,i.start+2,0))}}const s=t.type==="frontmatter"?ei(n):{start:-1,end:n.length,lines:n};if(s===undefined)return{metadata:{}};const r=eo(s);const o=t.type==="frontmatter"?fl(s,"name"):undefined;return{metadata:r===undefined?{}:Zr(r.entries),...o===undefined?{}:{name:o}}}function Yr(e,t,n){const s=e.split(`
-`);const r=Object.entries(n);if(t.type==="comment"){const{prefix:f}=t;const m=r.length===0?[]:[`${f} /// metadata`,...r.map(([v,y])=>`${f} ${Xn(v)}: ${Xn(y)}`),`${f} ///`];const x=ti(s,f);if(x!==undefined)return[...s.slice(0,x.start),...m,...s.slice(x.end+1)].join(`
-`);if(m.length===0)return e;const O=s[0]?.startsWith("#!")===true?1:0;return[...s.slice(0,O),...m,...s.slice(O)].join(`
-`)}const o=r.length===0?[]:["metadata:",...r.map(([f,m])=>`  ${Xn(f)}: ${Xn(m)}`)];if(t.type==="sidecar"){const f=eo({start:-1,end:s.length,lines:s});const m=f===undefined?s:[...s.slice(0,f.start),...s.slice(f.end)];const x=m.join(`
-`).trim();return[...x===""?[]:[x],...o].join(`
-`)+(o.length===0&&x===""?"":`
-`)}const i=ei(s);if(i===undefined)return o.length===0?e:["---",...o,"---",...s].join(`
-`);const c=eo(i);const d=c===undefined?[...i.lines,...o]:[...s.slice(i.start+1,c.start),...o,...s.slice(c.end,i.end)];if(d.every((f)=>f.trim()===""))return s.slice(i.end+1).join(`
-`);return[...s.slice(0,i.start+1),...d,...s.slice(i.end)].join(`
-`)}function ei(e){if(e[0]?.replace(/^\uFEFF/,"").trimEnd()!=="---")return;const t=e.findIndex((n,s)=>s>0&&n.trimEnd()==="---");if(t===-1)throw new Ve(1,"the frontmatter starts with --- and never ends. Close it with a --- line.");return{start:0,end:t,lines:e.slice(1,t)}}function ti(e,t){const n=e.findIndex((r)=>r.trimEnd()===`${t} /// metadata`);if(n===-1)return;const s=[];for(let r=n+1;r<e.length;r+=1){const o=(e[r]??"").trimEnd();if(o===`${t} ///`)return{start:n,end:r,lines:s};if(o!==t&&!o.startsWith(`${t} `))break;s.push(o.slice(t.length+1))}throw new Ve(n+1,`the metadata block never ends. Close it with a "${t} ///" line.`)}function eo(e){const t=e.lines.findIndex((c)=>/^metadata\s*:/.test(c));if(t===-1)return;const n=e.start+2+t;const s=so((e.lines[t]??"").replace(/^metadata\s*:/,"")).trim();const r=e.start+1+t;if(s.startsWith("{"))return{start:r,end:r+1,entries:ul(s,n)};if(s!=="")throw new Ve(n,"metadata holds a single value. Write a map of names to text, such as metadata: { mymod.key: value }.");let o=t+1;while(o<e.lines.length&&(/^\s/.test(e.lines[o]??"")||(e.lines[o]??"").trim()===""))o+=1;while(o>t+1&&(e.lines[o-1]??"").trim()==="")o-=1;const i=e.lines.slice(t+1,o);return{start:r,end:e.start+1+o,entries:ni(i,n+1,ll(i))}}function ll(e){const t=e.find((n)=>n.trim()!==""&&!n.trim().startsWith("#"));return t===undefined?0:/^\s*/.exec(t)?.[0].length??0}function ni(e,t,n){const s=[];e.forEach((r,o)=>{const i=t+o;const c=so(r);if(c.trim()==="")return;const d=/^\s*/.exec(c)?.[0].length??0;if(d!==n)throw new Ve(i,"a metadata value holds a list or a map. Each value is one line of text, and a list is one space-separated text.");const f=c.trim();if(f.startsWith("- "))throw new Ve(i,"metadata holds a list. Write a map of names to text, and a list as one space-separated text.");s.push(si(f,i))});return s}function ul(e,t){if(!e.endsWith("}"))throw new Ve(t,"the metadata map starts with { and does not end on the same line. Close it with }, or write one entry per line.");const n=e.slice(1,-1).trim();if(n==="")return[];return oi(n,",",t).map((s)=>s.trim()).filter((s)=>s!=="").map((s)=>si(s,t))}function si(e,t){const[n,...s]=oi(e,":",t,true);if(n===undefined||s.length===0)throw new Ve(t,`"${e}" has no ":". Write each entry as name: value.`);const r=s.join(":").trim();if(r.startsWith("{")||r.startsWith("[")||r==="|"||r===">")throw new Ve(t,`${n.trim()} holds a list or a map. Each value is one line of text, and a list is one space-separated text.`);return{key:to(n.trim(),t),value:to(r,t)}}function oi(e,t,n,s=false){const r=[];let o;let i="";for(let c=0;c<e.length;c+=1){const d=e[c];if(o!==undefined){i+=d;if(d==="\\"&&o==='"'){i+=e[c+1]??"";c+=1}else if(d===o)o=undefined;continue}const f=i.trimEnd().at(-1);if((d==='"'||d==="'")&&(f===undefined||f===":"))o=d;const m=e[c+1];if(d===t&&(!s||m===undefined||m===" "||m==="\t")){r.push(i);i="";if(s){r.push(e.slice(c+1));return r}continue}i+=d}if(o!==undefined)throw new Ve(n,`a ${o==='"'?"double":"single"} quote never closes.`);r.push(i);return r}function so(e){let t;for(let n=0;n<e.length;n+=1){const s=e[n];if(t!==undefined){if(s==="\\"&&t==='"')n+=1;else if(s===t)t=undefined;continue}if(s==='"'||s==="'")t=s;if(s==="#"&&(n===0||/\s/.test(e[n-1]??"")))return e.slice(0,n)}return e}function to(e,t){if(e.startsWith('"')){if(!e.endsWith('"')||e.length<2)throw new Ve(t,`${e} opens a double quote that never closes.`);try{return JSON.parse(e)}catch(n){if(!(n instanceof SyntaxError))throw n;throw new Ve(t,`${e} is not a double-quoted text. Escape a " inside it as \\".`)}}if(e.startsWith("'")){if(!e.endsWith("'")||e.length<2)throw new Ve(t,`${e} opens a single quote that never closes.`);return e.slice(1,-1).replaceAll("''","'")}return e}function fl(e,t){const n=e.lines.findIndex((r)=>r.startsWith(`${t}:`));if(n===-1)return;const s=so((e.lines[n]??"").slice(t.length+1)).trim();if(s==="")return;try{return to(s,e.start+2+n)}catch(r){if(r instanceof Ve)return;throw r}}function Zr(e){return Object.freeze(Object.fromEntries(e.map(({key:t,value:n})=>[t,n])))}var pl=/^[A-Za-z0-9_./+~$%^()=\\][^#]*$/;var ml=/^(true|false|yes|no|on|off|null|~|[-+]?(\d[\d_]*)?\.?\d+([eE][-+]?\d+)?|0x[0-9a-fA-F]+|\.inf|\.nan)$/i;function Xn(e){const t=pl.test(e)&&e===e.trim()&&!e.includes(": ")&&!e.endsWith(":")&&!e.includes(" #")&&!ml.test(e)&&!/["',{}[\]]/.test(e);return t?e:JSON.stringify(e)}var ri=[".git","node_modules"];var hl=/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;function Jt(e,t){const n=/^~\/\.claude(?=\/|$)/.exec(e);if(n!==null&&t.configRoot!==undefined)return at(`${t.configRoot}${e.slice(n[0].length)}`);const s=sn.exec(e)?.[0];if(s!==undefined){if(t.home===undefined)throw new Error(`${e} starts with ${s}, and HOME is not set. Start Claude Code with HOME set.`);return at(Ln(e,t.home,t.configRoot))}return e.startsWith("/")?at(e):at(t.projectRoot(),e)}function ii({name:e,claude:t,places:n,report:s}){const r=`${e}.`;const o=new Map;const i=new Set;const c=(v)=>Object.freeze(Object.fromEntries(Object.entries(v).flatMap(([y,R])=>y.startsWith(r)?[[y.slice(r.length),R]]:[])));const d=async(v)=>{const y=await t.fs.stat(v,{resolve:true});if(y.kind!=="file")throw new Error(`${v} is not a file, so it holds no metadata.`);const R=y.realPath??v;const D=!R.slice(R.lastIndexOf("/")+1).includes(".");const z=D?(await t.fs.read(R)).split(`
-`,1)[0]:undefined;const X=Qr(R,z);const G=X.type==="sidecar"?`${R}${Zn}`:R;const H=X.type==="sidecar"?await t.fs.stat(G).catch(Ne(undefined)):undefined;return{realPath:R,format:X,holder:G,signature:`${y.mtimeMs}:${y.size}:${H?.kind==="file"?`${H.mtimeMs}:${H.size}`:""}`}};const f=async(v)=>(await t.fs.stat(v).catch(Ne(undefined)))?.kind==="file"?t.fs.read(v):"";const m=(v,y)=>(R)=>{if(nn(R))return y;const D=`${e}: fs.find skipped ${v}: ${se(R)}`;if(!i.has(D))t.ui.warn("fs:find",D);i.add(D);return y};const x=async(v)=>{const y=await d(v);const R=o.get(v);if(R?.signature===y.signature)return R.read;let D;try{const{metadata:z,name:X}=no(await f(y.holder),y.format);D={metadata:z,...X===undefined?{}:{name:X}}}catch(z){if(!(z instanceof Ve))throw z;const X=`${y.holder} ${z.message}`;D={metadata:{},error:X};if(!i.has(X))s({id:`metadata:${y.holder}`,message:`Skips the metadata of ${y.holder}`,description:X});i.add(X)}o.set(v,{signature:y.signature,read:D});return D};const O=async(v)=>{const y=Jt(v,n);const R=In.scan(y);if(!R.isGlob)return(await t.fs.stat(y).catch(m(y,undefined)))?.kind==="file"?[y]:[];const D=In(y,{dot:true});const z=ri.filter((b)=>R.glob.split("/").includes(b));const X=R.glob.includes("**")?Number.POSITIVE_INFINITY:R.glob.split("/").length;const G=[];const H=new Set;const k=async(b,Q)=>{const Z=(await t.fs.stat(b,{resolve:true}).catch(m(b,undefined)))?.realPath??b;if(H.has(Z))return;H.add(Z);const T=await t.fs.list(b).catch(m(b,[]));await Promise.all(T.map(async(j)=>{const I=`${b}/${j.name}`;const q=j.isLink===true?(await t.fs.stat(I).catch(m(I,undefined)))?.kind:j.kind;if(q==="file"&&D(I))G.push(I);if(q!=="dir"||Q+1>=X)return;if(ri.includes(j.name)&&!z.includes(j.name))return;await k(I,Q+1)}))};const B=R.base===""?"/":R.base;if((await t.fs.stat(B).catch(m(B,undefined)))?.kind==="dir")await k(B,0);return G};return{async find(v){const y=typeof v==="string"?[v]:v;const R=[...new Set((await Promise.all(y.map(O))).flat())].sort();const D=R.filter((z)=>!(z.endsWith(Zn)&&R.includes(z.slice(0,-Zn.length))));return Promise.all(D.map(async(z)=>{const X=await x(z).catch((G)=>({metadata:{},error:`${z} ${se(G)}`}));return{path:z,...X.name===undefined?{}:{name:X.name},metadata:c(X.metadata),...X.error===undefined?{}:{error:X.error}}}))},async read(v){const y=await x(Jt(v,n));if(y.error!==undefined)throw new Error(`${e}: ${y.error}`);return c(y.metadata)},async update(v,y){const R=Jt(v,n);const D=await d(R);const z=await f(D.holder);let X;try{X=no(z,D.format).metadata}catch(k){throw new Error(`${e}: ${D.holder} ${se(k)}`,{cause:k})}const G={...c(X)};y(G);for(const[k,B]of Object.entries(G)){if(!hl.test(k))throw new Error(`${e}: the metadata key "${k}" is not a name. Use letters, digits, "_", ".", and "-".`);if(typeof B!=="string")throw new Error(`${e}: the metadata key "${k}" holds ${JSON.stringify(B)}. Each value is text, and a list is one space-separated text.`);if(B.includes(`
-`))throw new Error(`${e}: the metadata key "${k}" holds a line break. Each value is one line of text.`)}const H={};for(const[k,B]of Object.entries(X)){if(!k.startsWith(r))H[k]=B;else if(Object.hasOwn(G,k.slice(r.length)))H[k]=G[k.slice(r.length)]}for(const[k,B]of Object.entries(G))H[`${r}${k}`]=B;if(JSON.stringify(H)===JSON.stringify(X))return;await t.fs.write(D.holder,Yr(z,D.format,H));o.delete(R)}}}var Qn={text:(e)=>({...e,type:"text"}),secret:(e)=>({...e,type:"secret"}),number:(e)=>({...e,type:"number"}),toggle:(e)=>({...e,type:"toggle",default:e.default??false}),choice:(e,t)=>({...t,type:"choice",choices:e}),folder:(e)=>({...e,type:"folder"}),file:(e)=>({...e,type:"file"}),list:(e)=>({...e,type:"list"})};var gl=/^[A-Za-z_]\w*$/;function ai(e,t){for(const[n,s]of Object.entries(t)){const r=`${e}: options.${n}`;if(!gl.test(n))throw new Error(`${r} is not an option name. Use letters, digits, and _, starting with a letter, as Claude Code passes each option on as CLAUDE_PLUGIN_OPTION_${n.toUpperCase()}.`);if(s.title.trim()==="")throw new Error(`${r} needs a title, the label /config shows.`);if(s.type==="choice"&&(s.choices??[]).length===0)throw new Error(`${r} is a choice with no choices. Give option.choice(['a', 'b'], { ... }).`);if(s.type==="choice"&&s.default!==undefined&&!(s.choices??[]).includes(s.default))throw new Error(`${r} defaults to ${String(s.default)}, which is not one of its choices: ${(s.choices??[]).join(", ")}.`)}return t}function ci(e,t,n){let s;try{s=JSON.parse(n)}catch(i){return{values:{},ignored:[`is not JSON (${se(i)}). Fix the file; ${e} uses its other options until then.`]}}if(!Le(s))return{values:{},ignored:['is not a JSON object. Write one, such as { "branch": "main" }.']};const r={};const o=[];for(const[i,c]of Object.entries(s)){const d=t[i];if(d===undefined)o.push(`sets ${i}, which ${e} does not declare. ${Object.keys(t).length===0?"Remove it.":`Remove it, or use one of: ${Object.keys(t).join(", ")}.`}`);else if(d.type==="secret")o.push(`sets ${i}, a secret, and a project file is committed for everyone to read. Remove it. ${Lt}`);else{const f=dn(d,c);if(f===undefined)r[i]=c;else o.push(`sets ${i} to ${JSON.stringify(c)}, and ${d.title} ${f}.`)}}return{values:r,ignored:o}}function oo(e){return e===undefined||e===""||Array.isArray(e)&&e.length===0}function dn(e,t){const n=e.type;if(n==="toggle")return typeof t==="boolean"?undefined:"takes true or false";if(n==="number"){if(typeof t!=="number"||!Number.isFinite(t))return"takes a number";if(e.min!==undefined&&t<e.min)return`takes ${e.min} or more`;if(e.max!==undefined&&t>e.max)return`takes ${e.max} or less`;return}if(n==="list")return Array.isArray(t)&&t.every((s)=>typeof s==="string")?undefined:"takes a list of text";if(typeof t!=="string")return"takes text";if(n==="choice"&&!(e.choices??[]).includes(t))return`takes one of: ${(e.choices??[]).join(", ")}`;return}var xt=Symbol("an element built outside a render");var bt;function et(e,t,n){const s=bt;const r={table:e,markdown:n};bt=r;try{return ao(r,t())}finally{bt=s}}function tt(e){const t=(n)=>bt===undefined?{[xt]:{name:e,props:n}}:li(bt,e,n);return t}function li(e,t,n){const s="children"in n?{...n,children:ao(e,n.children)}:n;if(t==="Markdown"&&e.markdown!==undefined)return e.markdown(s);return e.table[t](s)}function ao(e,t){if(Array.isArray(t))return t.map((r)=>ao(e,r));if(typeof t!=="object"||t===null||!(xt in t))return t;const{name:n,props:s}=t[xt];return li(e,n,s)}function co(e,t){const n=bt;bt=undefined;try{return ro(t(),e)}finally{bt=n}}function ro(e,t){if(Array.isArray(e))return e.map((o)=>ro(o,t));if(typeof e!=="object"||e===null||!(xt in e))return e;const{name:n,props:s}=e[xt];const r=Object.fromEntries(Object.entries(s).map(([o,i])=>[o,o==="key"&&typeof i==="string"?`${t}${i}`:ro(i,t)]));return{[xt]:{name:n,props:r}}}var lo="$cmodElement";var io="$cmodHandler";function jt(e,t){if(typeof e==="function")return{[io]:t.push(e)-1};if(Array.isArray(e))return e.map((n)=>jt(n,t));if(typeof e!=="object"||e===null)return e;if(xt in e){const{name:n,props:s}=e[xt];if(n==="Client")throw new Error("Client draws only in panes and styles.");return{[lo]:n,props:jt(s,t)}}if(Object.getPrototypeOf(e)!==Object.prototype)throw new Error("a widget draws only the elements of ui/elements.js and ui/components.js, text, numbers, and plain objects.");return Object.fromEntries(Object.entries(e).map(([n,s])=>[n,jt(s,t)]))}function ln(e,t,n){if(Array.isArray(e))return e.map((i)=>ln(i,t,n));if(typeof e!=="object"||e===null)return e;const s=e;if(typeof s[io]==="number"){const i=s[io];return(...c)=>n(i,JSON.parse(JSON.stringify(c)))}const r=s[lo];if(r===undefined)return Object.fromEntries(Object.entries(s).map(([i,c])=>[i,ln(c,t,n)]));if(typeof r!=="string"||!Object.hasOwn(di,r))throw new Error(`a widget drew ${String(r)}, which is not an element of ui/elements.js.`);const o=ln(s["props"],t,n);return di[r](typeof o["key"]==="string"?{...o,key:`${t}${o["key"]}`}:o)}var wl=new Set(["Button","Input","Select"]);function Yn(e,t){if(typeof e!=="object"||e===null)return false;if(Array.isArray(e))return e.some((r)=>Yn(r,t));const n=e;const s=n["props"];if(wl.has(n[lo])&&s?.["key"]===t)return true;return Object.values(n).some((r)=>Yn(r,t))}function ui(e,t,n){const{Button:s,Link:r}=e;const o=(i)=>{const{href:c,...d}=i;if(typeof c!=="string")return s(i);const{label:f,children:m}=d;const x=m!==undefined&&!(Array.isArray(m)&&m.length===0);if(t!=="terminal"&&c.startsWith("https:"))return r({href:c,...typeof f==="string"?{label:f}:{},...x?{children:m}:{}});return s({...d,onPress:(O)=>n(c,O)})};return{...e,Button:o}}var Oe=tt("Box");var fe=tt("Text");var Ue=tt("Button");var yl=tt("Link");var $l=tt("Code");var es=tt("Markdown");var Kt=tt("Input");var xl=tt("Select");var bl=tt("Image");var vl=tt("Svg");var kl=tt("Raster");var Vm=tt("Client");var di={Box:Oe,Text:fe,Button:Ue,Link:yl,Code:$l,Markdown:es,Input:Kt,Select:xl,Image:bl,Svg:vl,Raster:kl};function Vt({key:e,label:t,hotkey:n,variant:s="secondary",onPress:r}){const o=s==="primary";return Ue({plain:true,key:e,label:t,...n===undefined?{}:{hotkey:n},onPress:r,children:fe({backgroundColor:o?"claude":"userMessageBackground",color:o?"inverseText":"text",bold:o,children:` ${t} `})})}var ts="working";var qt="turnEnd";var Sl=/^[A-Za-z0-9_-]{1,64}$/;var uo=["columns","rows"];function ns(e,t,n,s){if(!Sl.test(n))throw new Error(`${e}: "${n}" is not a ${t} id. Use 1 to 64 letters, digits, "_", or "-".`);if(s.trim()==="")throw new Error(`${e}: the ${t} "${n}" needs a title, the label its tab shows.`)}function fi(e,t){ns(e,"pane",t.id,t.title);for(const n of uo){const s=t[n];if(typeof s!=="function"&&s!==undefined&&(!Number.isInteger(s)||s<=0))throw new Error(`${e}: the pane "${t.id}" has ${n} ${s}. Use a whole number above 0, or leave it out.`)}}var mi="toolGroup";var hi="toolProgress";var gi="commandOutput";var wi="askUserQuestion";var pi={prompt:"UserMessage",reply:"AssistantMessage",toolCall:"ToolUse",toolResult:"ToolResult",notice:"InfoNotice",[mi]:"ToolGroup",[hi]:"ToolProgress",[gi]:"CommandOutput",[wi]:"AskUserQuestion",[ts]:"Spinner",[qt]:"TurnDuration"};function yi(e){return typeof e==="string"&&Object.hasOwn(pi,e)?pi[e]:undefined}function ss(e){return typeof e==="string"?`${e.charAt(0).toUpperCase()}${e.slice(1)}`:e.name}var He={list:"cmod:parts",draw:"cmod:draw",press:"cmod:press",shown:"cmod:shown",changed:"cmod:partsChanged",stylers:"cmod:markdownStylers"};var fn="that button drew before the last redraw. Press the one it shows now.";var Al=80;function Si(e){return e.viewport?.columns??Al}function rs(e,t=Si(e)){return{surface:e.surface,columns:Math.max(t,0)}}async function Ai(e,t,n){if(n==="terminal"){const[r,o,i,c]=await Promise.all([e.env.browser(),e.env.sshConnection(),e.env.display(),e.env.waylandDisplay()]);const d=r||o?"":(await e.process.run(["uname","-s"])).stdout.trim().toLowerCase();const f=No({os:d,browser:r,sshConnection:o,display:i,waylandDisplay:c},t);if(f!==undefined&&(await e.process.run(f)).exitCode===0)return"opened"}const s=await e.ui.copy({text:t,surface:n});if(!s.isCopied)throw new Error(`cmod could not open ${t} or copy it: ${s.reason}`);return"copied"}var Ol="⏺";function $i(e,t){const n={};for(const s of uo){const r=e[s];const o=typeof r==="function"?r(t):r;if(o===undefined)continue;if(!Number.isInteger(o)||o<=0)throw new Error(`the pane "${e.id}" gets ${s} ${o} from its state. Return a whole number above 0, or undefined for Claude Code's default.`);n[s]=o}return n}function xi(e){return e===1?"1 time":`${e} times`}function bi(e,t,n){const s={...e,...t};return n||!("isFirstOfReply"in s)?s:{...s,isFirstOfReply:false}}function fo(e){let t=0;return()=>e===undefined?undefined:`${e}:${t+=1}`}function vi(e,t,n=fo(e.key)){const{dimColor:s,onLinkPress:r,pressableLinks:o}=e;const i={...s===undefined?{}:{dimColor:s},...r===undefined?{}:{onLinkPress:r},...o===undefined?{}:{pressableLinks:o}};let c=false;const d=(f)=>{if(f.key!==undefined)return f.key;if(c)return n();c=true;return e.key};return(f)=>{const m=d(f);return t({...i,...m===undefined?{}:{key:m},...f})}}function po(e){return`threw, so Claude Code draws its own: ${se(e)}`}async function ki(e,t,n){const s=[];let r;try{r=et(e,()=>t(({children:f,...m})=>{const x=e.Box({});s.push({given:m,drawing:x});return x}))}catch(f){return{failure:po(f)}}if(s.length===0)return{drawing:r,isClaudesRow:false};const o=s.findIndex((f)=>f.drawing===r);const i=await Promise.all(s.map(({given:f},m)=>n(f,m===o)));let c=0;let d;try{d=et(e,()=>t(()=>i[c++]??Oe({})))}catch(f){return{failure:po(f)}}if(c!==i.length)return{failure:`used Default ${xi(i.length)}, then ${xi(c)}, so Claude Code draws its own. A render must draw the same for the same props.`};return{drawing:d,isClaudesRow:o>=0}}function os(e,t){const n=e.map(({drawing:i,isClaudesRow:c},d)=>(d>0||t==="inReply")&&!c?Oe({marginTop:1,children:i}):i);const s=(i)=>Oe({flexDirection:"column",children:i});const[r,...o]=n;if(t!=="opensReply"||r===undefined)return s(n);if(e[0]?.isClaudesRow!==true)return Oe({children:[Oe({minWidth:2,children:fe({color:"text",children:Ol})}),s(n)]});return s([r,Oe({paddingLeft:2,children:s(o)})])}function un(e){const t=e.findLast((o)=>o.parts!==undefined)?.parts;const n=e.flatMap((o)=>o.requests??[]);const s=e.some((o)=>o.redraw===true);const r=e.some((o)=>o.isStart===true);return{...t===undefined?{}:{parts:t},...s?{redraw:true}:{},...n.length===0?{}:{requests:n},...r?{isStart:r}:{}}}var Cl=200;function Oi({name:e,claude:t,router:n,report:s,announce:r,mod:o,borrowed:i,nextDraw:c}){const d=new Map;const f=new Map;const m=new Set;const x=new Map;const O=async()=>{const a=new Map((await t.ui.panes()).map((w)=>[w.id,w]));for(const w of d.keys()){const g=a.get(w);if(g?.isPlaced===true)m.add(w);else m.delete(w);if(g===undefined)x.delete(w);else x.set(w,{isShown:g.isShown,isFocused:g.isFocused})}};const v=()=>O().catch((a)=>t.ui.warn("panes:read",`${e} keeps its panes' open, shown, and focused state from before: ${se(a)}`));const y=new Map;const R=new Set;const D=new Map;let z;let X=[];let G=0;let H=false;let k=false;const B=new Map;const b=new Map;const Q=new Map;let Z={open:[],shown:null,isFocused:false};const T=new Map;const j=new Map;const I=new Set;let q=[];let te=0;const K=new Set;let he=0;let we;let S=0;let W;const J=()=>({widgets:[...B.values()].map(({id:a,title:w,areas:g,place:C})=>({id:a,title:w,areas:g,...C===undefined?{}:{place:C}})),pages:[...Q.values()].map(({init:{id:a,title:w},place:g})=>({id:a,title:w,place:g})),...D.size>0?{stylesMarkdown:true}:{}});const N=(a,w)=>{if(!Array.isArray(a))return;const g=a.filter((C)=>typeof C==="string"&&C!==e);if(!w&&g.join("\x00")===X.join("\x00"))return;X=g;G+=1;if(e===Ie||d.size>0)t.ui.invalidate("ui.render")};const V=(a,w)=>{const g=a();return g===undefined?null:jt(g,w)};const re=()=>{for(const[a,w]of j){if(a==="markdown")continue;for(const g of w.values()){const C=[];try{if(JSON.stringify(V(g.render,C))!==g.tree)return true}catch(U){t.ui.warn(`drawing:${a}`,`${e}: the ${a} drawing threw, so the cmod plugin asks for it again: ${se(U)}`);return true}const E=g.draws.at(-1);if(E!==undefined&&T.has(E))T.set(E,{id:a,handlers:C})}}return false};const ce=({redraw:a,...w})=>a===true&&re()?{...w,redraw:a}:w;const ie=(a)=>{if(we!==undefined)return void we.push(a);if(q!==undefined)return void q.push(a);const w=te>0;if(W!==undefined&&!w)return void W.push(a);const g=[a];if(!w)W=g;const C=async()=>{if(W===g)W=undefined;const U=ce(un(g));if(Object.keys(U).length===0)return;const ee={...U,...w?{isAsked:true}:{}};return t.cmod.call({to:Ie,method:He.changed,input:ee}).then((ae)=>{if(w&&ee.requests!==undefined&&!(Le(ae)&&ae["isHeld"]===true))he+=1;if(Le(ae)&&e!==Ie)N(ae["stylers"],false)},(ae)=>{t.ui.warn("parts:tell",`${e}: the cmod plugin did not hear about its pages and widgets: ${se(ae)}`)})};if(!w)return Promise.resolve().then(C);const E=C().finally(()=>K.delete(E));K.add(E);return E};const xe=async(a)=>{te+=1;try{const w=await a();while(K.size>0)await Promise.allSettled(K);return w}finally{te-=1}};const ye=async(a)=>{S+=1;we??=[];try{await a()}finally{S-=1}const w=we;we=S===0?undefined:[];return ce(un(w))};const Ee=(a)=>{let w=false;return(g)=>{if(!w)s({id:`draw:${a}`,message:`The ${a} failed`,description:g});w=true}};const ne=(a)=>D.get(a);const le=(a,w,g,C,E)=>{if("text"in a)return g({text:a.text});const{render:U,props:ee}=a;const ae=()=>co(C,()=>U.Component({...ee,...w,Default:({source:ve=ee.source})=>g({text:ve})}));try{return E===undefined?ae():et(E,ae,g)}catch(ve){U.log(po(ve));return g({text:ee.source})}};const L=(a,w,g,C)=>(E,U=fo(E.key))=>{if(g>=X.length)return a.Markdown(E);const ee=E.key??C();for(const[ae,ve]of X.entries()){if(ae<g)continue;const Ae=`${G}\x00${w.surface}\x00${w.columns}\x00${E.text}`;const Be=L(a,w,ae+1,C);const _=et(a,()=>i(ve,Ae,{markdown:E.text,...w},ee),vi(E,(F)=>Be(F,U),U));if(_!==undefined)return _}return a.Markdown(E)};const me=(a,w)=>{const g=z;let C=0;const E=()=>String(C++);const U=L(a,w,0,E);if(g===undefined)return X.length===0?undefined:U;return(ee)=>{const ae=g(ee.text,ne);if(ae.every((F)=>("text"in F)))return U(ee);const ve=ee.key??E();const Ae=fo(ee.key);const Be=vi(ee,(F)=>U(F,Ae),Ae);const _=ae.map((F,de)=>le(F,w,Be,`${ve}:${de}:`,a));return os(_.map((F)=>({drawing:F,isClaudesRow:false})),"pane")}};const Ce=(a,w)=>{const g=z===undefined?[]:z(a,ne);if(g.every((C)=>("text"in C)))return es({text:a});return os(g.map((C,E)=>({drawing:le(C,w,es,`${E}:`),isClaudesRow:false})),"pane")};const be=(a)=>{if(z!==undefined)return;const w=a();z=w;n.add("ui.render",async(g,C)=>{if(g.component!=="AssistantMessage")return C(g);const E=w(g.props.text,ne,g.requestId);if(E.every((ve)=>("text"in ve)))return C(g);const U=t.ui.resolve(g);const ee=(ve,Ae)=>C({...g,props:bi(g.props,{text:ve},Ae)});const ae=await Promise.all(E.map(async(ve,Ae)=>{if("text"in ve)return{drawing:await ee(ve.text,Ae===0),isClaudesRow:true};const{render:Be,props:_}=ve;const F=await ki(U,(de)=>co(`${Ae}:`,()=>Be.Component({..._,...rs(g),id:g.requestId,Default:de})),({source:de=_.source},ge)=>ee(de,Ae===0&&ge));if(!("failure"in F))return F;Be.log(F.failure);return{drawing:await ee(_.source,Ae===0),isClaudesRow:true}}));return et(U,()=>os(ae,g.props.isFirstOfReply?"opensReply":"inReply"))})};const P=(a,w,g)=>{y.set(a.id,w);const{id:C,title:E,closeOnEscape:U,holdToasts:ee}=a;return t.ui.open({id:C,title:E,...w,...U===true?{closeOnEscape:U}:{},...ee===true?{holdToasts:ee}:{},...g===true?{focus:g}:{}})};const M=async(a)=>{try{const w=$i(a,o().state);const g=y.get(a.id);if(g?.columns===w.columns&&g?.rows===w.rows)return;await P(a,w)}catch(w){t.ui.warn(`pane:resize:${a.id}`,`${e}: the ${a.title} pane kept its size: ${se(w)}`)}};const Re=async(a,w,g)=>{try{await g()}catch(C){s({id:`pane:${a.id}:${w}`,message:`The ${a.title} pane's ${w} threw`,error:C})}};const pe=()=>{if(H)return;H=true;n.add("ui.render",(a,w)=>{const g=d.get(a.requestId);if(g===undefined||a.component!=="Pane")return w(a);const{init:C}=g;m.add(C.id);x.set(C.id,{isShown:true,isFocused:a.props.isFocused});v();const E=t.ui.resolve(a);try{return et(E,()=>C.render(o(),{...a.props,surface:a.surface,params:g.params}),me(E,rs(a,a.props.bodyColumns)))}catch(U){f.get(C.id)?.(`threw: ${se(U)}`);return et(E,()=>fe({color:"error",children:`The ${C.title} pane could not draw: ${se(U)}`}))}});n.add("ui.scroll",async(a,w)=>{const g=d.get(a.requestId)?.init;const C=await w(a);if(g?.onScroll===undefined||a.component!=="Pane"||C.deny!==undefined)return C;await Re(g,"onScroll",()=>g.onScroll?.(o(),a));return C});n.add("ui.close",async(a,w)=>{m.delete(a.id);x.delete(a.id);const g=await w(a);await v();const C=d.get(a.id)?.init;if(C?.onClose!==undefined)await Re(C,"onClose",()=>C.onClose?.(o(),a));return g})};const Se=(a,w,g)=>t.ui.scroll({to:w,in:a,...g?.block===undefined?{}:{block:g.block}}).then(({deny:C})=>{if(C!==undefined)throw new Error(`${e}: Claude Code did not scroll ${a}: ${C}`)});const Y=(a)=>{fi(e,a);if(d.has(a.id))throw new Error(`${e}: the pane "${a.id}" is already added. Give each pane its own id.`);const w={init:a,params:undefined};d.set(a.id,w);f.set(a.id,Ee(`${a.title} pane`));r(`the ${a.title} pane`);pe();const g=a;const C={id:a.id,get isOpen(){return m.has(a.id)},get isShown(){return x.get(a.id)?.isShown??false},get isFocused(){return x.get(a.id)?.isFocused??false},get params(){return w.params},async open(...[E]){if(E!==undefined&&"params"in E)w.params=E.params;const{isPlaced:U}=await P(g,$i(g,o().state),E?.focus);if(U)m.add(a.id);await O();t.ui.invalidate("ui.render")},async close(){await t.ui.close({id:a.id});m.delete(a.id);x.delete(a.id);await O()},toggle:(E)=>m.has(a.id)?C.close():C.open(E),scrollTo:(E,U)=>Se(a.id,E,U),async focus(E){const{deny:U}=await t.ui.focus({requestId:a.id,key:E});if(U!==undefined)throw new Error(`${e}: Claude Code did not focus "${E}" in the ${a.title} pane: ${U}`)},remove(){if(d.get(a.id)!==w)return;d.delete(a.id);f.delete(a.id);if(m.has(a.id))t.ui.close({id:a.id}).catch((E)=>t.ui.warn(`pane:close:${a.id}`,`${e}: the ${a.title} pane stayed open: ${se(E)}`));m.delete(a.id);x.delete(a.id)}};return C};const Pe=(a)=>Z.open.find((w)=>w.id===a);const ue=(a,w)=>{ns(e,"page",w.id,w.title);if(Q.has(w.id))throw new Error(`${e}: the page "${w.id}" is already added. Give each page its own id.`);const g={init:w,place:a,params:undefined};Q.set(w.id,g);r(a==="settings"?`the ${w.title} page in Settings`:`the ${w.title} page in the Sidebar`);ie({parts:J()});const C={id:w.id,get isOpen(){return a==="settings"?Z.shown===w.id:Pe(w.id)!==undefined},get isShown(){return Z.shown===w.id},get isFocused(){return Z.shown===w.id&&Z.isFocused},get params(){return Pe(w.id)?.params??g.params},async open(...[E]){if(E!==undefined&&"params"in E)g.params=E.params;await ie({requests:[{open:w.id,...g.params===undefined?{}:{params:g.params},...E?.focus===true?{focus:true}:{}}]})},toggle:(E)=>C.isOpen?C.close():C.open(E),close:async()=>{await ie({requests:[{close:w.id}]})},scrollTo:async(E,U)=>{await ie({requests:[{scroll:w.id,to:E,...U?.block===undefined?{}:{block:U.block}}]})},focus:async(E)=>{const U=[...j.get(`page:${w.id}`)?.values()??[]].at(-1);if(U===undefined||!Yn(V(U.render,[]),E))throw new Error(`${e}: the ${w.title} page draws no Button, Input, or Select with the key "${E}".`);await ie({requests:[{focus:w.id,key:E}]})},remove(){if(Q.get(w.id)!==g)return;Q.delete(w.id);p(`page:${w.id}`);ie({parts:J(),requests:[{close:w.id}]})}};return C};const oe=(a)=>{ns(e,"widget",a.id,a.title);if(B.has(a.id))throw new Error(`${e}: the widget "${a.id}" is already added. Give each widget its own id.`);B.set(a.id,a);r(`the ${a.title} widget`);ie({parts:J()});return{id:a.id,get area(){return b.get(a.id)},remove(){if(B.get(a.id)!==a)return;B.delete(a.id);b.delete(a.id);p(`widget:${a.id}`);ie({parts:J()})}}};const $e=({kind:a,render:w})=>{const g=typeof a==="string"?undefined:a;const C=yi(a);if(g===undefined&&C===undefined)throw new Error(`${e}: ${String(a)} is not a kind styles.add draws, such as ToolCall or CodeBlock.`);const E=`the style of ${ss(a)}`;if(R.has(E))throw new Error(`${e}: ${E} is already added. Add one style per kind.`);R.add(E);r(E);const U=(Ae)=>w(o(),Ae);const ee=(Ae)=>()=>{Ae?.remove();if(g!==undefined&&D.delete(g.markdown))ie({parts:J()});R.delete(E);t.ui.invalidate("ui.render")};if(g!==undefined){D.set(g.markdown,{Component:U,log:Ee(`${ss(a)} style`)});be(g.createReader);ie({parts:J()});return{kind:a,remove:ee()}}const ae=Ee(`${ss(a)} style`);const ve=n.add("ui.render",async(Ae,Be)=>{if(Ae.component!==C)return Be(Ae);const _=t.ui.resolve(Ae);const F=await ki(_,(de)=>U({...Ae.props,...rs(Ae),id:Ae.requestId,Default:de}),(de,ge)=>Be({...Ae,props:bi(Ae.props,de,ge)}));if("failure"in F){ae(F.failure);return Be(Ae)}if(Ae.component!=="AssistantMessage")return F.drawing;return et(_,()=>os([F],Ae.props.isFirstOfReply?"opensReply":"inReply"))});return{kind:a,remove:ee(ve)}};const p=(a)=>{for(const w of j.get(a)?.values()??[])for(const g of w.draws)T.delete(g);j.delete(a)};const u=(a,w,g,C,E=()=>{return})=>{let U=[];let ee;try{ee=V(C,U);I.delete(a)}catch(de){if(!I.has(a))s({id:a,message:`The ${w} could not draw`,error:de});I.add(a);U=[];ee=V(()=>E(de),U)}const ae=c();const ve=j.get(a)??new Map;j.set(a,ve);const Ae=JSON.stringify("turn"in g?{...g,turn:g.turn.prompt.id}:g);const Be=ve.get(Ae)?.draws??[];const _=[...Be,ae].slice(-2);for(const de of Be)if(!_.includes(de))T.delete(de);ve.delete(Ae);ve.set(Ae,{draws:_,tree:JSON.stringify(ee),render:C});const[F]=ve;if(ve.size>Cl&&F!==undefined){for(const de of F[1].draws)T.delete(de);ve.delete(F[0])}T.set(ae,{id:a,handlers:U});return{draw:ae,tree:ee}};const A=(a)=>{if("markdown"in a)return u("markdown","markdown style",a,()=>Ce(a.markdown,{surface:a.surface,columns:a.columns}));if("page"in a){const C=Q.get(a.page);if(C===undefined)throw new Error(`${e} has no ${a.page} page.`);const E=`${C.init.title} page`;return u(`page:${a.page}`,E,a,()=>C.init.render(o(),{params:a.params,isFocused:a.isFocused,columns:a.columns}),(U)=>fe({color:"error",children:`The ${E} could not draw: ${se(U)}`}))}const w=B.get(a.widget);if(w===undefined||!w.areas.includes(a.area))return null;b.set(w.id,a.area);const g=a.area===qt&&a.turn!==undefined?{area:a.area,columns:a.columns,turn:a.turn}:{area:a.area,columns:a.columns};return u(`widget:${w.id}`,`${w.title} widget`,a,()=>w.render(o(),g))};const l=async({draw:a,handler:w,args:g},C)=>{const E=T.get(a);const U=E?.handlers[w];if(E===undefined||U===undefined)throw new Error(`${e}: ${fn}`);if(C!==Ie&&E.id!=="markdown")throw new Error(`${e}: ${C} pressed a button only the cmod plugin draws.`);const ee=async()=>{try{await U(...g)}catch(ae){s({id:E.id,message:"Its button failed",error:ae,isCritical:true})}};if(C===Ie)return ye(ee);await ee();return null};return{panes:{add:Y},sidebar:{add:(a)=>ue("sidebar",a)},settings:{add:(a)=>ue("settings",a),open:async()=>{await ie({requests:[{settings:true}]})}},widgets:{add:oe},styles:{add:$e},asked:xe,async answerInput(a,w){const g=he;const C=await xe(a);if(he>g)await w();return C},answer(a,w,g){const C=a===He.draw&&Le(w)&&typeof w["markdown"]==="string";if(g!==Ie&&!C&&a!==He.press)return;if(a===He.list)return Promise.resolve({value:J()});if(a===He.draw)return Promise.resolve().then(()=>({value:A(w)}));if(a===He.press)return l(w,g).then((E)=>({value:E}));if(a===He.shown){Z=w;return Promise.resolve({value:null})}if(a===He.stylers){N(w,true);return Promise.resolve({value:null})}return},markdownIn:me,restyled:(a)=>N(a,true),started(){const a=un(q??[]);q=undefined;ie({...a,parts:J(),isStart:true})},changed(){if(B.size>0||Q.size>0)ie({redraw:true});if(d.size===0&&R.size===0)return;t.ui.invalidate("ui.render");if(k)return;k=true;Promise.resolve().then(()=>{k=false;for(const{init:a}of d.values()){if(m.has(a.id))M(a)}})},async restorePanes(){if(d.size>0)await O()}}}var pn="cmod:install";var El=8;function Ci(e,t,n,s){let r;let o=false;let i=false;let c=[];let d;const f=new Map;const m=async(H)=>{if(d!==undefined)return void d.push(H);await Fn(t()).cmod.call({to:Ie,method:He.changed,input:H})};const x=(H)=>(k)=>t().ui.warn("installer:page",`${e}: ${H}: ${se(k)}`);const O=(H)=>m({requests:[{open:pn,focus:true}],...H?{isAsked:true}:{}});const v=async(H,k,B)=>{r?.cancel();const b=new Promise((Q)=>{let Z=false;const T=(j)=>{if(Z)return;Z=true;n.hide();t().clock.after(0,()=>Q(j))};r={...k(T),cancel:()=>T(B)}});n.show(()=>O(true),H);if(o){await m({redraw:true}).catch(x("the installer did not redraw"))}else{o=true;await O(false).catch((Q)=>{o=false;n.hide();throw Q})}for(const Q of c)Q();c=[];return b};const y=()=>void m({redraw:true}).catch(x("the installer did not redraw"));const R=(...H)=>Oe({gap:2,flexShrink:0,children:H});const D=(H,...k)=>Oe({flexDirection:"column",gap:1,children:[H,...k]});const z=(H,k)=>{if(r===undefined&&!o)t().clock.after(0,()=>void m({requests:[{close:pn}]}).catch(x("a leftover install page stayed open")));const B=[];const b=jt(r?.draw({params:undefined,isFocused:k,columns:H})??fe({dimColor:true,children:`${e} needs nothing from you now.`}),B);const Q=s();f.set(Q,B);for(const Z of f.keys())if(f.size>El)f.delete(Z);return{draw:Q,tree:b}};const X=async(H)=>{const k=d;const B=[];d=B;try{await H()}finally{d=k}return un(B)};const G=async({draw:H,handler:k,args:B})=>{const b=f.get(H)?.[k];if(b===undefined)throw new Error(`${e}: ${fn}`);return X(()=>b(...B))};return{answer(H,k){if(H===He.draw&&Le(k)&&k["page"]===pn)return Promise.resolve({value:z(Number(k["columns"]),k["isFocused"]===true)});if(H===He.press&&Le(k)&&typeof k["draw"]==="number"&&f.has(k["draw"]))return G(k).then((B)=>({value:B}));return},hear(H){if(H.open.some((k)=>k.id===pn)){i=o;return}if(!i)return;o=false;i=false;r?.cancel()},options(H,k){const B=new Map;const b=new Map;return v(`Enter ${H.length===1?"one setting":`${H.length} settings`}`,(Q)=>({draw:()=>D(fe({bold:true,children:`Set up ${e}`}),fe({children:`${e} needs ${H.length===1?"one setting":`${H.length} settings`}:`}),...H.map(([Z,T])=>{const j=Oe({flexDirection:"column",children:[fe({bold:true,children:T.title}),...T.description===""?[]:[fe({dimColor:true,wrap:"wrap",children:T.description})]]});if(T.type==="secret"){return Oe({flexDirection:"column",children:[j,fe({dimColor:true,wrap:"wrap",children:`${Lt} Then press Next.`}),Vt({key:`secret:${Z}`,label:"Open /config",onPress:()=>void t().command.run({command:"config"})})]})}const I=b.get(Z);const q=Kt({key:`option:${Z}`,label:"Value",placeholder:T.type==="choice"?(T.choices??[]).join(", "):T.type==="toggle"?"true or false":T.type==="list"?"comma-separated":"",value:B.get(Z)??"",submitLabel:"save",onSubmit:(K)=>void k(Z,K).then((he)=>{if(he===undefined){B.set(Z,K);b.delete(Z)}else b.set(Z,he)}).catch((he)=>b.set(Z,se(he))).finally(y)});const te=I!==undefined?[fe({color:"error",wrap:"wrap",children:I})]:B.has(Z)?[fe({color:"success",children:"✓ saved"})]:[];return Oe({flexDirection:"column",children:[j,q,...te]})}),R(Vt({key:"next",hotkey:"x",variant:"primary",label:"Next",onPress:()=>Q(true)}),Vt({key:"not-now",hotkey:"n",label:"Not now",onPress:()=>Q(false)})))}),false)},step(H,k,B,b){let Q;return v(`Step ${B} of ${b}: ${k.title}`,(Z)=>({draw:(T)=>{let j;try{j=k.render(H,T)}catch(q){j=fe({color:"error",wrap:"wrap",children:`The ${k.title} step could not draw: ${se(q)}`})}const I=async()=>{try{if(await k.isDone(H))return Z(true);Q={color:"warning",text:`Finish ${k.title} first.`}}catch(q){Q={color:"error",text:`The ${k.title} step's isDone failed: ${se(q)}`}}await m({redraw:true})};return D(fe({children:[fe({bold:true,children:k.title}),fe({dimColor:true,children:`  (${B} of ${b})`})]}),j,...Q===undefined?[]:[fe({color:Q.color,wrap:"wrap",children:Q.text})],R(Vt({key:"next",hotkey:"x",variant:"primary",label:B===b?"Finish":"Next",onPress:()=>void I()}),Vt({key:"not-now",hotkey:"n",label:"Not now",onPress:()=>Z(false)})))}}),false)},async close(){r?.cancel();r=undefined;if(!o)return;o=false;i=false;await m({requests:[{close:pn}]}).catch(x("the install page stayed open"))},changed(){if(r!==undefined&&o)y()},shown:()=>new Promise((H)=>void c.push(H)),collect:X}}class mn extends Error{keys;titles;constructor(e,t){super(`it needs ${mt(t)}`);this.keys=e;this.titles=t}}function _i({name:e,declared:t,fromClaude:n,claude:s,report:r,changed:o}){let i=Ei(t,n,{},new Set);let c;let d;const f=async()=>{if(Object.keys(t).length===0)return new Set;const x=await s.config.list().catch((O)=>{s.ui.warn("options:config",`${e} could not read /config, so a project's options.json may override a value your organization set: ${se(O)}`);return[]});return new Set(x.filter((O)=>O.isLocked&&O.key.startsWith(`${e}.`)).map((O)=>O.key.slice(e.length+1)))};const m=async(x)=>{const O={HOME:await s.env.home(),CLAUDE_CONFIG_DIR:await s.env.configHome()};const v=kn(O,e,x).find(({tier:z})=>z==="project");if(v===undefined)return{};const y=`${v.folder}/options.json`;if(!await s.fs.exists(y))return{};const{values:R,ignored:D}=ci(e,t,await s.fs.read(y));for(const z of D)r({id:`options:${y} ${z}`,message:`Ignores part of ${y}`,description:`${y} ${z}`});return R};return{get values(){return i},get missing(){return Object.entries(t).filter(([x,O])=>O.default===undefined&&oo(i[x])).map(([x])=>x)},async load(x){if(Object.keys(t).length===0)return;c??=await f();const O=await m(x);const v=d===undefined;d=x;const y=Ei(t,n,O,c);if(!v&&JSON.stringify(y)===JSON.stringify(i))return;i=y;if(!v)o()}}}function Ei(e,t,n,s){return Object.freeze(Object.fromEntries(Object.entries(e).map(([r,o])=>[r,_l(r,o,t[r],n,s)])))}function _l(e,t,n,s,r){if(r.has(e))return n;if(Object.hasOwn(s,e))return s[e];if(!oo(n)&&dn(t,n)===undefined)return Array.isArray(n)?Object.freeze([...n]):n;return t.default??(t.type==="list"?Object.freeze([]):t.type==="number"?undefined:"")}var is=new AbortController().signal;function mo(){const e=new Map;return{add(t,n,s){const r={hook:n,...s===undefined?{}:{failed:s}};e.set(t,[...e.get(t)??[],r]);return{remove(){const o=(e.get(t)??[]).filter((i)=>i!==r);if(o.length===0)e.delete(t);else e.set(t,o)}}},dispatch(t,n,s,r=is){const o=e.get(t);const i=async(c,d)=>{const f=o?.[c];if(f===undefined)return s(d);return f.hook(d,Object.assign((m)=>i(c+1,m),{signal:r}))};return i(0,n)},dispatchFailure(t,n,s,r,o){const i=e.get(t);const c=async(d,f)=>{const m=i?.[d];if(m===undefined)return r(f);const x=await m.failed?.(f,s,Object.assign((O)=>c(d+1,O),{signal:is,called:o}));return x===undefined?c(d+1,f):x};return c(0,n)}}}var Pi=["memory","session","project","global"];var Pl=20;var Tl=new WeakMap;function Rl(e,t,n){return`${e}.${t}.sessions.${n}`}function Ti({name:e,initial:t,session:n,root:s,claude:r,report:o,changed:i,forkParent:c}){const d=()=>{i();for(const T of Tl.get(Z)??[])T()};const f=jl(e,t);const m=Ml(f);let x=s;let O=n;let v=Promise.resolve();const y=(T)=>{const j=v.then(T);v=Promise.allSettled([j]);return j};const R=(T,j)=>T==="project"?`${e}.${j}.projects.`:Rl(e,j,"");const D=(T,j,I)=>T==="global"?`${e}.${j}`:`${R(T,j)}${I}`;const z=(T,j,I)=>r.store.get(D(T,j,I));const X=async(T,j,I,q)=>{if(T!=="project")return r.store.set(D(T,j,q),I);await r.store.delete(D(T,j,q));await r.store.set(D(T,j,q),I);const te=(await r.store.keys()).filter((K)=>K.startsWith(R(T,j)));for(const K of te.slice(0,-Pl))await r.store.delete(K)};const G=`${e}.$transcripts.`;const H=async(T)=>{const j=await r.store.keys();const I=async(te)=>{const K=await r.store.get(te);return typeof K!=="string"||!await r.fs.exists(K)};const q=j.filter((te)=>te.startsWith(G)&&te!==`${G}${T}`);await Promise.all(q.map(async(te)=>{if(!await I(te))return;const K=te.slice(G.length);await Promise.all(j.filter((he)=>he.startsWith(`${e}.`)&&he.endsWith(`.sessions.${K}`)).map((he)=>r.store.delete(he)));await r.store.delete(te)}))};const k=async(T,j)=>{const I=[];for(const q of T){for(const te of Object.keys(f[q]))I.push([q,te,q==="memory"?undefined:await z(q,te,q==="project"?j.root:j.session)])}x=j.root;O=j.session;for(const[q,te,K]of I)m[q][te]=K===undefined?f[q][te]:hn(e,`${q}.${te}`,K);d()};const B=async(T,j)=>{for(const I of Object.keys(f.session)){const q=await z("session",I,T);if(q!==undefined)await X("session",I,q,j)}};const b=async(T)=>(await r.store.keys()).some((j)=>j.startsWith(`${e}.`)&&j.endsWith(`.sessions.${T}`));const Q=(T)=>new Proxy(m[T],{set(j,I,q){if(typeof I!=="string")throw new Error(`${e}: mod.state.${T} keys are text, not ${String(I)}.`);if(!Object.hasOwn(f[T],I))throw new Error(`${e}: mod.state.${T}.${I} is not declared. Add it to state.${T} in defineMod with its starting value.`);if(Object.is(j[I],q))return true;j[I]=hn(e,`${T}.${I}`,q);if(T!=="memory"){const te=T==="project"?x:O;y(()=>X(T,I,q,te)).catch((K)=>{o({id:`state:${T}.${I}`,message:`Could not keep state.${T}.${I}`,error:K})})}d();return true}});const Z=Object.freeze(Object.fromEntries(Object.keys(t).map((T)=>[T,Q(T)])));return{state:Z,get root(){return x},changed:d,load:()=>y(async()=>{if(Object.keys(f.session).length>0&&!await b(O)){const T=await c();if(T!==undefined)await B(T,O)}return k(Pi,{root:x,session:O})}),moveTo:(T)=>y(async()=>T===x?undefined:k(["project"],{root:T,session:O})),switchSession:(T,j,I)=>y(async()=>{if(Object.keys(f.session).length>0){await r.store.set(`${G}${T}`,I);H(T).catch((q)=>o({id:"state:sessions",message:"Could not forget the session values of ended sessions",error:q}))}if(T===O)return;if(j==="fork")await B(O,T);return k(["memory","session"],{root:x,session:T})})}}function jl(e,t){const n={memory:{},session:{},project:{},global:{}};for(const[s,r]of Object.entries(t)){if(!Il(s))throw new Error(`${e}: state.${s} is not a lifetime. Put each value in state.memory, state.session, state.project, or state.global.`);if(!Ri(r))throw new Error(`${e}: state.${s} is not an object of values. Write state: { ${s}: { key: value } }.`);for(const[o,i]of Object.entries(r))n[s][o]=hn(e,`${s}.${o}`,i)}return n}function Ml(e){return{memory:{...e.memory},session:{...e.session},project:{...e.project},global:{...e.global}}}function Il(e){return Pi.includes(e)}function hn(e,t,n){const s=Array.isArray(n);if(!s&&!Ri(n))return n;const r=s?n.map((c)=>hn(e,t,c)):Object.fromEntries(Object.entries(n).map(([c,d])=>[c,hn(e,t,d)]));const o=s?`mod.state.${t} = [...mod.state.${t}, item]`:`mod.state.${t} = { ...mod.state.${t}, field: value }`;const i=()=>{throw new Error(`${e}: mod.state.${t} cannot change in place. Assign it a new value, such as ${o}, so the mod redraws and keeps it.`)};return new Proxy(Object.freeze(r),{set:i,defineProperty:i,deleteProperty:i})}function Ri(e){if(typeof e!=="object"||e===null)return false;const t=Object.getPrototypeOf(e);return t===Object.prototype||t===null}var ji="cmod:failed";var Ll=/^https:\/\/github\.com\/([^/]+\/[^/#?]+?)(?:\.git)?(?:\/issues)?\/?$/;var Nl=2048;var Mi="cmod:hidden-failures";var Dl=30000;var Ii=[1e4,60000,300000];var Fl=4000;var Li=3;var ho=2;var Bl=16;var Ni=["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];var Bi=100;var Wl=1e4/Bi;var Hl="…";var zl={default:{glyph:" "},success:{glyph:"✓",color:"success"},info:{glyph:"ℹ",color:"suggestion"},warning:{glyph:"⚠",color:"warning"},error:{glyph:"✗",color:"error"}};function Wi(e,t,n){const s=new Map;const r=new Map;const o=new Map;e.store.get(Mi).then((S)=>{if(typeof S!=="object"||S===null)return;for(const[W,J]of Object.entries(S))if(typeof J==="string"&&!r.has(W))r.set(W,J)},(S)=>I("hidden:read",`${t}: could not read the failures you hid: ${se(S)}`));let i=0;let c=0;let d;let f=false;let m=false;let x;const O=(S)=>S.type==="loading"||S.trying!==undefined;const v=(S)=>S.spinsFrom!==undefined&&c-S.spinsFrom<Wl;const y=()=>{for(const W of s.values())W.spinsFrom=O(W)?W.spinsFrom??c:undefined;const S=[...s.values()].some(v);if(S&&d===undefined){d=e.clock.every(Bi,()=>{c+=1;y()})}if(!S&&d!==undefined){d.cancel();d=undefined}if(s.size<=Li)m=false;e.ui.invalidate("ui.render")};const R=(S)=>{S.timer?.cancel();S.timer=undefined};const D=(S)=>{const W=S.options.duration??Fl;if(S.timer!==undefined||S.type==="loading"||S.isOpen||!Number.isFinite(W))return;S.timer=e.clock.after(W,()=>{S.timer=undefined;if(f)D(S);else z(S.id)})};const z=(S)=>{if(S===undefined)o.clear();else o.delete(String(S));for(const W of s.values()){if(S!==undefined&&W.id!==S&&!W.merged.has(String(S)))continue;for(const J of W.merged.keys())o.delete(J);R(W);s.delete(W.id)}y()};const X=(S,W,J,N,V)=>{const re=J.id??(i+=1);const ce=s.get(re);if(ce?.trying!==undefined&&S==="loading"){ce.trying=J.description??W;y();return re}if(ce!==undefined)R(ce);const ie=V!==undefined&&ce?.hides===V?ce.reporting:undefined;const xe={id:re,type:S,message:W,options:J,actions:N,...V===undefined?{}:{hides:V},merged:new Map,count:1,at:new Date,isOpen:ce?.isOpen??false,reporting:ie,timer:undefined};if(S==="error"&&ce?.message!==W)e.ui.log(`${t}: ${W}${typeof J.description==="string"?`: ${J.description}`:""}`,{to:"debug"});s.set(re,xe);y();return re};const G=(S)=>(W,J={})=>X(S,W,J,J.action===undefined?[]:[J.action]);const H=(S)=>{z(S.id);if(S.hides===undefined)return;for(const[W,J]of[[String(S.id),S.hides],...S.merged])r.set(W,J);e.store.set(Mi,Object.fromEntries(r)).catch((W)=>I("hidden:write",`${t}: could not remember the failure you hid: ${se(W)}`))};const k=Object.assign(G("default"),{success:G("success"),info:G("info"),warning:G("warning"),error:G("error"),loading:G("loading"),dismiss:z,promise(S,W){const J=G("loading")(W.loading);const N=Promise.resolve().then(()=>typeof S==="function"?S():S).then((V)=>{G("success")(typeof W.success==="function"?W.success(V):W.success,{id:J});return V},(V)=>{G("error")(typeof W.error==="function"?W.error(V):W.error,{id:J});throw V});N.catch(()=>{return});return{unwrap:()=>N}}});const B=async(S)=>{const W=await e.ui.copy({text:S});if(!W.isCopied)throw new Error(W.reason)};const b=(S,W)=>()=>void Promise.resolve().then(W).catch((J)=>te({id:`press:${S.id}`,message:`${S.message}: the press failed`,error:J,isCritical:true}));const Q=(S)=>e.cmod.call({to:Ie,method:ji,input:S});const Z=()=>e.fs.read(`${e.plugin.root}/.claude-plugin/plugin.json`).then((S)=>String(JSON.parse(S).version)).catch((S)=>`unknown (${se(S)})`);const T=(S,W,J)=>`${t} ${S}, @cmodjs/core ${Yt}, at ${W.toISOString()}
-${J}`;const j=new Map;const I=(S,W)=>{e.ui.log(W,{to:"debug"});const J=new Date;const N=`${W}
-${J.toISOString().slice(0,16)}`;if(j.get(S)===N)return;j.set(S,N);e.clock.after(0,()=>{(async()=>{const V=await Z();await Q({mod:t,id:S,message:W,details:T(V,J,W),at:J.toISOString(),isCritical:false,root:e.plugin.root,level:"warning",version:V,core:Yt})})().catch(()=>{return})})};const q=async(S,W)=>{const J={isSettled:false};try{const N=Q(S).finally(()=>void(J.isSettled=true));const V=await(W?N:Bt(e,{ms:Dl},ji,N));if(Le(V)&&typeof V["showsToast"]==="boolean")return V["showsToast"];throw new Error(`cmod answered ${V===undefined?"nothing":JSON.stringify(V)}, not { showsToast: true or false }`)}catch(N){if(!J.isSettled||ks(N))return"unanswered";e.ui.log(`${t}: cmod kept no Log of ${S.id}, so it shows the toast: ${se(N)}`,{to:"debug"});return}};const te=({id:S,message:W,error:J,description:N=J===undefined||as(J)===W?undefined:as(J),retry:V,isCritical:re=false,root:ce=e.plugin.root})=>{if(!re&&ks(J)){I(S,`${t}: ${W}: ${as(J)}`);return S}const ie=`${n()??""}
-${W}
-${J===undefined?"":as(J)}`;const xe=new Date;const ye=`${ie}
-${N??""}
-${xe.toISOString().slice(0,16)}`;if(o.get(S)===ye)return S;o.set(S,ye);const Ee=J instanceof Error&&J.stack!==undefined?`
+class rt {
+  schema;
+  draft;
+  shortCircuit;
+  lookup;
+  constructor(e, r = "2019-09", t = true) {
+    this.schema = e, this.draft = r, this.shortCircuit = t, this.lookup = ce(e);
+  }
+  validate(e) {
+    return F(e, this.schema, this.draft, this.lookup, this.shortCircuit);
+  }
+  addSchema(e, r) {
+    if (r)
+      e = { ...e, $id: r };
+    ce(e, this.lookup);
+  }
+}
+var Ar = /^[A-Za-z]:\//;
+function Ee(e = "") {
+  if (!e)
+    return e;
+  return e.replace(/\\/g, "/").replace(Ar, (r) => r.toUpperCase());
+}
+var Er = /^[/\\](?![/\\])|^[/\\]{2}(?!\.)|^[A-Za-z]:[/\\]/;
+function br() {
+  return "/";
+}
+var ve = function(...e) {
+  e = e.map((n) => Ee(n));
+  let r = "", t = false;
+  for (let n = e.length - 1;n >= -1 && !t; n--) {
+    let o = n >= 0 ? e[n] : br();
+    if (!o || o.length === 0)
+      continue;
+    r = `${o}/${r}`, t = ye(o);
+  }
+  if (r = ze(r, !t), t && !ye(r))
+    return `/${r}`;
+  return r.length > 0 ? r : ".";
+};
+function ze(e, r) {
+  let t = "", n = 0, o = -1, u = 0, s = null;
+  for (let i = 0;i <= e.length; ++i) {
+    if (i < e.length)
+      s = e[i];
+    else if (s === "/")
+      break;
+    else
+      s = "/";
+    if (s === "/") {
+      if (o === i - 1 || u === 1)
+        ;
+      else if (u === 2) {
+        if (t.length < 2 || n !== 2 || t[t.length - 1] !== "." || t[t.length - 2] !== ".") {
+          if (t.length > 2) {
+            let h2 = t.lastIndexOf("/");
+            if (h2 === -1)
+              t = "", n = 0;
+            else
+              t = t.slice(0, h2), n = t.length - 1 - t.lastIndexOf("/");
+            o = i, u = 0;
+            continue;
+          } else if (t.length > 0) {
+            t = "", n = 0, o = i, u = 0;
+            continue;
+          }
+        }
+        if (r)
+          t += t.length > 0 ? "/.." : "..", n = 2;
+      } else {
+        if (t.length > 0)
+          t += `/${e.slice(o + 1, i)}`;
+        else
+          t = e.slice(o + 1, i);
+        n = i - o - 1;
+      }
+      o = i, u = 0;
+    } else if (s === "." && u !== -1)
+      ++u;
+    else
+      u = -1;
+  }
+  return t;
+}
+var ye = function(e) {
+  return Er.test(e);
+};
+var ft = function(e, r) {
+  let t = Ee(e).split("/"), n = "";
+  for (let o = t.length - 1;o >= 0; o--) {
+    let u = t[o];
+    if (u) {
+      n = u;
+      break;
+    }
+  }
+  return r && n.endsWith(r) ? n.slice(0, -r.length) : n;
+};
+var Sn = Kt(wt(), 1);
+var Mt = vt();
+var Dt = Pt();
+var $s = Sn.default;
 
-${J.stack}`:"";const ne=async(P)=>T(await Z(),P,`${W}${N===undefined?"":`
-${N}`}${Ee}`);const le=async(P=0)=>{const M=await Di(e);const Re=await Z();const pe={mod:t,id:S,message:W,details:T(Re,xe,`${W}${N===undefined?"":`
-${N}`}${Ee}`),at:xe.toISOString(),isCritical:re,root:ce,...M===undefined?{}:{contact:M},level:"error",version:Re,core:Yt};const Se=await q(pe,re);const Y=Ii[P];if(Se==="unanswered"&&Y!==undefined)return void e.clock.after(Y,()=>void le(P+1));if(Se==="unanswered")e.ui.log(`${t}: cmod did not answer ${Ii.length+1} times, so ${S} reached no Log and shows its toast`,{to:"debug"});if(re)return;if(Se!==false)return L();e.ui.log(`${t}: ${W}${N===undefined?"":`: ${N}`}`,{to:"debug"})};const L=()=>{if(r.get(S)===ie)return;r.delete(S);const P=s.get(S);const M=N??W;const Re=P===undefined?[...s.values()].find((Se)=>Se.hides!==undefined&&Se.trying===undefined&&(Se.options.description??Se.message)===M):P.hides===ie&&P.trying===undefined&&P.options.description===N?P:undefined;if(Re!==undefined){if(Re!==P)Re.merged.set(S,ie);Re.count+=1;Re.at=new Date;y();return}const pe=[{label:"Report",onClick:me},...V===undefined?[]:[{label:"Retry",onClick:Ce}],...be];X("error",W,{id:S,...N===undefined?{}:{description:N},duration:Infinity},pe,ie)};const me=async()=>{const P=s.get(S);if(P===undefined)return;P.reporting={contact:await Di(e),details:await ne(P.at)};R(P);y();if(x===undefined)return;const M=await e.ui.focus({requestId:x,key:`toast:${S}:ask-claude`});if("deny"in M)I("report:focus",`${t}: the Report choices did not take the keys: ${String(M.deny)}`)};const Ce=async()=>{const P=s.get(S);if(P===undefined||V===undefined||P.trying!==undefined)return;P.trying="Starting";y();try{await V()}finally{if(s.get(S)===P){P.trying=undefined;y()}}};const be=[{sentence:ps,label:"Plugins",onClick:()=>e.command.run({command:"plugin"})},{sentence:Lt,label:"Open /config",onClick:()=>e.command.run({command:"config"})}].filter(({sentence:P})=>`${W}
-${N??""}`.includes(P));if(re)L();e.clock.after(0,()=>void le());return S};const K=(S)=>()=>{S.isOpen=!S.isOpen;R(S);y()};const he=(S,W)=>{const{description:J}=S.options;const N=typeof J==="string";const V=S.type==="loading"||S.trying!==undefined?{glyph:v(S)?Ni[c%Ni.length]:Hl,color:"claude"}:zl[S.type];const re=N?Ue({plain:true,key:`toast:${S.id}:open`,label:S.message,onPress:K(S)}):fe({children:S.message});const ce=!N?J:fe({dimColor:true,wrap:S.isOpen?"wrap":"truncate-end",children:S.isOpen?J:xn(J)});const ie=(Ce)=>Oe({flexShrink:0,children:Ce});const xe=Ue({plain:true,dimColor:true,key:`toast:${S.id}:close`,label:"✕",onPress:()=>H(S)});const ye=S.actions.map((Ce,be)=>Ue({plain:true,key:`toast:${S.id}:${be===0?"action":`action-${be}`}`,label:Ce.label,onPress:b(S,Ce.onClick)}));const Ee=fe({dimColor:true,children:S.count>1?`${Fi(S.at)} · ${S.count} times`:Fi(S.at)});const ne=ye.length===0?[]:[Oe({gap:ho,flexWrap:"wrap",children:[...ye,Ee].map(ie)})];const le=S.trying===undefined?undefined:Oe({gap:1,children:[fe({dimColor:true,children:"Trying again:"}),typeof S.trying==="string"?fe({dimColor:true,wrap:"truncate-end",children:S.trying}):S.trying]});const L=ce===undefined?[]:[le??ce];const me=le!==undefined&&ce===undefined?[le]:S.reporting===undefined?ne:we(S,S.reporting);return Oe({width:W,gap:ho,justifyContent:"space-between",children:[Oe({gap:ho,flexShrink:1,children:[ie(fe({...V.color===undefined?{}:{color:V.color},children:V.glyph})),ie(fe({dimColor:true,children:t.padEnd(Bl)})),Oe({flexDirection:"column",flexShrink:1,children:[re,...L,...me]})]}),ie(xe)]})};const we=(S,{contact:W,details:J,status:N})=>{const V=(ye)=>{S.reporting={contact:W,details:J,status:ye};y()};const re=()=>{S.reporting=undefined;y()};const ce=async()=>{await e.prompt.submit({text:Gl(t,W,J),asUser:true});re()};const ie=async()=>{const ye=await e.ui.copy({text:J});V(ye.isCopied?"Copied the error.":`Could not copy it: ${ye.reason}`)};const xe=W===undefined?[]:[Ul(`toast:${S.id}:report`,W,t,S.message,J)];return[fe({dimColor:true,children:"Claude writes up the problem and files it with your tools. You approve each step before anything is posted."}),Oe({gap:2,flexWrap:"wrap",children:[Ue({plain:true,key:`toast:${S.id}:ask-claude`,label:"Ask Claude to report it",onPress:b(S,ce)}),...xe,Ue({plain:true,key:`toast:${S.id}:copy`,label:"Copy the error",onPress:b(S,ie)}),Ue({plain:true,dimColor:true,key:`toast:${S.id}:back`,label:"Back",onPress:re})]}),...N===undefined?[]:[fe({dimColor:true,children:N})]]};return{toast:k,copy:B,fail:te,warn:I,get shown(){return[...s.values()].map(({type:S,message:W,options:J})=>({type:S,message:W,...typeof J.description==="string"?{description:J.description}:{}}))},draw(S,W,J,N){x=N;f=J.hasSurvey===true;if(f||s.size===0)return S;const V=[...s.values()];const re=m?0:Math.max(V.length-Li,0);for(const ie of V.slice(re))D(ie);const ce=Ue({plain:true,dimColor:true,key:"toasts:more",label:`+${re} more`,onPress:()=>{m=true;y()}});return et(W,()=>Oe({flexDirection:"column",children:[S,...re>0?[ce]:[],...V.slice(re).map((ie)=>he(ie,J.bodyColumns))]}))}}}function as(e){const t=[];for(let n=e;n!==undefined;n=n instanceof Error?n.cause:undefined){const s=se(n);if(!t.some((r)=>r.includes(s)||s.includes(r)))t.push(s)}return t.join(`
-`)}async function Di(e){const t=await e.fs.read(`${e.plugin.root}/.claude-plugin/plugin.json`).then((i)=>JSON.parse(i)).catch((i)=>{e.ui.log(`${e.plugin.name}: could not read whom to report to: ${se(i)}`,{to:"debug"});return{}});const n=Le(t["repository"])?t["repository"]["url"]:t["repository"];const s=[t["supportUrl"],n].map((i)=>typeof i==="string"?Ll.exec(i)?.[1]:undefined).find((i)=>i!==undefined);if(s!==undefined)return{kind:"github",repository:s};const r=t["author"];const o=Le(r)?r["email"]:undefined;return typeof o==="string"&&o!==""?{kind:"email",address:o}:undefined}function Ul(e,t,n,s,r){const o=`${n}: ${s}`.slice(0,120);const i=(d)=>t.kind==="github"?`https://github.com/${t.repository}/issues/new?title=${encodeURIComponent(o)}&body=${encodeURIComponent(d)}`:`mailto:${t.address}?subject=${encodeURIComponent(o)}&body=${encodeURIComponent(d)}`;let c=r;while(i(c).length>Nl&&c.length>0)c=`${c.slice(0,Math.floor(c.length*0.8))}…`;return Ue({plain:true,key:e,href:i(c),label:t.kind==="github"?"Report it on GitHub (opens your browser)":"Email the author (opens your mail app)"})}function Gl(e,t,n){const s=t===undefined?`${e} names no place to report it, so find its author from its plugin.json or its marketplace.`:t.kind==="github"?`Report it as an issue on https://github.com/${t.repository}.`:`Email it to ${t.address}.`;return`The ${e} mod failed. Report it to its author. ${s} First check whether it is reported already, and add to that report instead of filing a new one. Show me the report before you post it.
+// node_modules/@cmodjs/core/utils/paths.js
+var missingPath = /(?:^|: )(?:ENOENT|ENOTDIR)\b/;
+function isMissing(error) {
+  return missingPath.test(messageOf(error));
+}
+function ifMissing(value) {
+  return (error) => {
+    if (isMissing(error))
+      return value;
+    throw error;
+  };
+}
+var homePrefix = /^(~|\$HOME|\$CLAUDE_CONFIG_DIR)(?=\/|$)/;
+function expandHome(path, home, configRoot = `${home}/.claude`) {
+  const prefix = homePrefix.exec(path)?.[0];
+  if (prefix === undefined)
+    return path;
+  return `${prefix === "$CLAUDE_CONFIG_DIR" ? configRoot : home}${path.slice(prefix.length)}`;
+}
+function relativePath(base, path) {
+  if (path === base)
+    return "";
+  const prefix = base === "/" ? "/" : `${base}/`;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : undefined;
+}
 
-${n}`}function Fi(e){return`${String(e.getHours()).padStart(2,"0")}:${String(e.getMinutes()).padStart(2,"0")}`}async function Jl(e,t){if(t===undefined)return new Map;const n=await e.fs.read(`${t}/keybindings.json`).catch(Ne("{}"));try{return Do(JSON.parse(n))}catch(s){e.ui.warn("hotkeys:read",`${t}/keybindings.json is not JSON, so cmod reads no combos from it: ${se(s)}`);return new Map}}async function Hi({name:e,declared:t,configRoot:n,claude:s,router:r,answerInput:o,report:i}){if(e===Ie){r.add("command.describe",async(x,O)=>{const v=await O(x);return x.command.startsWith(Sn(x.provider.plugin.replace(/@[^@]*$/,""),""))?{...v,isHidden:true}:v})}const c=Object.entries(t);if(c.length===0)return{};const d=await Jl(s,n);const f=new Map;const m=new Map;for(const[x,{title:O}]of c){f.set(x,new Set);s.command.register({name:Sn(e,x),description:O,immediate:true}).then(({command:v})=>void m.set(v,x),(v)=>i({id:`hotkey:${x}`,message:`The ${O} hotkey is not added`,error:v}))}r.add("command.run",async(x,O)=>{const v=m.get(x.command);if(v===undefined)return O(x);return o(async()=>{for(const y of f.get(v)??[]){try{await y()}catch(R){i({id:`hotkey:${v}`,message:`The ${t[v]?.title??v} hotkey failed`,error:R,isCritical:true})}}return{}},()=>O(x))});return Object.fromEntries(c.map(([x,{title:O}])=>[x,{title:O,combo:d.get(Sn(e,x)),onPress(v){f.get(x)?.add(v);return{remove:()=>void f.get(x)?.delete(v)}}}]))}var Kl=200;function zi({claude:e,report:t,press:n}){const s=new Map;const r=new Map;const o=new Map;const i=(d,f)=>`${d}\x00${f}`;const c=(d)=>o.get(d)??0;return{fill(d,f,m,x){const O=i(d,f);const v=c(d);if(s.get(O)?.generation===v)return;const y=(D,z)=>{s.delete(O);s.set(O,{data:D,...z===undefined?{}:{failure:z},generation:v});const[X]=s.keys();if(s.size>Kl&&X!==undefined)s.delete(X);if(c(d)!==v)e.ui.invalidate("ui.render")};const R=r.get(O)??e.cmod.call({to:d,method:He.draw,input:m}).then((D)=>y(D??null),(D)=>{if(Wt(d,D))return y(s.get(O)?.data??null);t(`draw:${d}`,`${x} drew nothing`,D);y(s.get(O)?.data??null,se(D))}).finally(()=>r.delete(O));r.set(O,R);return R},element(d,f,m,x,O){const v=i(d,f);const y=s.get(v);if(y===undefined)return;s.delete(v);s.set(v,y);const{data:R}=y;if(R===null||R.tree===null)return;try{return ln(R.tree,m,(D,z)=>n(d,{draw:R.draw,handler:D,args:z}))}catch(D){t(O,`${x} could not draw`,D);return}},failure(d,f){return s.get(i(d,f))?.failure},forget(d){o.set(d,c(d)+1)}}}var Vl=500;var ql=4;var Ui=2000;function Gi(e,t){const n=new Set;let s;let r=false;let o=0;const i=async(m)=>{const{paths:x}=m;const O=new Map;const v=new Set;const y=o%ql===0?new Set:m.missing;const R=async(D)=>{const z=await e.fs.stat(D).catch(Ne(undefined));if(z===undefined)return;if(z.kind!=="dir"){if(O.size===Ui)throw new Error(`fs.onChange watches at most ${Ui} files, and ${x.join(", ")} holds more, so it stopped. Watch a smaller folder.`);return void O.set(D,z.mtimeMs)}for(const X of await e.fs.list(D).catch(Ne([])))await R(`${D}/${X.name}`)};for(const D of x){if(y.has(D)){v.add(D);continue}await R(D);if(![...O.keys()].some((z)=>z===D||z.startsWith(`${D}/`)))v.add(D)}m.missing=v;return O};const c=(m)=>{n.delete(m);if(n.size>0)return;s?.cancel();s=undefined};const d=(m)=>i(m).catch((x)=>{c(m);t({id:"fs:onChange",message:"Could not read the files fs.onChange watches",error:x});return});const f=async()=>{if(r)return;r=true;o+=1;try{for(const m of n){const x=await d(m);if(x===undefined)continue;const O=m.seen;m.seen=x;if(O===undefined)continue;const v=[...[...x].filter(([y,R])=>O.has(y)&&O.get(y)!==R).map(([y])=>({path:y,type:"change"})),...[...x.keys()].filter((y)=>!O.has(y)).map((y)=>({path:y,type:"add"})),...[...O.keys()].filter((y)=>!x.has(y)).map((y)=>({path:y,type:"unlink"}))];for(const y of v)await Promise.resolve().then(()=>m.listener(y)).catch((R)=>t({id:"fs:onChange",message:"The fs.onChange listener failed",error:R}))}}finally{r=false}};return{add(m,x){const O={paths:m,listener:x,seen:undefined,missing:new Set};n.add(O);d(O).then((v)=>void(O.seen??=v));s??=e.clock.every(Vl,()=>void f());return{remove:()=>c(O)}}}}function Ji({value:e,width:t=24}){const n=Math.round(Math.min(Math.max(e,0),100)/100*t);return fe({children:[fe({color:"claude",children:"█".repeat(n)}),fe({color:"subtle",children:"░".repeat(t-n)})]})}var ta=[We.subscribe,We.watchBefore];var Xl=[...ta,He.draw];var Ki="cmod:announced";var go="cmod:cmod-updated-for";var Xt="cmod:install";var Vi="cmod:asking";var qi="cmod:record";var wo="cmod:download";var Xi=[2,4,8,16,32,64,128];var Zl=1000;var Ql=1000;var Yl=1000;var eu=60000;var tu=1e4;var Zi=Dn/2;var nu=30000;var su=3;var ou=60000;var ru=["Bash","PowerShell"];async function na(e){const{name:t,root:n}=e.plugin;const s=async(v)=>{const y=await e.fs.stat(v).catch(Ne(undefined));return y?.kind==="file"?e.fs.read(v):undefined};const r=await Qi(s,`${n}/.claude-plugin/plugin.json`);const o=typeof r?.version==="string"?r.version:undefined;const i=kt({HOME:await e.env.home(),XDG_DATA_HOME:await e.env.dataHome()});const c=Ro(await Qi(s,`${n}/package.json`))??{};if(t===Ie){const v=await zt(e);return{name:t,root:n,version:o,store:i,steps:c,isInstalled:o!==undefined&&v!==undefined&&On(v,o),shouldRecord:false}}const d={name:t,root:n,version:o,store:i,steps:c};const f=await fs(s,i,t);if(Object.keys(c).length===0)return{...d,isInstalled:true,shouldRecord:f?.version!==o};const m=await Wo(c,{read:(v)=>s(`${n}/${v}`),list:(v)=>sa(e,`${n}/${v}`)});if(o===undefined||f?.scriptsSha256!==m)return{...d,isInstalled:false,shouldRecord:false};const x=f.version===o||f.root===n;const O=await _o(async(v)=>(await e.fs.stat(v).catch(Ne(undefined)))?.mtimeMs,i,f);return{...d,isInstalled:x,shouldRecord:x&&(f.version!==o||Po(f,O))}}async function sa(e,t){const n=await e.fs.list(t);const s=await Promise.all(n.map(async({name:r,kind:o,isLink:i})=>{if(o==="file"||i)return[r];if(o==="dir")return(await sa(e,`${t}/${r}`)).map((c)=>`${r}/${c}`);return[]}));return s.flat()}async function Qi(e,t){const n=await e(t);if(n===undefined)return;try{return JSON.parse(n)}catch(s){throw new Error(`${t} is not JSON (${se(s)}). Fix it, then press Retry.`)}}function oa(e,t=()=>{return},n={},s=true,r){let o=mo();let i;let c="starting";let d;let f;let m;let x;let O;const v=async()=>{await K().cmod.call({to:Ie,method:He.changed,input:{requests:[{settings:true}],isAsked:true}})};let y;let R;let D;let z=n;let X=0;const G=()=>X+=1;const H=Ci(e.name,()=>K(),{show:(_,F)=>{if(c!=="active")d?.toaster.toast.dismiss(Xt);d?.toaster.toast.info("Finish setting up",{id:Vi,description:F,duration:Infinity,action:{label:"Continue",onClick:_}})},hide:()=>d?.toaster.toast.dismiss(Vi)},G);let k=false;let B;let b;let Q=false;const Z=new Map;let T=()=>{return};const j=new Promise((_)=>T=_);let I;let q=()=>{return};const te=()=>c==="installing"||c==="waiting"?I??=new Promise((_)=>{q=()=>{I=undefined;_()}}):undefined;const K=()=>{if(d===undefined)throw new Error(`${e.name}: the lifecycle has not started. registerMod(addHook, mod, options) starts it at session.start.`);return d.claude};const he=(_)=>d?.toaster.toast.loading("Installing",{id:Xt,..._===undefined?{}:{description:_}});const we=(_)=>d?.toaster.fail(_);const S=(_,F,de,ge)=>{c="failed";q();D??=new Error(`${e.name}: ${_}${/[.!?]$/.test(_)?"":"."}${F===undefined?"":` ${F}`}`,{cause:ge});const ke=de===undefined?{}:{retry:()=>(D=undefined,ce(),de().catch(oe))};we({id:Xt,message:_,...F===undefined?{}:{description:F},...ge===undefined?{}:{error:ge},...ke,isCritical:true});C()};const W=()=>{const _=D===undefined?"":se(D);const F=`${e.name}: `;return _===""?`${e.name} is not set up.`:`${e.name} is not set up: ${_.startsWith(F)?_.slice(F.length):_}`};const J=()=>pe();const N=()=>K().store.delete(go).then(J);let V;const re=(_)=>{const F=Xi[Math.min(_.tries,Xi.length-1)];V?.timer.cancel();V={..._,tries:_.tries+1,timer:K().clock.after(F*1000,()=>void xe().catch(oe))};S(_.reason,`Trying again in ${F} s.`,J)};const ce=()=>{V?.timer.cancel();V=undefined};const ie=(_,F)=>{if(F===undefined){ce();return S(_,undefined,J)}re({when:F,tries:V?.when===F?V.tries:0,reason:_})};const xe=async()=>{if(c!=="failed"||V===undefined)return;if(await l()){ce();return U()}await pe(true);await U()};const ye=async()=>{await f?.refresh();c="ready";x??=new Promise((_)=>K().clock.after(0,()=>_(M().catch(oe))));q();K().ui.invalidate("ui.render")};const Ee=async()=>{if(m===undefined||await zt(K())===undefined)return;let _;const{code:F,lastError:de}=await Tt(K().process.spawn({argv:["cmod","setup",m.root,"--events"],env:{CLAUDE_CODE_SESSION_ID:await K().session.id()}}),(ge)=>{const ke=An(ge);if(ke.type==="done")k=false;if(ke.type==="failed")_=ke.message});if(!k){d?.toaster.toast.dismiss(qi);return f?.refresh()}if(_!==undefined)return void we({id:qi,message:_,retry:le,isCritical:true});throw new Error(`cmod setup ${Xe(F,de)}`)};const ne=async()=>{await B;if(m===undefined)return true;const _=await fs((F)=>K().fs.read(F).catch(Ne(undefined)),m.store,m.name);return _===undefined||_.root===m.root};const le=()=>{B??=Ee().catch((_)=>K().ui.warn("record",`${e.name} has no cmod record yet: ${se(_)}`)).finally(()=>{B=undefined})};const L=async(_,F)=>{const de=e.options?.[_];if(de===undefined||m===undefined)return`${e.name} has no option ${_}.`;const ge=de.type==="number"?Number(F):de.type==="toggle"?F.trim()==="true":de.type==="list"?F.split(",").map((_e)=>_e.trim()).filter((_e)=>_e!==""):F;const ke=de.type==="toggle"&&!["true","false"].includes(F.trim())?"takes true or false":dn(de,ge);if(ke!==undefined)return`${de.title} ${ke}.`;const Te=await K().process.run(["cmod","option",m.name,_,Array.isArray(ge)?ge.join(","):String(ge)]);return Te.exitCode===0?undefined:Un(Te.stderr,"option")||`cmod option ${Xe(Te.exitCode,"")}.`};const me=async(_)=>{if(!s||m===undefined||(await K().session.surfaces()).length===0)return false;const F=e.options??{};const de=_.keys.flatMap((Te)=>{const _e=F[Te];return _e===undefined?[]:[[Te,_e]]});if(!await H.options(de,L))return false;const ge=`${m.name}.`;const ke=await K().config.list();z={...z,...Object.fromEntries(ke.filter((Te)=>Te.key.startsWith(ge)).map((Te)=>[Te.key.slice(ge.length),Te.value]))};return true};const Ce=async(_,F)=>{try{return await F.isDone(_)}catch(de){we({id:`step:${F.title}`,message:`The ${F.title} step's isDone failed`,error:de});return}};const be=async(_)=>{const F=[];for(const de of e.installer??[])if(await Ce(_,de)!==true)F.push(de.title);return F};const P=async(_)=>{const F=s?e.installer??[]:[];try{for(const[de,ge]of F.entries()){const ke=await Ce(_,ge);if(ke===undefined)break;if(ke)continue;const Te=(await K().session.surfaces()).length>0&&await H.step(_,ge,de+1,F.length);if(!Te){d?.toaster.toast.warning(F.length-de===1?"Needs one more step":`Needs ${F.length-de} more steps`,{id:"cmod:steps",description:`Starting with ${ge.title}.`,duration:Infinity,action:{label:"Finish",onClick:()=>P(_)}});break}}}finally{await H.close()}};const M=async()=>{if(d===undefined||m===undefined)return;const _=mo();i=_;const F=await iu(e,{...d,router:_,dataFolder:us(m.store,m.name),store:m.store,permissionRoutes:t,options:z,nextDraw:G,installer:H,serveCmodPlugin:r,isInstalledCopy:ne}).catch(async(_e)=>{if(_e instanceof mn&&await me(_e))return;await H.close();S(se(_e),_e instanceof mn?`Retry asks for ${_e.keys.length===1?"it":"them"}.`:undefined,ue,_e);throw _e}).finally(()=>{i=undefined});if(F===undefined)return M();const{added:de}=F;O=F.mod;y=F.imports;R=F.raise;o=_;c="active";E();const ge=[...Z.values()];Z.clear();for(const _e of ge){const Fe=(Ke)=>void we({id:`listens:${String(_e.caller)}`,message:`${String(_e.caller)} hears nothing from this session`,error:Ke});_.dispatch("cmod.call",_e,async()=>({deny:`${e.name} has no method ${_e.method}.`})).then((Ke)=>("deny"in Ke)?Fe(new Error(Ke.deny)):undefined,Fe)}d.claude.ui.invalidate("ui.render");if(e.name===Ie)d.claude.ui.invalidate("command.describe");P(F.mod).catch((_e)=>we({id:"cmod:steps",message:"Its installer stopped",error:_e,isCritical:true}));const ke=b;b=undefined;if(ke!==undefined)await Re(ke);if(await d.claude.store.get(Ki)!==undefined){d.toaster.toast.dismiss(Xt);return}await d.claude.store.set(Ki,{version:m.version??""});const{toaster:Te}=d;Vr(d.claude,m,de,v).then(({message:_e,...Fe})=>Te.toast.success(_e,{id:Xt,duration:Kr,...Fe})).catch((_e)=>we({id:Xt,message:"Could not say what it installed",error:_e}))};const Re=async(_)=>{Q=true;const F=await o.dispatch("classic.SessionStart",_,async()=>({})).catch((ke)=>{we({id:"classic.SessionStart",message:"The SessionStart hook failed",error:ke});return{}});const{additionalContext:de,...ge}=F;for(const ke of de??[]){const Te=await K().session.append({message:{type:"user",content:[{type:"text",text:ke}]}});if(Te.deny!==undefined)K().ui.warn("session-start:note",`${e.name}: Claude Code refused its SessionStart note: ${Te.deny}`)}if(Object.keys(ge).length>0){K().ui.warn("session-start:late",`${e.name} started after Claude Code's SessionStart, so Claude Code did not read ${Object.keys(ge).join(", ")} from its SessionStart hooks.`)}};const pe=async(_=false)=>{if(m===undefined)return;c="installing";if(m.name===Ie){Pe(m.root);return ye()}const F=await zt(K());if(!Se(F))return Y(F);if(!_)he();let de;let ge;const{code:ke,lastError:Te}=await Tt(K().process.spawn({argv:["cmod","setup",m.root,"--events"],env:{CLAUDE_CODE_SESSION_ID:await K().session.id()}}),(_e)=>{const Fe=An(_e);if(Fe.type==="progress"&&!_)he(ea(Fe));if(Fe.type==="retries")ge=Fe.when;if(Fe.type==="done"||Fe.type==="failed")de=Fe});if(de?.type==="done"){ce();return ye()}return ie(de?.type==="failed"?de.message:`cmod setup ${Xe(ke,Te)}`,ge)};const Se=(_)=>_!==undefined&&On(_,Nt);const Y=(_)=>{c="waiting";he("Waiting for cmod");let F=_;let de;const ge=()=>{Te.cancel();_e.cancel()};const ke=(Fe)=>K().clock.every(Fe,()=>{de??=zt(K()).then((Ke)=>{de=undefined;F=Ke;if(!Se(Ke))return;ge();return pe()}).catch((Ke)=>{ge();oe(Ke)})});let Te=ke(Zl);const _e=K().clock.after(eu,()=>{Te.cancel();Te=ke(tu);if(F===undefined)return he("Still waiting for cmod to download cmod. See cmod's own line.");const Fe=F;const Ke=`${Fe} to ${Nt}`;return K().store.get(go).then(async(It)=>{if(It===Ke){ge();return S(`${e.name} needs cmod ${Nt} or later, and the newest cmod is ${Fe}.`,undefined,N)}await K().store.set(go,Ke);he(`${e.name} needs cmod ${Nt} or later, and this computer has cmod ${Fe}, so cmod is updating itself.`);const{code:ft,lastError:vt}=await Tt(K().process.spawn({argv:["cmod","update","cmod"]}),()=>{return});if(ft===0)return;ge();S(`${e.name} needs cmod ${Nt} or later, and updating cmod ${Fe} ${Xe(ft,vt)}`,undefined,N)}).catch(oe)})};const Pe=(_)=>{const F=(ge)=>d?.toaster.toast.loading("Downloading the cmod program",{id:wo,...ge===undefined?{}:{description:ge}});F();const de=Tt(K().process.spawn({argv:["sh","-c","./setup/bootstrap.sh"],cwd:_}),(ge)=>{const ke=An(ge);if(ke.type==="progress")F(ea(ke))}).then(({code:ge,lastError:ke})=>{if(ge!==0)throw new Error(`bootstrap ${Xe(ge,ke)}`)});f?.waitFor(de);de.then(()=>d?.toaster.toast.dismiss(wo),(ge)=>we({id:wo,message:se(ge),retry:async()=>Pe(_),isCritical:true}))};const ue=async()=>{if(u===undefined)return;const _=await u(K());m=_;p=await $e(vn(_.store,_.name));if(_.isInstalled){k=_.shouldRecord;if(k)le();x=undefined;return M()}if(_.version===undefined)return S("no version to install",'Its author adds "version" to .claude-plugin/plugin.json.');pe().catch(oe)};const oe=(_)=>{D=_;if(c!=="failed")S(se(_),undefined,ue,_)};const $e=async(_)=>{const F=await K().fs.stat(_).catch(Ne(undefined));return F?.kind==="file"?F.mtimeMs:0};let p=0;let u;const A=async()=>{if(m===undefined||u===undefined)return false;const _=await $e(vn(m.store,m.name));if(_===p)return false;p=_;const F=await u(K());if(!F.isInstalled)return false;m=F;return true};const l=async()=>{if(c!=="failed"||!await A())return false;D=undefined;x=undefined;await ye();return true};let a;let w;let g;const C=()=>{a??=K().clock.every(Ql,()=>{w??=l().then(()=>{return}).catch((_)=>K().ui.warn("record:watch",`${e.name} could not read whether another cmod installed it: ${se(_)}`)).finally(()=>{w=undefined})})};const E=()=>{a?.cancel();a=undefined};const U=async()=>{if(c==="ready")x??=M().catch(oe);if(x!==undefined&&c!=="active")await x};const ee=(_,F)=>d===undefined?_.then(()=>false):new Promise((de)=>{const ge=K().clock.after(Zi,()=>de(true));if(F?.aborted===true)de(false);F?.addEventListener("abort",()=>de(false),{once:true});_.then(()=>{ge.cancel();de(false)})});const ae=(_)=>ee(j.then(U),_);const ve=(_)=>ee(j.then(te).then(U),_);const Ae=(_)=>{const F=U();return x!==undefined&&c!=="active"?ee(F,_):F.then(()=>false)};const Be=async(_,F,de,ge)=>{if(y!==undefined)Gt(y);const ke=F;if(_==="cmod.call"&&ke.to===e.name&&ke.caller===Ie){if(ke.method===He.shown)H.hear(ke.input);const pt=H.answer(ke.method,ke.input);if(pt!==undefined)return await pt.catch((Qt)=>({deny:`${e.name}: ${se(Qt)}`}));if(ke.method===He.shown&&c!=="active")return{value:null}}if(_==="classic.SessionStart"){b=undefined;Q=true}if(_==="classic.SessionStart"&&d===undefined){b=F;return de(F)}if(k&&_==="classic.UserPromptSubmit")le();if(_==="classic.UserPromptSubmit"||_==="classic.SessionStart")await l().catch((pt)=>K().ui.warn("recover",`${e.name} stays stopped: ${se(pt)}`));const Te=F.tool;const _e=_==="cmod.call"&&F.to===e.name||_==="tool.call"&&typeof Te==="string"&&Te.startsWith(`mcp__${e.name}__`);if(_==="cmod.call"&&!_e)return de(F);const Fe=_e&&_==="cmod.call"&&ta.includes(ke.method);if(Fe&&c!=="active"){Z.set(`${ke.caller}
-${ke.method}
-${String(ke.input.session)}`,ke);j.then(te).then(U);return{value:null}}const Ke=_e&&!(_==="cmod.call"&&Xl.includes(ke.method));const It=await(Ke?ve(ge):_==="classic.SessionStart"||_==="session.append"||_e?ae(ge):Ae(ge));if(_==="classic.SessionStart"&&c!=="active"){b=F;return de(F)}if(_e&&c!=="active")return{deny:c==="failed"?W():Bn(e.name)};if(It&&c!=="active")return(i??o).dispatchFailure(_,F,new Error(`it was still starting after ${Zi/1000} s`),de,false);const ft=F;if(_==="cmod.call"&&ft.to===e.name&&O!==undefined){if(ft.method===jo)return{value:await be(O)};if(ft.method===Mo){const pt=O;const Qt=await H.collect(()=>Promise.race([P(pt).catch((ds)=>void we({id:"cmod:steps",message:"Could not finish the setup",error:ds,isCritical:true})),H.shown()]));return{value:Qt}}}if(_==="classic.UserPromptSubmit"&&c==="active"&&!Q){const{session_id:pt,transcript_path:Qt,cwd:ds}=F;await Re({session_id:pt,transcript_path:Qt,cwd:ds,hook_event_name:"SessionStart",source:"resume"})}const vt=o.dispatch(_,F,de,ge);const yn=F;if(_!=="ui.render"||yn.component!=="AbovePrompt"||d===undefined)return vt;return d.toaster.draw(await vt,d.claude.ui.resolve(yn),yn.props,yn.requestId)};return{get phase(){return c},get mod(){return O},get failure(){return D},get toasts(){return d?.toaster.shown??[]},async raise(_,F){if(R===undefined||y===undefined)throw new Error(`${e.name} has not started, so ${_} has no listener yet.`);Gt(y);return R(_,F,is)},async start(_,F){if(d!==undefined)return;const de=(Te,_e)=>void Ai(_,Te,_e.surface).then((Fe)=>Fe==="copied"&&d?.toaster.toast.success("Copied the link",{description:"Paste it in your browser."}),(Fe)=>we({id:"open-link",message:"Could not open the link",error:Fe,isCritical:true}));const ge={..._,ui:{..._.ui,warn:(Te,_e)=>d===undefined?_.ui.warn(Te,_e):d.toaster.warn(Te,_e),resolve:(Te)=>ui(_.ui.resolve(Te),Te.surface,de)},session:{..._.session,id:async()=>g??_.session.id()}};f=mr(ge);const ke={...ge,cmod:{async call(Te){if(Te.to===e.name)await ae();return bs(_,o).cmod.call(Te)}}};d={claude:f.claude,toaster:Wi(ke,e.name,()=>m?.version)};u=F;try{X=await _.clock.now()*Yl;await f.refresh();await ue().catch(oe)}finally{T()}},async route(_,F,de,ge){if(_!=="classic.SessionStart")return rn(Be(_,F,de,ge),ge);const ke=F.session_id;g=ke;try{return await rn(Be(_,F,de,ge),ge)}finally{if(g===ke)g=undefined}},async caught(_,F,de,{error:{kind:ge,message:ke},called:Te}){const _e=F;const Fe=_==="cmod.call"&&_e.to===e.name&&yo(_e)!==undefined;const Ke={timeout:vs,throw:ke??"it threw"};const It=Ke[ge];if(It===undefined)return Fe?{value:null}:de(F);const ft=new Error(It);const vt=Te&&ge==="throw"?await de(F).then(()=>{return},se):undefined;if(vt===undefined||vt!==ke)we({id:`stopped:${_}`,message:`Claude Code stopped its ${_.replace(/^classic\./,"")} hook`,error:ft});return(i??o).dispatchFailure(_,F,ft,de,Te)}}}async function iu(e,t){const{router:n,toaster:s}=t;const r=(l)=>void s.fail(l);const o=new Set;const i=bs(Fn(t.claude),n);const c=(l)=>{i.ui.invalidate(l);if(l==="ui.render")for(const a of o)a()};const d={...i,ui:{...i.ui,invalidate:c}};const f=[];const m=(l)=>{f.push(l)};const[x,O,v,y,R]=await Promise.all([d.session.id(),d.session.root(),d.session.cwd(),d.env.home(),d.env.configHome()]);const D=R??(y===undefined?undefined:`${y}/.claude`);const z={home:y,configRoot:D,projectRoot:()=>he.root};const X=ii({name:e.name,claude:d,places:z,report:r});let G=v;let H=v;let k;let B;let b;let Q=true;let Z;let T;const j=(l,a,w,g)=>{const C=`The markdown style of ${l}`;T?.fill(l,a,w,C)?.then(()=>d.ui.invalidate("ui.render"));return T?.element(l,a,`${l}/markdown:${g}:`,C,`markdown:${l}`)};const I=Oi({name:e.name,claude:d,router:n,report:r,announce:m,mod:()=>le,borrowed:j,nextDraw:t.nextDraw});const q=async()=>{if(e.name===Ie)return;try{const l=await d.cmod.call({to:Ie,method:"forkParent",input:null});return typeof l==="string"?l:undefined}catch(l){d.ui.warn("fork:values",`${e.name} starts without the session values of the conversation it was forked from: ${se(l)}`);return}};const te=()=>b??=q().then((l)=>{B=l;return l});const K=()=>{I.changed();t.installer.changed()};const he=Ti({name:e.name,initial:e.state??{},session:x,root:O,claude:d,report:r,changed:K,forkParent:te});const we=_i({name:e.name,declared:e.options??{},fromClaude:t.options,claude:d,report:r,changed:he.changed});const S=(l,a,w)=>n.add(`classic.${l}`,_r(l,a,r),w===undefined?undefined:Pr(w));const W=(l)=>sn.test(l)?Jt(l,z):l;const J=(l)=>({read:()=>d.settings.read({source:l}),async update(a){await d.cmod.call({to:Ie,method:"updateSettings",input:{mod:e.name,source:l,project:he.root,values:a}})}});const N=Fr({name:e.name,claude:d,report:(l,a,w)=>r({id:l,message:a,error:w}),hookOn:(l,a,w)=>S(l,a,w),routeOn:(l,a,w)=>n.add(l,a,w),permissionRoutes:t.permissionRoutes});let V;const re=Gi(d,r);const ce=(l,a)=>{if(V===undefined)return;V={...V,project:l,cwd:a};N.follow(V)};let ie;const xe={sessions:N.sessions,commands:{list:async()=>(await d.command.list()).map(({name:l,description:a,source:w,plugin:g})=>({name:l,description:a,source:w,...g===undefined?{}:{plugin:g}})),run:async(l,a)=>{const{text:w,context:g}=await d.command.run({command:l,...a===undefined?{}:{args:a}});return{...w===undefined?{}:{text:w},...g===undefined||g.length===0?{}:{note:g.join(`
-`)}}},beforeRun:(...l)=>N.listen("beforeRun",l),onRun:(...l)=>N.listen("onRun",l)},config:{list:async()=>(await d.config.list()).map(({key:l,label:a,description:w,kind:g,value:C,options:E,provider:U,isLocked:ee})=>({key:l,label:a,kind:g,value:C,isLocked:ee,...w===undefined?{}:{description:w},...E===undefined?{}:{options:E},...U.plugin==="engine"?{}:{plugin:U.plugin}}))},settings:{user:J("user"),project:J("project"),local:J("local"),beforeFileChange:(l,a)=>{const w=a??l;const g=a===undefined?undefined:l;return S("ConfigChange",async({source:C,file_path:E})=>{const U={source:C==="skills"?"skills":C.replace("_settings",""),...E===undefined?{}:{path:E}};if(g!==undefined&&!rt(U,g))return;const ee=(await w(U))?.refuse;return typeof ee==="string"?{block:ee}:undefined})}},model:{complete:(l,a)=>d.model.complete(l,a)},fs:{read:(l)=>d.fs.read(W(l)),write:(l,a)=>d.fs.write(W(l),a),exists:(l)=>d.fs.exists(W(l)),find:(l)=>X.find(l),list:async(l)=>(await d.fs.list(l===undefined?undefined:W(l))).map(({name:a,kind:w,size:g,mtimeMs:C,isLink:E})=>({name:a,isFile:w==="file",isFolder:w==="dir",isLink:E,size:g,modifiedAt:C})),async stat(l,a){const{kind:w,size:g,mtimeMs:C,isLink:E,realPath:U}=await d.fs.stat(W(l),a);return{isFile:w==="file",isFolder:w==="dir",isLink:E,size:g,modifiedAt:C,...U===undefined?{}:{realPath:U}}},onChange:({path:l},a)=>re.add([l].flat().map((w)=>Jt(w,z)),(w)=>{Gt(xe);return a(w)})},metadata:{read:(l)=>X.read(l),update:(l,a)=>X.update(l,a)},process:{run:(l,a)=>d.process.run(l,a),spawn:(l,a)=>d.process.spawn({...a,argv:l})},http:{fetch:(l,a)=>d.http.fetch(l,a)},device:{read:()=>ie??=d.device.read().catch((l)=>{ie=undefined;throw l})},clipboard:{async write(l){await s.copy(l)}},mods:{isLoaded:async(l)=>await d.cmod.call({to:Ie,method:dr,input:{name:l}})===true}};const ye=(l,a,w,g)=>{let C=false;let E=true;let U=0;let ee=false;const ae=async()=>{const _=await d.clock.now()-U;if(ee||_<Math.max(Ae*su,ou))return;ee=true;d.ui.warn(`${a}:${l}:stalled`,`${e.name}: one run of its ${a} ${l} ms timer has gone on for ${Math.round(_/1000)} s, so the timer skipped every tick since. Give what the listener awaits a deadline.`)};const ve=()=>{if(!w)E=false;if(C){ae();return}C=true;ee=false;Promise.resolve().then(async()=>{U=await d.clock.now();Gt(xe);return g()}).catch((_)=>r({id:`${a}:${l}`,message:`The ${a} ${l} ms timer failed`,error:_})).finally(()=>{C=false})};const Ae=cu(e.name,`mod.${a}`,l);const Be=w?d.clock.every(Ae,ve):d.clock.after(Ae,ve);return{get isRunning(){return E},stop(){E=false;Be.cancel()}}};const Ee=await Hi({name:e.name,declared:e.hotkeys??{},configRoot:D,claude:d,router:n,answerInput:I.answerInput,report:r});const ne=async(l,a,w)=>{const{exitCode:g,stdout:C,stderr:E}=await d.process.run(["cmod","secret",l,e.name,a],w===undefined?undefined:{stdin:w});if(g!==0)throw new Error(`${e.name}: mod.secrets.${l}: ${Un(E,"secret")||`cmod secret ${Xe(g,"")}.`}`);return C};const le={name:e.name,folder:d.plugin.root,dataFolder:t.dataFolder,secrets:{get:async(l)=>await ne("get",l)||undefined,store:async(l,a)=>void await ne("store",l,a),delete:async(l)=>void await ne("delete",l)},state:he.state,get options(){return we.values},hotkeys:Ee,every:(l,a)=>ye(l,"every",true,a),after:(l,a)=>ye(l,"after",false,a),use:(l)=>l({mod:le,announce:m,reserveName:$e}),log:(l,a)=>{if(a?.level==="error")r({id:`log:${l}`,message:l});else if(a?.level==="warning")d.ui.warn(`log:${l}`,`${e.name}: ${l}`);else d.ui.log(`${e.name}: ${l}`,{to:a?.to??"debug"})},panes:I.panes,sidebar:I.sidebar,settings:I.settings,widgets:I.widgets,styles:I.styles,toast:s.toast,ask:(l,a)=>d.ui.ask(l,a),dependencies:ur(d,(l,a)=>Bt(d,{ms:nu},l,a))};Gt(xe);const L=async(l=false)=>{try{const[a,w]=await Promise.all([d.session.root(),d.session.cwd()]);const g=G;const C=a!==he.root;if(l&&C&&ys(a,w)===undefined)k=w;if(w!==k)k=undefined;const E=k===undefined?w:a;if(!C&&E===g)return;G=E;ce(a,E);await he.moveTo(a).catch((ee)=>{if(G===E)G=H;ce(he.root,G);throw ee});if(C)await we.load(a);H=E;if(!C)I.changed();if(E===g)return;const U={session_id:await d.session.id(),cwd:E,hook_event_name:"CwdChanged",old_cwd:g,new_cwd:E};await n.dispatch("classic.CwdChanged",U,async()=>({}))}catch(a){r({id:"cmod:follow",message:`Keeps the state of ${he.root} until the next prompt or folder move`,error:a})}};const me=async(l,a)=>{const[w,g]=await Promise.all([d.session.model(),d.session.usage()]);V={id:l,title:a??"",project:he.root,cwd:G,model:w,startedAt:new Date(g.startedAt).toISOString(),...B===undefined?{}:{forkedFrom:B},...Z===undefined?{}:{agentType:Z}};N.follow(V)};n.add("classic.SessionStart",async(l,a)=>{Z=l.agent_id===undefined?l.agent_type:Z;const w=V?.id;if(l.source==="fork"&&w!==undefined&&w!==l.session_id)B=w;else if(l.session_id!==w){B=undefined;b=undefined}Q=l.source!=="startup"&&l.source!=="clear";await me(l.session_id,l.session_title).catch((g)=>r({id:"cmod:current",message:"Kept the details of the session from before",error:g}));await he.switchSession(l.session_id,l.source,l.transcript_path).catch((g)=>{r({id:"cmod:session",message:`Kept its session values from before the ${l.source}`,error:g})});return a(l)});n.add("classic.UserPromptSubmit",async(l,a)=>{k=undefined;await L();const w=l.source===undefined||l.source==="user"||l.source==="sdk";await me(l.session_id,l.session_title||(w&&!Q&&N.sessions.current.title===""?xn(l.prompt):undefined)).catch((g)=>r({id:"cmod:current",message:"Kept the details of the session from before",error:g}));return a(l)});for(const l of["classic.PostToolUse","classic.PostToolUseFailure"]){n.add(l,async(a,w)=>{if(ru.includes(a.tool_name))await L();return w(a)})}n.add("command.run",async(l,a)=>{const w=await a(l);if(l.command==="cd"){await L(true);Se?.moved()}return w});n.add("skill.prompt",Tr(d));n.add("ui.press",(l,a)=>I.asked(()=>a(l)));let Ce={};let be;const P=(l,a,w)=>r({id:l,message:a,error:w});const M=(l,a)=>{if(se(a).includes(fn))s.toast.warning(`The ${l} button was from an older drawing, so nothing ran`,{id:`press:${l}`,description:"Press the button it shows now."});else r({id:`press:${l}`,message:`${l} did not take the press`,error:a,isCritical:true})};const Re=(l,a)=>void d.cmod.call({to:l,method:He.press,input:a}).catch((w)=>{T?.forget(l);d.ui.invalidate("ui.render");M(l,w)});T=zi({claude:d,report:P,press:(l,a)=>be===undefined?Re(l,a):be.press(l,a)});const pe=t.serveCmodPlugin?.({claude:d,router:n,store:t.store,project:()=>he.root,report:P,clear:(l)=>s.toast.dismiss(l),tellRefusedPress:M,parts:T,markdownIn:I.markdownIn,tellStylers:I.restyled});const Se=pe?.conversations;const Y=pe?.widgets;be=pe?.pages;const Pe=(l,a)=>{if(a.session===""||l===Ie)return;d.clock.after(0,()=>void d.cmod.call({to:l,method:We.sessionColor,input:a}).catch((w)=>{if(!Wt(l,w))d.ui.warn("color:tell",`cmod: ${l} did not hear the session's color: ${se(w)}`)}))};Se?.onColor((l)=>{N.recolor(l);for(const{mod:a}of be?.declared()??[])Pe(a,l)});n.add("cmod.call",async(l,a)=>{if(l.to!==e.name)return a(l);const w=l;if(l.method===We.changed&&w.caller===Ie){const{session:E,change:U,isInProject:ee}=l.input;N.changed(E,U,ee!==false,a.signal);return{value:null}}if(l.method===We.sessionColor&&w.caller===Ie){N.recolor(l.input);return{value:null}}const g=yo(w);if(g!==undefined)return{value:await N.answerBefore(g.session,g.event,g.change,g.isInProject,a.signal)??null};if(l.method===He.changed&&w.caller!==undefined&&be!==undefined){const E=l.input;if(E.parts!==undefined&&Se!==undefined)Pe(w.caller,Se.color());return{value:{isHeld:be.update(w.caller,E),stylers:be.stylers()}}}if(w.caller!==undefined){const E=l.method===He.draw?l.input.turn:undefined;const U=I.answer(l.method,E===undefined?l.input:{...l.input,turn:N.turn(E)},w.caller);if(U!==undefined)return U.catch((ee)=>({deny:`${e.name}: ${se(ee)}`}))}const C=await Se?.answer(w);return C??lr(e.name,Ce,l)},(l,a)=>{if(l.to!==e.name)return;const w=yo(l);return w===undefined?{deny:`${e.name}: ${a.message}`}:{value:N.failedBefore(w.session,w.event,w.change,w.isInProject,a)??null}});const ue=fr(d,n);Xr(le,{claude:d,router:n,toolCalls:ue,report:r,hasPermissionCheck:()=>t.permissionRoutes()!==undefined,answerInput:I.answerInput,spawnCmod:(l,a)=>Gn(d,l,x,a),isInstalledCopy:t.isInstalledCopy,watches:re,onRedraw(l){o.add(l);return{remove:()=>void o.delete(l)}},...Y===undefined?{}:{widgets:Y},...be===undefined?{}:{pages:be}});const oe=new Set;const $e=(l,a,w)=>{const g=`${l}:${a}`;if(oe.has(g))throw new Error(w);oe.add(g);return{remove:()=>void oe.delete(g)}};const p=async()=>{if(!await t.isInstalledCopy())return;for(const{name:l}of await d.fs.list(Lo(t.store,e.name)).catch(Ne([]))){const a=l.endsWith(".json")?l.slice(0,-".json".length):undefined;if(a!==undefined&&!oe.has(`service:${a}`))await Es(d,["program",e.name,"--remove-service","--",a],x)}};await gn("its state did not load",()=>he.load());await gn("its options did not load",()=>we.load(O));const u=we.missing;if(u.length>0)throw new mn(u,u.map((l)=>e.options?.[l]?.title??l));await gn("the details of its session did not load",()=>me(x,undefined));const A=await gn("its setup function threw",()=>e.setup(le));Ce=au(e.name,A);await gn("its open panes did not load",()=>I.restorePanes());I.started();p().catch((l)=>r({id:"program:services",message:"Could not stop a service it no longer runs",error:l}));return{mod:le,added:f,imports:xe,raise:N.raise,area:I}}function au(e,t){if(t===undefined||t===null)return{};if(typeof t!=="object"||!Object.values(t).every((n)=>typeof n==="function"))throw new Error(`${e}: setup returns its API, an object of methods other mods call, or nothing. It returned ${typeof t==="object"?"an object with values that are not methods":typeof t}.`);return t}var Yi=2147483647;function cu(e,t,n){if(!Number.isInteger(n)||n<=0||n>Yi)throw new Error(`${e}: ${t} is ${n}. Give a whole number of milliseconds above 0 and at most ${Yi}.`);return n}function yo(e){if(e.method!==We.before||e.caller!==Ie)return;const{session:t,event:n,change:s,isInProject:r}=e.input;return{session:t,event:n,change:s,isInProject:r!==false}}async function gn(e,t){try{return await t()}catch(n){throw new Error(`${e}: ${se(n)}`,{cause:n})}}function ea({done:e,total:t,label:n}){return Oe({gap:2,children:[Ji({value:t>0?e/t*100:0}),fe({dimColor:true,wrap:"truncate-end",children:n})]})}var Zt;var ra;var uu;var fu=[100,300,600];var pu="Lock file is already being held";var mu=globalThis;async function ia(e){for(const t of fu){try{return await e()}catch(n){if(!se(n).includes(pu))throw n;await new Promise((s)=>void mu.setTimeout(s,t))}}return e()}async function hu(e,t,n){const s={plugin:{name:e.plugin.name,root:e.plugin.root},ui:{log:(o,i)=>e.ui.log(o,i),warn:(o,i)=>e.ui.log(i,{to:"debug"}),notice:(o,i)=>e.ui.notice(o,i),toast:(o,i)=>e.ui.toast(o,i),invalidate:(o)=>e.ui.invalidate(o),ask:(o,i)=>e.ui.ask(o,i),open:(o)=>e.ui.open(o),close:(o)=>e.ui.close(o),panes:()=>e.ui.panes(),scroll:(o)=>e.ui.scroll(o),copy:(o)=>e.ui.copy(o),focus:(o)=>e.ui.focus(o),resolve:(o)=>e.ui.resolve(o)},process:{run:(o,i)=>e.process.run(o,i),spawn:(o)=>e.process.spawn(o)},fs:{read:(o)=>e.fs.read(o),write:(o,i)=>e.fs.write(o,i),list:(o)=>e.fs.list(o),exists:(o)=>e.fs.exists(o),stat:(o,i)=>e.fs.stat(o,i)},http:{fetch:(o,i)=>e.http.fetch(o,i)},settings:{read:(o)=>e.settings.read(o)},config:{list:()=>e.config.list()},store:{get:(o)=>e.store.get(o),set:(o,i)=>ia(()=>e.store.set(o,i)),delete:(o)=>ia(()=>e.store.delete(o)),keys:()=>e.store.keys()},clock:{now:()=>e.clock.now(),after:(o,i)=>e.clock.after(o,i),every:(o,i)=>e.clock.every(o,i)},session:{id:()=>e.session.id(),root:()=>e.session.root(),cwd:()=>e.session.cwd(),model:()=>e.session.model(),usage:()=>e.session.usage(),surfaces:()=>e.session.surfaces(),version:async()=>(await e.session.version()).version,messages:(o)=>o===undefined?e.session.messages():e.session.messages(o),append:(o)=>e.session.append(o),send:(o)=>e.session.send(o)},prompt:{submit:(o)=>e.prompt.submit(o)},turn:{abort:(o)=>e.turn.abort(o)},model:{complete:(o,i)=>e.model.complete(o,i)},command:{register:(o)=>e.command.register(o),list:()=>e.command.list(),run:(o)=>e.command.run(o)},tool:{register:(o)=>e.tool.register(o),call:(o)=>e.tool.call(o)},agent:{list:()=>e.agent.list(),spawn:(o)=>e.agent.spawn(o)},env:{home:()=>e.env.get("HOME"),dataHome:()=>e.env.get("XDG_DATA_HOME"),configHome:()=>e.env.get("CLAUDE_CONFIG_DIR"),browser:()=>e.env.get("BROWSER"),sshConnection:()=>e.env.get("SSH_CONNECTION"),display:()=>e.env.get("DISPLAY"),waylandDisplay:()=>e.env.get("WAYLAND_DISPLAY")},device:{read:()=>Jr(s)},cmod:{call:(o)=>e.cmod.call(o)}};const[,r]=await rn(Promise.all([Zt.start(s,na),n(t)]),n.signal);return r}function je(e,t,n){return Zt.route(n.event,t,(s)=>n(s),n.signal)}function Me(e,t,n){return Zt.caught(n.event,t,(s)=>n(s),n)}var aa=(e,t)=>({...e,caller:t.origin.plugin});var ca=(e)=>(t)=>e(Object.fromEntries(Object.entries(t).filter(([n])=>n!=="caller")));function gu(e,t,n){return Zt.route("cmod.call",aa(t,n),ca(n),n.signal)}function wu(e,t,n){return Zt.caught("cmod.call",aa(t,n),ca(n),n)}function da(e,t,n){yu(e,t,n);e("ui.render",je).catch(Me)}function yu(e,t,n,s){ra=undefined;uu=t;Zt=oa(t,()=>ra,n,true,s);e("session.start",hu);e("classic.Setup",je).catch(Me);e("classic.SessionStart",je).catch(Me);e("classic.SessionEnd",je).catch(Me);e("classic.UserPromptSubmit",je).catch(Me);e("classic.UserPromptExpansion",je).catch(Me);e("classic.InstructionsLoaded",je).catch(Me);e("classic.ConfigChange",je).catch(Me);e("classic.DirectoryAdded",je).catch(Me);e("classic.PreModelSwitch",je).catch(Me);e("classic.PostModelSwitch",je).catch(Me);e("classic.PermissionDenied",je).catch(Me);e("classic.PostToolUse",je).catch(Me);e("classic.PostToolUseFailure",je).catch(Me);e("classic.PostToolBatch",je).catch(Me);e("classic.MessageDisplay",je).catch(Me);e("classic.SubagentStart",je).catch(Me);e("classic.SubagentStop",je).catch(Me);e("classic.TaskCreated",je).catch(Me);e("classic.TaskCompleted",je).catch(Me);e("classic.TeammateIdle",je).catch(Me);e("classic.Elicitation",je).catch(Me);e("classic.ElicitationResult",je).catch(Me);e("classic.Notification",je).catch(Me);e("classic.PreCompact",je).catch(Me);e("classic.PostCompact",je).catch(Me);e("classic.Stop",je).catch(Me);e("classic.StopFailure",je).catch(Me);e("classic.WorktreeCreate",je).catch(Me);e("classic.WorktreeRemove",je).catch(Me);e("tool.call",je).catch(Me);e("prompt.submit",je).catch(Me);e("prompt.context",je).catch(Me);e("command.run",je).catch(Me);e("session.measure",je).catch(Me);e("skill.prompt",je).catch(Me);e("ui.press",je).catch(Me);e("ui.scroll",je).catch(Me);e("ui.close",je).catch(Me);e("cmod.call",{to:t.name},gu).catch(wu);e("session.compact",je).catch(Me)}var $u=/^[A-Za-z0-9_-]{1,64}$/;function la(e,t){const n=new Set;for(const s of t){if(!$u.test(s.id))throw new Error(`${e}: the install step "${s.id}" has no valid id. Use 1 to 64 letters, digits, "_", or "-".`);if(s.title.trim()==="")throw new Error(`${e}: the install step "${s.id}" needs a title, the line the installer shows above it.`);if(n.has(s.id))throw new Error(`${e}: two install steps have the id "${s.id}". Give each step its own id.`);n.add(s.id)}}var Ge={get current(){return ct().sessions.current},list:(e)=>ct().sessions.list(e),search:(e,t,n)=>ct().sessions.search(e,t,n),...Object.fromEntries(Object.keys(Et).map((e)=>[`on${e}`,(...t)=>ct().sessions[`on${e}`](...t)]))};var ua={list:()=>ct().commands.list(),run:(e,t)=>ct().commands.run(e,t),beforeRun:(...e)=>ct().commands.beforeRun(...e),onRun:(...e)=>ct().commands.onRun(...e)};var fa={fetch:(e,t)=>ct().http.fetch(e,t)};var pa={read:()=>ct().device.read()};function ma(e){if(e.name.trim()==="")throw new Error("defineMod: the mod needs a name, such as the name in .claude-plugin/plugin.json.");if(e.options!==undefined)ai(e.name,e.options);if(e.hotkeys!==undefined)$n(e.name,e.hotkeys);if(e.installer!==undefined)la(e.name,e.installer);return e}var ha=[1,2,4,8,16];var xu=5000;var ga=15000;var bu=1000;function ya(e){const{command:t,environment:n,singleInstance:s=false,isService:r=false,isWebApp:o=false}=e;return({mod:i,announce:c,reserveName:d})=>{const{claude:f,report:m,spawnCmod:x,isInstalledCopy:O,watches:v}=$t(i);const[y]=t;if(y===undefined)throw new Error(`${i.name}: the program has no command. Name the program on PATH and its arguments, such as ['preview-server', '--port', '0'].`);if(r)for(const N of["program","service"])d(N,Ze(y),`${i.name}: the service ${y} is already added. Give each isService program its own executable.`);else if(s)d("program",Ze(y),`${i.name}: the single instance of ${y} is already added. Give each singleInstance program its own executable.`);const R=s||r;if(o&&!R)throw new Error(`${i.name}: the web app ${y} runs a copy per session, and your tailnet reaches one copy per computer. Add singleInstance: true or isService: true.`);const D=o?["--web-app"]:[];const z={argv:t,...n===undefined?{}:{env:n}};let X="stopped";let G;let H;let k=0;const B=[];let b=false;let Q=false;let Z;let T;const j=(N)=>{if(N)return x(["program",i.name,...D,"--service",...Object.keys(n??{}).flatMap((V)=>["--env",V]),"--",...t],n);return R?x(["program",i.name,...D,"--no-wait","--",...t],n):f.process.spawn(z)};const I=()=>Z??=Promise.all([f.env.home(),f.env.dataHome()]).then(([N,V])=>Io(kt({HOME:N,XDG_DATA_HOME:V}),i.name,Ze(y)));const q=(N)=>void N.catch((V)=>m({id:`program:${y}:follow`,message:`Could not follow the ${y} program`,error:V}));const te=(N)=>{G=undefined;X="fatal";H=new Error(`${i.name}: the ${y} program stopped: ${N}`);const V=()=>{k=0;H=undefined;J()};m({id:`program:${y}`,message:`The ${y} program stopped`,description:N,retry:V});for(const re of B.splice(0))re.reject(H)};const K=async(N)=>{const V=await f.fs.read(N).catch(Ne(undefined));if(V===undefined)return;const re=JSON.parse(V);const ce=wa(String(re.address).trim());return ce!==undefined&&typeof re.tailnetUrl==="string"?{...ce,tailnetUrl:re.tailnetUrl}:ce};const he=(N)=>{G=N;X="running";k=0;for(const V of B.splice(0))V.resolve(N)};const we=(N)=>T??=(async()=>{if(!b||await Cs(f,`${N}.lock`,ga))return;b=false;J()})().finally(()=>{T=undefined});const S=async(N)=>{if(!b)return;const V=await K(N);if(V!==undefined)return he(V);G=undefined;X="starting";f.clock.after(Math.random()*bu,()=>q(we(N)))};const W=async(N)=>{b=true;if(!Q){Q=true;v.add([N],()=>q(S(N)));f.clock.every(xu,()=>q(we(N)))}await S(N)};const J=async()=>{b=false;G=undefined;X="starting";let N="";let V="";let re=false;try{const ie=r&&await O();if(R&&!ie){const xe=await I();if(await Cs(f,`${xe}.lock`,ga))return await W(xe)}for await(const xe of j(ie)){if(xe.stream==="stderr"){V=xe.text.trim().split(`
-`).at(-1)??V;continue}if(re)continue;const ye=`${N}${xe.text}`.split(`
-`);N=ye.pop()??"";for(const Ee of ye.slice(0,1)){if(R&&Ee.trim()==="held")return await W(await I());const ne=wa(Ee.trim());if(ne===undefined){te(`its first line is "${Ee.trim()}". Write 127.0.0.1:<port> or unix:<socket path> as the first line on standard output.`);return}he(o?await K(await I())??ne:ne);re=true}}}catch(ie){V=se(ie)}G=undefined;k+=1;const ce=ha[k-1];if(ce===undefined){te(`it did not start again after ${ha.length} tries: ${V===""?"no standard error":V}.`);return}X="backoff";f.clock.after(ce*1000,()=>void J())};c(`the ${y} program`);f.session.surfaces().then((N)=>{if(N.length>0&&X==="stopped")J()});return{get state(){return X},ready(){if(X==="running"&&G!==undefined)return Promise.resolve(G);if(X==="fatal")return Promise.reject(H);if(X==="stopped")J();return new Promise((N,V)=>B.push({resolve:N,reject:V}))}}}}function wa(e){const t=/^127\.0\.0\.1:(\d{1,5})$/.exec(e);if(t!==null)return{url:`http://127.0.0.1:${t[1]}`};const n=/^unix:(\/.+)$/.exec(e);if(n?.[1]!==undefined)return{url:"http://localhost",socketPath:n[1]};return}function cs(e,t,n,s){return Bt($t(e).claude,t,n,Promise.resolve().then(s))}var vu={ms:30000,job:"slashCommand"};var ku=/^[A-Za-z0-9_-]{1,64}$/;function $o(e){const{name:t,description:n,argumentHint:s,immediate:r,reply:o}=e;return(i)=>{const{mod:c,announce:d,reserveName:f}=i;const{claude:m,router:x,report:O,answerInput:v}=$t(c);if(!ku.test(t))throw new Error(`${c.name}: "${t}" is not a slash command name. Use 1 to 64 letters, digits, "_", or "-", without the slash.`);const y=f("slashCommand",t,`${c.name}: the slash command /${t} is already added. Give each slashCommand its own name.`);let R;m.command.register({name:t,description:n,...s===undefined?{}:{argumentHint:s},...r===undefined?{}:{immediate:r}}).then(({command:z})=>{R=z},(z)=>{O({id:`command:${t}`,message:`/${t} is not added`,error:z})});d(`/${t}`);const D=x.add("command.run",async(z,X)=>{if(z.command!==R)return X(z);try{return await v(async()=>Su(c.name,await cs(c,vu,`/${t}`,()=>o({args:z.args,positionals:Au(z.args)},c))),()=>X(z))}catch(G){return{text:`/${t} failed: ${Ou(G)}`}}});return{name:t,remove(){D.remove();y.remove()}}}}function Su(e,t){if(t===undefined)return{};if(typeof t==="string")return{text:t};return{...t.text===undefined?{}:{text:t.text},...t.note===undefined?{}:{context:[ot(e,t.note)]}}}function Au(e){return Mn(e,(t)=>`$${t}`).flatMap((t)=>{if(typeof t==="string")return[t];if("comment"in t)return[];if(t.op==="glob")return[t.pattern];return[t.op]})}function Ou(e){return se(e).replace(/\s*\n\s*/g," ")}var Cu=/^[A-Za-z0-9_-]{1,64}$/;function Je(e){const{name:t,description:n,inputSchema:s,isDeferred:r,execute:o}=e;return(i)=>{const{mod:c,announce:d,reserveName:f}=i;const{claude:m,router:x,report:O}=$t(c);if(!Cu.test(t))throw new Error(`${c.name}: "${t}" is not a tool name. Use 1 to 64 letters, digits, "_", or "-".`);const v=s?.properties??{};const y=Ss.filter((G)=>Object.hasOwn(v,G));if(y.length>0)throw new Error(`${c.name}: the ${t} tool's inputSchema has the property ${y.join(", ")}, which Claude Code keeps for itself. Rename it.`);const R=f("tool",t,`${c.name}: the tool ${t} is already added. Give each tool its own name.`);const D=new ws(s??{type:"object"},"2020-12",false);let z;m.tool.register({name:t,description:n,...s===undefined?{}:{inputSchema:s},...r===undefined?{}:{isDeferred:r}}).then((G)=>{z=G.tool},(G)=>{O({id:`tool:${t}`,message:`The ${t} tool is not added`,error:G})});d(`the ${t} tool`);const X=x.add("tool.call",async(G,H)=>{if(G.tool!==z)return H(G);const k=Wn(G);const{valid:B,errors:b}=D.validate(k);if(!B)return{deny:`The ${t} tool input is not valid:
-${b.map((Q)=>`- ${Q.instanceLocation}: ${Q.error}`).join(`
-`)}`};try{return{result:Eu(await cs(c,ar,`the ${t} tool`,()=>o(k,c)))}}catch(Q){return{deny:`The ${t} tool failed: ${se(Q)}`}}});return{name:`mcp__${m.plugin.name}__${t}`,remove(){X.remove();R.remove()}}}}function Eu(e){if(e===undefined||typeof e==="string")return e;if(Array.isArray(e)&&e.every((t)=>typeof t==="object"&&t!==null&&("type"in t)))return e;return JSON.stringify(e)}var ka={memory:{connecting:null,isFollowing:false,joined:null,joining:null,relayState:null,machines:null,isAdding:false,removing:null,problem:null}};var $a=15000;var xa=1e4;var bo=1000;var Sa=new WeakMap;var Aa=(e,t)=>void Sa.set(e,t);class Mt extends Error{}async function De(e,t,n){const s=Sa.get(e);if(s===undefined)throw new Error("The anyhost mod has not started its program yet.");const{url:r,socketPath:o}=await new Promise((d,f)=>{const m=e.after(xa,()=>f(new Mt(`The anyhost program is restarting and did not answer ${t} within ${xa/1000} s. Ask again in a few seconds.`)));s.ready().then((x)=>{m.stop();d(x)},(x)=>{m.stop();f(x)})});const i=await fa.fetch(`${r}${t}`,{...o===undefined?{}:{socketPath:o},...n===undefined?{}:{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(n)}}).catch((d)=>{throw new Mt(`The anyhost program did not answer ${t}: ${se(d)}`)});const c=(()=>{try{return JSON.parse(i.text)}catch{return}})();if(!i.ok)throw new Error(c?.message??`The anyhost program answered ${i.status}: ${i.text}`);return c}var ba=(e,t)=>new Promise((n)=>void e.after(t,n));function Oa(e){if(e.state.memory.isFollowing)return;e.state.memory.isFollowing=true;const t=e.every(bo,async()=>{const n=await De(e,"/status").catch((o)=>void e.log(`anyhost could not follow Connect Cloudflare: ${se(o)}`,{level:"warning"}));if(n===undefined)return;const{connecting:s,joining:r}=n;e.state.memory.connecting=s??null;e.state.memory.joining=r??null;if(s?.is==="running")return;t.stop();e.state.memory.isFollowing=false})}async function xo(e,t,n){const s=await De(e,t,n).catch((r)=>({is:"failed",lines:e.state.memory.connecting?.lines??[],error:se(r)}));e.state.memory.connecting=s;if(s.is==="running")Oa(e)}async function _u(e,t){e.state.memory.joined=await De(e,"/join",{link:t}).catch((n)=>({problem:se(n)}));if("url"in e.state.memory.joined)e.state.memory.joining=null}async function Pu(e){const t=Date.now();for(;;){const n=await De(e,"/status").catch((c)=>{if(c instanceof Mt)return Date.now()-t<$a?undefined:null;throw c});if(n===null)return false;if(n===undefined){await ba(e,250);continue}const{relay:s,connecting:r,joining:o}=n;if(r?.is==="running")Oa(e);e.state.memory.joining=o??null;if(o?.is==="running"||s.state==="connecting"&&Date.now()-t<$a){await ba(e,250);continue}e.state.memory.relayState=s.state;const i=s.state==="unjoined";e.state.memory.connecting=i&&r?.is==="joined"?null:r??null;if(i&&e.state.memory.joined!==null&&"url"in e.state.memory.joined)e.state.memory.joined=null;return i||s.state==="outdated"&&(n.needsLogin===true||r?.is==="joined")}}var Ca={id:"machines",title:"Connect your machines",render:(e)=>h(Tu,{mod:e}),isDone:async(e)=>!await Pu(e)};function Tu({mod:e}){const{connecting:t,joined:n,joining:s}=e.state.memory;return h(Oe,{flexDirection:"column",gap:1},h(fe,{wrap:"wrap"},"anyhost keeps every session of every machine in your own Cloudflare account, through a relay it sets up there. Connect each machine once."),h(Oe,{flexDirection:"column"},h(fe,{bold:true},"On your first machine, or any machine with your Cloudflare login"),t!==null&&t.is!=="failed"?null:h(Oe,null,h(Ue,{key:"connect",plain:true,onPress:()=>xo(e,"/connect",{})},h(fe,{color:"claude"},t?.is==="failed"?"[Connect Cloudflare again]":"[Connect Cloudflare]"))),t===null?null:h(Ru,{mod:e,connecting:t}),t?.is==="joined"&&e.state.memory.relayState==="outdated"?h(fe,{wrap:"wrap"},"Cloudflare still runs your relay's older version, for up to 5 minutes after the upload. Press Finish once it runs the new one."):null),h(Oe,{flexDirection:"column"},h(fe,{bold:true},"On every other machine"),h(fe,{wrap:"wrap"},"Add it from /machines on a joined machine, which installs anyhost here over ssh, or ask Claude there to add it. A machine it can't reach over ssh joins here with the command anyhost machines --invite prints there."),s===null?null:s.is==="running"?h(fe,{dimColor:true,wrap:"wrap"},"Joining with the invite link of the install command"):h(Oe,{flexDirection:"column"},h(fe,{color:"error",wrap:"wrap"},`The invite link of the install command joined no relay: ${s.error}`),h(fe,{wrap:"wrap"},"anyhost tries a link once. Add this machine again from /machines on a joined machine.")),h(Kt,{key:"invite",label:"› ",placeholder:"cmod install … --option 'join=https://…/v1/join#…'",submitLabel:"join",onSubmit:(r)=>void _u(e,r)}),n===null?null:("url"in n)?h(fe,{color:"success"},`✔ Joined ${n.url}`):h(fe,{color:"error",wrap:"wrap"},n.problem)))}function Ru({mod:e,connecting:t}){return h(Oe,{flexDirection:"column"},t.lines.map((n)=>h(fe,{dimColor:true,wrap:"wrap"},n)),t.accounts===undefined?null:h(Oe,{flexDirection:"column"},h(fe,null,"Your Cloudflare login reaches several accounts. Pick the one your relay goes in:"),t.accounts.map((n)=>h(Oe,null,h(Ue,{key:`account-${n.id}`,plain:true,onPress:()=>xo(e,"/connect/account",{id:n.id})},`[${n.name}]`)))),t.r2Page===undefined?null:h(Oe,{gap:2},h(Ue,{key:"r2-page",plain:true,href:t.r2Page},"[Open Cloudflare's R2 page]"),h(fe,null,"Turn R2 on there, then press Next."),h(Ue,{key:"r2-next",plain:true,onPress:()=>xo(e,"/connect/r2",{})},"[Next]")),t.is==="joined"?h(fe,{color:"success"},"✔ This machine is joined to your relay."):null,t.error===undefined?null:h(fe,{color:"error",wrap:"wrap"},t.error))}function ju(e){const t=new Date(e);const n=t.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"});return t.toDateString()===new Date().toDateString()?n:`${t.toLocaleDateString(undefined,{month:"short",day:"numeric"})} ${n}`}async function vo(e,t){e.state.memory.problem=null;await t().catch((n)=>void(e.state.memory.problem=se(n)))}async function wn(e){await vo(e,async()=>void(e.state.memory.machines=await De(e,"/machines")))}async function Ea(e,t){if(!t.isOpen){e.state.memory.isAdding=false;e.state.memory.removing=null;wn(e)}await t.toggle({focus:true})}var va=(e,t)=>vo(e,async()=>{await De(e,"/machines/add",{target:t.trim()});await wn(e)});var Mu=(e,t)=>vo(e,async()=>{await De(e,"/machines/remove",{id:t});e.state.memory.removing=null;await wn(e)});var _a={id:"machines",title:"Machines",render:(e)=>{const{machines:t,isAdding:n,removing:s,problem:r}=e.state.memory;return h(Oe,{flexDirection:"column",gap:1,paddingX:1},t===null?h(fe,{dimColor:true},r===null?"Reading your machines":""):h(Iu,{mod:e,machines:t,removing:s}),t?.adding.map(({target:o,error:i})=>i===undefined?h(fe,{key:`adding-${o}`,dimColor:true},`Adding ${o}: anyhost installs there and joins it`):h(fe,{key:`adding-${o}`,color:"error",wrap:"wrap"},`${o} was not added: ${i}`)),!n?h(Oe,null,h(Ue,{key:"add",plain:true,onPress:()=>void(e.state.memory.isAdding=true)},h(fe,{color:"claude"},"[Add a machine]"))):h(Oe,{flexDirection:"column"},t===null||t.candidates.length===0?null:h(Oe,{gap:2},h(fe,{dimColor:true},"On your Tailscale network:"),t.candidates.map(({target:o,online:i})=>h(Ue,{key:`candidate-${o}`,plain:true,onPress:()=>va(e,o)},h(fe,{color:i?"claude":undefined,dimColor:!i},`[${o}]`)))),h(Kt,{key:"target",label:"› ",placeholder:"how ssh reaches it: devbox, me@10.0.0.7",submitLabel:"add",onSubmit:(o)=>void va(e,o)})),r===null?null:h(fe,{color:"error",wrap:"wrap"},r))}};function Iu({mod:e,machines:t,removing:n}){const s=Math.max(...t.machines.map(({name:i})=>i.length));const r=({os:i,arch:c})=>`${i}-${c}`;const o=Math.max(...t.machines.map((i)=>r(i).length));return h(Oe,{flexDirection:"column"},t.machines.map((i)=>h(Oe,{key:i.id,flexDirection:"column"},h(Oe,{gap:2},h(Oe,{flexShrink:0},h(fe,{bold:i.id===t.here},i.name.padEnd(s))),h(Oe,{flexShrink:0},h(fe,{dimColor:true},r(i).padEnd(o))),i.connected?h(fe,{color:"success"},"connected"):h(fe,{dimColor:true},`last seen ${ju(i.seenAt)}`),i.id===t.here?h(fe,{dimColor:true},"this machine"):h(Ue,{key:`remove-${i.id}`,plain:true,dimColor:true,onPress:()=>void(e.state.memory.removing=i.id)},"[Remove]")),n!==i.id?null:h(Oe,{flexDirection:"column",paddingLeft:2},h(fe,{wrap:"wrap"},`Remove ${i.name}? It stops uploading at once, and its sessions stay listed and resumable here. Add a machine joins it again.`),h(Oe,{gap:2},h(Ue,{key:`remove-yes-${i.id}`,plain:true,onPress:()=>Mu(e,i.id)},h(fe,{color:"error"},"[Remove]")),h(Ue,{key:`remove-no-${i.id}`,plain:true,dimColor:true,onPress:()=>void(e.state.memory.removing=null)},"[Cancel]"))))))}var nt={type:"string",description:"The agent id, or its first 8 characters."};var Pa="An idle agent takes the message at once, works, and rests again on its own.";function Ta(e){const t=(r,o)=>De(e,"/agents/tell",{session:r,...o});const n=async()=>(await De(e,"/agents")).agents;const s=(r,o)=>{const i=r.filter(({id:c})=>c.startsWith(o));if(i[0]===undefined)throw new Error(`No agent's id begins with ${o}. list_agents lists them.`);if(i.length>1)throw new Error(`${i.length} agents' ids begin with ${o}. Give more of it.`);return i[0]};return[Je({name:"list_machines",description:"List every machine joined to your relay: its name, whether it is connected, and when it was last seen. `here` is the id of this machine. `candidates` are machines on your Tailscale network not joined yet, which add_machine adds, and `adding` the adds still running, with why one failed.",execute:()=>De(e,"/machines")}),Je({name:"add_machine",description:"Add a machine this one reaches over ssh: anyhost installs herdr-core, cmod and anyhost there and joins it to your relay, and every machine then shows its agents and terminals. It takes a few minutes and runs on after this call: list_machines shows it under adding until it joins, or why it failed.",inputSchema:{type:"object",properties:{target:{type:"string",description:"How ssh reaches the machine: a Host of the ssh config, a Tailscale name such as mac-studio, or user@host."}},required:["target"]},execute:async({target:r})=>{await De(e,"/machines/add",{target:r});return`Adding ${r}. list_machines shows it under adding until it joins.`}}),Je({name:"remove_machine",description:"Remove a machine from your relay by its name. Its agents stay listed and can be taken onto another machine.",inputSchema:{type:"object",properties:{machine:{type:"string"}},required:["machine"]},execute:async({machine:r})=>{const o=(await De(e,"/machines")).machines.find((i)=>i.name===r);if(o===undefined)throw new Error(`No machine joined to your relay is named ${r}.`);await De(e,"/machines/remove",{id:o.id});return`Removed ${r}.`}}),Je({name:"list_agents",description:"List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder, whether it is archived, its parent: the agent that started it with start_agent and manages it, and its source: the agent whose conversation it was forked from, each with that agent's title and the machine that holds it, or null. A fork has a source and no parent. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. tell_agent, read_agent's screen, press_keys and show_agent reach a Codex agent only while it runs in a terminal of herdr-core, and sleep_agent, read_agent's messages, move_agent and open_agent reach Claude Code agents alone. Archived agents are left out unless archived is true. children_of lists only the agents one agent started, `me` the ones this agent started.",inputSchema:{type:"object",properties:{limit:{type:"integer",minimum:1,description:"How many to list, 30 by default."},archived:{type:"boolean",description:"List archived agents too."},children_of:{type:"string",description:"An agent id, its first 8 characters, or `me`: list only the agents it started."}}},execute:async({limit:r=30,archived:o=false,children_of:i})=>{const c=await n();const d=i===undefined?undefined:i==="me"?Ge.current.id:s(c,i).id;const f=new Map(c.map((x)=>[x.id,x]));const m=(x)=>{const O=f.get(x);return x===""?null:{id:x,title:O?.title??"",machine:O===undefined?"":O.holder||O.machine}};return c.filter((x)=>(o||!x.archived)&&(d===undefined||x.parent===d)).slice(0,r).map(({id:x,tool:O,title:v,firstPrompt:y,machine:R,holder:D,status:z,lastActivity:X,repo:G,cwd:H,archived:k,parent:B,source:b})=>({id:x,tool:O,title:v,firstPrompt:y.slice(0,200),machine:R,holder:D,status:z,lastActivity:X,repo:G,cwd:H,archived:k,parent:m(B),source:m(b)}))}}),Je({name:"start_agent",description:`Start a new Claude Code agent on a machine, this one when machine is left out, in its checkout of the repository the folder is in, and type prompt into it as its first message. It never reaches an agent that exists: to message one, find it with list_agents and use tell_agent, which wakes it wherever it sleeps, and when list_agents fails, call it again instead of starting an agent. This agent becomes its parent: the prompt names this agent and its machine as its sender, so the new agent reports back with tell_agent when it is done or stuck, which wakes this agent, and list_agents lists it with children_of me. Answers the agent's id and machine. ${Pa}`,inputSchema:{type:"object",properties:{folder:{type:"string",description:"An absolute folder on this machine. Another machine works in its own checkout of the same repository."},machine:{type:"string",description:"The machine name, from list_machines."},prompt:{type:"string",description:"The first message the agent gets."}},required:["folder"]},execute:({folder:r,machine:o="",prompt:i=""})=>De(e,"/new",{folder:r,machine:o,prompt:i,parent:Ge.current.id})}),Je({name:"tell_agent",description:`Send an agent a message wherever it runs: anyhost types it into its terminal and presses Enter, then answers its status and screen once its turn started. The message names this agent as its sender, so the other agent answers with tell_agent when it is done or stuck. A message that starts with / runs that slash command in it, as /exit. An agent waiting at a permission prompt refuses messages until press_keys answers it. ${Pa}`,inputSchema:{type:"object",properties:{agent:nt,text:{type:"string"}},required:["agent","text"]},execute:({agent:r,text:o})=>t(r,{text:o,sender:Ge.current.id})}),Je({name:"read_agent",description:"Read an agent wherever it runs, without waking it: its status and screen, or with messages its conversation, what it was told and what it answered, from the machine that holds it, running or not. An agent's answer to the task start_agent gave it is its last assistant message, messages 1. skip pages back through its whole history.",inputSchema:{type:"object",properties:{agent:nt,lines:{type:"integer",minimum:0,description:"Lines of the terminal above the screen, 0 by default. herdr-core reads them only while the agent is not working."},messages:{type:"integer",minimum:1,description:"Read this many of its messages instead of its screen, the newest last."},skip:{type:"integer",minimum:0,description:"With messages: leave out this many of the newest first, 0 by default, so messages 20 skip 20 reads the 20 before the last 20."}},required:["agent"]},execute:({agent:r,lines:o=0,messages:i,skip:c=0})=>t(r,i===undefined?{lines:o}:{messages:i,skip:c})}),Je({name:"sleep_agent",description:"Stop an agent wherever it runs: its Claude Code ends once its turn ends, and its terminal stays with its last reply, so its tab and place on screen stay. tell_agent wakes it with its whole conversation. press_keys esc stops a turn without stopping the agent.",inputSchema:{type:"object",properties:{agent:nt},required:["agent"]},execute:async({agent:r})=>{const o=await t(r,{sleep:true});return`${o.session.slice(0,8)} on ${o.machine} goes to sleep once its turn ends. It is ${o.status} now.`}}),Je({name:"show_agent",description:"Show an agent's terminal on this machine's Herdr app, as a terminal multiplexer shows a pane: focus brings it on screen in its tab, peek shows it over the screen with Keep and Close, tab gives it a tab of its own, right and down show it live beside or below the person's focused pane, and hide takes its pane away while the agent runs on. An agent another machine runs shows from there; one that runs nowhere starts here.",inputSchema:{type:"object",properties:{agent:nt,place:{type:"string",enum:["focus","peek","tab","right","down","hide"],description:"focus by default."}},required:["agent"]},execute:({agent:r,place:o="focus"})=>De(e,"/agents/show",{session:r,place:o})}),Je({name:"press_keys",description:"Press named keys in an agent's terminal wherever it runs, then answer its status and screen: down and enter pick and answer a permission prompt, esc stops its turn. Names are enter, esc, tab, up, down, left, right, ctrl+c, a single character, and the like.",inputSchema:{type:"object",properties:{agent:nt,keys:{type:"array",items:{type:"string"},minItems:1}},required:["agent","keys"]},execute:({agent:r,keys:o})=>t(r,{keys:o})}),Je({name:"move_agent",description:"Move an agent to another machine, which runs it from then on with its whole conversation and code. The machine that runs the agent moves it once its turn ends.",inputSchema:{type:"object",properties:{agent:nt,machine:{type:"string"}},required:["agent","machine"]},execute:async({agent:r,machine:o})=>{const[i,{here:c,machines:d}]=await Promise.all([n(),De(e,"/machines")]);const f=s(i,r);const m=f.holder||f.machine;if(m===d.find(({id:x})=>x===c)?.name)return await De(e,"/move",{session:f.id,machine:o});await t(f.id,{text:`/move ${o}`});return`${m} moves ${f.id.slice(0,8)} to ${o} once its turn ends. read_agent shows how it goes.`}}),Je({name:"archive_agent",description:"Archive an agent whose work is finished, which moves it out of the active list on every machine, or bring an archived one back with archived false. Working in an archived agent brings it back by itself.",inputSchema:{type:"object",properties:{agent:nt,archived:{type:"boolean",description:"true by default."}},required:["agent"]},execute:async({agent:r,archived:o=true})=>{const{id:i}=s(await n(),r);await De(e,"/agents/archive",{session:i,archived:o});return`${o?"Archived":"Brought back"} ${i.slice(0,8)}.`}}),Je({name:"settle_agent",description:"Settle an agent whose work rests, which moves it to the Settled shelf on every machine until its next message, and clears its pin and snooze, or with settled false keep it out of Settled until its next message, as an agent settles by itself once it sits idle the days the person chose.",inputSchema:{type:"object",properties:{agent:nt,settled:{type:"boolean",description:"true by default."}},required:["agent"]},execute:async({agent:r,settled:o=true})=>{await De(e,"/agents/settle",{session:r,settled:o});return`${o?"Settled":"Unsettled"} ${r.slice(0,8)}.`}}),Je({name:"snooze_agent",description:"Snooze an agent on every machine until a time, which hides it on the Snoozed shelf until then, until a prompt reaches it, or until it waits for the person at a permission prompt. A finished turn never wakes it. until null wakes it now.",inputSchema:{type:"object",properties:{agent:nt,until:{type:["string","null"],description:"The ISO time it wakes, such as 2026-11-16T09:00:00.000Z, or null to wake it now."}},required:["agent","until"]},execute:async({agent:r,until:o})=>{await De(e,"/agents/snooze",{session:r,until:o});return o===null?`Woke ${r.slice(0,8)}.`:`Snoozed ${r.slice(0,8)} until ${o}.`}}),Je({name:"delete_agent",description:"Delete an agent wherever it is held: the machine that holds it stops it, working or not, and deletes its conversation and files there and in R2, so every machine lists it under Deleted. Opening a deleted agent with open_agent brings it back. An agent cannot delete itself.",inputSchema:{type:"object",properties:{agent:nt},required:["agent"]},execute:async({agent:r})=>{const{id:o}=s(await n(),r);if(o===Ge.current.id)throw new Error(`${o.slice(0,8)} is this agent, which cannot delete itself.`);await De(e,"/agents/delete",{session:o});return`Deleted ${o.slice(0,8)}.`}}),Je({name:"fork_agent",description:"Fork a Claude Code agent into a new agent that holds its conversation up to a message, by default its end, on the machine that holds it, titled after it with (fork), with the agent forked as its source in list_agents. A fork is an agent of its own, never a child of the agent forked. A fork at the end that nobody opens is a duplicate, and one at an earlier message a split. Its history refers to the source's and uploads only what it adds. open_agent or tell_agent then runs it.",inputSchema:{type:"object",properties:{agent:nt,at:{type:"string",description:"The uuid of the message the fork ends with, from the agent's transcript. Leave it out to fork at the end."}},required:["agent"]},execute:({agent:r,at:o=""})=>De(e,"/agents/fork",{session:r,at:o})}),Je({name:"open_agent",description:"Run an agent on this machine in a terminal of herdr-core and answer that terminal: the one it runs in when it runs here, else one that resumes it, from its history in R2 when the machine that holds it is not connected, as when it is closed, offline or died, which then stops its copy as it next connects. An agent whose machine is connected stays there, and move_agent moves it.",inputSchema:{type:"object",properties:{agent:nt},required:["agent"]},execute:({agent:r})=>De(e,"/agents/open",{session:r})})]}var Lu=1e4;var Nu=1500;var Du=3000;var Ra=new Set(["waiting","uploading","moving"]);var ja=ma({name:"anyhost",state:ka,options:{uploadEvery:Qn.number({title:"Upload every",description:"Seconds between uploads of a session to your Cloudflare account. 0 uploads every write.",default:5,min:0}),checkouts:Qn.folder({title:"Checkouts folder",description:"Where anyhost resume clones a repository this machine lacks. Empty: the folder your checkouts share, else your home folder.",default:""}),join:Qn.text({title:"Join with",description:"An invite link, which Add a machine sets as it installs anyhost here, or anyhost machines --invite prints on a joined machine. anyhost joins this machine with it within a minute, then empties it.",default:""})},installer:[Ca],async setup(e){const t=await pa.read();const n=e.use(ya({command:["anyhost","serve"],environment:{ANYHOST_DEVICE_ID:t.id,ANYHOST_DEVICE_NAME:t.name,ANYHOST_DEVICE_OS:t.os,ANYHOST_DEVICE_ARCH:t.arch},isService:true}));Aa(e,n);for(const y of Ta(e))e.use(y);const s=e.sidebar.add(_a);e.use($o({name:"machines",description:"Show every machine joined to your relay, add a machine, or remove one",reply:()=>Ea(e,s)}));e.every(Lu,()=>s.isOpen?wn(e):undefined);const r=new Set;const o=(y,R)=>{if(r.has(y))return;r.add(y);e.toast.error(y,{description:R,duration:Infinity})};const i=new Map;const c=new Set;const d=async()=>{const y=Ge.current.id;if(await n.ready().catch(()=>{return})===undefined)return;const R=await De(e,`/claims/${y}`).catch((z)=>{if(!(z instanceof Mt))o("anyhost could not check which machine holds this session",se(z));return});if(R===undefined)return;i.set(y,R);if(R.problem!==undefined)o("anyhost captures nothing on this machine",R.problem);const D=`untold ${y} ${R.untold}`;if(R.untold!==undefined&&!r.has(D)){r.add(D);e.toast.warning(`${R.untold} may take one more prompt of this session`,{description:`${R.untold}'s anyhost was not connected when this machine took the session, so it learns that this machine holds the session when it next connects.`,duration:Infinity})}if(R.move!==undefined&&Ra.has(R.move.step))v();return R};const f=new Map;let m="";const x=(y,R=new Date().toISOString(),D="")=>{const z=Ge.current.id;return De(e,"/sessions/changed",{session:z,folder:Ge.current.cwd,event:y,at:R,source:f.get(z)??"",title:D}).then(()=>{return},(X)=>X instanceof Mt?undefined:e.log(`anyhost could not hear this session's change: ${se(X)}`,{level:"warning"}))};Ge.current.onSessionStart(async(y)=>{if(y.source==="clear"&&m!==""&&m!==y.session)f.set(y.session,m);await d();await x("started")});Ge.current.onSessionEnd((y)=>{m=y.session;return x(y.reason==="exit"?"quit":"ended")});Ge.current.onTurnStart((y)=>{if(!y.prompt.text.startsWith("/"))return x("turnStart",y.openedAt);const R=y.onMessage({type:/^(reply|toolCall)$/},()=>{R.remove();return x("turnStart",y.openedAt)});return});Ge.current.onTurnEnd((y)=>x("turnEnd",y.closedAt));Ge.current.onElicitation(()=>x("asked"));Ge.current.onNotification({type:/^(permission_prompt|elicitation_dialog)$/},()=>x("asked"));Ge.current.onCwdChange(()=>x("moved"));ua.onRun({name:"rename"},(y)=>x("renamed",undefined,y.args.trim()||Ge.current.title));const O=(y)=>`This session continues on ${y}, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.`;Ge.current.beforePrompt(async()=>{const y=Ge.current.id;const R=await new Promise((X)=>{const G=e.after(Nu,()=>X(undefined));d().then((H)=>{G.stop();X(H)})});const{machine:D,move:z}=R??i.get(y)??{};if(D===undefined)return;return{refuse:z?.step==="moved"?O(D):`This session continues on ${D}.`}},{timeoutMs:Du,onFailure:"pass"});const v=()=>{const y=Ge.current.id;if(c.has(y))return;c.add(y);const R=`move-${y}`;let D="";const z=()=>{X.stop();c.delete(y)};const X=e.every(bo,async()=>{const G=await De(e,`/claims/${y}`).catch((k)=>{e.log(`anyhost could not follow the move of ${y}: ${se(k)}`,{level:"warning"});return});if(G===undefined)return;i.set(y,G);const{move:H}=G;if(H===undefined){z();e.toast.error("anyhost lost track of the move, as its program restarted",{id:R,description:"anyhost list shows which machine holds the session now.",duration:Infinity});return}if(`${H.step} ${H.line}`===D)return;D=`${H.step} ${H.line}`;if(H.step==="moved")e.toast.info(O(H.to),{id:R,description:H.line,duration:Infinity});else if(H.step==="failed")e.toast.error(H.line,{id:R,duration:Infinity});else{const k={label:"Keep it here",onClick:()=>De(e,"/move/keep",{session:y})};e.toast.loading(`Moving to ${H.to}…`,{id:R,description:H.line,action:k})}if(!Ra.has(H.step))z()})};e.use($o({name:"move",description:"Move this session to another of your machines, which runs it from then on",argumentHint:"<machine>",reply:async({positionals:y})=>{const[R,...D]=y;if(R===undefined||D.length>0)return"Name the one machine to move this session to, as in /move devbox. /machines lists your machines.";const z=Ge.current.id;const{to:X,step:G,line:H}=await De(e,"/move",{session:z,machine:R});i.set(z,{...i.get(z),move:{to:X,step:G,line:H}});e.toast.loading(`Moving to ${R}…`,{id:`move-${z}`});v();return}}))}});function Cy(e,t){da(e,ja,t)}export{Cy as register};
+// node_modules/@cmodjs/core/runtime/deadline.js
+var longestMs = 600000;
+var toolDeadline = { ms: 30000, job: "tool" };
+var callDeadline = { ms: 30000 };
+var listenerMs = 1e4;
+var hookMs = 1e4;
+
+class PassedTimeout extends Error {
+}
+var timers = globalThis;
+function listenerOf(name, method, args) {
+  const hasMatcher = typeof args[1] === "function";
+  const listener = hasMatcher ? args[1] : args[0];
+  const options = (hasMatcher ? args[2] : args[1]) ?? {};
+  if (typeof listener !== "function")
+    throw new Error(`${name}: ${method} takes a listener, or a matcher and then a listener.`);
+  const { timeoutMs, onFailure } = options;
+  if (timeoutMs !== undefined && (typeof timeoutMs !== "number" || !Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > longestMs))
+    throw new Error(`${name}: ${method}'s timeoutMs is ${String(timeoutMs)}. Give a whole number of milliseconds above 0 and at most ${longestMs}.`);
+  if (onFailure !== undefined && onFailure !== "pass" && onFailure !== "refuse")
+    throw new Error(`${name}: ${method}'s onFailure is ${String(onFailure)}. Give 'pass' or 'refuse'.`);
+  return { matcher: hasMatcher ? args[0] : undefined, listener, options };
+}
+async function withinTime(clock, method, { timeoutMs = listenerMs }, cancel, run) {
+  const controller = new AbortController;
+  const deadline = await clock.now() + timeoutMs;
+  cancel.throwIfAborted();
+  let timer;
+  let cancelled = () => {
+    return;
+  };
+  const passed = new Promise((_resolve, reject) => {
+    timer = timers.setTimeout(() => {
+      controller.abort();
+      reject(new PassedTimeout(`${method} passed its ${timeoutMs / 1000} s timeout`));
+    }, timeoutMs);
+    cancelled = () => reject(cancel.reason);
+    cancel.addEventListener("abort", cancelled, { once: true });
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => run({ deadline, signal: AbortSignal.any([controller.signal, cancel]) })), passed]);
+  } finally {
+    timers.clearTimeout(timer);
+    cancel.removeEventListener("abort", cancelled);
+  }
+}
+var abortGraceMs = 1000;
+function settledAfterAbort(work, signal) {
+  if (signal === undefined)
+    return work;
+  return new Promise((resolve, reject) => {
+    let timer;
+    const giveUp = () => void (timer = timers.setTimeout(() => reject(signal.reason), abortGraceMs));
+    if (signal.aborted)
+      giveUp();
+    else
+      signal.addEventListener("abort", giveUp, { once: true });
+    work.then(resolve, reject).finally(() => {
+      timers.clearTimeout(timer);
+      signal.removeEventListener("abort", giveUp);
+    });
+  });
+}
+function beforeDeadline(clock, { ms, job }, call, run) {
+  const passed = new AbortController;
+  return new Promise((resolve, reject) => {
+    const deadline = job === undefined ? `its ${ms / 1000} s deadline` : `the ${ms / 1000} s deadline of ${job}`;
+    const timer = clock.after(ms, () => {
+      const error = new Error(`${call} passed ${deadline}`);
+      reject(error);
+      passed.abort(error);
+    });
+    run(passed.signal).then((value) => {
+      timer.cancel();
+      resolve(value);
+    }, (error) => {
+      timer.cancel();
+      reject(error);
+    });
+  });
+}
+
+// node_modules/@cmodjs/core/runtime/dependencies.js
+var cmodPluginName = "cmod";
+var loadedMethod = "cmod:isLoaded";
+async function answerCall(name, api, e) {
+  const method = Object.hasOwn(api, e.method) ? api[e.method] : undefined;
+  if (method === undefined)
+    return { deny: `${name} has no method ${e.method}.` };
+  try {
+    return { value: await method(e.input) };
+  } catch (error) {
+    return { deny: `${name}: ${messageOf(error)}` };
+  }
+}
+function dependencyCalls(claude, within) {
+  const methodsOf = (to) => new Proxy({}, { get: (_methods, method) => typeof method === "string" && method !== "then" ? (input) => within(`mod.dependencies.${to}.${method}`, claude.cmod.call({ to, method, input })) : undefined });
+  return new Proxy({}, { get: (_dependencies, to) => typeof to === "string" && to !== "then" ? methodsOf(to) : undefined });
+}
+function withBareRefusals(claude) {
+  const prefix = `${claude.plugin.name}: $.cmod.call: `;
+  const call = (input) => claude.cmod.call(input).catch((error) => {
+    const message = messageOf(error);
+    throw message.startsWith(prefix) ? new Error(message.slice(prefix.length), { cause: error }) : error;
+  });
+  return { ...claude, cmod: { call } };
+}
+function answeringOwnCalls(claude, router) {
+  const name = claude.plugin.name;
+  const call = async (input) => {
+    if (input.to !== name)
+      return claude.cmod.call(input);
+    const answer = await router.dispatch("cmod.call", { ...input, caller: name }, async () => ({ deny: `${name} has no method ${input.method}.` }));
+    if (answer.deny !== undefined)
+      throw new Error(answer.deny);
+    return answer.value;
+  };
+  return { ...claude, cmod: { call } };
+}
+function stillInstalling(name) {
+  return `${name} is installing. Try again when it's ready.`;
+}
+function isStillInstalling(name, error) {
+  return messageOf(error).endsWith(stillInstalling(name));
+}
+function didNotAnswer(name) {
+  return `${name} did not answer in time, so Claude Code went on without it.`;
+}
+var overranHook = `it ran past the ${hookMs / 1000} s Claude Code gives a hook`;
+function isUnanswered(error) {
+  const refusals = [stillInstalling(""), didNotAnswer(""), `: ${overranHook}`];
+  for (let cause = error;cause !== undefined; cause = cause instanceof Error ? cause.cause : undefined) {
+    const message = messageOf(cause);
+    if (refusals.some((refusal) => message.endsWith(refusal)))
+      return true;
+  }
+  return false;
+}
+
+// node_modules/@cmodjs/core/runtime/tool-calls.js
+var reservedKeys = ["tool", "tool_use_id", "consent", "agentId"];
+function toolInputOf(envelope) {
+  return Object.fromEntries(Object.entries(envelope).filter(([key]) => !reservedKeys.includes(key)));
+}
+function toolCalls(claude, router) {
+  let mainAgentType;
+  const agentIds = new Map;
+  const noteAgent = (e) => {
+    if (e.agent_id === undefined)
+      mainAgentType = e.agent_type;
+  };
+  router.add("classic.SessionStart", (e, next) => {
+    noteAgent(e);
+    return next(e);
+  });
+  router.add("classic.UserPromptSubmit", (e, next) => {
+    noteAgent(e);
+    return next(e);
+  });
+  router.add("tool.call", async (e, next) => {
+    if (e.agentId === undefined)
+      return next(e);
+    agentIds.set(e.tool_use_id, e.agentId);
+    try {
+      return await next(e);
+    } finally {
+      agentIds.delete(e.tool_use_id);
+    }
+  });
+  return {
+    async agentOf(toolUseId) {
+      const agentId = toolUseId === undefined ? undefined : agentIds.get(toolUseId);
+      const agentType = agentId === undefined ? mainAgentType : (await claude.agent.list()).find((agent) => agent.id === agentId)?.type;
+      return { ...agentId === undefined ? {} : { agentId }, ...agentType === undefined ? {} : { agentType } };
+    }
+  };
+}
+
+// node_modules/@cmodjs/core/runtime/before.js
+function withAnswer(change, answer) {
+  if (change.type === Message && answer.output !== undefined && change.message.type === ToolResult)
+    return { ...change, message: { ...change.message, output: answer.output } };
+  if (change.type === Message && answer.text !== undefined)
+    return { ...change, message: { ...change.message, text: answer.text } };
+  if (change.type === Message && answer.input !== undefined && change.message.type === ToolCall)
+    return { ...change, message: { ...change.message, input: answer.input } };
+  if (change.type === TaskStart) {
+    const { agentType, model } = answer.owner ?? {};
+    return { ...change, task: { ...change.task, ...answer.title === undefined ? {} : { title: answer.title }, ...agentType === undefined ? {} : { agentType }, ...model === undefined ? {} : { model } } };
+  }
+  return change;
+}
+var methodOf = (prefix, event) => `${prefix}${Object.entries(sessionEvents).find(([, each]) => each === event)?.[0] ?? event}`;
+var beforeAnswerKeys = {
+  prompt: ["text", "note", "title", "refuse"],
+  note: ["text"],
+  skill: ["text"],
+  instructionFile: ["text", "refuse"],
+  attachedFile: ["text", "refuse"],
+  reply: ["text"],
+  toolCall: ["input", "result", "refuse", "note"],
+  toolResult: ["output", "isError", "note"],
+  notice: ["text"],
+  taskStart: ["prompt", "title", "owner", "isAsync", "refuse"],
+  turnEnd: ["refuse", "note"],
+  contextEnd: ["refuse", "summary"]
+};
+function foldBefore(event, change, askers, report) {
+  return foldAnswers(methodOf("before", event), beforeAnswerKeys[event], ["refuse", "result"], change, askers, report, withAnswer);
+}
+function takenAnswer(method, takes, answer) {
+  if (answer === undefined || answer === null || answer === false)
+    return;
+  if (typeof answer !== "object" || Array.isArray(answer))
+    throw new Error(`it answered ${JSON.stringify(answer)}, but ${method} takes an object or nothing: ${takes.map((key) => `{ ${key} }`).join(", ") || "no answer"}.`);
+  const unread = Object.keys(answer).filter((key) => !takes.includes(key));
+  if (unread.length > 0)
+    throw new Error(`it answered ${unread.join(" and ")}, which ${method} does not take. It takes ${takes.map((key) => `{ ${key} }`).join(", ") || "no answer"}.`);
+  return answer;
+}
+async function foldAnswers(method, takes, ends, change, askers, report, applied = (same) => same) {
+  let latest = change;
+  let result;
+  for (const ask of askers) {
+    try {
+      const answer = takenAnswer(method, takes, await ask(latest));
+      if (typeof answer !== "object" || answer === null)
+        continue;
+      const given = answer;
+      const notes = [result?.["note"], given["note"]].filter((note) => typeof note === "string");
+      result = { ...result, ...given, ...notes.length === 0 ? {} : { note: notes.join(`
+
+`) } };
+      if (ends.some((key) => given[key] !== undefined))
+        return result;
+      latest = applied(latest, answer);
+    } catch (error) {
+      report(error);
+    }
+  }
+  return result;
+}
+
+// node_modules/@cmodjs/core/runtime/device.js
+var cmodAppId = "1fd8a8ee972047c4a89640fd51048522";
+var sha256Block = 64;
+var systems = { Darwin: "darwin", Linux: "linux" };
+var machines = { arm64: "arm64", aarch64: "arm64", x86_64: "x64", amd64: "x64" };
+var platformUuid = /"IOPlatformUUID" = "([0-9A-Fa-f-]{36})"/;
+var machineId = /^[0-9a-f]{32}$/;
+var machineIdFiles = ["/etc/machine-id", "/var/lib/dbus/machine-id"];
+
+class MissingMachineId extends Error {
+}
+async function readDevice(claude) {
+  const output = async (argv) => {
+    const { exitCode, stdout, stderr } = await claude.process.run(argv);
+    if (exitCode !== 0)
+      throw new Error(`cmod could not read this computer: ${argv.join(" ")} ${formatExit(exitCode, stderr)}`);
+    return stdout.trim();
+  };
+  const [system = "", node = "", machine = ""] = (await output(["uname", "-snm"])).split(/\s+/);
+  const os = systems[system];
+  const arch = machines[machine];
+  if (os === undefined)
+    throw new Error(`cmod reads the device of macOS and Linux, and this computer runs ${system}.`);
+  if (arch === undefined)
+    throw new Error(`cmod reads the device of arm64 and x64 computers, and this one is ${machine}.`);
+  if (os === "linux")
+    return { id: await appSpecific(await linuxMachineId(claude.fs)), name: node, os, arch };
+  const [platform, name] = await Promise.all([output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"]), output(["scutil", "--get", "LocalHostName"])]);
+  const uuid = platformUuid.exec(platform)?.[1];
+  if (uuid === undefined)
+    throw new Error("cmod could not read this computer: ioreg -rd1 -c IOPlatformExpertDevice names no IOPlatformUUID.");
+  return { id: await appSpecific(uuid.replaceAll("-", "").toLowerCase()), name, os, arch };
+}
+async function linuxMachineId(fs) {
+  for (const path of machineIdFiles) {
+    const id = (await fs.read(path).catch(ifMissing(""))).trim();
+    if (machineId.test(id))
+      return id;
+  }
+  throw new MissingMachineId(`cmod could not read this computer: neither ${machineIdFiles.join(" nor ")} holds a machine id.`);
+}
+async function appSpecific(machine) {
+  if (!machineId.test(machine))
+    throw new Error("cmod could not read this computer: its machine id is not 32 hex digits.");
+  const id = (await hmacSha256(bytesOf(machine), bytesOf(cmodAppId))).slice(0, 16);
+  id[6] = (id[6] ?? 0) & 15 | 64;
+  id[8] = (id[8] ?? 0) & 63 | 128;
+  return [...id].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+async function hmacSha256(key, message) {
+  const sha256 = async (...parts) => new Uint8Array(await crypto.subtle.digest("SHA-256", Uint8Array.from(parts.flatMap((part) => [...part]))));
+  const padded = new Uint8Array(sha256Block);
+  padded.set(key);
+  return sha256(padded.map((byte) => byte ^ 92), await sha256(padded.map((byte) => byte ^ 54), message));
+}
+function bytesOf(hex) {
+  return Uint8Array.from(hex.match(/../g) ?? [], (pair) => Number.parseInt(pair, 16));
+}
+
+// node_modules/@cmodjs/core/runtime/router.js
+var unaborted = new AbortController().signal;
+function createRouter() {
+  const routes = new Map;
+  return {
+    add(event, hook, failed) {
+      const route = { hook, ...failed === undefined ? {} : { failed } };
+      routes.set(event, [...routes.get(event) ?? [], route]);
+      return {
+        remove() {
+          const chain = (routes.get(event) ?? []).filter((each) => each !== route);
+          if (chain.length === 0)
+            routes.delete(event);
+          else
+            routes.set(event, chain);
+        }
+      };
+    },
+    dispatch(event, e, next, signal = unaborted) {
+      const chain = routes.get(event);
+      const call = async (index, current) => {
+        const route = chain?.[index];
+        if (route === undefined)
+          return next(current);
+        return route.hook(current, Object.assign((passed) => call(index + 1, passed), { signal }));
+      };
+      return call(0, e);
+    },
+    dispatchFailure(event, e, error, next, called) {
+      const chain = routes.get(event);
+      const fail = async (index, current) => {
+        const route = chain?.[index];
+        if (route === undefined)
+          return next(current);
+        const answer = await route.failed?.(current, error, Object.assign((passed) => fail(index + 1, passed), { signal: unaborted, called }));
+        return answer === undefined ? fail(index + 1, current) : answer;
+      };
+      return fail(0, e);
+    }
+  };
+}
+
+// node_modules/@cmodjs/core/runtime/interfaces.js
+var styleInterface = "cmod/Style";
+var interfaceMethods = { providers: "cmod:providers", provider: "cmod:provider", provided: "cmod:provided", listen: "cmod:listenProvided", unlisten: "cmod:unlistenProvided", tell: "cmod:tellProvided", ask: "cmod:askProvided", heard: "cmod:heard" };
+var providerHoldMs = hookMs / 4;
+function checkInterfaceName(name) {
+  if (!interfaceName.test(name))
+    throw new Error(`${name} is no interface name, such as demo/Platform.`);
+}
+function methodName(name, method) {
+  return `${name}.${method}`;
+}
+function providerClient(name, identity, call, listen) {
+  return new Proxy(identity, {
+    get: (known, key) => {
+      if (typeof key !== "string" || key === "then")
+        return;
+      if (key === "mod" || key === "program" || key === "device")
+        return known[key];
+      const event = /^(on|before)([A-Z]\w*)$/.exec(key);
+      if (event === null)
+        return (...args) => call(key, args);
+      return (...args) => {
+        const { matcher, listener, options } = listenerOf(name, key, args);
+        return listen(event[1], event[2] ?? "", matcher, listener, options);
+      };
+    }
+  });
+}
+function createProviders({ name, call, changed, after, report }) {
+  const provided = new Map;
+  const heard = new Map;
+  let nextListener = 0;
+  const run = async ({ interface: named, method, args }) => {
+    const runs = provided.get(named)?.[method];
+    if (runs === undefined)
+      throw new Error(`${name} provides no ${named}.${method}.`);
+    return await runs(...args) ?? null;
+  };
+  const answer = (method, asked, caller, signal) => {
+    if (method === interfaceMethods.heard && caller === cmodPluginName)
+      return (async () => await heard.get(asked.id)?.(asked.payload, signal) ?? null)();
+    return method === interfaceMethods.provided && asked.program === undefined ? run(asked) : undefined;
+  };
+  const client = (named, identity) => providerClient(named, identity, (method, args) => {
+    const asked = { interface: named, method, args, ...identity };
+    return beforeDeadline({ after }, callDeadline, methodName(named, method), () => identity.mod === name && identity.program === undefined ? run(asked) : call(identity.program === undefined ? identity.mod : cmodPluginName, interfaceMethods.provided, asked));
+  }, (kind, event, matcher, listener, options) => {
+    const id = `${named}#${nextListener += 1}`;
+    heard.set(id, listener);
+    call(cmodPluginName, interfaceMethods.listen, { id, interface: named, kind, event, ...identity, ...matcher === undefined ? {} : { matcher: sentMatcher(matcher) }, ...options }).catch((error) => {
+      heard.delete(id);
+      report(error);
+    });
+    return {
+      remove() {
+        if (heard.delete(id))
+          call(cmodPluginName, interfaceMethods.unlisten, { id }).catch(report);
+      }
+    };
+  });
+  return {
+    provided: () => [...provided.keys()],
+    provide(named, methods) {
+      checkInterfaceName(named);
+      provided.set(named, methods);
+      changed();
+      const send = (method, event, payload) => new Promise((resolve) => after(0, () => resolve(call(cmodPluginName, method, { interface: named, event, payload }))));
+      return {
+        remove() {
+          if (provided.get(named) === methods && provided.delete(named))
+            changed();
+        },
+        tell: (event, payload) => void send(interfaceMethods.tell, event, payload).catch(report),
+        ask: (event, payload) => send(interfaceMethods.ask, event, payload)
+      };
+    },
+    async providers(named) {
+      const listed = await call(cmodPluginName, interfaceMethods.providers, { name: named });
+      return [...listed.mods.map((mod) => client(named, { mod, device: listed.device })), ...listed.programs.map((identity) => client(named, identity))];
+    },
+    answer
+  };
+}
+
+// node_modules/@cmodjs/core/runtime/programs.js
+function lastLineOf(text) {
+  const trimmed = text.trim();
+  return trimmed === "" ? undefined : trimmed.slice(trimmed.lastIndexOf(`
+`) + 1).trim();
+}
+function cmodError(stderr, command) {
+  const line = lastLineOf(stderr) ?? "";
+  const prefix = `cmod ${command}: `;
+  return line.startsWith(prefix) ? line.slice(prefix.length) : line;
+}
+async function readLines(stream, onLine) {
+  let pending = "";
+  let lastError = "";
+  let piece = await stream.next();
+  while (piece.done !== true) {
+    if (piece.value.stream === "stderr") {
+      lastError = lastLineOf(piece.value.text) ?? lastError;
+    } else {
+      const lines = `${pending}${piece.value.text}`.split(`
+`);
+      pending = lines.pop() ?? "";
+      for (const text of lines)
+        onLine(text);
+    }
+    piece = await stream.next();
+  }
+  if (pending !== "")
+    onLine(pending);
+  return { code: piece.value.code, lastError };
+}
+function spawnCmod(claude, args, session, env = {}) {
+  return claude.process.spawn({ argv: ["cmod", ...args], env: { ...env, CLAUDE_CODE_SESSION_ID: session } });
+}
+async function isHeld(claude, lock, staleMs) {
+  const now = await claude.clock.now();
+  const holders = await claude.fs.list(lock).catch(ifMissing([]));
+  const touched = await Promise.all(holders.map(async ({ name }) => (await claude.fs.stat(`${lock}/${name}`).catch(ifMissing(undefined)))?.mtimeMs ?? 0));
+  return touched.some((at) => now - at < staleMs);
+}
+async function cmodStore(claude) {
+  return storeFolder({ HOME: await claude.env.home(), XDG_DATA_HOME: await claude.env.dataHome() });
+}
+async function newestCmodVersion(claude) {
+  const store = await cmodStore(claude);
+  return readCmodVersion({
+    list: async (folder) => (await claude.fs.list(folder).catch(ifMissing([]))).map((entry) => entry.name),
+    exists: async (path) => await claude.fs.stat(path).catch(ifMissing(undefined)) !== undefined
+  }, store);
+}
+async function runCmod(claude, args, session) {
+  const lines = [];
+  const { code, lastError } = await readLines(spawnCmod(claude, args, session), (line) => void lines.push(line));
+  if (code !== 0)
+    throw new Error(cmodError(lastError, args[0]) || `cmod ${args.slice(0, 2).join(" ")} ${formatExit(code, "")}.`);
+  return lines.join(`
+`);
+}
+function spawnedAfter(ready, spawn) {
+  let resolve = () => {
+    return;
+  };
+  let reject = () => {
+    return;
+  };
+  const result = new Promise((resolved, rejected) => {
+    resolve = resolved;
+    reject = rejected;
+  });
+  result.catch(() => {
+    return;
+  });
+  const stream = async function* () {
+    try {
+      await ready;
+      const ended = yield* spawn();
+      resolve(ended);
+      return ended;
+    } finally {
+      reject(new Error("cmod: the stream closed before the program ended."));
+    }
+  }();
+  return Object.assign(stream, { result });
+}
+function locatingPrograms(claude) {
+  let folder;
+  let names = new Set;
+  let downloading;
+  const located = (argv) => {
+    const [name, ...rest] = argv;
+    return folder !== undefined && name !== undefined && (name === "cmod" || names.has(name)) ? [`${folder}/${name}`, ...rest] : argv;
+  };
+  const waiting = (argv) => argv[0] === "cmod" ? downloading : undefined;
+  return {
+    claude: {
+      ...claude,
+      process: {
+        run: (argv, init) => {
+          const ready = waiting(argv);
+          return ready === undefined ? claude.process.run(located(argv), init) : ready.then(() => claude.process.run(located(argv), init));
+        },
+        spawn: (request) => {
+          const ready = waiting(request.argv);
+          const spawn = () => claude.process.spawn({ ...request, argv: located(request.argv) });
+          return ready === undefined ? spawn() : spawnedAfter(ready, spawn);
+        }
+      }
+    },
+    waitFor(download) {
+      const current = download.then(() => {
+        if (downloading === current)
+          downloading = undefined;
+      });
+      current.catch(() => {
+        return;
+      });
+      downloading = current;
+    },
+    async refresh() {
+      const programs = `${await cmodStore(claude)}/programs`;
+      names = new Set((await claude.fs.list(programs).catch(ifMissing([]))).map((entry) => entry.name));
+      folder = programs;
+    }
+  };
+}
+
+// node_modules/@cmodjs/core/utils/parse-shell.js
+var markerPattern = /\u0001(\d+)\u0001/g;
+var descriptorPattern = /[0-9]+(?=[<>])/y;
+var assignmentPattern = /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/;
+var dynamicPattern = /[$`]/;
+var homePrefix2 = /^\$HOME(?=\/|$)/;
+var clusterPattern = /^-[A-Za-z0-9]{2,}$/;
+var separators = ";&|()<>";
+var redirectOperators = new Set([">", ">>", ">|", "&>", "&>>", ">&", "<", "<>", "<&", "<<<"]);
+var writeRedirects = new Set([">", ">>", ">|", "&>", "&>>", "<>"]);
+var sequenceOperators = new Set([";", "&", "&&", "||", "|", "|&"]);
+var casePatternStarts = new Set([";;", ";&", ";;&"]);
+var reservedWords = new Set(["if", "then", "else", "elif", "fi", "do", "done", "while", "until", "esac", "{", "}", "!"]);
+var shells = new Set(["sh", "bash", "zsh"]);
+var findActions = new Set(["-exec", "-execdir", "-ok", "-okdir"]);
+var gitValuedOptions = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source"]);
+var nonGetoptPrograms = new Set([
+  "find",
+  "java",
+  "javac",
+  "go",
+  "gcc",
+  "g++",
+  "clang",
+  "clang++",
+  "swift",
+  "swiftc",
+  "xcodebuild",
+  "xcrun",
+  "ffmpeg",
+  "ffprobe",
+  "openssl",
+  "plutil",
+  "defaults",
+  "security",
+  "codesign"
+]);
+var grep = {
+  valued: "efmABCdD",
+  longValued: ["--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context", "--directories", "--devices", "--binary-files", "--label", "--include", "--exclude", "--exclude-dir", "--exclude-from"],
+  scriptOptions: ["-e", "-f", "--regexp", "--file"]
+};
+var awk = {
+  valued: "fFvi",
+  longValued: ["--file", "--field-separator", "--assign", "--include", "--source"],
+  scriptOptions: ["-f", "--file", "--source"],
+  takesAssignments: true,
+  inPlaceOptions: ["-i", "--include"]
+};
+var sed = {
+  valued: "efl",
+  optional: "iI",
+  longValued: ["--expression", "--file", "--line-length"],
+  scriptOptions: ["-e", "-f", "--expression", "--file"],
+  inPlaceOptions: ["-i", "-I", "--in-place"]
+};
+var perl = {
+  valued: "eEIMmF",
+  optional: "ixdDC",
+  scriptOptions: ["-e", "-E"],
+  inPlaceOptions: ["-i"]
+};
+var fileWriters = new Map([
+  ["tee", {}],
+  ["rm", {}],
+  ["touch", { valued: "drt", longValued: ["--date", "--reference", "--time"] }],
+  ["truncate", { valued: "sr", longValued: ["--size", "--reference"] }]
+]);
+var copyTarget = { valued: "tS", longValued: ["--target-directory", "--suffix"], targetOptions: ["-t", "--target-directory"] };
+var copyPrograms = new Map([
+  ["cp", { ...copyTarget, sources: "reads" }],
+  ["mv", { ...copyTarget, sources: "writes" }],
+  ["ln", { ...copyTarget, sources: undefined, linksHere: true }],
+  ["rsync", {
+    valued: "efBTM",
+    longValued: [
+      "--rsh",
+      "--rsync-path",
+      "--filter",
+      "--exclude",
+      "--include",
+      "--exclude-from",
+      "--include-from",
+      "--files-from",
+      "--temp-dir",
+      "--compare-dest",
+      "--copy-dest",
+      "--link-dest",
+      "--backup-dir",
+      "--suffix",
+      "--chmod",
+      "--chown",
+      "--usermap",
+      "--groupmap",
+      "--timeout",
+      "--contimeout",
+      "--bwlimit",
+      "--log-file",
+      "--log-file-format",
+      "--out-format",
+      "--password-file",
+      "--port",
+      "--sockopts",
+      "--max-size",
+      "--min-size",
+      "--max-delete",
+      "--partial-dir",
+      "--block-size",
+      "--modify-window",
+      "--iconv",
+      "--checksum-choice",
+      "--compress-choice",
+      "--compress-level",
+      "--remote-option",
+      "--info",
+      "--debug",
+      "--address",
+      "--write-batch",
+      "--only-write-batch",
+      "--read-batch",
+      "--protocol",
+      "--skip-compress"
+    ],
+    sources: "reads",
+    skipsRemote: true
+  }]
+]);
+var fetchers = new Map([
+  ["curl", {
+    valued: "AbcCdDeEFHKmoPQrTtuUwxXyYz",
+    longValued: [
+      "--url",
+      "--data",
+      "--data-raw",
+      "--data-binary",
+      "--data-urlencode",
+      "--data-ascii",
+      "--json",
+      "--form",
+      "--form-string",
+      "--header",
+      "--proxy-header",
+      "--user",
+      "--user-agent",
+      "--referer",
+      "--output",
+      "--output-dir",
+      "--cookie",
+      "--cookie-jar",
+      "--request",
+      "--proxy",
+      "--proxy-user",
+      "--preproxy",
+      "--noproxy",
+      "--max-time",
+      "--connect-timeout",
+      "--retry",
+      "--retry-delay",
+      "--retry-max-time",
+      "--range",
+      "--continue-at",
+      "--upload-file",
+      "--write-out",
+      "--cert",
+      "--cert-type",
+      "--key",
+      "--key-type",
+      "--cacert",
+      "--capath",
+      "--ciphers",
+      "--config",
+      "--dump-header",
+      "--interface",
+      "--limit-rate",
+      "--max-filesize",
+      "--max-redirs",
+      "--resolve",
+      "--connect-to",
+      "--oauth2-bearer",
+      "--aws-sigv4",
+      "--unix-socket",
+      "--abstract-unix-socket",
+      "--variable",
+      "--url-query",
+      "--trace",
+      "--trace-ascii",
+      "--stderr",
+      "--keepalive-time",
+      "--local-port",
+      "--dns-servers",
+      "--doh-url",
+      "--quote",
+      "--telnet-option",
+      "--time-cond",
+      "--speed-limit",
+      "--speed-time",
+      "--etag-save",
+      "--etag-compare",
+      "--hsts",
+      "--alt-svc",
+      "--mail-from",
+      "--mail-rcpt",
+      "--mail-auth",
+      "--pass",
+      "--proto",
+      "--proto-redir",
+      "--pubkey",
+      "--socks4",
+      "--socks4a",
+      "--socks5",
+      "--socks5-hostname"
+    ]
+  }],
+  ["wget", {
+    valued: "aoeiBtOTwQPlARDIXU",
+    longValued: [
+      "--output-file",
+      "--append-output",
+      "--execute",
+      "--input-file",
+      "--base",
+      "--tries",
+      "--output-document",
+      "--timeout",
+      "--dns-timeout",
+      "--connect-timeout",
+      "--read-timeout",
+      "--wait",
+      "--waitretry",
+      "--quota",
+      "--limit-rate",
+      "--directory-prefix",
+      "--level",
+      "--accept",
+      "--reject",
+      "--domains",
+      "--exclude-domains",
+      "--include-directories",
+      "--exclude-directories",
+      "--user-agent",
+      "--header",
+      "--user",
+      "--password",
+      "--http-user",
+      "--http-password",
+      "--post-data",
+      "--post-file",
+      "--body-data",
+      "--body-file",
+      "--method",
+      "--referer",
+      "--load-cookies",
+      "--save-cookies",
+      "--certificate",
+      "--private-key",
+      "--ca-certificate",
+      "--ca-directory",
+      "--bind-address",
+      "--cut-dirs",
+      "--default-page",
+      "--restrict-file-names",
+      "--local-encoding",
+      "--remote-encoding"
+    ]
+  }]
+]);
+var su = { valued: "cgGsw", longValued: ["--command", "--session-command", "--group", "--supp-group", "--shell", "--whitelist-environment"] };
+var suCodeOptions = ["-c", "--command", "--session-command"];
+var fileReaders = new Map([
+  ["cat", {}],
+  ["head", { valued: "nc", longValued: ["--lines", "--bytes"] }],
+  ["tail", { valued: "ncbs", longValued: ["--lines", "--bytes", "--pid", "--sleep-interval", "--max-unchanged-stats"] }],
+  ["less", { valued: "bhjkoOpPtTxyz" }],
+  ["grep", grep],
+  ["egrep", grep],
+  ["fgrep", grep],
+  ["rg", {
+    valued: "efgtTmABCjMrEd",
+    longValued: ["--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--type-add", "--max-count", "--after-context", "--before-context", "--context", "--threads", "--max-columns", "--replace", "--encoding", "--max-depth", "--max-filesize", "--sort", "--sortr", "--pre", "--pre-glob", "--engine", "--ignore-file", "--path-separator", "--context-separator", "--field-match-separator", "--field-context-separator"],
+    scriptOptions: ["-e", "-f", "--regexp", "--file"]
+  }],
+  ["awk", awk],
+  ["gawk", awk],
+  ["sed", sed],
+  ["gsed", sed]
+]);
+var wrappers = new Map([
+  ["sudo", {
+    valued: "CDghpRrTtUu",
+    longValued: ["--close-from", "--chdir", "--group", "--host", "--prompt", "--chroot", "--role", "--type", "--command-timeout", "--other-user", "--user"],
+    stops: ["-e", "--edit", "-l", "--list", "-v", "--validate", "-V", "--version", "-K", "--remove-timestamp"],
+    folderOptions: ["-D", "--chdir"],
+    takesAssignments: true
+  }],
+  ["env", {
+    valued: "aCPSu",
+    longValued: ["--argv0", "--chdir", "--split-string", "--unset"],
+    folderOptions: ["-C", "--chdir"],
+    codeOptions: ["-S", "--split-string"],
+    takesAssignments: true
+  }],
+  ["doas", { valued: "aCu", stops: ["-C", "-L"] }],
+  ["timeout", { valued: "ks", longValued: ["--kill-after", "--signal"], leadingOperands: 1 }],
+  ["flock", { valued: "wEc", longValued: ["--timeout", "--wait", "--conflict-exit-code", "--command"], codeOptions: ["-c", "--command"], leadingOperands: 1 }],
+  ["stdbuf", { valued: "ioe", longValued: ["--input", "--output", "--error"] }],
+  ["watch", { valued: "nq", optional: "d", longValued: ["--interval", "--equexit"], shellUnless: ["-x", "--exec"] }],
+  ["nohup", {}],
+  ["nice", { valued: "n", longValued: ["--adjustment"] }],
+  ["time", { valued: "fo", longValued: ["--format", "--output"] }],
+  ["exec", { valued: "a" }],
+  ["command", { stops: ["-v", "-V"] }],
+  ["xargs", {
+    valued: "aEdILnPs",
+    optional: "eil",
+    longValued: ["--arg-file", "--delimiter", "--max-args", "--max-chars", "--max-procs", "--process-slot-var"]
+  }]
+]);
+var inlineCodeFlags = new Map([
+  ["python", ["-c"]],
+  ["python2", ["-c"]],
+  ["python3", ["-c"]],
+  ["node", ["-e", "--eval", "-p", "--print"]],
+  ["bun", ["-e", "--eval", "-p", "--print"]],
+  ["deno", ["eval"]],
+  ["ruby", ["-e"]],
+  ["perl", ["-e", "-E"]],
+  ["php", ["-r"]],
+  ["lua", ["-e"]],
+  ["osascript", ["-e"]]
+]);
+function parseShell(line) {
+  const result = { commands: [], writes: [], reads: [], fetches: [], isFullyParsed: true };
+  parseLine(line, "", result);
+  return result;
+}
+function parseLine(line, folder, result) {
+  if (line.includes("\x01")) {
+    result.isFullyParsed = false;
+    return;
+  }
+  try {
+    const { text, markers } = scan(line, 0, false);
+    walk(Dt(text, (name) => name === "" ? undefined : `$${name}`), markers, folder, result);
+  } catch (error) {
+    if (!(error instanceof SyntaxError) && !(error instanceof Error && error.message.startsWith("Bad substitution: ")))
+      throw error;
+    result.isFullyParsed = false;
+  }
+}
+function scan(source, start, isNested) {
+  const markers = [];
+  const heredocs = [];
+  const mark = (marker) => `\x01${markers.push(marker) - 1}\x01`;
+  let text = "";
+  let depth = 0;
+  let cases = 0;
+  let index = start;
+  let isWordStart = true;
+  while (index < source.length) {
+    const char = source.charAt(index);
+    const next = source.charAt(index + 1);
+    if (char === `
+`) {
+      text += " ; ";
+      index = readHeredocBodies(source, index + 1, heredocs.splice(0));
+      isWordStart = true;
+      continue;
+    }
+    if (char === " " || char === "\t") {
+      text += char;
+      index += 1;
+      isWordStart = true;
+      continue;
+    }
+    if (char === "#") {
+      if (isWordStart)
+        index = lineEnd(source, index);
+      else {
+        text += "\\#";
+        index += 1;
+      }
+      continue;
+    }
+    if (char === "\\") {
+      if (next === "")
+        throw new SyntaxError("The line ends with a backslash.");
+      if (next !== `
+`) {
+        text += char + next;
+        isWordStart = false;
+      }
+      index += 2;
+      continue;
+    }
+    if (char === "'" || char === "$" && next === "'") {
+      const close = closingQuote(source, index + (char === "$" ? 2 : 1), "'", char === "$");
+      text += source.slice(index, close + 1);
+      index = close + 1;
+      isWordStart = false;
+      continue;
+    }
+    if (char === '"') {
+      const quoted = readDoubleQuoted(source, index, mark);
+      text += quoted.text;
+      index = quoted.end;
+      isWordStart = false;
+      continue;
+    }
+    const expansion = expansionAt(source, index);
+    if (expansion !== undefined) {
+      text += mark(expansion);
+      index = expansion.end;
+      isWordStart = false;
+      continue;
+    }
+    if ((char === "<" || char === ">") && next === "(") {
+      const close = scan(source, index + 2, true).end;
+      text += mark({ raw: source.slice(index, close + 1), code: [source.slice(index + 2, close)] });
+      index = close + 1;
+      isWordStart = false;
+      continue;
+    }
+    if (char === "(" && next === "(" && isWordStart) {
+      const end = arithmeticEnd(source, index + 2);
+      if (end !== undefined) {
+        if (substitutionsIn(source.slice(index + 2, end - 2)).length > 0)
+          throw new SyntaxError("An arithmetic command runs a substitution.");
+        index = end;
+        continue;
+      }
+    }
+    if (source.startsWith("<<<", index)) {
+      text += "<<<";
+      index += 3;
+      isWordStart = true;
+      continue;
+    }
+    if (char === "<" && next === "<") {
+      const heredoc = readHeredocOperator(source, index);
+      heredocs.push(heredoc);
+      text += ` <<< ${mark(heredoc.marker)} `;
+      index = heredoc.end;
+      isWordStart = true;
+      continue;
+    }
+    if (isWordStart) {
+      descriptorPattern.lastIndex = index;
+      const descriptor = descriptorPattern.exec(source);
+      if (descriptor !== null) {
+        index += descriptor[0].length;
+        continue;
+      }
+      if (startsWord(source, index, "case"))
+        cases += 1;
+      if (startsWord(source, index, "esac") && cases > 0)
+        cases -= 1;
+    }
+    if (char === "(")
+      depth += 1;
+    if (char === ")") {
+      if (depth > 0)
+        depth -= 1;
+      else if (cases === 0) {
+        if (!isNested)
+          throw new SyntaxError("The line closes a parenthesis it never opened.");
+        if (heredocs.length > 0)
+          throw new SyntaxError("A heredoc inside a substitution has no body.");
+        return { text, markers, end: index };
+      }
+    }
+    text += char;
+    index += 1;
+    isWordStart = separators.includes(char);
+  }
+  if (isNested)
+    throw new SyntaxError("A substitution is never closed.");
+  if (depth > 0)
+    throw new SyntaxError("A parenthesis is never closed.");
+  if (heredocs.length > 0)
+    throw new SyntaxError("A heredoc has no body.");
+  return { text, markers, end: index };
+}
+function readDoubleQuoted(source, start, mark) {
+  let text = '"';
+  let index = start + 1;
+  while (index < source.length) {
+    const char = source.charAt(index);
+    if (char === '"')
+      return { text: `${text}"`, end: index + 1 };
+    if (char === "\\") {
+      if (source.charAt(index + 1) !== `
+`)
+        text += source.slice(index, index + 2);
+      index += 2;
+      continue;
+    }
+    const expansion = expansionAt(source, index);
+    if (expansion !== undefined) {
+      text += mark(expansion);
+      index = expansion.end;
+      continue;
+    }
+    text += char;
+    index += 1;
+  }
+  throw new SyntaxError("A double quote is never closed.");
+}
+function expansionAt(source, index) {
+  if (source.startsWith("$((", index)) {
+    const end = arithmeticEnd(source, index + 3);
+    if (end !== undefined)
+      return { raw: source.slice(index, end), code: substitutionsIn(source.slice(index + 3, end - 2)), end };
+  }
+  if (source.startsWith("$(", index)) {
+    const close = scan(source, index + 2, true).end;
+    return { raw: source.slice(index, close + 1), code: [source.slice(index + 2, close)], end: close + 1 };
+  }
+  if (source.charAt(index) === "`") {
+    const close = closingQuote(source, index + 1, "`", true);
+    return { raw: source.slice(index, close + 1), code: [source.slice(index + 1, close).replace(/\\([\\`$])/g, "$1")], end: close + 1 };
+  }
+  return;
+}
+function substitutionsIn(text) {
+  const code = [];
+  let index = 0;
+  while (index < text.length) {
+    if (text.charAt(index) === "\\") {
+      index += 2;
+      continue;
+    }
+    const expansion = expansionAt(text, index);
+    if (expansion === undefined)
+      index += 1;
+    else {
+      code.push(...expansion.code);
+      index = expansion.end;
+    }
+  }
+  return code;
+}
+function arithmeticEnd(source, from) {
+  let depth = 0;
+  for (let index = from;index < source.length; index += 1) {
+    const char = source.charAt(index);
+    if (char === "(")
+      depth += 1;
+    if (char !== ")")
+      continue;
+    if (depth > 0)
+      depth -= 1;
+    else
+      return source.charAt(index + 1) === ")" ? index + 2 : undefined;
+  }
+  throw new SyntaxError("An arithmetic expansion is never closed.");
+}
+function closingQuote(source, from, quote, isEscapable) {
+  for (let index = from;index < source.length; index += 1) {
+    const char = source.charAt(index);
+    if (isEscapable && char === "\\")
+      index += 1;
+    else if (char === quote)
+      return index;
+  }
+  throw new SyntaxError(`A ${quote} quote is never closed.`);
+}
+function lineEnd(source, index) {
+  const end = source.indexOf(`
+`, index);
+  return end < 0 ? source.length : end;
+}
+function startsWord(source, index, word) {
+  return source.startsWith(word, index) && /^$|[\s;&|()<>]/.test(source.charAt(index + word.length));
+}
+function readHeredocOperator(source, index) {
+  let end = index + 2;
+  const stripsTabs = source.charAt(end) === "-";
+  if (stripsTabs)
+    end += 1;
+  while (source.charAt(end) === " " || source.charAt(end) === "\t")
+    end += 1;
+  let delimiter = "";
+  let isQuoted = false;
+  while (end < source.length && !/[\s;&|()<>]/.test(source.charAt(end))) {
+    const char = source.charAt(end);
+    if (char === "'" || char === '"') {
+      const close = closingQuote(source, end + 1, char, char === '"');
+      delimiter += source.slice(end + 1, close);
+      isQuoted = true;
+      end = close + 1;
+    } else if (char === "\\") {
+      delimiter += source.charAt(end + 1);
+      isQuoted = true;
+      end += 2;
+    } else {
+      delimiter += char;
+      end += 1;
+    }
+  }
+  if (delimiter === "")
+    throw new SyntaxError("A heredoc has no delimiter.");
+  return { delimiter, stripsTabs, isQuoted, marker: { raw: "", code: [] }, end };
+}
+function readHeredocBodies(source, from, heredocs) {
+  let index = from;
+  for (const heredoc of heredocs) {
+    const lines = [];
+    for (;; ) {
+      if (index >= source.length)
+        throw new SyntaxError(`The heredoc ${heredoc.delimiter} never ends.`);
+      const end = lineEnd(source, index);
+      const line = heredoc.stripsTabs ? source.slice(index, end).replace(/^\t+/, "") : source.slice(index, end);
+      index = end + 1;
+      if (line === heredoc.delimiter)
+        break;
+      lines.push(line);
+    }
+    heredoc.marker.raw = lines.join(`
+`);
+    heredoc.marker.code = heredoc.isQuoted ? [] : substitutionsIn(heredoc.marker.raw);
+  }
+  return index;
+}
+function walk(tokens, markers, start, result) {
+  let folder = start;
+  const subshells = [];
+  let command = newCommand(undefined);
+  let caseState;
+  for (let index = 0;index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (typeof token !== "string" && "comment" in token)
+      throw new SyntaxError("The line holds a comment the scanner left.");
+    if (isWordToken(token)) {
+      const word = wordOf(token, markers, folder, result);
+      if (caseState === "header") {
+        if (word.text === "in")
+          caseState = "pattern";
+      } else if (caseState === "pattern") {
+        if (word.text === "esac")
+          caseState = undefined;
+      } else if (word.text === "case" && command.words.every((earlier) => reservedWords.has(earlier.text))) {
+        caseState = "header";
+      } else
+        command.words.push(word);
+      continue;
+    }
+    const operator = token.op;
+    if (redirectOperators.has(operator)) {
+      const target = tokens[index + 1];
+      if (target === undefined || !isWordToken(target))
+        throw new SyntaxError(`The redirection ${operator} has no target.`);
+      index += 1;
+      command.redirects.push({ operator, target: wordOf(target, markers, folder, result) });
+      continue;
+    }
+    if (caseState !== undefined) {
+      if (caseState === "pattern" && operator === ")")
+        caseState = undefined;
+      continue;
+    }
+    const following = tokens[index + 1];
+    if (operator === "(" && command.words.length === 1 && following !== undefined && !isWordToken(following) && "op" in following && following.op === ")") {
+      command = newCommand(undefined);
+      index += 1;
+      continue;
+    }
+    const before = result.commands.length;
+    folder = finish(command, operator, folder, result);
+    const writer = result.commands.length > before ? result.commands.length - 1 : undefined;
+    command = newCommand(operator === "|" || operator === "|&" ? { writer } : undefined);
+    if (operator === "(")
+      subshells.push(folder);
+    else if (operator === ")") {
+      const outer = subshells.pop();
+      if (outer === undefined)
+        throw new SyntaxError("The line closes a subshell it never opened.");
+      folder = outer;
+    } else if (casePatternStarts.has(operator))
+      caseState = "pattern";
+    else if (!sequenceOperators.has(operator))
+      throw new SyntaxError(`The parser does not know the operator ${operator}.`);
+  }
+  finish(command, ";", folder, result);
+}
+function newCommand(pipe) {
+  return { words: [], redirects: [], pipe };
+}
+function isWordToken(token) {
+  return typeof token === "string" || "op" in token && token.op === "glob";
+}
+function wordOf(token, markers, folder, result) {
+  const raw = typeof token === "string" ? token : token.pattern;
+  for (const match of raw.matchAll(markerPattern)) {
+    for (const code of markers[Number(match[1])].code)
+      parseLine(code, folder, result);
+  }
+  return {
+    text: raw.replace(markerPattern, (_, index) => markers[Number(index)].raw),
+    isGlob: typeof token !== "string",
+    isDynamic: /[$\u0001]/.test(ft(raw))
+  };
+}
+function finish(command, operator, folder, result) {
+  for (const redirect of command.redirects)
+    addRedirect(redirect, folder, result);
+  const words = withoutPrefixes(command.words);
+  const [first, ...args] = words;
+  if (first === undefined || first.text === "for" || first.text === "select")
+    return folder;
+  const here = command.redirects.findLast((redirect) => redirect.operator === "<<<");
+  const stdin = here !== undefined ? { type: "text", text: here.target.text } : command.pipe !== undefined ? { type: "pipe" } : undefined;
+  const reader = result.commands.length;
+  const changed = addCommand(first, args, folder, stdin, result);
+  const read = result.commands[reader];
+  const writer = command.pipe?.writer;
+  if (read !== undefined && writer !== undefined && here === undefined)
+    result.commands[reader] = { ...read, input: writer };
+  const isPiped = command.pipe !== undefined || operator === "|" || operator === "|&" || operator === "&";
+  return changed === undefined || isPiped ? folder : changed;
+}
+function withoutPrefixes(words) {
+  let start = 0;
+  for (;; ) {
+    const text = words[start]?.text;
+    if (text === undefined)
+      break;
+    if (text === "function")
+      start += 2;
+    else if (reservedWords.has(text) || assignmentPattern.test(text))
+      start += 1;
+    else
+      break;
+  }
+  return words.slice(start);
+}
+function addRedirect({ operator, target }, folder, result) {
+  if (operator === "<" || operator === "<>")
+    addPath(result, "reads", target, folder);
+  if (writeRedirects.has(operator) || operator === ">&" && !/^([0-9]+|-)$/.test(target.text))
+    addPath(result, "writes", target, folder);
+}
+function addCommand(first, args, folder, stdin, result) {
+  if (first.isDynamic || first.isGlob)
+    result.isFullyParsed = false;
+  const program = ft(first.text);
+  if (program === "git")
+    addGit(first, args, folder, result);
+  else if (program === "find")
+    addFind(first, args, folder, result);
+  else if (wrappers.has(program))
+    addWrapper(first, program, args, folder, stdin, result);
+  else {
+    const flags = expandFlags(program, args);
+    const runner = result.commands.push({ argv: [first.text, ...flags], folder }) - 1;
+    addEffects(program, args, flags, folder, stdin, result);
+    runBy(runner, result);
+    if (program === "cd")
+      return changedFolder(args, folder);
+  }
+  return;
+}
+function addGit(first, args, folder, result) {
+  let index = 0;
+  let gitFolder = folder;
+  for (let text = args[0]?.text;text?.startsWith("-") === true; text = args[index]?.text) {
+    if (text === "-C")
+      gitFolder = joinFolder(gitFolder, args[index + 1]?.text ?? "");
+    if (text === "-c" && /^alias\.[^=]*=\s*!/i.test(args[index + 1]?.text ?? ""))
+      result.isFullyParsed = false;
+    index += gitValuedOptions.has(text) ? 2 : 1;
+  }
+  result.commands.push({ argv: [first.text, ...expandFlags("git", args.slice(index))], folder: gitFolder });
+}
+function addFind(first, args, folder, result) {
+  const own = [];
+  const actions = [];
+  for (let index = 0;index < args.length; index += 1) {
+    const text = args[index].text;
+    if (!findActions.has(text)) {
+      own.push(text);
+      continue;
+    }
+    const end = args.findIndex((word, at) => at > index && (word.text === ";" || word.text === "+"));
+    actions.push(args.slice(index + 1, end < 0 ? args.length : end));
+    index = end < 0 ? args.length : end;
+  }
+  const runner = result.commands.push({ argv: [first.text, ...own], folder }) - 1;
+  const starts = findStarts(args);
+  if (own.includes("-delete"))
+    for (const start of starts)
+      addPath(result, "writes", start, folder);
+  for (const action of actions)
+    addFindAction(action, starts, folder, result);
+  runBy(runner, result);
+}
+function addFindAction(action, starts, folder, result) {
+  const [first, ...args] = action;
+  if (first === undefined)
+    return;
+  const reads = result.reads.length;
+  const writes = result.writes.length;
+  addCommand(first, args, folder, undefined, result);
+  if (!action.some((word) => word.text.includes("{}")))
+    return;
+  result.reads.splice(reads);
+  result.writes.splice(writes);
+  for (const start of starts) {
+    const found = { commands: [], reads: result.reads, writes: result.writes, fetches: [], isFullyParsed: true };
+    const [foundFirst, ...foundArgs] = action.map((word) => foundWord(word, start));
+    addCommand(foundFirst, foundArgs, folder, undefined, found);
+    if (!found.isFullyParsed)
+      result.isFullyParsed = false;
+  }
+}
+function foundWord(word, start) {
+  if (!word.text.includes("{}"))
+    return word;
+  return { text: word.text.replaceAll("{}", start.text), isGlob: word.isGlob || start.isGlob, isDynamic: word.isDynamic || start.isDynamic };
+}
+function findStarts(args) {
+  let index = 0;
+  for (let text = args[0]?.text;text === "-D" || /^-([HLP]|O\d*)$/.test(text ?? ""); text = args[index]?.text)
+    index += text === "-D" ? 2 : 1;
+  const end = args.findIndex((word, at) => at >= index && /^[-(!),]/.test(word.text));
+  const starts = args.slice(index, end < 0 ? args.length : end);
+  return starts.length > 0 ? starts : [literal(".")];
+}
+function addWrapper(first, program, args, folder, stdin, result) {
+  const wrapper = wrappers.get(program);
+  if (program === "xargs" && stdin?.type !== "text")
+    result.isFullyParsed = false;
+  const { options, operands } = readArguments(args, wrapper, true);
+  let start = args.length - operands.length;
+  if (options.some((option) => wrapper.stops?.includes(option.name) === true))
+    start = args.length;
+  start += wrapper.leadingOperands ?? 0;
+  while (wrapper.takesAssignments === true && assignmentPattern.test(args[start]?.text ?? ""))
+    start += 1;
+  const hasTrailingCode = wrapper.codeOptions?.includes(args[start]?.text ?? "") === true;
+  const runner = result.commands.push({ argv: [first.text, ...expandFlags(program, args.slice(0, start))], folder }) - 1;
+  const innerFolder = options.findLast((option) => wrapper.folderOptions?.includes(option.name) === true)?.value;
+  const wrappedFolder = innerFolder === undefined ? folder : joinFolder(folder, innerFolder.text);
+  const code = hasTrailingCode ? args[start + 1] : options.findLast((option) => wrapper.codeOptions?.includes(option.name) === true)?.value;
+  const rest = args.slice(hasTrailingCode ? start + 2 : start);
+  const isShell = wrapper.shellUnless !== undefined && !options.some((option) => wrapper.shellUnless?.includes(option.name) === true);
+  const [innerFirst, ...innerArgs] = rest;
+  if (code !== undefined || isShell)
+    parseLine([...code === undefined ? [] : [code], ...rest].map((word) => word.text).join(" "), wrappedFolder, result);
+  else if (innerFirst !== undefined)
+    addCommand(innerFirst, innerArgs, wrappedFolder, stdin, result);
+  runBy(runner, result);
+}
+function runBy(runner, result) {
+  for (const command of result.commands.slice(runner + 1))
+    command.runner ??= runner;
+}
+function addEffects(program, args, flags, folder, stdin, result) {
+  const fileProgram = fileReaders.get(program);
+  const fileWriter = fileWriters.get(program);
+  const copyProgram = copyPrograms.get(program);
+  const fetcher = fetchers.get(program);
+  const inlineFlags = inlineCodeFlags.get(program);
+  if (program === "eval")
+    result.isFullyParsed = false;
+  else if (shells.has(program))
+    addShell(args, folder, stdin, result);
+  else if (program === "ssh")
+    addSsh(args, stdin, result);
+  else if (program === "su")
+    addSu(args, folder, result);
+  else if (program === "source" || program === ".")
+    addPath(result, "reads", readArguments(args, {}, true).operands[0], folder);
+  else if (program === "dd")
+    for (const word of args.filter((arg) => arg.text.startsWith("of=")))
+      addPath(result, "writes", { ...word, text: word.text.slice(3) }, folder);
+  else if (fileWriter !== undefined)
+    for (const operand of readArguments(args, fileWriter, false).operands)
+      addPath(result, "writes", operand, folder);
+  else if (copyProgram !== undefined)
+    addCopy(copyProgram, args, folder, result);
+  else if (fileProgram !== undefined)
+    addFileArguments(fileProgram, args, folder, result);
+  else if (fetcher !== undefined)
+    addFetches(fetcher, args, result);
+  else if (inlineFlags !== undefined) {
+    if (program === "perl" && readArguments(args, perl, false).options.some((option) => option.name === "-i"))
+      addFileArguments(perl, args, folder, result);
+    const script = args.find((word) => !word.text.startsWith("-") || word.text === "-");
+    const readsCodeFromPipe = stdin?.type === "pipe" && (script === undefined || script.text === "-");
+    if (flags.some((flag) => inlineFlags.includes(flag)) || stdin?.type === "text" || readsCodeFromPipe)
+      result.isFullyParsed = false;
+  }
+}
+function addShell(args, folder, stdin, result) {
+  const { options, operands } = readArguments(args, { valued: "oO", longValued: ["--rcfile", "--init-file"] }, true);
+  const script = operands[0];
+  if (options.some((option) => option.name === "-c")) {
+    if (script !== undefined)
+      parseLine(script.text, folder, result);
+  } else if (script === undefined || options.some((option) => option.name === "-s"))
+    addStdinCode(stdin, folder, result);
+}
+function addSsh(args, stdin, result) {
+  const { operands } = readArguments(args, { valued: "BbcDEeFIiJLlmOoPpQRSWw" }, true);
+  const remote = operands.slice(1);
+  if (remote.length > 0)
+    parseLine(remote.map((word) => word.text).join(" "), "~", result);
+  else if (operands.length > 0)
+    addStdinCode(stdin, "~", result);
+}
+function addSu(args, folder, result) {
+  const code = readArguments(args, su, false).options.findLast((option) => suCodeOptions.includes(option.name))?.value;
+  if (code !== undefined)
+    parseLine(code.text, folder, result);
+}
+function addFetches(fetcher, args, result) {
+  const { options, operands } = readArguments(args, fetcher, false);
+  const urls = [...options.filter((option) => option.name === "--url").flatMap((option) => option.value === undefined ? [] : [option.value]), ...operands];
+  for (const url of urls)
+    result.fetches.push(/^[a-z][a-z0-9+.-]*:\/\//i.test(url.text) ? url.text : `http://${url.text}`);
+}
+function addStdinCode(stdin, folder, result) {
+  if (stdin?.type === "text")
+    parseLine(stdin.text, folder, result);
+  if (stdin?.type === "pipe")
+    result.isFullyParsed = false;
+}
+function addCopy(program, args, folder, result) {
+  const { options, operands } = readArguments(args, program, false);
+  const target = options.findLast((option) => program.targetOptions?.includes(option.name) === true)?.value;
+  const only = operands[0];
+  if (program.linksHere === true && target === undefined && operands.length === 1 && only !== undefined) {
+    addPath(result, "writes", { ...only, text: ft(only.text) }, folder);
+    return;
+  }
+  const destination = target ?? operands.at(-1);
+  const sources = target === undefined ? operands.slice(0, -1) : operands;
+  if (destination === undefined || sources.length === 0)
+    return;
+  const isLocal = (word) => program.skipsRemote !== true || !/^[^/]*:/.test(word.text);
+  for (const source of sources.filter(isLocal)) {
+    if (program.sources !== undefined)
+      addPath(result, program.sources, source, folder);
+    if (isLocal(destination) && !source.isGlob && !destination.isGlob)
+      addPathText(result, "writes", `${destination.text.replace(/\/+$/, "")}/${ft(source.text)}`, folder);
+  }
+  if (isLocal(destination))
+    addPath(result, "writes", destination, folder);
+}
+function addFileArguments(program, args, folder, result) {
+  const { options, operands } = readArguments(args, program, false);
+  const inPlace = options.find((option) => program.inPlaceOptions?.includes(option.name) === true && (program !== awk || option.value?.text === "inplace"));
+  let files = operands;
+  if (program === sed && inPlace !== undefined && inPlace.value === undefined) {
+    const suffix = files[0]?.text;
+    const hasScriptOption = options.some((option) => program.scriptOptions?.includes(option.name) === true);
+    if (suffix === "" || !hasScriptOption && suffix !== undefined && /^\.[\w.-]*$/.test(suffix))
+      files = files.slice(1);
+  }
+  if (program.scriptOptions !== undefined && !options.some((option) => program.scriptOptions?.includes(option.name) === true))
+    files = files.slice(1);
+  if (program.takesAssignments === true)
+    files = files.filter((file) => !assignmentPattern.test(file.text));
+  for (const file of files)
+    addPath(result, inPlace === undefined ? "reads" : "writes", file, folder);
+}
+function readArguments(args, spec, stopsAtOperand) {
+  const options = [];
+  const operands = [];
+  for (let index = 0;index < args.length; index += 1) {
+    const word = args[index];
+    const text = word.text;
+    if (text === "--") {
+      operands.push(...args.slice(index + 1));
+      break;
+    }
+    if (word.isGlob || text === "-" || !text.startsWith("-")) {
+      if (stopsAtOperand) {
+        operands.push(...args.slice(index));
+        break;
+      }
+      operands.push(word);
+      continue;
+    }
+    if (text.startsWith("--")) {
+      const equals = text.indexOf("=");
+      if (equals >= 0)
+        options.push({ name: text.slice(0, equals), value: literal(text.slice(equals + 1)) });
+      else if (spec.longValued?.includes(text) === true) {
+        options.push({ name: text, value: args[index + 1] });
+        index += 1;
+      } else
+        options.push({ name: text, value: undefined });
+      continue;
+    }
+    for (let at = 1;at < text.length; at += 1) {
+      const letter = text.charAt(at);
+      const rest = text.slice(at + 1);
+      if (spec.optional?.includes(letter) === true) {
+        options.push({ name: `-${letter}`, value: rest === "" ? undefined : literal(rest) });
+        break;
+      }
+      if (spec.valued?.includes(letter) === true) {
+        if (rest !== "")
+          options.push({ name: `-${letter}`, value: literal(rest) });
+        else {
+          options.push({ name: `-${letter}`, value: args[index + 1] });
+          index += 1;
+        }
+        break;
+      }
+      options.push({ name: `-${letter}`, value: undefined });
+    }
+  }
+  return { options, operands };
+}
+function expandFlags(program, args) {
+  const texts = args.map((word) => word.text);
+  if (nonGetoptPrograms.has(program))
+    return texts;
+  const spec = fileReaders.get(program) ?? wrappers.get(program);
+  const takesValue = `${spec?.valued ?? ""}${spec?.optional ?? ""}`;
+  const end = texts.indexOf("--");
+  return texts.flatMap((text, index) => end >= 0 && index > end || !clusterPattern.test(text) ? [text] : expandCluster(text, takesValue));
+}
+function expandCluster(cluster, takesValue) {
+  const flags = [];
+  for (let index = 1;index < cluster.length; index += 1) {
+    const letter = cluster.charAt(index);
+    if (takesValue.includes(letter) && index < cluster.length - 1)
+      return [...flags, `-${cluster.slice(index)}`];
+    flags.push(`-${letter}`);
+  }
+  return flags;
+}
+function changedFolder(args, folder) {
+  const target = args.find((word) => !word.text.startsWith("-") || word.text === "-");
+  if (target === undefined)
+    return "~";
+  return joinFolder(folder, target.text === "-" ? "$OLDPWD" : target.text);
+}
+function addPath(result, access, word, folder) {
+  if (word !== undefined && !word.isGlob)
+    addPathText(result, access, word.text, folder);
+}
+function addPathText(result, access, path, folder) {
+  if (path === "" || path.startsWith("/dev/"))
+    return;
+  const joined = joinFolder(folder, path);
+  if (dynamicPattern.test(joined.replace(homePrefix2, "")))
+    result.isFullyParsed = false;
+  result[access].push(joined);
+}
+function joinFolder(folder, path) {
+  return folder === "" || /^(\/|~|\$HOME(\/|$))/.test(path) ? path : `${folder}/${path}`;
+}
+function literal(text) {
+  return { text, isGlob: false, isDynamic: false };
+}
+
+// node_modules/@cmodjs/core/utils/call-effects.js
+function callEffects(use, workspace) {
+  const { fs } = workspace;
+  const absolute = (path, folder = workspace.cwd) => ve(folder, expandHome(path, workspace.home, workspace.configRoot));
+  const access = (path) => ({ path: absolute(path), contents: undefined });
+  const effects = { shell: undefined, reads: [], writes: [], urls: [], subagent: undefined };
+  if (use.tool === "Bash") {
+    const line = textField(use, "command");
+    const parsed = parseShell(line);
+    const commands = parsed.commands.map(({ argv, folder }) => ({ argv, folder: absolute(folder) }));
+    effects.shell = { line, commands, isFullyParsed: parsed.isFullyParsed };
+    effects.reads = parsed.reads.map(access);
+    effects.writes = parsed.writes.map(access);
+    effects.urls = parsed.fetches;
+  } else if (use.tool === "PowerShell") {
+    effects.shell = { line: textField(use, "command"), commands: [], isFullyParsed: false };
+  } else if (use.tool === "Edit") {
+    const path = absolute(textField(use, "file_path"));
+    effects.writes = [{ path, contents: once(() => editedContents(use, path, fs)) }];
+  } else if (use.tool === "Write") {
+    const path = absolute(textField(use, "file_path"));
+    const content = textField(use, "content");
+    effects.writes = [{ path, contents: once(async () => contentsOf(content, await previousContentOf(path, fs))) }];
+  } else if (use.tool === "NotebookEdit") {
+    const path = absolute(textField(use, "notebook_path"));
+    effects.writes = [{ path, contents: once(async () => contentsOf(undefined, await previousContentOf(path, fs))) }];
+  } else if (use.tool === "Read") {
+    effects.reads = [access(textField(use, "file_path"))];
+  } else if (use.tool === "Grep") {
+    effects.reads = [access(optionalTextField(use, "path") ?? "")];
+  } else if (use.tool === "Glob") {
+    const folder = absolute(optionalTextField(use, "path") ?? "");
+    effects.reads = [{ path: absolute(textField(use, "pattern"), folder), contents: undefined }];
+  } else if (use.tool === "WebFetch") {
+    effects.urls = [textField(use, "url")];
+  } else if (use.tool === "Agent") {
+    effects.subagent = optionalTextField(use, "subagent_type") ?? "general-purpose";
+  }
+  return effects;
+}
+async function editedContents(use, path, fs) {
+  const previousContent = await previousContentOf(path, fs);
+  const oldString = textField(use, "old_string");
+  const newString = textField(use, "new_string");
+  if (oldString === "")
+    return contentsOf(previousContent === undefined || previousContent === "" ? newString : undefined, previousContent);
+  if (previousContent === undefined || !previousContent.includes(oldString))
+    return contentsOf(undefined, previousContent);
+  const content = fieldOf(use, "replace_all") === true ? previousContent.split(oldString).join(newString) : previousContent.replace(oldString, () => newString);
+  return contentsOf(content, previousContent);
+}
+async function previousContentOf(path, fs) {
+  const stat = await fs.stat(path).catch(ifMissing(undefined));
+  return stat?.kind === "file" ? fs.read(path) : undefined;
+}
+function contentsOf(content, previousContent) {
+  return { ...content === undefined ? {} : { content }, ...previousContent === undefined ? {} : { previousContent } };
+}
+function once(load) {
+  let loaded;
+  return () => loaded ??= load();
+}
+function fieldOf(use, name) {
+  return use.input[name];
+}
+
+class InvalidCall extends Error {
+}
+function textField(use, name) {
+  const value = fieldOf(use, name);
+  if (typeof value !== "string")
+    throw new InvalidCall(`The ${use.tool} call has no text field ${name}.`);
+  return value;
+}
+function optionalTextField(use, name) {
+  return fieldOf(use, name) === undefined ? undefined : textField(use, name);
+}
+
+// node_modules/@cmodjs/core/runtime/hooks.js
+function classicHook(event, hook, report) {
+  const routed = async (e, next) => {
+    const ours = await Promise.resolve().then(() => hook(e, next.signal)).catch((error) => {
+      report({ id: `hook:${event}`, message: `The ${event} listener failed`, error });
+      return;
+    });
+    if (ours === undefined)
+      return next(e);
+    return mergeClassic(await next(e), ours);
+  };
+  return routed;
+}
+function classicFailure(failed) {
+  const routed = async (e, error, next) => {
+    const ours = await failed(e, error);
+    return ours === undefined ? undefined : mergeClassic(await next(e), ours);
+  };
+  return routed;
+}
+var frontmatter = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
+var baseDirectoryLine = /^Base directory for this skill: [^\n]*\n\n/;
+function userSkillHook(claude) {
+  return async (e, next) => {
+    const { name, root } = claude.plugin;
+    if (!e.skill.startsWith(`${name}:`))
+      return next(e);
+    const skill = e.skill.slice(name.length + 1);
+    const skills = `${root}/skills`;
+    if (!await claude.fs.exists(skills) || !(await claude.fs.list(skills)).some((entry) => entry.name === skill))
+      return next(e);
+    if ((await claude.fs.stat(`${skills}/${skill}`)).kind !== "dir")
+      return next(e);
+    const env = { HOME: await claude.env.home(), CLAUDE_CONFIG_DIR: await claude.env.configHome() };
+    for (const { folder } of configFolders(env, name, await claude.session.root()).toReversed()) {
+      const path = `${folder}/skills/${skill}/SKILL.md`;
+      if (await claude.fs.exists(path))
+        return { text: `${baseDirectoryLine.exec(e.text)?.[0] ?? ""}${(await claude.fs.read(path)).replace(frontmatter, "")}` };
+    }
+    return next(e);
+  };
+}
+async function callFiles(name, claude, folders, use, cwd) {
+  try {
+    const { home, configRoot } = await folders;
+    if (home === undefined)
+      throw new Error("HOME is not set, so ~ in a path has no meaning.");
+    const { shell, reads, writes } = callEffects(use, { cwd, home, ...configRoot === undefined ? {} : { configRoot }, fs: claude.fs });
+    const known = (accesses) => accesses.map(({ path }) => path).filter((path) => shell === undefined || !dynamicPattern.test(path));
+    const unchecked = (path) => (error) => {
+      if (!isMissing(error))
+        claude.ui.warn("call:files", `${name}: the ${use.tool} call reads ${path}, which could not be checked: ${messageOf(error)}`);
+      return;
+    };
+    const read = await Promise.all(known(reads).map(async (path) => (await claude.fs.stat(path).catch(unchecked(path)))?.kind === "file" ? [path] : []));
+    return { read: read.flat(), changed: known(writes) };
+  } catch (error) {
+    if (!(error instanceof InvalidCall))
+      claude.ui.warn("call:files", `${name}: the ${use.tool} call lists no files: ${messageOf(error)}`);
+    return { read: [], changed: [] };
+  }
+}
+function mergeClassic(below, ours) {
+  const merged = { ...below, ...ours };
+  const context = [...below["additionalContext"] ?? [], ...ours["additionalContext"] ?? []];
+  if (context.length > 0)
+    merged["additionalContext"] = context;
+  return merged;
+}
+
+// node_modules/@cmodjs/core/runtime/sessions.js
+var conversationMethods = {
+  sessions: "cmod:sessions",
+  session: "cmod:session",
+  search: "cmod:search",
+  messages: "cmod:messages",
+  turns: "cmod:turns",
+  contexts: "cmod:contexts",
+  tasks: "cmod:tasks",
+  goal: "cmod:goal",
+  updateGoal: "cmod:updateGoal",
+  subscribe: "cmod:subscribe",
+  watchBefore: "cmod:watchBefore",
+  act: "cmod:act",
+  changed: "cmod:changed",
+  before: "cmod:before",
+  sessionColor: "cmod:sessionColor"
+};
+var sessionFields = { id: true, title: true, color: true, project: true, cwd: true, model: true, startedAt: true, lastAt: true, forkedFrom: true, isRunning: true, agentType: true, visitedAt: true, device: true, status: true, waitingFor: true, contextPercent: true, lastTurn: true };
+async function usageOf(claude) {
+  const [model, usage] = await Promise.all([claude.session.model(), claude.session.usage()]);
+  const { tokens, window, percent } = usage.context;
+  const rateLimits = usage.rateLimits.map(({ kind, percentUsed, resetsAt }) => ({ type: kind, percent: percentUsed, ...resetsAt === undefined ? {} : { resetsAt } }));
+  return { model, contextWindow: { ...tokens === undefined ? {} : { tokenCount: tokens }, size: window, ...percent === undefined ? {} : { percent } }, rateLimits, ...usage.cost === undefined ? {} : { cost: { usd: usage.cost.usd } } };
+}
+function payloadOf(change) {
+  if (change.type === Message)
+    return change.message;
+  if ("turn" in change)
+    return change.turn;
+  if ("context" in change)
+    return change.context;
+  if ("task" in change) {
+    const { id, title, agentType, model, openedBy, openedAt, closedAt, isBackground, forkedFrom } = change.task;
+    const owner = { id, title, ...agentType === undefined ? {} : { agentType }, ...model === undefined ? {} : { model }, ...forkedFrom === undefined ? {} : { forkedFrom }, startedAt: openedAt };
+    return { id, title, openedBy, openedAt, ...closedAt === undefined ? {} : { closedAt }, ...isBackground === true ? { isBackground } : {}, owner };
+  }
+  if ("usage" in change)
+    return change.usage;
+  return change.goal;
+}
+function isHeardBy(event, matcher, change) {
+  const named = change.type === Message ? event === Message || event === change.message.type : event === change.type;
+  return named && (matcher === undefined || matches(payloadOf(change), matcher));
+}
+function taskOfChange(change) {
+  if (change.type === Message)
+    return change.message.task;
+  if (change.type === TaskStart || change.type === TaskEnd)
+    return change.task.id === "" ? change.task.parent : change.task.id;
+  if (change.type === TurnStart || change.type === TurnEnd)
+    return change.turn.prompt.task;
+  if (change.type === ContextStart || change.type === ContextEnd)
+    return change.context.task;
+  if (change.type === GoalChange)
+    return change.goal.task;
+  return;
+}
+function ownerOfChange(change) {
+  if (change.type === TaskStart || change.type === TaskEnd)
+    return change.task.parent;
+  return taskOfChange(change);
+}
+function contextOfChange(change) {
+  if (change.type === Message)
+    return change.message.context;
+  if (change.type === TurnStart || change.type === TurnEnd)
+    return change.turn.context;
+  if (change.type === ContextStart || change.type === ContextEnd)
+    return change.context.number;
+  if (change.type === TaskStart || change.type === TaskEnd)
+    return change.task.context;
+  return;
+}
+function isInScope(scope, session, change, isUnder) {
+  if (scope.session !== undefined && scope.session !== session)
+    return false;
+  const task = taskOfChange(change);
+  if (scope.isAgent === true)
+    return (change.type === TaskStart || change.type === TaskEnd ? change.task.parent : task) === scope.task;
+  if (scope.task !== undefined && (task === undefined || !isUnder(task, scope.task)))
+    return false;
+  if (scope.context !== undefined && (contextOfChange(change) !== scope.context || ownerOfChange(change) !== scope.task))
+    return false;
+  if (scope.turn === undefined)
+    return true;
+  if (change.type === Message)
+    return change.message.turn === scope.turn;
+  return (change.type === TurnStart || change.type === TurnEnd) && change.turn.prompt.id === scope.turn;
+}
+function withoutPermissionCheck(name, hearer) {
+  return `${name}: ${hearer} hears Claude Code's permission check, so hooks/register.ts must call registerPermissionCheck(addHook) after registerMod.`;
+}
+function createSessionsClient({ name, claude, report, hookOn, routeOn, permissionRoutes }) {
+  const call = (method, input) => claude.cmod.call({ to: cmodPluginName, method, input });
+  const listening = new Map;
+  const deciding = new Map;
+  const queued = new Set;
+  const parents = new Map;
+  const readingParents = new Map;
+  const known = new Map;
+  let current = { id: "", title: "", project: "", cwd: "", model: "", startedAt: "", lastAt: "", isRunning: true };
+  let told = { session: "" };
+  const ownOnly = (method) => new Error(`${name}: ${method} works only in a mod's own session.`);
+  const colored = ({ color: _color, ...data }) => told.session === data.id && told.color !== undefined ? { ...data, color: told.color } : data;
+  const keyOf = (scope) => scope.session ?? current.id;
+  const subscribe = (key) => {
+    if (queued.has(key))
+      return;
+    queued.add(key);
+    Promise.resolve().then(async () => {
+      queued.delete(key);
+      const heard = (from) => [...from.get(key) ?? []].map(({ event, matcher, options, scope }) => ({ event, matcher: matcher === undefined ? undefined : sentMatcher(matcher), scope, ...options.onFailure === "refuse" ? { onFailure: "refuse" } : {}, ...options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs } }));
+      const tracksTasks = [...listening.get(key) ?? [], ...deciding.get(key) ?? []].some(({ scope }) => scope.task !== undefined || scope.isGoal === true);
+      const subscriptions = [...heard(listening), ...tracksTasks ? [{ event: TaskStart }] : []];
+      await call(conversationMethods.subscribe, { session: key, subscriptions }).catch((error) => report(`sessions:${key}`, `Hears nothing from session ${key}`, error));
+      await call(conversationMethods.watchBefore, { session: key, subscriptions: heard(deciding) }).catch((error) => report(`before:${key}`, `Changes nothing in session ${key}`, error));
+    });
+  };
+  const parentsOf = (session) => {
+    const known = parents.get(session);
+    if (known !== undefined)
+      return known;
+    const reading = readingParents.get(session);
+    if (reading !== undefined)
+      return reading;
+    const read = call(conversationMethods.tasks, { session, all: true }).then((tasks) => {
+      const tree = new Map(tasks.map((task) => [task.id, task.parent]));
+      parents.set(session, tree);
+      return tree;
+    }).finally(() => readingParents.delete(session));
+    readingParents.set(session, read);
+    return read;
+  };
+  const isUnderIn = (tree) => (task, ancestor) => {
+    for (let at = task, steps = 0;at !== undefined && steps < 64; at = tree?.get(at), steps += 1)
+      if (at === ancestor)
+        return true;
+    return false;
+  };
+  const inScope = ({ scope }, session, change) => {
+    if (scope.task === undefined || scope.isAgent === true)
+      return isInScope(scope, session, change, isUnderIn(undefined));
+    const tree = parentsOf(session);
+    if (tree instanceof Map)
+      return isInScope(scope, session, change, isUnderIn(tree));
+    return tree.then((read) => isInScope(scope, session, change, isUnderIn(read)), (error) => {
+      report(`tasks:${session}`, "Could not read the tasks it listens under", error);
+      return false;
+    });
+  };
+  const remember = (session, change) => {
+    if (change.type !== TaskStart)
+      return;
+    parents.get(session)?.set(change.task.id, change.task.parent);
+    readingParents.get(session)?.then((tree) => tree.set(change.task.id, change.task.parent), (error) => claude.ui.warn("tasks:read", `${name}: the tasks of ${session} stay unread until the next change: ${messageOf(error)}`));
+  };
+  const add = (into, scope, event, method, args, onChange) => {
+    const key = keyOf(scope);
+    const entry = { scope, event, method, ...listenerOf(name, method, args) };
+    const set = into.get(key) ?? new Set;
+    set.add(entry);
+    into.set(key, set);
+    onChange(key);
+    return {
+      remove() {
+        for (const [at, held] of into) {
+          if (!held.delete(entry))
+            continue;
+          if (held.size === 0)
+            into.delete(at);
+          onChange(at);
+          return;
+        }
+      }
+    };
+  };
+  const refusalOf = (options, takes, error) => options.onFailure === "refuse" && takes.includes("refuse") ? { refuse: `${name}: ${messageOf(error)}` } : undefined;
+  const invoke = (method, options, cancel, run, takes = []) => withinTime(claude.clock, method, options, cancel, run).catch((error) => {
+    if (cancel.aborted || error instanceof PassedTimeout && !method.startsWith("before"))
+      return;
+    report(`session:${method}`, `The ${method} listener failed`, error);
+    return refusalOf(options, takes, error);
+  });
+  const decidersOf = (session, event) => [...deciding.get(session) ?? []].filter((entry) => entry.event === event);
+  const decides = async (entry, session, change) => (entry.matcher === undefined || matches(payloadOf(change), entry.matcher)) && await inScope(entry, session, change);
+  const combined = async (session, event, change, cancel) => {
+    const askers = decidersOf(session, event).map((entry) => async (latest) => {
+      if (!await decides(entry, session, latest))
+        return;
+      const payload = await payloadFor(session, latest);
+      return invoke(entry.method, entry.options, cancel, async (time) => takenAnswer(entry.method, beforeAnswerKeys[event], await entry.listener(payload, time)), beforeAnswerKeys[event]);
+    });
+    const answer = await foldBefore(event, change, askers, (error) => report(`session:${methodOf("before", event)}`, `The ${methodOf("before", event)} listener failed`, error));
+    return answer?.note === undefined ? answer : { ...answer, note: modNote(name, answer.note) };
+  };
+  const eventMethods = (scopeOf, hasBefore, ended) => {
+    const method = (into, named, event) => (...args) => {
+      if (ended !== undefined)
+        throw new Error(`${name}: ${ended} has ended, so its ${named} never fires. Listen on its Session.`);
+      const scope = scopeOf();
+      if (routeOn === undefined || keyOf(scope) !== current.id)
+        throw ownOnly(named);
+      return add(into, scope, event, named, args, subscribe);
+    };
+    return Object.fromEntries([
+      ...Object.entries(sessionEvents).map(([named, event]) => [`on${named}`, method(listening, `on${named}`, event)]),
+      ...hasBefore ? beforeEvents.map((named) => [`before${named}`, method(deciding, `before${named}`, sessionEvents[named])]) : []
+    ]);
+  };
+  let folders;
+  const withFiles = async (message) => {
+    if (message.type !== ToolCall && message.type !== ToolResult)
+      return message;
+    folders ??= Promise.all([claude.env.home(), claude.env.configHome()]).then(([home, configRoot]) => ({ home, configRoot }));
+    return { ...message, files: await callFiles(name, claude, folders, { tool: message.name, input: message.input }, message.cwd) };
+  };
+  const messagesFrom = async (method, input) => Promise.all((await call(method, input)).map(withFiles));
+  const searched = (request, matcher) => ({
+    async* [Symbol.asyncIterator]() {
+      let before = request["before"];
+      for (;; ) {
+        const page = await messagesFrom(conversationMethods.search, { ...request, ...before === undefined ? {} : { before } });
+        for (const message of page)
+          if (matcher === undefined || matches(message, matcher))
+            yield message;
+        const last = page.at(-1);
+        if (last === undefined || page.length < searchLimit)
+          return;
+        before = { session: last.session, id: last.id };
+      }
+    }
+  });
+  const recordPart = (scope, ended) => ({
+    search: (text, matcher) => searched({ text, ...scope }, matcher),
+    ...eventMethods(() => scope, true, ended)
+  });
+  const turnOf = (scope, data) => {
+    const task = data.prompt.task ?? scope.task;
+    return {
+      ...data,
+      ...recordPart({ ...scope, ...task === undefined ? {} : { task }, turn: data.prompt.id }, data.closedAt === undefined ? undefined : `turn ${data.prompt.id}`),
+      messages: () => messagesFrom(conversationMethods.messages, { session: scope.session, turn: data.prompt.id, ...task === undefined ? {} : { task } }),
+      abort: async () => {
+        if (data.closedAt !== undefined)
+          throw new Error(`${name}: turn ${data.prompt.id} has ended, so there is nothing to abort.`);
+        const session = scope.session ?? current.id;
+        await act(session, "abort", { turn: data.prompt.id }, task === undefined ? undefined : { session, task });
+      }
+    };
+  };
+  const contextOf = (scope, data) => {
+    const owned = { ...scope.session === undefined ? {} : { session: scope.session }, ...data.task === undefined ? {} : { task: data.task } };
+    return {
+      ...data,
+      ...recordPart({ ...owned, context: data.number }, data.closedAt === undefined ? undefined : `context ${data.number}`),
+      turns: async () => (await call(conversationMethods.turns, { ...owned, context: data.number })).map((turn) => turnOf(owned, turn))
+    };
+  };
+  const taskOf = (session, data) => {
+    const record = data.isBackground === true ? { session: data.id } : { session, task: data.id };
+    return {
+      id: data.id,
+      title: data.title,
+      openedBy: data.openedBy,
+      openedAt: data.openedAt,
+      ...data.closedAt === undefined ? {} : { closedAt: data.closedAt },
+      ...data.status === undefined ? {} : { status: data.status },
+      ...data.name === undefined ? {} : { name: data.name },
+      ...data.spawnedBy === undefined ? {} : { spawnedBy: data.spawnedBy },
+      ...data.isBackground === true ? { isBackground: true } : {},
+      owner: ownerOf(session, data),
+      ...recordPart({ session, task: data.id }),
+      search: (text, matcher) => searched({ text, ...record }, matcher),
+      tasks: async () => (await call(conversationMethods.tasks, record)).map((task) => taskOf(record.session, task)),
+      messages: () => messagesFrom(conversationMethods.messages, record)
+    };
+  };
+  const goalOf = (where) => ({
+    search: (text, matcher) => searched({ text, ...where() }, matcher),
+    ...eventMethods(() => ({ ...where(), isGoal: true }), true),
+    text: async () => (await call(conversationMethods.goal, where())).text,
+    tasks: async () => {
+      const { session = current.id, task } = where();
+      return (await call(conversationMethods.tasks, { session, ...task === undefined ? {} : { task } })).map((each) => taskOf(session, each));
+    },
+    update: async ({ text }) => {
+      if (text.trim() === "")
+        throw new Error(`${name}: a goal needs text.`);
+      const { session = current.id, task } = where();
+      await call(conversationMethods.updateGoal, { session, ...task === undefined ? {} : { task }, text });
+    }
+  });
+  const payloadFor = async (session, change) => {
+    const scope = { session };
+    if (change.type === Message)
+      return withFiles(change.message);
+    if ("turn" in change)
+      return turnOf(scope, change.turn);
+    if ("context" in change)
+      return contextOf(scope, change.context);
+    if ("task" in change)
+      return taskOf(session, change.task);
+    if ("usage" in change)
+      return change.usage;
+    const { task } = change.goal;
+    return goalOf(() => ({ session, ...task === undefined ? {} : { task } }));
+  };
+  const act = (session, action, input, owned) => call(conversationMethods.act, { session: owned?.session ?? session, action, input, ...owned === undefined ? {} : { task: owned.task } });
+  const sendHere = async ({ type, text, as }) => {
+    if (type === Note) {
+      if (as !== undefined)
+        throw new Error(`${name}: a Note is always from this mod, so it takes no as.`);
+      const added = await claude.session.append({ message: { type: "user", content: [{ type: "text", text: modNote(name, text) }] } });
+      if (added.deny !== undefined)
+        throw new Error(`${name}: Claude Code refused the note: ${added.deny}`);
+      return;
+    }
+    const submitted = await claude.prompt.submit({ text, ...as === Person ? { asUser: true } : {} });
+    if ("drop" in submitted && typeof submitted.drop === "string")
+      throw new Error(`${name}: Claude Code dropped the prompt: ${submitted.drop}`);
+  };
+  const surfacesHere = async () => [...await claude.session.surfaces()];
+  const sessionOf = (read, owned, isOwner = owned !== undefined, hears = true) => {
+    const id = () => read().id;
+    const isHere = () => owned === undefined && id() === current.id;
+    const scope = () => owned === undefined ? { session: id(), isAgent: true } : { session: owned.session, task: owned.task, isAgent: true };
+    const where = () => owned === undefined ? { session: id() } : { session: owned.session, task: owned.task };
+    const turnsOf = async (options = {}) => (await call(conversationMethods.turns, { ...where(), ...options })).map((turn) => turnOf(where(), turn));
+    const contextsOf = async () => (await call(conversationMethods.contexts, where())).map((context) => contextOf(where(), context));
+    const data = Object.defineProperties({}, Object.fromEntries(Object.keys(sessionFields).map((key) => [key, { get: () => read()[key], enumerable: true, configurable: true }])));
+    const session = Object.assign(data, {
+      search: (text, matcher) => recordPart(scope()).search(text, matcher),
+      ...hears ? eventMethods(scope, true) : {},
+      goal: goalOf(where),
+      context: async () => {
+        const all = await contextsOf();
+        const last = all.at(-1);
+        if (last === undefined)
+          throw new Error(`${name}: session ${id()} has no context yet.`);
+        return last;
+      },
+      contexts: contextsOf,
+      turn: async () => {
+        const [last] = await turnsOf({ last: 1 });
+        return last?.closedAt === undefined ? last : undefined;
+      },
+      turns: turnsOf,
+      messages: (options = {}) => messagesFrom(conversationMethods.messages, { ...where(), ...options }),
+      usage: async () => isHere() ? usageOf(claude) : act(id(), "usage", null, owned),
+      surfaces: async () => isHere() ? surfacesHere() : act(id(), "surfaces", null, owned),
+      async send(message) {
+        if (message.text.trim() === "")
+          throw new Error(`${name}: send needs text.`);
+        if (isHere() && message.as !== Session)
+          return sendHere(message);
+        await act(id(), "send", message, owned);
+      },
+      async end() {
+        await act(id(), "end", null, owned);
+      },
+      async visit(at) {
+        await act(id(), "visit", at ?? new Date().toISOString(), owned);
+      }
+    });
+    if (isOwner)
+      return session;
+    const started = async (starting) => taskOf(id(), await starting.catch((error) => Promise.reject(new Error(`${name}: ${messageOf(error)}`))));
+    return Object.assign(session, {
+      startTask: (task) => started(task.isBackground === true || task.device !== undefined ? act(id(), "startBackgroundTask", task) : isHere() ? spawnTask(claude, task) : act(id(), "startTask", task)),
+      fork: (task) => started(isHere() && task.isBackground !== true && task.at === undefined ? spawnTask(claude, task, current.id) : act(id(), "fork", task)),
+      delete: async () => {
+        await act(id(), "delete", null);
+      },
+      callTool: async (toolCall) => await withFiles(await act(id(), "callTool", toolCall))
+    });
+  };
+  const ownerOf = (session, data) => {
+    const parent = session === current.id ? current : known.get(session);
+    const isBackground = data.isBackground === true;
+    return sessionOf(() => ({
+      id: data.id,
+      title: data.title,
+      project: parent?.project ?? "",
+      ...data.agentType === undefined ? {} : { agentType: data.agentType },
+      model: data.model ?? "",
+      cwd: parent?.cwd ?? "",
+      isRunning: data.closedAt === undefined && (isBackground || (parent?.isRunning ?? true)),
+      startedAt: data.openedAt,
+      lastAt: data.closedAt ?? data.openedAt,
+      ...data.forkedFrom === undefined ? {} : { forkedFrom: data.forkedFrom }
+    }), isBackground ? undefined : { session, task: data.id }, true);
+  };
+  const processListeners = new Map;
+  const processHearers = (method, payload) => [...processListeners.get(method) ?? []].filter(({ matcher, isEveryAgent }) => (payload["task"] === undefined || isEveryAgent) && (matcher === undefined || matches(payload, matcher)));
+  const raise = async (method, payload, cancel) => {
+    const heard = processHearers(method, payload);
+    if (!method.startsWith("before")) {
+      await Promise.all(heard.map(({ listener, options }) => invoke(method, options, cancel, (time) => listener(payload, time))));
+      return;
+    }
+    const takes = takesOf(method);
+    const askers = heard.map(({ listener, options }) => () => invoke(method, options, cancel, async (time) => takenAnswer(method, takes, await listener(payload, time)), takes));
+    return foldAnswers(method, takes, ["refuse"], undefined, askers, (error) => report(`session:${method}`, `The ${method} listener failed`, error));
+  };
+  const takesOf = (method) => answerKeys[method.slice("before".length)] ?? [];
+  const refusalFor = (method, payload, error) => processHearers(method, payload).map((entry) => refusalOf(entry.options, takesOf(method), error)).find((answer) => answer !== undefined);
+  const commandRun = async (e) => {
+    const source = (await claude.command.list()).find((command) => command.name === e.command)?.source;
+    return { session: current.id, cwd: current.cwd, name: e.command, args: e.args, ...defined({ source }), from: senderOf(e.origin, false) };
+  };
+  const commandListeners = { beforeRun: new Set, onRun: new Set };
+  for (const [method, held] of Object.entries(commandListeners))
+    processListeners.set(method, held);
+  routeOn?.("command.run", async (e, next) => {
+    if (commandListeners.beforeRun.size === 0 && commandListeners.onRun.size === 0)
+      return next(e);
+    const run = await commandRun(e);
+    const answer = commandListeners.beforeRun.size === 0 ? undefined : await raise("beforeRun", run, next.signal);
+    if (typeof answer?.["refuse"] === "string")
+      return { text: answer["refuse"] };
+    if (typeof answer?.["result"] === "string")
+      return { text: answer["result"], ...typeof answer["exitCode"] === "number" ? { exitCode: answer["exitCode"] } : {} };
+    const args = typeof answer?.["args"] === "string" ? answer["args"] : e.args;
+    const ran = await next(args === e.args ? e : { ...e, args });
+    raise("onRun", { ...run, args }, next.signal);
+    return typeof answer?.["note"] === "string" ? { ...ran, context: [...ran.context ?? [], modNote(name, answer["note"])] } : ran;
+  }, async (e, error) => {
+    const refusal = commandListeners.beforeRun.size === 0 ? undefined : refusalFor("beforeRun", await commandRun(e), error);
+    return refusal === undefined ? undefined : { text: refusal.refuse };
+  });
+  const listenTo = (method, named) => {
+    if (hookOn === undefined || routeOn === undefined)
+      throw ownOnly(method);
+    const isBefore = method.startsWith("before");
+    if (named === "PermissionCheck" || named === "PermissionRequest") {
+      const routes = permissionRoutes?.();
+      if (routes === undefined)
+        throw new Error(withoutPermissionCheck(name, method));
+      return routes(method, { raise, refusalFor, hookOn, routeOn, current: () => current });
+    }
+    const event = processEvents[named];
+    const hook = (isBefore ? event.before : undefined) ?? event.on;
+    if (method === "beforeSessionStart")
+      routeOn("session.compact", trackCompaction);
+    if (method === "beforeModelChange")
+      hookOn(event.on, () => {
+        const notes = modelNotes.splice(0);
+        return notes.length === 0 ? undefined : { additionalContext: notes };
+      });
+    const failed = (input, error) => {
+      const refusal = refusalFor(method, processPayloadOf(named, input), error);
+      return refusal === undefined ? undefined : hookAnswerOf(name, named, refusal);
+    };
+    return hookOn(hook, async (input, signal) => {
+      const payload = processPayloadOf(named, input);
+      if (named === "SessionStart" && payload["source"] === "compact") {
+        if (!isBefore)
+          return;
+        const task = compacting?.agentId;
+        const model = task === undefined ? await claude.session.model() : undefined;
+        const answer = await raise(method, { ...payload, ...defined({ task, model, title: current.title || undefined }) }, signal);
+        if (answer === undefined)
+          return;
+        return hookAnswerOf(name, named, task === undefined ? answer : defined({ note: answer["note"] }));
+      }
+      if (!isBefore) {
+        raise(method, payload, signal);
+        return;
+      }
+      if (named === "ModelChange")
+        modelNotes.splice(0);
+      const answer = await raise(method, payload, signal);
+      if (answer === undefined)
+        return;
+      if (named === "ModelChange" && typeof answer["note"] === "string" && answer["refuse"] === undefined)
+        modelNotes.push(modNote(name, answer["note"]));
+      return hookAnswerOf(name, named, answer);
+    }, isBefore ? failed : undefined);
+  };
+  const modelNotes = [];
+  let compacting;
+  const trackCompaction = async (e, next) => {
+    compacting = e;
+    try {
+      return await next(e);
+    } finally {
+      if (compacting === e)
+        compacting = undefined;
+    }
+  };
+  const listen = (method, args, isEveryAgent = false) => {
+    const heard = listenerOf(name, method, args);
+    const entry = { ...heard, options: method === "beforePermissionRequest" ? { ...heard.options, onFailure: "refuse" } : heard.options, isEveryAgent };
+    const held = processListeners.get(method) ?? new Set;
+    if (!processListeners.has(method)) {
+      listenTo(method, method.replace(/^(on|before)/, ""));
+      processListeners.set(method, held);
+    }
+    held.add(entry);
+    return { remove: () => void held.delete(entry) };
+  };
+  const processMethods = () => Object.fromEntries(Object.entries(processEvents).flatMap(([named, event]) => [`on${named}`, ..."before" in event ? [`before${named}`] : []]).map((method) => [method, (...args) => listen(method, args)]));
+  const here = sessionOf(() => current);
+  const currentSession = Object.assign(here, processMethods(), {
+    goal: Object.assign(here.goal, { beforeSessionStart: (...args) => listen("beforeSessionStart", args, true) }),
+    async scrollTo(message, options) {
+      const { deny } = await claude.ui.scroll({ to: { requestId: message.id }, ...options?.block === undefined ? {} : { block: options.block } });
+      if (deny !== undefined)
+        throw new Error(`${name}: Claude Code did not scroll to the message: ${deny}`);
+    },
+    caption: (toolCall, text) => claude.ui.notice(toolCall.callId, text)
+  });
+  const failedBefore = (session, event, change, error) => {
+    const asked = decidersOf(session, event).filter((entry) => isInScope(entry.scope, session, change, isUnderIn(parents.get(session))) && (entry.matcher === undefined || matches(payloadOf(change), entry.matcher)));
+    return asked.map((entry) => refusalOf(entry.options, beforeAnswerKeys[event], error)).find((answer) => answer !== undefined);
+  };
+  const listed = (data) => {
+    if (data.id !== current.id) {
+      known.set(data.id, data);
+      return sessionOf(() => known.get(data.id) ?? data, undefined, false, false);
+    }
+    current = { ...current, title: current.title || data.title, device: data.device };
+    return currentSession;
+  };
+  return {
+    sessions: {
+      get current() {
+        return currentSession;
+      },
+      list: async (scope = {}) => (await call(conversationMethods.sessions, scope)).map(listed),
+      get: async (id) => id === current.id ? currentSession : listed(await call(conversationMethods.session, { session: id })),
+      search: (text, matcher, options = {}) => searched({ text, ...searchOptionsOf(options) }, matcher)
+    },
+    changed(session, change, cancel) {
+      remember(session, change);
+      let payload;
+      for (const entry of listening.get(session) ?? []) {
+        const { event, method, matcher, listener, options } = entry;
+        const deliver = () => {
+          payload ??= payloadFor(session, change);
+          payload.then((heard) => invoke(method, options, cancel, (time) => listener(heard, time))).catch((error) => report(`session:${method}`, `The ${method} listener failed`, error));
+        };
+        const isHeard = isHeardBy(event, matcher, change) && inScope(entry, session, change);
+        if (isHeard === true)
+          deliver();
+        else if (isHeard !== false)
+          isHeard.then((isIn) => isIn && deliver());
+      }
+    },
+    answerBefore: combined,
+    failedBefore,
+    raise,
+    listen,
+    turn: (data) => turnOf({ session: current.id }, data),
+    follow(next) {
+      const moved = next.id !== current.id && current.id !== "";
+      const previous = current.id;
+      current = colored({ device: current.device, ...next, title: next.title || (next.id === current.id ? current.title : ""), isRunning: true, lastAt: new Date().toISOString() });
+      if (!moved)
+        return;
+      for (const into of [listening, deciding]) {
+        const kept = into.get(previous);
+        if (kept === undefined)
+          continue;
+        into.delete(previous);
+        for (const entry of kept)
+          if (entry.scope.session === previous)
+            entry.scope = { ...entry.scope, session: current.id };
+        into.set(current.id, new Set([...into.get(current.id) ?? [], ...kept]));
+      }
+      parents.delete(previous);
+      subscribe(previous);
+      subscribe(current.id);
+    },
+    recolor(next) {
+      told = next;
+      current = colored(current);
+    }
+  };
+}
+var recordOf = (value) => typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+var defined = (fields) => Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+var placementOf = (input) => defined({ session: input["session_id"], task: input["agent_id"], agentType: input["agent_type"], cwd: input["cwd"], permissionMode: input["permission_mode"] });
+var mcpServerOf = (server) => server === undefined ? undefined : { name: String(recordOf(server)["name"]), source: String(recordOf(server)["source"]) };
+var modelChangeOf = (input) => ({
+  model: input["to_model"],
+  previous: input["from_model"],
+  requested: input["requested_model"] ?? undefined,
+  source: input["source"],
+  contextTokenCount: input["context_tokens"],
+  isCacheWarm: input["prompt_cache_warm"],
+  cacheTtl: input["cache_ttl"],
+  cacheWriteUsd: input["estimated_cache_write_usd"],
+  pricing: input["pricing"]
+});
+var answerKeys = {
+  Run: ["args", "note", "result", "exitCode", "refuse"],
+  ProjectSetup: ["note"],
+  SessionStart: ["note", "title", "reloadSkills", "firstPrompt"],
+  ModelChange: ["ask", "refuse", "note"],
+  WorktreeCreate: ["result"],
+  Elicitation: ["refuse"],
+  ElicitationResponse: ["refuse"],
+  PermissionCheck: ["allow", "ask", "refuse"],
+  PermissionRequest: ["allow", "input", "updates", "refuse", "interrupt"],
+  PermissionDenial: ["retry"],
+  ToolBatch: ["note"],
+  TodoCreate: ["refuse"],
+  TodoComplete: ["refuse"],
+  ReplyDisplay: ["text"]
+};
+var todoOf = (input) => ({ id: input["task_id"], subject: input["task_subject"], description: input["task_description"], teammate: input["teammate_name"] });
+var processFields = {
+  ProjectSetup: (input) => ({ trigger: input["trigger"] }),
+  SessionStart: (input) => ({
+    source: input["source"],
+    model: input["model"],
+    title: input["session_title"] || undefined,
+    idleSeconds: input["seconds_since_last_response"],
+    contextTokenCount: input["context_tokens"],
+    isCacheWarm: input["prompt_cache_likely_expired"] === undefined ? undefined : input["prompt_cache_likely_expired"] !== true,
+    cacheWriteUsd: input["estimated_cache_write_usd"]
+  }),
+  SessionEnd: (input) => ({ reason: input["reason"] === "prompt_input_exit" ? "exit" : input["reason"] }),
+  ModelChange: modelChangeOf,
+  CwdChange: (input) => ({ cwd: input["new_cwd"] ?? input["cwd"], previous: input["old_cwd"] }),
+  DirectoryAdd: (input) => ({ directory: input["directory"], source: input["source"] === "slash_command" ? "command" : "sdk" }),
+  WorktreeCreate: (input) => ({ name: input["name"] }),
+  WorktreeRemove: (input) => ({ path: input["worktree_path"] }),
+  Notification: (input) => ({ text: input["message"], title: input["title"], type: input["notification_type"] }),
+  Elicitation: (input) => ({ id: input["elicitation_id"], server: input["mcp_server_name"], text: input["message"], mode: input["mode"], url: input["url"], schema: input["requested_schema"] }),
+  ElicitationResponse: (input) => ({ id: input["elicitation_id"], server: input["mcp_server_name"], mode: input["mode"], action: input["action"], content: input["content"] }),
+  PermissionRequest: (input) => ({ name: input["tool_name"], input: recordOf(input["tool_input"]), suggestions: input["permission_suggestions"] ?? [], mcpServer: mcpServerOf(input["mcp_server"]) }),
+  PermissionDenial: (input) => ({ name: input["tool_name"], input: recordOf(input["tool_input"]), callId: input["tool_use_id"], reason: input["reason"], mcpServer: mcpServerOf(input["mcp_server"]) }),
+  ToolBatch: (input) => ({
+    calls: (Array.isArray(input["tool_calls"]) ? input["tool_calls"] : []).map((call) => {
+      const fields = recordOf(call);
+      return defined({ callId: fields["tool_use_id"], name: fields["tool_name"], input: recordOf(fields["tool_input"]), output: fields["tool_response"] });
+    })
+  }),
+  TodoCreate: todoOf,
+  TodoComplete: todoOf,
+  ReplyDisplay: (input) => ({ replyId: input["message_id"], index: input["index"], isLast: input["final"], text: input["delta"] })
+};
+async function spawnTask(claude, task, forkedFrom) {
+  if (task.title.trim() === "")
+    throw new Error("a task needs a title.");
+  const { name, agentType, model, cwd } = forkedFrom === undefined ? task : { prompt: task.prompt, title: task.title, agentType: forkAgentType };
+  const started = await claude.agent.spawn({
+    prompt: task.prompt,
+    description: task.title,
+    ...name === undefined ? {} : { name },
+    ...agentType === undefined ? {} : { subagentType: agentType },
+    ...model === undefined ? {} : { model },
+    ...cwd === undefined ? {} : { cwd }
+  });
+  if (started.deny !== undefined)
+    throw new Error(`Claude Code refused the task: ${started.deny}`);
+  if (started.agentId === undefined)
+    throw new Error("Claude Code answered without starting a task.");
+  return { id: started.agentId, title: task.title, ...forkedFrom === undefined ? { agentType: agentType ?? "general-purpose" } : { forkedFrom }, model: started.model, openedBy: "", openedAt: new Date().toISOString() };
+}
+function processPayloadOf(named, input) {
+  const fields = recordOf(input);
+  return { ...placementOf(fields), ...defined(processFields[named](fields)) };
+}
+function hookAnswerOf(name, named, answer) {
+  const refuse = typeof answer["refuse"] === "string" ? answer["refuse"] : undefined;
+  const note = typeof answer["note"] === "string" ? [modNote(name, answer["note"])] : undefined;
+  if (named === "SessionStart")
+    return defined({ additionalContext: note, sessionTitle: answer["title"], reloadSkills: answer["reloadSkills"] === true ? true : undefined, initialUserMessage: answer["firstPrompt"] });
+  if (named === "ModelChange") {
+    if (refuse !== undefined)
+      return { permissionDecision: "deny", permissionDecisionReason: refuse };
+    return typeof answer["ask"] === "string" ? { permissionDecision: "ask", permissionDecisionReason: answer["ask"] } : undefined;
+  }
+  if (named === "ProjectSetup")
+    return defined({ additionalContext: note });
+  if (named === "WorktreeCreate")
+    return defined({ worktreePath: answer["result"] });
+  if (named === "PermissionDenial")
+    return answer["retry"] === true ? { retry: true } : undefined;
+  if (named === "ToolBatch")
+    return defined({ additionalContext: note });
+  if (named === "ReplyDisplay")
+    return defined({ displayContent: answer["text"] });
+  return refuse === undefined ? undefined : { block: refuse };
+}
+function searchOptionsOf({ running, since, everyProject, before }) {
+  return {
+    ...running === undefined ? {} : { running },
+    ...since === undefined ? {} : { since },
+    ...everyProject === undefined ? {} : { everyProject },
+    ...before === undefined ? {} : { before: { session: before.session, id: before.id } }
+  };
+}
+
+// node_modules/@cmodjs/core/runtime/conversations.js
+var relayKinds = new Set(["act", "goal", "taskEnd"]);
+
+// node_modules/@cmodjs/core/runtime/announce.js
+var announcementMs = 1e4;
+async function announcementOf(claude, plugin, added, openSettings) {
+  const manifest = jsonOf(await claude.fs.read(`${plugin.root}/.claude-plugin/plugin.json`).catch(ifMissing(undefined)));
+  const { program, hotkeys } = plugin.steps;
+  const rules = (await claude.fs.list(`${plugin.root}/rules`).catch(ifMissing([]))).filter((entry) => entry.kind === "file" && entry.name.endsWith(".md")).map((entry) => entry.name.slice(0, -".md".length)).toSorted();
+  const lines = [
+    isObject(manifest) && typeof manifest["description"] === "string" ? manifest["description"] : undefined,
+    added.length > 0 ? `Adds ${listed(added)}.` : undefined,
+    rules.length > 0 ? `Adds ${rules.length} ${rules.length === 1 ? "rule" : "rules"}: ${listed(rules)}.` : undefined,
+    program === undefined ? undefined : `Installed the ${program} program.`,
+    ...Object.values(hotkeys ?? {}).flatMap(({ title, default: combo }) => combo === undefined ? [] : [`Binds ${combo} to ${title}.`])
+  ].filter((line) => line !== undefined);
+  return { message: "Installed", ...lines.length === 0 ? {} : { description: lines.join(`
+`) }, action: { label: "Settings", onClick: () => openSettings() } };
+}
+function jsonOf(text) {
+  try {
+    return text === undefined ? undefined : JSON.parse(text);
+  } catch (error) {
+    if (error instanceof SyntaxError)
+      return;
+    throw error;
+  }
+}
+
+// node_modules/@cmodjs/core/runtime/bound.js
+var current;
+function bind(imports) {
+  current = imports;
+}
+function bound() {
+  if (current === undefined)
+    throw new Error("A mod's imports work once its setup runs. Call them from setup or from a hook, never at the top of a module.");
+  return current;
+}
+
+// node_modules/@cmodjs/core/runtime/engine.js
+var engines = new WeakMap;
+function keepEngine(mod, engine) {
+  engines.set(mod, engine);
+}
+function engineOf(mod) {
+  const engine = engines.get(mod);
+  if (engine === undefined)
+    throw new Error("This mod has not started, so it reaches no Claude Code calls yet.");
+  return engine;
+}
+
+// node_modules/@cmodjs/core/utils/metadata.js
+class MetadataError extends Error {
+  line;
+  constructor(line, message) {
+    super(`line ${line}: ${message}`);
+    this.line = line;
+  }
+}
+var markdown = ["md", "markdown", "mdx"];
+var hashComments = ["sh", "bash", "zsh", "fish", "py", "rb", "pl", "r", "yaml", "yml", "toml", "ps1", "nu", "tcl", "mk", "conf", "cfg", "env"];
+var slashComments = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "go", "rs", "swift", "kt", "kts", "java", "c", "h", "cc", "cpp", "hpp", "cs", "scala", "dart", "zig", "jsonc", "json5"];
+var dashComments = ["lua", "sql", "hs", "elm"];
+var hashCommentNames = ["Makefile", "Dockerfile", "Brewfile", "Gemfile", "Rakefile", "Justfile", "justfile"];
+var sidecarSuffix = ".meta";
+function formatOf(path, firstLine) {
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const dot = name.lastIndexOf(".");
+  const extension = dot <= 0 ? "" : name.slice(dot + 1).toLowerCase();
+  if (markdown.includes(extension))
+    return { type: "frontmatter" };
+  if (hashComments.includes(extension) || hashCommentNames.includes(name))
+    return { type: "comment", prefix: "#" };
+  if (slashComments.includes(extension))
+    return { type: "comment", prefix: "//" };
+  if (dashComments.includes(extension))
+    return { type: "comment", prefix: "--" };
+  if (extension === "" && firstLine?.startsWith("#!") === true)
+    return { type: "comment", prefix: "#" };
+  return { type: "sidecar" };
+}
+function readMetadata(text, format) {
+  const lines = text.split(`
+`);
+  if (format.type === "comment") {
+    const region = commentRegion(lines, format.prefix);
+    return { metadata: region === undefined ? {} : asRecord(mapEntries(region.lines, region.start + 2, 0)) };
+  }
+  const region = format.type === "frontmatter" ? frontmatterRegion(lines) : { start: -1, end: lines.length, lines };
+  if (region === undefined)
+    return { metadata: {} };
+  const block = metadataBlock(region);
+  const name = format.type === "frontmatter" ? topLevelScalar(region, "name") : undefined;
+  return { metadata: block === undefined ? {} : asRecord(block.entries), ...name === undefined ? {} : { name } };
+}
+function writeMetadata(text, format, metadata) {
+  const lines = text.split(`
+`);
+  const entries = Object.entries(metadata);
+  if (format.type === "comment") {
+    const { prefix } = format;
+    const block = entries.length === 0 ? [] : [`${prefix} /// metadata`, ...entries.map(([key, value]) => `${prefix} ${scalar(key)}: ${scalar(value)}`), `${prefix} ///`];
+    const region = commentRegion(lines, prefix);
+    if (region !== undefined)
+      return [...lines.slice(0, region.start), ...block, ...lines.slice(region.end + 1)].join(`
+`);
+    if (block.length === 0)
+      return text;
+    const at = lines[0]?.startsWith("#!") === true ? 1 : 0;
+    return [...lines.slice(0, at), ...block, ...lines.slice(at)].join(`
+`);
+  }
+  const map = entries.length === 0 ? [] : ["metadata:", ...entries.map(([key, value]) => `  ${scalar(key)}: ${scalar(value)}`)];
+  if (format.type === "sidecar") {
+    const block = metadataBlock({ start: -1, end: lines.length, lines });
+    const rest = block === undefined ? lines : [...lines.slice(0, block.start), ...lines.slice(block.end)];
+    const kept = rest.join(`
+`).trim();
+    return [...kept === "" ? [] : [kept], ...map].join(`
+`) + (map.length === 0 && kept === "" ? "" : `
+`);
+  }
+  const region = frontmatterRegion(lines);
+  if (region === undefined)
+    return map.length === 0 ? text : ["---", ...map, "---", ...lines].join(`
+`);
+  const block = metadataBlock(region);
+  const inner = block === undefined ? [...region.lines, ...map] : [...lines.slice(region.start + 1, block.start), ...map, ...lines.slice(block.end, region.end)];
+  if (inner.every((line) => line.trim() === ""))
+    return lines.slice(region.end + 1).join(`
+`);
+  return [...lines.slice(0, region.start + 1), ...inner, ...lines.slice(region.end)].join(`
+`);
+}
+function frontmatterRegion(lines) {
+  if (lines[0]?.replace(/^\uFEFF/, "").trimEnd() !== "---")
+    return;
+  const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
+  if (end === -1)
+    throw new MetadataError(1, "the frontmatter starts with --- and never ends. Close it with a --- line.");
+  return { start: 0, end, lines: lines.slice(1, end) };
+}
+function commentRegion(lines, prefix) {
+  const start = lines.findIndex((line) => line.trimEnd() === `${prefix} /// metadata`);
+  if (start === -1)
+    return;
+  const content = [];
+  for (let index = start + 1;index < lines.length; index += 1) {
+    const line = (lines[index] ?? "").trimEnd();
+    if (line === `${prefix} ///`)
+      return { start, end: index, lines: content };
+    if (line !== prefix && !line.startsWith(`${prefix} `))
+      break;
+    content.push(line.slice(prefix.length + 1));
+  }
+  throw new MetadataError(start + 1, `the metadata block never ends. Close it with a "${prefix} ///" line.`);
+}
+function metadataBlock(region) {
+  const at = region.lines.findIndex((line) => /^metadata\s*:/.test(line));
+  if (at === -1)
+    return;
+  const lineNumber = region.start + 2 + at;
+  const rest = withoutComment((region.lines[at] ?? "").replace(/^metadata\s*:/, "")).trim();
+  const start = region.start + 1 + at;
+  if (rest.startsWith("{"))
+    return { start, end: start + 1, entries: flowEntries(rest, lineNumber) };
+  if (rest !== "")
+    throw new MetadataError(lineNumber, "metadata holds a single value. Write a map of names to text, such as metadata: { mymod.key: value }.");
+  let index = at + 1;
+  while (index < region.lines.length && (/^\s/.test(region.lines[index] ?? "") || (region.lines[index] ?? "").trim() === ""))
+    index += 1;
+  while (index > at + 1 && (region.lines[index - 1] ?? "").trim() === "")
+    index -= 1;
+  const children = region.lines.slice(at + 1, index);
+  return { start, end: region.start + 1 + index, entries: mapEntries(children, lineNumber + 1, indentOf(children)) };
+}
+function indentOf(lines) {
+  const first = lines.find((line) => line.trim() !== "" && !line.trim().startsWith("#"));
+  return first === undefined ? 0 : /^\s*/.exec(first)?.[0].length ?? 0;
+}
+function mapEntries(lines, firstLine, indent) {
+  const entries = [];
+  lines.forEach((raw, index) => {
+    const lineNumber = firstLine + index;
+    const line = withoutComment(raw);
+    if (line.trim() === "")
+      return;
+    const depth = /^\s*/.exec(line)?.[0].length ?? 0;
+    if (depth !== indent)
+      throw new MetadataError(lineNumber, "a metadata value holds a list or a map. Each value is one line of text, and a list is one space-separated text.");
+    const body = line.trim();
+    if (body.startsWith("- "))
+      throw new MetadataError(lineNumber, "metadata holds a list. Write a map of names to text, and a list as one space-separated text.");
+    entries.push(entryOf(body, lineNumber));
+  });
+  return entries;
+}
+function flowEntries(text, lineNumber) {
+  if (!text.endsWith("}"))
+    throw new MetadataError(lineNumber, "the metadata map starts with { and does not end on the same line. Close it with }, or write one entry per line.");
+  const body = text.slice(1, -1).trim();
+  if (body === "")
+    return [];
+  return splitOutsideQuotes(body, ",", lineNumber).map((part) => part.trim()).filter((part) => part !== "").map((part) => entryOf(part, lineNumber));
+}
+function entryOf(text, lineNumber) {
+  const [keyText, ...rest] = splitOutsideQuotes(text, ":", lineNumber, true);
+  if (keyText === undefined || rest.length === 0)
+    throw new MetadataError(lineNumber, `"${text}" has no ":". Write each entry as name: value.`);
+  const valueText = rest.join(":").trim();
+  if (valueText.startsWith("{") || valueText.startsWith("[") || valueText === "|" || valueText === ">")
+    throw new MetadataError(lineNumber, `${keyText.trim()} holds a list or a map. Each value is one line of text, and a list is one space-separated text.`);
+  return { key: unquoted(keyText.trim(), lineNumber), value: unquoted(valueText, lineNumber) };
+}
+function splitOutsideQuotes(text, separator, lineNumber, needsSpace = false) {
+  const parts = [];
+  let quote;
+  let current = "";
+  for (let index = 0;index < text.length; index += 1) {
+    const char = text[index];
+    if (quote !== undefined) {
+      current += char;
+      if (char === "\\" && quote === '"') {
+        current += text[index + 1] ?? "";
+        index += 1;
+      } else if (char === quote)
+        quote = undefined;
+      continue;
+    }
+    const before = current.trimEnd().at(-1);
+    if ((char === '"' || char === "'") && (before === undefined || before === ":"))
+      quote = char;
+    const next = text[index + 1];
+    if (char === separator && (!needsSpace || next === undefined || next === " " || next === "\t")) {
+      parts.push(current);
+      current = "";
+      if (needsSpace) {
+        parts.push(text.slice(index + 1));
+        return parts;
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (quote !== undefined)
+    throw new MetadataError(lineNumber, `a ${quote === '"' ? "double" : "single"} quote never closes.`);
+  parts.push(current);
+  return parts;
+}
+function withoutComment(line) {
+  let quote;
+  for (let index = 0;index < line.length; index += 1) {
+    const char = line[index];
+    if (quote !== undefined) {
+      if (char === "\\" && quote === '"')
+        index += 1;
+      else if (char === quote)
+        quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'")
+      quote = char;
+    if (char === "#" && (index === 0 || /\s/.test(line[index - 1] ?? "")))
+      return line.slice(0, index);
+  }
+  return line;
+}
+function unquoted(text, lineNumber) {
+  if (text.startsWith('"')) {
+    if (!text.endsWith('"') || text.length < 2)
+      throw new MetadataError(lineNumber, `${text} opens a double quote that never closes.`);
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      if (!(error instanceof SyntaxError))
+        throw error;
+      throw new MetadataError(lineNumber, `${text} is not a double-quoted text. Escape a " inside it as \\".`);
+    }
+  }
+  if (text.startsWith("'")) {
+    if (!text.endsWith("'") || text.length < 2)
+      throw new MetadataError(lineNumber, `${text} opens a single quote that never closes.`);
+    return text.slice(1, -1).replaceAll("''", "'");
+  }
+  return text;
+}
+function topLevelScalar(region, key) {
+  const at = region.lines.findIndex((line) => line.startsWith(`${key}:`));
+  if (at === -1)
+    return;
+  const text = withoutComment((region.lines[at] ?? "").slice(key.length + 1)).trim();
+  if (text === "")
+    return;
+  try {
+    return unquoted(text, region.start + 2 + at);
+  } catch (error) {
+    if (error instanceof MetadataError)
+      return;
+    throw error;
+  }
+}
+function asRecord(entries) {
+  return Object.freeze(Object.fromEntries(entries.map(({ key, value }) => [key, value])));
+}
+var plain = /^[A-Za-z0-9_./+~$%^()=\\][^#]*$/;
+var special = /^(true|false|yes|no|on|off|null|~|[-+]?(\d[\d_]*)?\.?\d+([eE][-+]?\d+)?|0x[0-9a-fA-F]+|\.inf|\.nan)$/i;
+function scalar(text) {
+  const isPlain = plain.test(text) && text === text.trim() && !text.includes(": ") && !text.endsWith(":") && !text.includes(" #") && !special.test(text) && !/["',{}[\]]/.test(text);
+  return isPlain ? text : JSON.stringify(text);
+}
+
+// node_modules/@cmodjs/core/runtime/metadata.js
+var skippedFolders = [".git", "node_modules"];
+var ownKey = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
+function resolvedPath(path, places) {
+  const configured = /^~\/\.claude(?=\/|$)/.exec(path);
+  if (configured !== null && places.configRoot !== undefined)
+    return ve(`${places.configRoot}${path.slice(configured[0].length)}`);
+  const prefix = homePrefix.exec(path)?.[0];
+  if (prefix !== undefined) {
+    if (places.home === undefined)
+      throw new Error(`${path} starts with ${prefix}, and HOME is not set. Start Claude Code with HOME set.`);
+    return ve(expandHome(path, places.home, places.configRoot));
+  }
+  return path.startsWith("/") ? ve(path) : ve(places.projectRoot(), path);
+}
+function createModFiles({ name, claude, places, report }) {
+  const prefix = `${name}.`;
+  const cache = new Map;
+  const logged = new Set;
+  const own = (all) => Object.freeze(Object.fromEntries(Object.entries(all).flatMap(([key, value]) => key.startsWith(prefix) ? [[key.slice(prefix.length), value]] : [])));
+  const locate = async (path) => {
+    const stat = await claude.fs.stat(path, { resolve: true });
+    if (stat.kind !== "file")
+      throw new Error(`${path} is not a file, so it holds no metadata.`);
+    const realPath = stat.realPath ?? path;
+    const extensionless = !realPath.slice(realPath.lastIndexOf("/") + 1).includes(".");
+    const firstLine = extensionless ? (await claude.fs.read(realPath)).split(`
+`, 1)[0] : undefined;
+    const format = formatOf(realPath, firstLine);
+    const holder = format.type === "sidecar" ? `${realPath}${sidecarSuffix}` : realPath;
+    const sidecar = format.type === "sidecar" ? await claude.fs.stat(holder).catch(ifMissing(undefined)) : undefined;
+    return { realPath, format, holder, signature: `${stat.mtimeMs}:${stat.size}:${sidecar?.kind === "file" ? `${sidecar.mtimeMs}:${sidecar.size}` : ""}` };
+  };
+  const textOf = async (holder) => (await claude.fs.stat(holder).catch(ifMissing(undefined)))?.kind === "file" ? claude.fs.read(holder) : "";
+  const skipped = (path, value) => (error) => {
+    if (isMissing(error))
+      return value;
+    const reason = `${name}: fs.find skipped ${path}: ${messageOf(error)}`;
+    if (!logged.has(reason))
+      claude.ui.warn("fs:find", reason);
+    logged.add(reason);
+    return value;
+  };
+  const readEntry = async (path) => {
+    const located = await locate(path);
+    const cached = cache.get(path);
+    if (cached?.signature === located.signature)
+      return cached.read;
+    let read;
+    try {
+      const { metadata, name: declared } = readMetadata(await textOf(located.holder), located.format);
+      read = { metadata, ...declared === undefined ? {} : { name: declared } };
+    } catch (error) {
+      if (!(error instanceof MetadataError))
+        throw error;
+      const failure = `${located.holder} ${error.message}`;
+      read = { metadata: {}, error: failure };
+      if (!logged.has(failure))
+        report({ id: `metadata:${located.holder}`, message: `Skips the metadata of ${located.holder}`, description: failure });
+      logged.add(failure);
+    }
+    cache.set(path, { signature: located.signature, read });
+    return read;
+  };
+  const matchesOf = async (pattern) => {
+    const absolute = resolvedPath(pattern, places);
+    const scanned = $s.scan(absolute);
+    if (!scanned.isGlob)
+      return (await claude.fs.stat(absolute).catch(skipped(absolute, undefined)))?.kind === "file" ? [absolute] : [];
+    const isMatch = $s(absolute, { dot: true });
+    const entersSkipped = skippedFolders.filter((folder) => scanned.glob.split("/").includes(folder));
+    const maxDepth = scanned.glob.includes("**") ? Number.POSITIVE_INFINITY : scanned.glob.split("/").length;
+    const found = [];
+    const visited = new Set;
+    const walk = async (folder, depth) => {
+      const real = (await claude.fs.stat(folder, { resolve: true }).catch(skipped(folder, undefined)))?.realPath ?? folder;
+      if (visited.has(real))
+        return;
+      visited.add(real);
+      const entries = await claude.fs.list(folder).catch(skipped(folder, []));
+      await Promise.all(entries.map(async (entry) => {
+        const path = `${folder}/${entry.name}`;
+        const kind = entry.isLink === true ? (await claude.fs.stat(path).catch(skipped(path, undefined)))?.kind : entry.kind;
+        if (kind === "file" && isMatch(path))
+          found.push(path);
+        if (kind !== "dir" || depth + 1 >= maxDepth)
+          return;
+        if (skippedFolders.includes(entry.name) && !entersSkipped.includes(entry.name))
+          return;
+        await walk(path, depth + 1);
+      }));
+    };
+    const base = scanned.base === "" ? "/" : scanned.base;
+    if ((await claude.fs.stat(base).catch(skipped(base, undefined)))?.kind === "dir")
+      await walk(base, 0);
+    return found;
+  };
+  return {
+    async find(glob) {
+      const patterns = typeof glob === "string" ? [glob] : glob;
+      const paths = [...new Set((await Promise.all(patterns.map(matchesOf))).flat())].sort();
+      const kept = paths.filter((path) => !(path.endsWith(sidecarSuffix) && paths.includes(path.slice(0, -sidecarSuffix.length))));
+      return Promise.all(kept.map(async (path) => {
+        const read = await readEntry(path).catch((error) => ({ metadata: {}, error: `${path} ${messageOf(error)}` }));
+        return { path, ...read.name === undefined ? {} : { name: read.name }, metadata: own(read.metadata), ...read.error === undefined ? {} : { error: read.error } };
+      }));
+    },
+    async read(path) {
+      const read = await readEntry(resolvedPath(path, places));
+      if (read.error !== undefined)
+        throw new Error(`${name}: ${read.error}`);
+      return own(read.metadata);
+    },
+    async update(path, change) {
+      const given = resolvedPath(path, places);
+      const located = await locate(given);
+      const text = await textOf(located.holder);
+      let all;
+      try {
+        all = readMetadata(text, located.format).metadata;
+      } catch (error) {
+        throw new Error(`${name}: ${located.holder} ${messageOf(error)}`, { cause: error });
+      }
+      const edited = { ...own(all) };
+      change(edited);
+      for (const [key, value] of Object.entries(edited)) {
+        if (!ownKey.test(key))
+          throw new Error(`${name}: the metadata key "${key}" is not a name. Use letters, digits, "_", ".", and "-".`);
+        if (typeof value !== "string")
+          throw new Error(`${name}: the metadata key "${key}" holds ${JSON.stringify(value)}. Each value is text, and a list is one space-separated text.`);
+        if (value.includes(`
+`))
+          throw new Error(`${name}: the metadata key "${key}" holds a line break. Each value is one line of text.`);
+      }
+      const next = {};
+      for (const [key, value] of Object.entries(all)) {
+        if (!key.startsWith(prefix))
+          next[key] = value;
+        else if (Object.hasOwn(edited, key.slice(prefix.length)))
+          next[key] = edited[key.slice(prefix.length)];
+      }
+      for (const [key, value] of Object.entries(edited))
+        next[`${prefix}${key}`] = value;
+      if (JSON.stringify(next) === JSON.stringify(all))
+        return;
+      await claude.fs.write(located.holder, writeMetadata(text, located.format, next));
+      cache.delete(given);
+    }
+  };
+}
+
+// node_modules/@cmodjs/core/options.js
+var option = {
+  text: (field) => ({ ...field, type: "text" }),
+  secret: (field) => ({ ...field, type: "secret" }),
+  number: (field) => ({ ...field, type: "number" }),
+  toggle: (field) => ({ ...field, type: "toggle", default: field.default ?? false }),
+  choice: (choices, field) => ({ ...field, type: "choice", choices }),
+  folder: (field) => ({ ...field, type: "folder" }),
+  file: (field) => ({ ...field, type: "file" }),
+  list: (field) => ({ ...field, type: "list" })
+};
+var optionKey = /^[A-Za-z_]\w*$/;
+function checkOptions(name, options) {
+  for (const [key, declared] of Object.entries(options)) {
+    const at = `${name}: options.${key}`;
+    if (!optionKey.test(key))
+      throw new Error(`${at} is not an option name. Use letters, digits, and _, starting with a letter, as Claude Code passes each option on as CLAUDE_PLUGIN_OPTION_${key.toUpperCase()}.`);
+    if (declared.title.trim() === "")
+      throw new Error(`${at} needs a title, the label /config shows.`);
+    if (declared.type === "choice" && (declared.choices ?? []).length === 0)
+      throw new Error(`${at} is a choice with no choices. Give option.choice(['a', 'b'], { ... }).`);
+    if (declared.type === "choice" && declared.default !== undefined && !(declared.choices ?? []).includes(declared.default))
+      throw new Error(`${at} defaults to ${String(declared.default)}, which is not one of its choices: ${(declared.choices ?? []).join(", ")}.`);
+  }
+  return options;
+}
+function projectOptionsOf(name, declared, text) {
+  let file;
+  try {
+    file = JSON.parse(text);
+  } catch (error) {
+    return { values: {}, ignored: [`is not JSON (${messageOf(error)}). Fix the file; ${name} uses its other options until then.`] };
+  }
+  if (!isObject(file))
+    return { values: {}, ignored: ['is not a JSON object. Write one, such as { "branch": "main" }.'] };
+  const values = {};
+  const ignored = [];
+  for (const [key, value] of Object.entries(file)) {
+    const option = declared[key];
+    if (option === undefined)
+      ignored.push(`sets ${key}, which ${name} does not declare. ${Object.keys(declared).length === 0 ? "Remove it." : `Remove it, or use one of: ${Object.keys(declared).join(", ")}.`}`);
+    else if (option.type === "secret")
+      ignored.push(`sets ${key}, a secret, and a project file is committed for everyone to read. Remove it. ${secretFix}`);
+    else {
+      const misfit = fitsOption(option, value);
+      if (misfit === undefined)
+        values[key] = value;
+      else
+        ignored.push(`sets ${key} to ${JSON.stringify(value)}, and ${option.title} ${misfit}.`);
+    }
+  }
+  return { values, ignored };
+}
+function isUnset(value) {
+  return value === undefined || value === "" || Array.isArray(value) && value.length === 0;
+}
+function fitsOption(declared, value) {
+  const type = declared.type;
+  if (type === "toggle")
+    return typeof value === "boolean" ? undefined : "takes true or false";
+  if (type === "number") {
+    if (typeof value !== "number" || !Number.isFinite(value))
+      return "takes a number";
+    if (declared.min !== undefined && value < declared.min)
+      return `takes ${declared.min} or more`;
+    if (declared.max !== undefined && value > declared.max)
+      return `takes ${declared.max} or less`;
+    return;
+  }
+  if (type === "list")
+    return Array.isArray(value) && value.every((item) => typeof item === "string") ? undefined : "takes a list of text";
+  if (typeof value !== "string")
+    return "takes text";
+  if (type === "choice" && !(declared.choices ?? []).includes(value))
+    return `takes one of: ${(declared.choices ?? []).join(", ")}`;
+  return;
+}
+
+// node_modules/@cmodjs/core/ui/elements.js
+var unbuilt = Symbol("an element built outside a render");
+var drawing;
+function drawWith(table, draw, markdown) {
+  const outer = drawing;
+  const current = { table, markdown };
+  drawing = current;
+  try {
+    return built(current, draw());
+  } finally {
+    drawing = outer;
+  }
+}
+function element(name) {
+  const construct = (props) => drawing === undefined ? { [unbuilt]: { name, props } } : build(drawing, name, props);
+  return construct;
+}
+function build(current, name, props) {
+  const ready = "children" in props ? { ...props, children: built(current, props.children) } : props;
+  if (name === "Markdown" && current.markdown !== undefined)
+    return current.markdown(ready);
+  return current.table[name](ready);
+}
+function built(current, value) {
+  if (Array.isArray(value))
+    return value.map((child) => built(current, child));
+  if (typeof value !== "object" || value === null || !(unbuilt in value))
+    return value;
+  const { name, props } = value[unbuilt];
+  return build(current, name, props);
+}
+function drawKeyed(keyPrefix, draw) {
+  const outer = drawing;
+  drawing = undefined;
+  try {
+    return keyed(draw(), keyPrefix);
+  } finally {
+    drawing = outer;
+  }
+}
+function keyed(value, keyPrefix) {
+  if (Array.isArray(value))
+    return value.map((each) => keyed(each, keyPrefix));
+  if (typeof value !== "object" || value === null || !(unbuilt in value))
+    return value;
+  const { name, props } = value[unbuilt];
+  const prefixed = Object.fromEntries(Object.entries(props).map(([field, each]) => [field, field === "key" && typeof each === "string" ? `${keyPrefix}${each}` : keyed(each, keyPrefix)]));
+  return { [unbuilt]: { name, props: prefixed } };
+}
+var elementKey = "$cmodElement";
+var handlerKey = "$cmodHandler";
+function elementData(value, numberOf) {
+  if (typeof value === "function")
+    return { [handlerKey]: numberOf(value) };
+  if (Array.isArray(value))
+    return value.map((each) => elementData(each, numberOf));
+  if (typeof value !== "object" || value === null)
+    return value;
+  if (unbuilt in value) {
+    const { name, props } = value[unbuilt];
+    if (name === "Client")
+      throw new Error("Client draws only in panes and styles.");
+    return { [elementKey]: name, props: elementData(props, numberOf) };
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype)
+    throw new Error("a widget draws only the elements of ui/elements.js and ui/components.js, text, numbers, and plain objects.");
+  return Object.fromEntries(Object.entries(value).map(([key, each]) => [key, elementData(each, numberOf)]));
+}
+function elementOf(data, keyPrefix, press) {
+  if (Array.isArray(data))
+    return data.map((each) => elementOf(each, keyPrefix, press));
+  if (typeof data !== "object" || data === null)
+    return data;
+  const fields = data;
+  if (typeof fields[handlerKey] === "number") {
+    const handler = fields[handlerKey];
+    return (...args) => press(handler, JSON.parse(JSON.stringify(args)));
+  }
+  const name = fields[elementKey];
+  if (name === undefined)
+    return Object.fromEntries(Object.entries(fields).map(([key, each]) => [key, elementOf(each, keyPrefix, press)]));
+  if (typeof name !== "string" || !Object.hasOwn(constructors, name))
+    throw new Error(`a widget drew ${String(name)}, which is not an element of ui/elements.js.`);
+  const props = elementOf(fields["props"], keyPrefix, press);
+  return constructors[name](typeof props["key"] === "string" ? { ...props, key: `${keyPrefix}${props["key"]}` } : props);
+}
+var focusable = new Set(["Button", "Input", "Select"]);
+function drawsFocusable(data, key) {
+  if (typeof data !== "object" || data === null)
+    return false;
+  if (Array.isArray(data))
+    return data.some((each) => drawsFocusable(each, key));
+  const fields = data;
+  const props = fields["props"];
+  if (focusable.has(fields[elementKey]) && props?.["key"] === key)
+    return true;
+  return Object.values(fields).some((each) => drawsFocusable(each, key));
+}
+function forClaudeCode(table, surface, open) {
+  const { Button: button, Link: link, Image: image, Svg: svg, Raster: raster } = table;
+  const opening = (props) => {
+    const { href, ...rest } = props;
+    if (typeof href !== "string")
+      return button(props);
+    const { label, children } = rest;
+    const hasChildren = children !== undefined && !(Array.isArray(children) && children.length === 0);
+    if (surface !== "terminal" && href.startsWith("https:"))
+      return link({ href, ...typeof label === "string" ? { label } : {}, ...hasChildren ? { children } : {} });
+    return button({ ...rest, onPress: (press) => open(href, press) });
+  };
+  const named = (draw) => ({ label, ...rest }) => draw({ alt: label, ...rest });
+  return { ...table, Button: opening, Image: named(image), Svg: named(svg), Raster: ({ label, ...rest }) => raster(rest) };
+}
+var Box = element("Box");
+var Text = element("Text");
+var Button = element("Button");
+var Link = element("Link");
+var Code = element("Code");
+var Markdown = element("Markdown");
+var Input = element("Input");
+var Select = element("Select");
+var Image = element("Image");
+var Svg = element("Svg");
+var Raster = element("Raster");
+var Client = element("Client");
+var constructors = { Box, Text, Button, Link, Code, Markdown, Input, Select, Image, Svg, Raster };
+
+// node_modules/@cmodjs/core/runtime/buttons.js
+function filledButton({ key, label, hotkey, variant = "secondary", onPress }) {
+  const isPrimary = variant === "primary";
+  return Button({
+    plain: true,
+    key,
+    label,
+    ...hotkey === undefined ? {} : { hotkey },
+    onPress,
+    children: Text({ backgroundColor: isPrimary ? "claude" : "userMessageBackground", color: isPrimary ? "inverseText" : "text", bold: isPrimary, children: ` ${label} ` })
+  });
+}
+
+// node_modules/@cmodjs/core/ui/areas.js
+var Working = "working";
+var TurnEnd2 = "turnEnd";
+
+// node_modules/@cmodjs/core/ui/panes.js
+var partId = /^[A-Za-z0-9_-]{1,64}$/;
+var sizeKeys = ["columns", "rows"];
+function checkPart(name, kind, id, title, takenBy) {
+  if (!partId.test(id))
+    throw new Error(`${name}: "${id}" is not a ${kind} id. Use 1 to 64 letters, digits, "_", or "-".`);
+  if (title.trim() === "")
+    throw new Error(`${name}: the ${kind} "${id}" needs a title, the label its tab shows.`);
+  if (takenBy !== undefined)
+    throw new Error(`${name}: the ${takenBy} "${id}" is already added. Give the ${kind} another id.`);
+}
+function checkPane(name, pane, takenBy) {
+  checkPart(name, "pane", pane.id, pane.title, takenBy);
+  for (const key of sizeKeys) {
+    const size = pane[key];
+    if (typeof size !== "function" && size !== undefined && (!Number.isInteger(size) || size <= 0))
+      throw new Error(`${name}: the pane "${pane.id}" has ${key} ${size}. Use a whole number above 0, or leave it out.`);
+  }
+}
+
+// node_modules/@cmodjs/core/ui/styles.js
+var ToolGroup = "toolGroup";
+var ToolProgress = "toolProgress";
+var CommandOutput = "commandOutput";
+var AskUserQuestion = "askUserQuestion";
+var components = {
+  prompt: "UserMessage",
+  reply: "AssistantMessage",
+  toolCall: "ToolUse",
+  toolResult: "ToolResult",
+  notice: "InfoNotice",
+  [ToolGroup]: "ToolGroup",
+  [ToolProgress]: "ToolProgress",
+  [CommandOutput]: "CommandOutput",
+  [AskUserQuestion]: "AskUserQuestion",
+  [Working]: "Spinner",
+  [TurnEnd2]: "TurnDuration"
+};
+function componentOf(kind) {
+  return typeof kind === "string" && Object.hasOwn(components, kind) ? components[kind] : undefined;
+}
+function nameOf(kind) {
+  return typeof kind === "string" ? `${kind.charAt(0).toUpperCase()}${kind.slice(1)}` : kind.name;
+}
+
+// node_modules/@cmodjs/core/runtime/ui.js
+var partMethods = {
+  list: "cmod:parts",
+  draw: "cmod:draw",
+  press: "cmod:press",
+  shown: "cmod:shown",
+  changed: "cmod:partsChanged",
+  stylers: "cmod:markdownStylers"
+};
+var stalePress = "that button drew before the last redraw. Press the one it shows now.";
+var unmeasuredColumns = 80;
+function viewportColumns(e) {
+  return e.viewport?.columns ?? unmeasuredColumns;
+}
+function styledAt(e, columns = viewportColumns(e)) {
+  return { surface: e.surface, columns: Math.max(columns, 0) };
+}
+async function openLink(claude, href, surface) {
+  if (surface === "terminal") {
+    const [browser, sshConnection, display, waylandDisplay] = await Promise.all([claude.env.browser(), claude.env.sshConnection(), claude.env.display(), claude.env.waylandDisplay()]);
+    const os = browser || sshConnection ? "" : (await claude.process.run(["uname", "-s"])).stdout.trim().toLowerCase();
+    const command = browserCommand({ os, browser, sshConnection, display, waylandDisplay }, href);
+    if (command !== undefined && (await claude.process.run(command)).exitCode === 0)
+      return "opened";
+  }
+  const copied = await claude.ui.copy({ text: href, surface });
+  if (!copied.isCopied)
+    throw new Error(`cmod could not open ${href} or copy it: ${copied.reason}`);
+  return "copied";
+}
+var bullet = "⏺";
+function paneSize(pane, state) {
+  const size = {};
+  for (const key of sizeKeys) {
+    const wanted = pane[key];
+    const value = typeof wanted === "function" ? wanted(state) : wanted;
+    if (value === undefined)
+      continue;
+    if (!Number.isInteger(value) || value <= 0)
+      throw new Error(`the pane "${pane.id}" gets ${key} ${value} from its state. Return a whole number above 0, or undefined for Claude Code's default.`);
+    size[key] = value;
+  }
+  return size;
+}
+function times(count) {
+  return count === 1 ? "1 time" : `${count} times`;
+}
+function pieceProps(props, given, isFirst) {
+  const merged = { ...props, ...given };
+  return isFirst || !("isFirstOfReply" in merged) ? merged : { ...merged, isFirstOfReply: false };
+}
+function laterKeys(key) {
+  let used = 0;
+  return () => key === undefined ? undefined : `${key}:${used += 1}`;
+}
+function inheriting(props, draw, laterKey = laterKeys(props.key)) {
+  const { dimColor, onLinkPress, pressableLinks } = props;
+  const inherited = { ...dimColor === undefined ? {} : { dimColor }, ...onLinkPress === undefined ? {} : { onLinkPress }, ...pressableLinks === undefined ? {} : { pressableLinks } };
+  let isKeyTaken = false;
+  const keyOf = (left) => {
+    if (left.key !== undefined)
+      return left.key;
+    if (isKeyTaken)
+      return laterKey();
+    isKeyTaken = true;
+    return props.key;
+  };
+  return (left) => {
+    const key = keyOf(left);
+    return draw({ ...inherited, ...key === undefined ? {} : { key }, ...left });
+  };
+}
+function threw(error) {
+  return `threw, so Claude Code draws its own: ${messageOf(error)}`;
+}
+async function drawComponent(table, draw, drawDefault) {
+  const calls = [];
+  let first;
+  try {
+    first = drawWith(table, () => draw(({ children, ...props }) => {
+      const drawing = table.Box({});
+      calls.push({ given: props, drawing });
+      return drawing;
+    }));
+  } catch (error) {
+    return { failure: threw(error) };
+  }
+  if (calls.length === 0)
+    return { drawing: first, isClaudesRow: false };
+  const whole = calls.findIndex((call) => call.drawing === first);
+  const pieces = await Promise.all(calls.map(({ given }, index) => drawDefault(given, index === whole)));
+  let used = 0;
+  let second;
+  try {
+    second = drawWith(table, () => draw(() => pieces[used++] ?? Box({})));
+  } catch (error) {
+    return { failure: threw(error) };
+  }
+  if (used !== pieces.length)
+    return { failure: `used Default ${times(pieces.length)}, then ${times(used)}, so Claude Code draws its own. A render must draw the same for the same props.` };
+  return { drawing: second, isClaudesRow: whole >= 0 };
+}
+function drawPieces(pieces, place) {
+  const spaced = pieces.map(({ drawing, isClaudesRow }, index) => (index > 0 || place === "inReply") && !isClaudesRow ? Box({ marginTop: 1, children: drawing }) : drawing);
+  const column = (drawings) => Box({ flexDirection: "column", children: drawings });
+  const [opening, ...rest] = spaced;
+  if (place !== "opensReply" || opening === undefined)
+    return column(spaced);
+  if (pieces[0]?.isClaudesRow !== true)
+    return Box({ children: [Box({ minWidth: 2, children: Text({ color: "text", children: bullet }) }), column(spaced)] });
+  return column([opening, Box({ paddingLeft: 2, children: column(rest) })]);
+}
+function merged(updates) {
+  const parts = updates.findLast((update) => update.parts !== undefined)?.parts;
+  const requests = updates.flatMap((update) => update.requests ?? []);
+  const isRedrawn = updates.some((update) => update.redraw === true);
+  const isStart = updates.some((update) => update.isStart === true);
+  return { ...parts === undefined ? {} : { parts }, ...isRedrawn ? { redraw: true } : {}, ...requests.length === 0 ? {} : { requests }, ...isStart ? { isStart } : {} };
+}
+var keptDrawInputs = 200;
+function createUi({ name, claude, router, report, announce, mod, borrowed, nextDraw, provided }) {
+  const panes = new Map;
+  const paneLogs = new Map;
+  const openPanes = new Set;
+  const paneStates = new Map;
+  const syncPanes = async () => {
+    const listed = new Map((await claude.ui.panes()).map((open) => [open.id, open]));
+    for (const id of panes.keys()) {
+      const open = listed.get(id);
+      if (open?.isPlaced === true)
+        openPanes.add(id);
+      else
+        openPanes.delete(id);
+      if (open === undefined)
+        paneStates.delete(id);
+      else
+        paneStates.set(id, { isShown: open.isShown, isFocused: open.isFocused });
+    }
+  };
+  const readPanes = () => syncPanes().catch((error) => claude.ui.warn("panes:read", `${name} keeps its panes' open, shown, and focused state from before: ${messageOf(error)}`));
+  const requestedSizes = new Map;
+  const styles = new Set;
+  const markdownRenders = new Map;
+  let read;
+  let stylers = [];
+  let stylersSeen = 0;
+  let isRouted = false;
+  let isResizeQueued = false;
+  const widgets = new Map;
+  const widgetAreas = new Map;
+  const parts = new Map;
+  let shownParts = { open: [], shown: null, isFocused: false };
+  const draws = new Map;
+  const latestDraws = new Map;
+  const failedDraws = new Set;
+  let beforeStart = [];
+  let askedDepth = 0;
+  const askedCalls = new Set;
+  let unheldRequests = 0;
+  let collected;
+  let collecting = 0;
+  let queued;
+  const partList = () => {
+    const provides = [...provided(), ...markdownRenders.size > 0 ? [styleInterface] : []];
+    return {
+      widgets: [...widgets.values()].map(({ id, title, areas: listed, place }) => ({ id, title, areas: listed, ...place === undefined ? {} : { place } })),
+      pages: [...parts.values()].map(({ init: { id, title }, place }) => ({ id, title, ...place === undefined ? {} : { place } })),
+      ...provides.length === 0 ? {} : { provides }
+    };
+  };
+  const hear = (listed, isRestyled) => {
+    if (!Array.isArray(listed))
+      return;
+    const heard = listed.filter((styler) => typeof styler === "string" && styler !== name);
+    if (!isRestyled && heard.join("\x00") === stylers.join("\x00"))
+      return;
+    stylers = heard;
+    stylersSeen += 1;
+    if (name === cmodPluginName || panes.size > 0)
+      claude.ui.invalidate("ui.render");
+  };
+  const treeOf = (render, handlers) => {
+    const drawn = render();
+    return drawn === undefined ? null : elementData(drawn, (run) => handlers.push(run) - 1);
+  };
+  const isAnyDrawingChanged = () => {
+    for (const [key, inputs] of latestDraws) {
+      if (key === "markdown")
+        continue;
+      for (const sent of inputs.values()) {
+        const handlers = [];
+        try {
+          if (JSON.stringify(treeOf(sent.render, handlers)) !== sent.tree)
+            return true;
+        } catch (error) {
+          claude.ui.warn(`drawing:${key}`, `${name}: the ${key} drawing threw, so the cmod plugin asks for it again: ${messageOf(error)}`);
+          return true;
+        }
+        const latest = sent.draws.at(-1);
+        if (latest !== undefined && draws.has(latest))
+          draws.set(latest, { id: key, handlers });
+      }
+    }
+    return false;
+  };
+  const withNeededRedraw = ({ redraw, ...update }) => redraw === true && isAnyDrawingChanged() ? { ...update, redraw } : update;
+  const send = (update) => {
+    if (collected !== undefined)
+      return void collected.push(update);
+    if (beforeStart !== undefined)
+      return void beforeStart.push(update);
+    const isAsked = askedDepth > 0;
+    if (queued !== undefined && !isAsked)
+      return void queued.push(update);
+    const batch = [update];
+    if (!isAsked)
+      queued = batch;
+    const tell = async () => {
+      if (queued === batch)
+        queued = undefined;
+      const needed = withNeededRedraw(merged(batch));
+      if (Object.keys(needed).length === 0)
+        return;
+      const input = { ...needed, ...isAsked ? { isAsked: true } : {} };
+      return claude.cmod.call({ to: cmodPluginName, method: partMethods.changed, input }).then((answer) => {
+        if (isAsked && input.requests !== undefined && !(isObject(answer) && answer["isHeld"] === true))
+          unheldRequests += 1;
+        if (isObject(answer) && name !== cmodPluginName)
+          hear(answer["stylers"], false);
+      }, (error) => {
+        claude.ui.warn("parts:tell", `${name}: the cmod plugin did not hear about its widgets, views, and pages: ${messageOf(error)}`);
+      });
+    };
+    if (!isAsked)
+      return Promise.resolve().then(tell);
+    const told = tell().finally(() => askedCalls.delete(told));
+    askedCalls.add(told);
+    return told;
+  };
+  const asked = async (run) => {
+    askedDepth += 1;
+    try {
+      const value = await run();
+      while (askedCalls.size > 0)
+        await Promise.allSettled(askedCalls);
+      return value;
+    } finally {
+      askedDepth -= 1;
+    }
+  };
+  const collect = async (run) => {
+    collecting += 1;
+    collected ??= [];
+    try {
+      await run();
+    } finally {
+      collecting -= 1;
+    }
+    const mine = collected;
+    collected = collecting === 0 ? undefined : [];
+    return withNeededRedraw(merged(mine));
+  };
+  const logOnce = (what) => {
+    let hasLogged = false;
+    return (failure) => {
+      if (!hasLogged)
+        report({ id: `draw:${what}`, message: `The ${what} failed`, description: failure });
+      hasLogged = true;
+    };
+  };
+  const renderOf = (type) => markdownRenders.get(type);
+  const drawnBlock = (piece, at, drawClaudes, keyPrefix, table) => {
+    if ("text" in piece)
+      return drawClaudes({ text: piece.text });
+    const { render, props: block } = piece;
+    const draw = () => drawKeyed(keyPrefix, () => render.Component({ ...block, ...at, Default: ({ source = block.source }) => drawClaudes({ text: source }) }));
+    try {
+      return table === undefined ? draw() : drawWith(table, draw, drawClaudes);
+    } catch (error) {
+      render.log(threw(error));
+      return drawClaudes({ text: block.source });
+    }
+  };
+  const othersFrom = (table, at, from, unkeyedScope) => (props, laterKey = laterKeys(props.key)) => {
+    if (from >= stylers.length)
+      return table.Markdown(props);
+    const scope = props.key ?? unkeyedScope();
+    for (const [index, styler] of stylers.entries()) {
+      if (index < from)
+        continue;
+      const cached = `${stylersSeen}\x00${at.surface}\x00${at.columns}\x00${props.text}`;
+      const next = othersFrom(table, at, index + 1, unkeyedScope);
+      const drawn = drawWith(table, () => borrowed(styler, cached, { markdown: props.text, ...at }, scope), inheriting(props, (part) => next(part, laterKey), laterKey));
+      if (drawn !== undefined)
+        return drawn;
+    }
+    return table.Markdown(props);
+  };
+  const markdownIn = (table, at) => {
+    const reader = read;
+    let unkeyed = 0;
+    const unkeyedScope = () => String(unkeyed++);
+    const others = othersFrom(table, at, 0, unkeyedScope);
+    if (reader === undefined)
+      return stylers.length === 0 ? undefined : others;
+    return (props) => {
+      const pieces = reader(props.text, renderOf);
+      if (pieces.every((piece) => ("text" in piece)))
+        return others(props);
+      const scope = props.key ?? unkeyedScope();
+      const laterKey = laterKeys(props.key);
+      const drawClaudes = inheriting(props, (part) => others(part, laterKey), laterKey);
+      const drawings = pieces.map((piece, index) => drawnBlock(piece, at, drawClaudes, `${scope}:${index}:`, table));
+      return drawPieces(drawings.map((drawing) => ({ drawing, isClaudesRow: false })), "pane");
+    };
+  };
+  const markdownDrawing = (text, at) => {
+    const pieces = read === undefined ? [] : read(text, renderOf);
+    if (pieces.every((piece) => ("text" in piece)))
+      return Markdown({ text });
+    return drawPieces(pieces.map((piece, index) => ({ drawing: drawnBlock(piece, at, Markdown, `${index}:`), isClaudesRow: false })), "pane");
+  };
+  const routeMarkdown = (createReader) => {
+    if (read !== undefined)
+      return;
+    const reader = createReader();
+    read = reader;
+    router.add("ui.render", async (e, next) => {
+      if (e.component !== "AssistantMessage")
+        return next(e);
+      const pieces = reader(e.props.text, renderOf, e.requestId);
+      if (pieces.every((piece) => ("text" in piece)))
+        return next(e);
+      const table = claude.ui.resolve(e);
+      const drawClaudes = (text, isFirst) => next({ ...e, props: pieceProps(e.props, { text }, isFirst) });
+      const drawn = await Promise.all(pieces.map(async (piece, index) => {
+        if ("text" in piece)
+          return { drawing: await drawClaudes(piece.text, index === 0), isClaudesRow: true };
+        const { render, props: block } = piece;
+        const component = await drawComponent(table, (Default) => drawKeyed(`${index}:`, () => render.Component({ ...block, ...styledAt(e), id: e.requestId, Default })), ({ source = block.source }, isClaudesRow) => drawClaudes(source, index === 0 && isClaudesRow));
+        if (!("failure" in component))
+          return component;
+        render.log(component.failure);
+        return { drawing: await drawClaudes(block.source, index === 0), isClaudesRow: true };
+      }));
+      return drawWith(table, () => drawPieces(drawn, e.props.isFirstOfReply ? "opensReply" : "inReply"));
+    });
+  };
+  const openAt = (pane, size, focus) => {
+    requestedSizes.set(pane.id, size);
+    const { id, title, closeOnEscape, holdToasts } = pane;
+    return claude.ui.open({ id, title, ...size, ...closeOnEscape === true ? { closeOnEscape } : {}, ...holdToasts === true ? { holdToasts } : {}, ...focus === true ? { focus } : {} });
+  };
+  const resize = async (pane) => {
+    try {
+      const size = paneSize(pane, mod().state);
+      const requested = requestedSizes.get(pane.id);
+      if (requested?.columns === size.columns && requested?.rows === size.rows)
+        return;
+      await openAt(pane, size);
+    } catch (error) {
+      claude.ui.warn(`pane:resize:${pane.id}`, `${name}: the ${pane.title} pane kept its size: ${messageOf(error)}`);
+    }
+  };
+  const handle = async (pane, handler, run) => {
+    try {
+      await run();
+    } catch (error) {
+      report({ id: `pane:${pane.id}:${handler}`, message: `The ${pane.title} pane's ${handler} threw`, error });
+    }
+  };
+  const routePanes = () => {
+    if (isRouted)
+      return;
+    isRouted = true;
+    router.add("ui.render", (e, next) => {
+      const added = panes.get(e.requestId);
+      if (added === undefined || e.component !== "Pane")
+        return next(e);
+      const { init } = added;
+      openPanes.add(init.id);
+      paneStates.set(init.id, { isShown: true, isFocused: e.props.isFocused });
+      readPanes();
+      const table = claude.ui.resolve(e);
+      try {
+        return drawWith(table, () => init.render(mod(), { ...e.props, surface: e.surface, params: added.params }), markdownIn(table, styledAt(e, e.props.bodyColumns)));
+      } catch (error) {
+        paneLogs.get(init.id)?.(`threw: ${messageOf(error)}`);
+        return drawWith(table, () => Text({ color: "error", children: `The ${init.title} pane could not draw: ${messageOf(error)}` }));
+      }
+    });
+    router.add("ui.scroll", async (e, next) => {
+      const init = panes.get(e.requestId)?.init;
+      const moved = await next(e);
+      if (init?.onScroll === undefined || e.component !== "Pane" || moved.deny !== undefined)
+        return moved;
+      await handle(init, "onScroll", () => init.onScroll?.(mod(), e));
+      return moved;
+    });
+    router.add("ui.close", async (e, next) => {
+      openPanes.delete(e.id);
+      paneStates.delete(e.id);
+      const closed = await next(e);
+      await readPanes();
+      const init = panes.get(e.id)?.init;
+      if (init?.onClose !== undefined)
+        await handle(init, "onClose", () => init.onClose?.(mod(), e));
+      return closed;
+    });
+  };
+  const scrollIn = (id, target, options) => claude.ui.scroll({ to: target, in: id, ...options?.block === undefined ? {} : { block: options.block } }).then(({ deny }) => {
+    if (deny !== undefined)
+      throw new Error(`${name}: Claude Code did not scroll ${id}: ${deny}`);
+  });
+  const addPane = (init) => {
+    checkPane(name, init, panes.has(init.id) ? "pane" : undefined);
+    const added = { init, params: undefined };
+    panes.set(init.id, added);
+    paneLogs.set(init.id, logOnce(`${init.title} pane`));
+    announce(`the ${init.title} pane`);
+    routePanes();
+    const sized = init;
+    const pane = {
+      id: init.id,
+      get isOpen() {
+        return openPanes.has(init.id);
+      },
+      get isShown() {
+        return paneStates.get(init.id)?.isShown ?? false;
+      },
+      get isFocused() {
+        return paneStates.get(init.id)?.isFocused ?? false;
+      },
+      get params() {
+        return added.params;
+      },
+      async open(...[options]) {
+        if (options !== undefined && "params" in options)
+          added.params = options.params;
+        const { isPlaced } = await openAt(sized, paneSize(sized, mod().state), options?.focus);
+        if (isPlaced)
+          openPanes.add(init.id);
+        await syncPanes();
+        claude.ui.invalidate("ui.render");
+      },
+      async close() {
+        await claude.ui.close({ id: init.id });
+        openPanes.delete(init.id);
+        paneStates.delete(init.id);
+        await syncPanes();
+      },
+      toggle: (options) => openPanes.has(init.id) ? pane.close() : pane.open(options),
+      scrollTo: (target, options) => scrollIn(init.id, target, options),
+      async focus(key) {
+        const { deny } = await claude.ui.focus({ requestId: init.id, key });
+        if (deny !== undefined)
+          throw new Error(`${name}: Claude Code did not focus "${key}" in the ${init.title} pane: ${deny}`);
+      },
+      remove() {
+        if (panes.get(init.id) !== added)
+          return;
+        panes.delete(init.id);
+        paneLogs.delete(init.id);
+        if (openPanes.has(init.id))
+          claude.ui.close({ id: init.id }).catch((error) => claude.ui.warn(`pane:close:${init.id}`, `${name}: the ${init.title} pane stayed open: ${messageOf(error)}`));
+        openPanes.delete(init.id);
+        paneStates.delete(init.id);
+      }
+    };
+    return pane;
+  };
+  const openEntry = (id) => shownParts.open.find((each) => each.id === id);
+  const takenBy = (id) => widgets.has(id) ? "widget" : parts.get(id)?.kind;
+  const addPart = (kind, init, place) => {
+    checkPart(name, kind, init.id, init.title, takenBy(init.id));
+    const added = { init, kind, place, params: undefined };
+    const key = `${kind}:${init.id}`;
+    let requested;
+    parts.set(init.id, added);
+    announce(place === "settings" ? `the ${init.title} view in Settings` : `the ${init.title} ${kind}`);
+    send({ parts: partList() });
+    const part = {
+      id: init.id,
+      get isOpen() {
+        if (requested?.[0] === shownParts)
+          return requested[1];
+        return place === "settings" ? shownParts.shown === init.id : openEntry(init.id) !== undefined;
+      },
+      get isShown() {
+        return [shownParts.shown, ...shownParts.inApps ?? []].includes(init.id);
+      },
+      get isFocused() {
+        return shownParts.shown === init.id && shownParts.isFocused;
+      },
+      get params() {
+        return openEntry(init.id)?.params ?? added.params;
+      },
+      async open(...[options]) {
+        if (options !== undefined && "params" in options)
+          added.params = options.params;
+        requested = [shownParts, true];
+        await send({ requests: [{ open: init.id, ...added.params === undefined ? {} : { params: added.params }, ...options?.focus === true ? { focus: true } : {} }] });
+      },
+      toggle: (options) => part.isOpen ? part.close() : part.open(options),
+      close: async () => {
+        requested = [shownParts, false];
+        await send({ requests: [{ close: init.id }] });
+      },
+      scrollTo: async (target, options) => {
+        await send({ requests: [{ scroll: init.id, to: target, ...options?.block === undefined ? {} : { block: options.block } }] });
+      },
+      focus: async (focused) => {
+        const latest = [...latestDraws.get(key)?.values() ?? []].at(-1);
+        if (latest === undefined || !drawsFocusable(treeOf(latest.render, []), focused))
+          throw new Error(`${name}: the ${init.title} ${kind} draws no Button, Input, or Select with the key "${focused}".`);
+        await send({ requests: [{ focus: init.id, key: focused }] });
+      },
+      remove() {
+        if (parts.get(init.id) !== added)
+          return;
+        parts.delete(init.id);
+        forgetDraws(key);
+        send({ parts: partList(), requests: [{ close: init.id }] });
+      }
+    };
+    return part;
+  };
+  const addWidget = (init) => {
+    checkPart(name, "widget", init.id, init.title, takenBy(init.id));
+    widgets.set(init.id, init);
+    announce(`the ${init.title} widget`);
+    send({ parts: partList() });
+    return {
+      id: init.id,
+      get area() {
+        return widgetAreas.get(init.id);
+      },
+      remove() {
+        if (widgets.get(init.id) !== init)
+          return;
+        widgets.delete(init.id);
+        widgetAreas.delete(init.id);
+        forgetDraws(`widget:${init.id}`);
+        send({ parts: partList() });
+      }
+    };
+  };
+  const addStyle = ({ kind, render }) => {
+    const markdown = typeof kind === "string" ? undefined : kind;
+    const component = componentOf(kind);
+    if (markdown === undefined && component === undefined)
+      throw new Error(`${name}: ${String(kind)} is not a kind styles.add draws, such as ToolCall or CodeBlock.`);
+    const feature = `the style of ${nameOf(kind)}`;
+    if (styles.has(feature))
+      throw new Error(`${name}: ${feature} is already added. Add one style per kind.`);
+    styles.add(feature);
+    announce(feature);
+    const Component = (props) => render(mod(), props);
+    const stop = (subscription) => () => {
+      subscription?.remove();
+      if (markdown !== undefined && markdownRenders.delete(markdown.markdown))
+        send({ parts: partList() });
+      styles.delete(feature);
+      claude.ui.invalidate("ui.render");
+    };
+    if (markdown !== undefined) {
+      markdownRenders.set(markdown.markdown, { Component, log: logOnce(`${nameOf(kind)} style`) });
+      routeMarkdown(markdown.createReader);
+      send({ parts: partList() });
+      return { kind, remove: stop() };
+    }
+    const log = logOnce(`${nameOf(kind)} style`);
+    const drawing = router.add("ui.render", async (e, next) => {
+      if (e.component !== component)
+        return next(e);
+      const table = claude.ui.resolve(e);
+      const drawn = await drawComponent(table, (Default) => Component({ ...e.props, ...styledAt(e), id: e.requestId, Default }), (given, isClaudesRow) => next({ ...e, props: pieceProps(e.props, given, isClaudesRow) }));
+      if ("failure" in drawn) {
+        log(drawn.failure);
+        return next(e);
+      }
+      if (e.component !== "AssistantMessage")
+        return drawn.drawing;
+      return drawWith(table, () => drawPieces([drawn], e.props.isFirstOfReply ? "opensReply" : "inReply"));
+    });
+    return { kind, remove: stop(drawing) };
+  };
+  const forgetDraws = (key) => {
+    for (const kept of latestDraws.get(key)?.values() ?? [])
+      for (const draw of kept.draws)
+        draws.delete(draw);
+    latestDraws.delete(key);
+  };
+  const drawPart = (key, title, input, render, drawFailure = () => {
+    return;
+  }) => {
+    let handlers = [];
+    let tree;
+    try {
+      tree = treeOf(render, handlers);
+      failedDraws.delete(key);
+    } catch (error) {
+      if (!failedDraws.has(key))
+        report({ id: key, message: `The ${title} could not draw`, error });
+      failedDraws.add(key);
+      handlers = [];
+      tree = treeOf(() => drawFailure(error), handlers);
+    }
+    const number = nextDraw();
+    const inputs = latestDraws.get(key) ?? new Map;
+    latestDraws.set(key, inputs);
+    const drawnFor = JSON.stringify("turn" in input ? { ...input, turn: input.turn.prompt.id } : input);
+    const earlier = inputs.get(drawnFor)?.draws ?? [];
+    const kept = [...earlier, number].slice(-2);
+    for (const draw of earlier)
+      if (!kept.includes(draw))
+        draws.delete(draw);
+    inputs.delete(drawnFor);
+    inputs.set(drawnFor, { draws: kept, tree: JSON.stringify(tree), render });
+    const [oldest] = inputs;
+    if (inputs.size > keptDrawInputs && oldest !== undefined) {
+      for (const draw of oldest[1].draws)
+        draws.delete(draw);
+      inputs.delete(oldest[0]);
+    }
+    draws.set(number, { id: key, handlers });
+    return { draw: number, tree };
+  };
+  const draw = (input) => {
+    if ("markdown" in input)
+      return drawPart("markdown", "markdown style", input, () => markdownDrawing(input.markdown, { surface: input.surface, columns: input.columns }));
+    if ("page" in input) {
+      const { page, ...props } = input;
+      const added = parts.get(page);
+      if (added === undefined)
+        throw new Error(`${name} has no view or page ${page}.`);
+      const title = `${added.init.title} ${added.kind}`;
+      return drawPart(`${added.kind}:${page}`, title, input, () => added.init.render(mod(), props), (error) => Text({ color: "error", children: `The ${title} could not draw: ${messageOf(error)}` }));
+    }
+    const { widget: id, turn, ...given } = input;
+    const widget = widgets.get(id);
+    if (widget === undefined || !widget.areas.includes(given.area))
+      return null;
+    widgetAreas.set(id, given.area);
+    const context = given.area === TurnEnd2 && turn !== undefined ? { ...given, turn } : given;
+    return drawPart(`widget:${id}`, `${widget.title} widget`, input, () => widget.render(mod(), context));
+  };
+  const press = async ({ draw: drawn, handler, args }, caller) => {
+    const known = draws.get(drawn);
+    const run = known?.handlers[handler];
+    if (known === undefined || run === undefined)
+      throw new Error(`${name}: ${stalePress}`);
+    if (caller !== cmodPluginName && known.id !== "markdown")
+      throw new Error(`${name}: ${caller} pressed a button only the cmod plugin draws.`);
+    const pressed = async () => {
+      try {
+        await run(...args);
+      } catch (error) {
+        report({ id: known.id, message: "Its button failed", error, isCritical: true });
+      }
+    };
+    if (caller === cmodPluginName)
+      return collect(pressed);
+    await pressed();
+    return null;
+  };
+  return {
+    panes: { add: addPane },
+    views: { add: (init) => addPart("view", init, "sidebar") },
+    pages: { add: (init) => addPart("page", init) },
+    settings: {
+      add: (init) => addPart("view", init, "settings"),
+      open: async () => {
+        await send({ requests: [{ settings: true }] });
+      }
+    },
+    widgets: { add: addWidget },
+    styles: { add: addStyle },
+    asked,
+    async answerInput(run, passOn) {
+      const before = unheldRequests;
+      const answer = await asked(run);
+      if (unheldRequests > before)
+        await passOn();
+      return answer;
+    },
+    answer(method, input, caller) {
+      const isMarkdown = method === partMethods.draw && isObject(input) && typeof input["markdown"] === "string";
+      if (caller !== cmodPluginName && !isMarkdown && method !== partMethods.press)
+        return;
+      if (method === partMethods.list)
+        return Promise.resolve({ value: partList() });
+      if (method === partMethods.draw)
+        return Promise.resolve().then(() => ({ value: draw(input) }));
+      if (method === partMethods.press)
+        return press(input, caller).then((value) => ({ value }));
+      if (method === partMethods.shown) {
+        shownParts = input;
+        return Promise.resolve({ value: null });
+      }
+      if (method === partMethods.stylers) {
+        hear(input, true);
+        return Promise.resolve({ value: null });
+      }
+      return;
+    },
+    markdownIn,
+    restyled: (stylers) => hear(stylers, true),
+    relisted() {
+      send({ parts: partList() });
+    },
+    started() {
+      const held = merged(beforeStart ?? []);
+      beforeStart = undefined;
+      send({ ...held, parts: partList(), isStart: true });
+    },
+    changed() {
+      if (widgets.size > 0 || parts.size > 0)
+        send({ redraw: true });
+      if (panes.size === 0 && styles.size === 0)
+        return;
+      claude.ui.invalidate("ui.render");
+      if (isResizeQueued)
+        return;
+      isResizeQueued = true;
+      Promise.resolve().then(() => {
+        isResizeQueued = false;
+        for (const { init } of panes.values()) {
+          if (openPanes.has(init.id))
+            resize(init);
+        }
+      });
+    },
+    async restorePanes() {
+      if (panes.size > 0)
+        await syncPanes();
+    }
+  };
+}
+
+// node_modules/@cmodjs/core/runtime/installer.js
+var installView = "cmod:install";
+var keptDraws = 8;
+function createInstaller(name, claude, waiting, nextDraw) {
+  let question;
+  let isOpen = false;
+  let isSeen = false;
+  let waitingForShow = [];
+  let collected;
+  const draws = new Map;
+  const send = async (update) => {
+    if (collected !== undefined)
+      return void collected.push(update);
+    await withBareRefusals(claude()).cmod.call({ to: cmodPluginName, method: partMethods.changed, input: update });
+  };
+  const log = (what) => (error) => claude().ui.warn("installer:page", `${name}: ${what}: ${messageOf(error)}`);
+  const open = (isAsked) => send({ requests: [{ open: installView, focus: true }], ...isAsked ? { isAsked: true } : {} });
+  const show = async (next, build, cancelled) => {
+    question?.cancel();
+    const answer = new Promise((resolve) => {
+      let isAnswered = false;
+      const done = (value) => {
+        if (isAnswered)
+          return;
+        isAnswered = true;
+        waiting.hide();
+        claude().clock.after(0, () => resolve(value));
+      };
+      question = { ...build(done), cancel: () => done(cancelled) };
+    });
+    waiting.show(() => open(true), next);
+    if (isOpen) {
+      await send({ redraw: true }).catch(log("the installer did not redraw"));
+    } else {
+      isOpen = true;
+      await open(false).catch((error) => {
+        isOpen = false;
+        waiting.hide();
+        throw error;
+      });
+    }
+    for (const resolve of waitingForShow)
+      resolve();
+    waitingForShow = [];
+    return answer;
+  };
+  const redraw = () => void send({ redraw: true }).catch(log("the installer did not redraw"));
+  const actions = (...buttons) => Box({ gap: 2, flexShrink: 0, children: buttons });
+  const dialog = (title, ...children) => Box({ flexDirection: "column", gap: 1, children: [title, ...children] });
+  const draw = (props) => {
+    if (question === undefined && !isOpen)
+      claude().clock.after(0, () => void send({ requests: [{ close: installView }] }).catch(log("a leftover install view stayed open")));
+    const handlers = [];
+    const tree = elementData(question?.draw(props) ?? Text({ dimColor: true, children: `${name} needs nothing from you now.` }), (run) => handlers.push(run) - 1);
+    const drawn = nextDraw();
+    draws.set(drawn, handlers);
+    for (const kept of draws.keys())
+      if (draws.size > keptDraws)
+        draws.delete(kept);
+    return { draw: drawn, tree };
+  };
+  const collect = async (run) => {
+    const outer = collected;
+    const mine = [];
+    collected = mine;
+    try {
+      await run();
+    } finally {
+      collected = outer;
+    }
+    return merged(mine);
+  };
+  const press = async ({ draw: drawn, handler, args }) => {
+    const run = draws.get(drawn)?.[handler];
+    if (run === undefined)
+      throw new Error(`${name}: ${stalePress}`);
+    return collect(() => run(...args));
+  };
+  return {
+    answer(method, input) {
+      const { page, ...props } = isObject(input) ? input : {};
+      if (method === partMethods.draw && page === installView)
+        return Promise.resolve({ value: draw({ ...props, params: undefined }) });
+      if (method === partMethods.press && isObject(input) && typeof input["draw"] === "number" && draws.has(input["draw"]))
+        return press(input).then((value) => ({ value }));
+      return;
+    },
+    hear(shown) {
+      if (shown.open.some((each) => each.id === installView)) {
+        isSeen = isOpen;
+        return;
+      }
+      if (!isSeen)
+        return;
+      isOpen = false;
+      isSeen = false;
+      question?.cancel();
+    },
+    options(missing, save) {
+      const saved = new Map;
+      const failures = new Map;
+      return show(`Enter ${missing.length === 1 ? "one setting" : `${missing.length} settings`}`, (answer) => ({
+        draw: () => dialog(Text({ bold: true, children: `Set up ${name}` }), Text({ children: `${name} needs ${missing.length === 1 ? "one setting" : `${missing.length} settings`}:` }), ...missing.map(([key, option]) => {
+          const label = Box({ flexDirection: "column", children: [Text({ bold: true, children: option.title }), ...option.description === "" ? [] : [Text({ dimColor: true, wrap: "wrap", children: option.description })]] });
+          if (option.type === "secret") {
+            return Box({ flexDirection: "column", children: [label, Text({ dimColor: true, wrap: "wrap", children: `${secretFix} Then press Next.` }), filledButton({ key: `secret:${key}`, label: "Open /config", onPress: () => void claude().command.run({ command: "config" }) })] });
+          }
+          const failure = failures.get(key);
+          const field = Input({
+            key: `option:${key}`,
+            label: "Value",
+            placeholder: option.type === "choice" ? (option.choices ?? []).join(", ") : option.type === "toggle" ? "true or false" : option.type === "list" ? "comma-separated" : "",
+            value: saved.get(key) ?? "",
+            submitLabel: "save",
+            onSubmit: (value) => void save(key, value).then((refused) => {
+              if (refused === undefined) {
+                saved.set(key, value);
+                failures.delete(key);
+              } else
+                failures.set(key, refused);
+            }).catch((error) => failures.set(key, messageOf(error))).finally(redraw)
+          });
+          const status = failure !== undefined ? [Text({ color: "error", wrap: "wrap", children: failure })] : saved.has(key) ? [Text({ color: "success", children: "✓ saved" })] : [];
+          return Box({ flexDirection: "column", children: [label, field, ...status] });
+        }), actions(filledButton({ key: "next", hotkey: "x", variant: "primary", label: "Next", onPress: () => answer(true) }), filledButton({ key: "not-now", hotkey: "n", label: "Not now", onPress: () => answer(false) })))
+      }), false);
+    },
+    step(mod, step, index, total) {
+      let notice;
+      return show(`Step ${index} of ${total}: ${step.title}`, (answer) => ({
+        draw: (props) => {
+          let body;
+          try {
+            body = step.render(mod, props);
+          } catch (error) {
+            body = Text({ color: "error", wrap: "wrap", children: `The ${step.title} step could not draw: ${messageOf(error)}` });
+          }
+          const next = async () => {
+            try {
+              if (await step.isDone(mod))
+                return answer(true);
+              notice = { color: "warning", text: `Finish ${step.title} first.` };
+            } catch (error) {
+              notice = { color: "error", text: `The ${step.title} step's isDone failed: ${messageOf(error)}` };
+            }
+            await send({ redraw: true });
+          };
+          return dialog(Text({ children: [Text({ bold: true, children: step.title }), Text({ dimColor: true, children: `  (${index} of ${total})` })] }), body, ...notice === undefined ? [] : [Text({ color: notice.color, wrap: "wrap", children: notice.text })], actions(filledButton({ key: "next", hotkey: "x", variant: "primary", label: index === total ? "Finish" : "Next", onPress: () => void next() }), filledButton({ key: "not-now", hotkey: "n", label: "Not now", onPress: () => answer(false) })));
+        }
+      }), false);
+    },
+    async close() {
+      question?.cancel();
+      question = undefined;
+      if (!isOpen)
+        return;
+      isOpen = false;
+      isSeen = false;
+      await send({ requests: [{ close: installView }] }).catch(log("the install view stayed open"));
+    },
+    changed() {
+      if (question !== undefined && isOpen)
+        redraw();
+    },
+    shown: () => new Promise((resolve) => void waitingForShow.push(resolve)),
+    collect
+  };
+}
+
+// node_modules/@cmodjs/core/runtime/options.js
+class MissingOptions extends Error {
+  keys;
+  titles;
+  constructor(keys, titles) {
+    super(`it needs ${listed(titles)}`);
+    this.keys = keys;
+    this.titles = titles;
+  }
+}
+function createOptions({ name, declared, fromClaude, claude, report, changed }) {
+  let values = merged2(declared, fromClaude, {}, new Set);
+  let locked;
+  let loadedRoot;
+  const readLocked = async () => {
+    if (Object.keys(declared).length === 0)
+      return new Set;
+    const rows = await claude.config.list().catch((error) => {
+      claude.ui.warn("options:config", `${name} could not read /config, so a project's options.json may override a value your organization set: ${messageOf(error)}`);
+      return [];
+    });
+    return new Set(rows.filter((row) => row.isLocked && row.key.startsWith(`${name}.`)).map((row) => row.key.slice(name.length + 1)));
+  };
+  const readProject = async (root) => {
+    const path = `${projectConfigFolder(root, name)}/options.json`;
+    if (!await claude.fs.exists(path))
+      return {};
+    const { values: kept, ignored } = projectOptionsOf(name, declared, await claude.fs.read(path));
+    for (const reason of ignored)
+      report({ id: `options:${path} ${reason}`, message: `Ignores part of ${path}`, description: `${path} ${reason}` });
+    return kept;
+  };
+  return {
+    get values() {
+      return values;
+    },
+    get missing() {
+      return Object.entries(declared).filter(([key, option]) => option.default === undefined && isUnset(values[key])).map(([key]) => key);
+    },
+    async load(root) {
+      if (Object.keys(declared).length === 0)
+        return;
+      locked ??= await readLocked();
+      const project = await readProject(root);
+      const isFirst = loadedRoot === undefined;
+      loadedRoot = root;
+      const next = merged2(declared, fromClaude, project, locked);
+      if (!isFirst && JSON.stringify(next) === JSON.stringify(values))
+        return;
+      values = next;
+      if (!isFirst)
+        changed();
+    }
+  };
+}
+function merged2(declared, fromClaude, project, locked) {
+  return Object.freeze(Object.fromEntries(Object.entries(declared).map(([key, option]) => [key, valueOf(key, option, fromClaude[key], project, locked)])));
+}
+function valueOf(key, option, own, project, locked) {
+  if (locked.has(key))
+    return own;
+  if (Object.hasOwn(project, key))
+    return project[key];
+  if (!isUnset(own) && fitsOption(option, own) === undefined)
+    return Array.isArray(own) ? Object.freeze([...own]) : own;
+  return option.default ?? (option.type === "list" ? Object.freeze([]) : option.type === "number" ? undefined : "");
+}
+
+// node_modules/@cmodjs/core/runtime/state.js
+var lifetimes = ["memory", "session", "project", "global"];
+var keptProjects = 20;
+var listeners = new WeakMap;
+function sessionKeyOf(name, key, session) {
+  return `${name}.${key}.sessions.${session}`;
+}
+function createState({ name, initial, session, root, claude, report, changed: redraw, forkParent }) {
+  const changed = () => {
+    redraw();
+    for (const listener of listeners.get(state) ?? [])
+      listener();
+  };
+  const declared = declaredGroups(name, initial);
+  const current = copied(declared);
+  let projectRoot = root;
+  let sessionId = session;
+  let turn = Promise.resolve();
+  const inTurn = (task) => {
+    const run = turn.then(task);
+    turn = Promise.allSettled([run]);
+    return run;
+  };
+  const ownersKey = (lifetime, key) => lifetime === "project" ? `${name}.${key}.projects.` : sessionKeyOf(name, key, "");
+  const storeKey = (lifetime, key, owner) => lifetime === "global" ? `${name}.${key}` : `${ownersKey(lifetime, key)}${owner}`;
+  const read = (lifetime, key, owner) => claude.store.get(storeKey(lifetime, key, owner));
+  const write = async (lifetime, key, value, owner) => {
+    if (lifetime !== "project")
+      return claude.store.set(storeKey(lifetime, key, owner), value);
+    await claude.store.delete(storeKey(lifetime, key, owner));
+    await claude.store.set(storeKey(lifetime, key, owner), value);
+    const owners = (await claude.store.keys()).filter((stored) => stored.startsWith(ownersKey(lifetime, key)));
+    for (const oldest of owners.slice(0, -keptProjects))
+      await claude.store.delete(oldest);
+  };
+  const transcriptsKey = `${name}.$transcripts.`;
+  const forgetEndedSessions = async (current) => {
+    const stored = await claude.store.keys();
+    const ended = async (recorded) => {
+      const transcript = await claude.store.get(recorded);
+      return typeof transcript !== "string" || !await claude.fs.exists(transcript);
+    };
+    const owners = stored.filter((key) => key.startsWith(transcriptsKey) && key !== `${transcriptsKey}${current}`);
+    await Promise.all(owners.map(async (recorded) => {
+      if (!await ended(recorded))
+        return;
+      const owner = recorded.slice(transcriptsKey.length);
+      await Promise.all(stored.filter((key) => key.startsWith(`${name}.`) && key.endsWith(`.sessions.${owner}`)).map((value) => claude.store.delete(value)));
+      await claude.store.delete(recorded);
+    }));
+  };
+  const loadGroups = async (only, next) => {
+    const loaded = [];
+    for (const lifetime of only) {
+      for (const key of Object.keys(declared[lifetime]))
+        loaded.push([lifetime, key, lifetime === "memory" ? undefined : await read(lifetime, key, lifetime === "project" ? next.root : next.session)]);
+    }
+    projectRoot = next.root;
+    sessionId = next.session;
+    for (const [lifetime, key, saved] of loaded)
+      current[lifetime][key] = saved === undefined ? declared[lifetime][key] : frozen(name, `${lifetime}.${key}`, saved);
+    changed();
+  };
+  const copySession = async (from, to) => {
+    for (const key of Object.keys(declared.session)) {
+      const saved = await read("session", key, from);
+      if (saved !== undefined)
+        await write("session", key, saved, to);
+    }
+  };
+  const hasSaved = async (owner) => (await claude.store.keys()).some((key) => key.startsWith(`${name}.`) && key.endsWith(`.sessions.${owner}`));
+  const group = (lifetime) => new Proxy(current[lifetime], {
+    set(target, key, value) {
+      if (typeof key !== "string")
+        throw new Error(`${name}: mod.state.${lifetime} keys are text, not ${String(key)}.`);
+      if (!Object.hasOwn(declared[lifetime], key))
+        throw new Error(`${name}: mod.state.${lifetime}.${key} is not declared. Add it to state.${lifetime} in defineMod with its starting value.`);
+      if (Object.is(target[key], value))
+        return true;
+      target[key] = frozen(name, `${lifetime}.${key}`, value);
+      if (lifetime !== "memory") {
+        const owner = lifetime === "project" ? projectRoot : sessionId;
+        inTurn(() => write(lifetime, key, value, owner)).catch((error) => {
+          report({ id: `state:${lifetime}.${key}`, message: `Could not keep state.${lifetime}.${key}`, error });
+        });
+      }
+      changed();
+      return true;
+    }
+  });
+  const state = Object.freeze(Object.fromEntries(Object.keys(initial).map((lifetime) => [lifetime, group(lifetime)])));
+  return {
+    state,
+    get root() {
+      return projectRoot;
+    },
+    changed,
+    load: () => inTurn(async () => {
+      if (Object.keys(declared.session).length > 0 && !await hasSaved(sessionId)) {
+        const parent = await forkParent();
+        if (parent !== undefined)
+          await copySession(parent, sessionId);
+      }
+      return loadGroups(lifetimes, { root: projectRoot, session: sessionId });
+    }),
+    moveTo: (nextRoot) => inTurn(async () => nextRoot === projectRoot ? undefined : loadGroups(["project"], { root: nextRoot, session: sessionId })),
+    switchSession: (nextSession, source, transcript) => inTurn(async () => {
+      if (Object.keys(declared.session).length > 0) {
+        await claude.store.set(`${transcriptsKey}${nextSession}`, transcript);
+        forgetEndedSessions(nextSession).catch((error) => report({ id: "state:sessions", message: "Could not forget the session values of ended sessions", error }));
+      }
+      if (nextSession === sessionId)
+        return;
+      if (source === "fork")
+        await copySession(sessionId, nextSession);
+      return loadGroups(["memory", "session"], { root: projectRoot, session: nextSession });
+    })
+  };
+}
+function declaredGroups(name, initial) {
+  const groups = { memory: {}, session: {}, project: {}, global: {} };
+  for (const [lifetime, values] of Object.entries(initial)) {
+    if (!isLifetime(lifetime))
+      throw new Error(`${name}: state.${lifetime} is not a lifetime. Put each value in state.memory, state.session, state.project, or state.global.`);
+    if (!isPlainObject(values))
+      throw new Error(`${name}: state.${lifetime} is not an object of values. Write state: { ${lifetime}: { key: value } }.`);
+    for (const [key, value] of Object.entries(values))
+      groups[lifetime][key] = frozen(name, `${lifetime}.${key}`, value);
+  }
+  return groups;
+}
+function copied(groups) {
+  return { memory: { ...groups.memory }, session: { ...groups.session }, project: { ...groups.project }, global: { ...groups.global } };
+}
+function isLifetime(group) {
+  return lifetimes.includes(group);
+}
+function frozen(name, path, value) {
+  const isArray = Array.isArray(value);
+  if (!isArray && !isPlainObject(value))
+    return value;
+  const copy = isArray ? value.map((item) => frozen(name, path, item)) : Object.fromEntries(Object.entries(value).map(([field, item]) => [field, frozen(name, path, item)]));
+  const example = isArray ? `mod.state.${path} = [...mod.state.${path}, item]` : `mod.state.${path} = { ...mod.state.${path}, field: value }`;
+  const refuse = () => {
+    throw new Error(`${name}: mod.state.${path} cannot change in place. Assign it a new value, such as ${example}, so the mod redraws and keeps it.`);
+  };
+  return new Proxy(Object.freeze(copy), { set: refuse, defineProperty: refuse, deleteProperty: refuse });
+}
+function isPlainObject(value) {
+  if (typeof value !== "object" || value === null)
+    return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+// node_modules/@cmodjs/core/runtime/toaster.js
+var failedMethod = "cmod:failed";
+var githubRepository = /^https:\/\/github\.com\/([^/]+\/[^/#?]+?)(?:\.git)?(?:\/issues)?\/?$/;
+var linkLimit = 2048;
+var hiddenKey = "cmod:hidden-failures";
+var failedCallMs = 30000;
+var logAgainMs = [1e4, 60000, 300000];
+var defaultDuration = 4000;
+var visibleToasts = 3;
+var columnGap = 2;
+var nameColumn = 16;
+var spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+var spinnerMs = 100;
+var spinFrames = 1e4 / spinnerMs;
+var still = "…";
+var icons = {
+  default: { glyph: " " },
+  success: { glyph: "✓", color: "success" },
+  info: { glyph: "ℹ", color: "suggestion" },
+  warning: { glyph: "⚠", color: "warning" },
+  error: { glyph: "✗", color: "error" }
+};
+function createToaster(claude, name, version) {
+  const entries = new Map;
+  const hidden = new Map;
+  const sent = new Map;
+  claude.store.get(hiddenKey).then((saved) => {
+    if (typeof saved !== "object" || saved === null)
+      return;
+    for (const [id, hides] of Object.entries(saved))
+      if (typeof hides === "string" && !hidden.has(id))
+        hidden.set(id, hides);
+  }, (error) => warn("hidden:read", `${name}: could not read the failures you hid: ${messageOf(error)}`));
+  let lastId = 0;
+  let frame = 0;
+  let spinning;
+  let isHeld = false;
+  let showsAll = false;
+  let bandId;
+  const isLoading = (entry) => entry.type === "loading" || entry.trying !== undefined;
+  const isSpinning = (entry) => entry.spinsFrom !== undefined && frame - entry.spinsFrom < spinFrames;
+  const changed = () => {
+    for (const entry of entries.values())
+      entry.spinsFrom = isLoading(entry) ? entry.spinsFrom ?? frame : undefined;
+    const spins = [...entries.values()].some(isSpinning);
+    if (spins && spinning === undefined) {
+      spinning = claude.clock.every(spinnerMs, () => {
+        frame += 1;
+        changed();
+      });
+    }
+    if (!spins && spinning !== undefined) {
+      spinning.cancel();
+      spinning = undefined;
+    }
+    if (entries.size <= visibleToasts)
+      showsAll = false;
+    claude.ui.invalidate("ui.render");
+  };
+  const disarm = (entry) => {
+    entry.timer?.cancel();
+    entry.timer = undefined;
+  };
+  const arm = (entry) => {
+    const duration = entry.options.duration ?? defaultDuration;
+    if (entry.timer !== undefined || entry.type === "loading" || entry.isOpen || !Number.isFinite(duration))
+      return;
+    entry.timer = claude.clock.after(duration, () => {
+      entry.timer = undefined;
+      if (isHeld)
+        arm(entry);
+      else
+        dismiss(entry.id);
+    });
+  };
+  const dismiss = (id) => {
+    if (id === undefined)
+      sent.clear();
+    else
+      sent.delete(String(id));
+    for (const entry of entries.values()) {
+      if (id !== undefined && entry.id !== id && !entry.merged.has(String(id)))
+        continue;
+      for (const merged of entry.merged.keys())
+        sent.delete(merged);
+      disarm(entry);
+      entries.delete(entry.id);
+    }
+    changed();
+  };
+  const put = (type, message, options, actions, hides) => {
+    const id = options.id ?? (lastId += 1);
+    const previous = entries.get(id);
+    if (previous?.trying !== undefined && type === "loading") {
+      previous.trying = options.description ?? message;
+      changed();
+      return id;
+    }
+    if (previous !== undefined)
+      disarm(previous);
+    const reporting = hides !== undefined && previous?.hides === hides ? previous.reporting : undefined;
+    const entry = { id, type, message, options, actions, ...hides === undefined ? {} : { hides }, merged: new Map, count: 1, at: new Date, isOpen: previous?.isOpen ?? false, reporting, timer: undefined };
+    if (type === "error" && previous?.message !== message)
+      claude.ui.log(`${name}: ${message}${typeof options.description === "string" ? `: ${options.description}` : ""}`, { to: "debug" });
+    entries.set(id, entry);
+    changed();
+    return id;
+  };
+  const show = (type) => (message, options = {}) => put(type, message, options, options.action === undefined ? [] : [options.action]);
+  const hide = (entry) => {
+    dismiss(entry.id);
+    if (entry.hides === undefined)
+      return;
+    for (const [id, hides] of [[String(entry.id), entry.hides], ...entry.merged])
+      hidden.set(id, hides);
+    claude.store.set(hiddenKey, Object.fromEntries(hidden)).catch((error) => warn("hidden:write", `${name}: could not remember the failure you hid: ${messageOf(error)}`));
+  };
+  const toast = Object.assign(show("default"), {
+    success: show("success"),
+    info: show("info"),
+    warning: show("warning"),
+    error: show("error"),
+    loading: show("loading"),
+    dismiss,
+    promise(task, messages) {
+      const id = show("loading")(messages.loading);
+      const settled = Promise.resolve().then(() => typeof task === "function" ? task() : task).then((value) => {
+        show("success")(typeof messages.success === "function" ? messages.success(value) : messages.success, { id });
+        return value;
+      }, (error) => {
+        show("error")(typeof messages.error === "function" ? messages.error(error) : messages.error, { id });
+        throw error;
+      });
+      settled.catch(() => {
+        return;
+      });
+      return { unwrap: () => settled };
+    }
+  });
+  const copy = async (text) => {
+    const copied = await claude.ui.copy({ text });
+    if (!copied.isCopied)
+      throw new Error(copied.reason);
+  };
+  const press = (entry, run) => () => void Promise.resolve().then(run).catch((error) => fail({ id: `press:${entry.id}`, message: `${entry.message}: the press failed`, error, isCritical: true }));
+  const logFailure = (failure) => claude.cmod.call({ to: cmodPluginName, method: failedMethod, input: failure });
+  const modVersion = () => claude.fs.read(`${claude.plugin.root}/.claude-plugin/plugin.json`).then((text) => String(JSON.parse(text).version)).catch((failure) => `unknown (${messageOf(failure)})`);
+  const detailsOf = (version, at, text) => `${name} ${version}, @cmodjs/core ${coreVersion}, at ${at.toISOString()}
+${text}`;
+  const warned = new Map;
+  const warn = (id, text) => {
+    claude.ui.log(text, { to: "debug" });
+    const at = new Date;
+    const repeat = `${text}
+${at.toISOString().slice(0, 16)}`;
+    if (warned.get(id) === repeat)
+      return;
+    warned.set(id, repeat);
+    claude.clock.after(0, () => {
+      (async () => {
+        const version = await modVersion();
+        await logFailure({ mod: name, id, message: text, details: detailsOf(version, at, text), at: at.toISOString(), isCritical: false, root: claude.plugin.root, level: "warning", version, core: coreVersion });
+      })().catch(() => {
+        return;
+      });
+    });
+  };
+  const showsToast = async (failure, isShown) => {
+    const call = { isSettled: false };
+    try {
+      const logged = logFailure(failure).finally(() => void (call.isSettled = true));
+      const answer = await (isShown ? logged : beforeDeadline(claude.clock, { ms: failedCallMs }, failedMethod, () => logged));
+      if (isObject(answer) && typeof answer["showsToast"] === "boolean")
+        return answer["showsToast"];
+      throw new Error(`cmod answered ${answer === undefined ? "nothing" : JSON.stringify(answer)}, not { showsToast: true or false }`);
+    } catch (error) {
+      if (!call.isSettled || isUnanswered(error))
+        return "unanswered";
+      claude.ui.log(`${name}: cmod kept no Log of ${failure.id}, so it shows the toast: ${messageOf(error)}`, { to: "debug" });
+      return;
+    }
+  };
+  const fail = ({ id, message, error, description = error === undefined || describe(error) === message ? undefined : describe(error), retry, isCritical = false, root = claude.plugin.root }) => {
+    if (!isCritical && isUnanswered(error)) {
+      warn(id, `${name}: ${message}: ${describe(error)}`);
+      return id;
+    }
+    const hides = `${version() ?? ""}
+${message}
+${error === undefined ? "" : describe(error)}`;
+    const at = new Date;
+    const repeat = `${hides}
+${description ?? ""}
+${at.toISOString().slice(0, 16)}`;
+    if (sent.get(id) === repeat)
+      return id;
+    sent.set(id, repeat);
+    const stack = error instanceof Error && error.stack !== undefined ? `
+
+${error.stack}` : "";
+    const details = async (failedAt) => detailsOf(await modVersion(), failedAt, `${message}${description === undefined ? "" : `
+${description}`}${stack}`);
+    const logged = async (tries = 0) => {
+      const contact = await contactOf(claude);
+      const version = await modVersion();
+      const failure = { mod: name, id, message, details: detailsOf(version, at, `${message}${description === undefined ? "" : `
+${description}`}${stack}`), at: at.toISOString(), isCritical, root, ...contact === undefined ? {} : { contact }, level: "error", version, core: coreVersion };
+      const shows = await showsToast(failure, isCritical);
+      const wait = logAgainMs[tries];
+      if (shows === "unanswered" && wait !== undefined)
+        return void claude.clock.after(wait, () => void logged(tries + 1));
+      if (shows === "unanswered")
+        claude.ui.log(`${name}: cmod did not answer ${logAgainMs.length + 1} times, so ${id} reached no Log and shows its toast`, { to: "debug" });
+      if (isCritical)
+        return;
+      if (shows !== false)
+        return show();
+      claude.ui.log(`${name}: ${message}${description === undefined ? "" : `: ${description}`}`, { to: "debug" });
+    };
+    const show = () => {
+      if (hidden.get(id) === hides)
+        return;
+      hidden.delete(id);
+      const own = entries.get(id);
+      const text = description ?? message;
+      const shown = own === undefined ? [...entries.values()].find((entry) => entry.hides !== undefined && entry.trying === undefined && (entry.options.description ?? entry.message) === text) : own.hides === hides && own.trying === undefined && own.options.description === description ? own : undefined;
+      if (shown !== undefined) {
+        if (shown !== own)
+          shown.merged.set(id, hides);
+        shown.count += 1;
+        shown.at = new Date;
+        changed();
+        return;
+      }
+      const actions = [{ label: "Report", onClick: startReporting }, ...retry === undefined ? [] : [{ label: "Retry", onClick: tryAgain }], ...fixes];
+      put("error", message, { id, ...description === undefined ? {} : { description }, duration: Infinity }, actions, hides);
+    };
+    const startReporting = async () => {
+      const shown = entries.get(id);
+      if (shown === undefined)
+        return;
+      shown.reporting = { contact: await contactOf(claude), details: await details(shown.at) };
+      disarm(shown);
+      changed();
+      if (bandId === undefined)
+        return;
+      const focused = await claude.ui.focus({ requestId: bandId, key: `toast:${id}:ask-claude` });
+      if ("deny" in focused)
+        warn("report:focus", `${name}: the Report choices did not take the keys: ${String(focused.deny)}`);
+    };
+    const tryAgain = async () => {
+      const shown = entries.get(id);
+      if (shown === undefined || retry === undefined || shown.trying !== undefined)
+        return;
+      shown.trying = "Starting";
+      changed();
+      try {
+        await retry();
+      } finally {
+        if (entries.get(id) === shown) {
+          shown.trying = undefined;
+          changed();
+        }
+      }
+    };
+    const fixes = [
+      { sentence: installFix, label: "Plugins", onClick: () => claude.command.run({ command: "plugin" }) },
+      { sentence: secretFix, label: "Open /config", onClick: () => claude.command.run({ command: "config" }) }
+    ].filter(({ sentence }) => `${message}
+${description ?? ""}`.includes(sentence));
+    if (isCritical)
+      show();
+    claude.clock.after(0, () => void logged());
+    return id;
+  };
+  const toggle = (entry) => () => {
+    entry.isOpen = !entry.isOpen;
+    disarm(entry);
+    changed();
+  };
+  const row = (entry, columns) => {
+    const { description } = entry.options;
+    const isText = typeof description === "string";
+    const icon = entry.type === "loading" || entry.trying !== undefined ? { glyph: isSpinning(entry) ? spinner[frame % spinner.length] : still, color: "claude" } : icons[entry.type];
+    const message = isText ? Button({ plain: true, key: `toast:${entry.id}:open`, label: entry.message, onPress: toggle(entry) }) : Text({ children: entry.message });
+    const details = !isText ? description : Text({ dimColor: true, wrap: entry.isOpen ? "wrap" : "truncate-end", children: entry.isOpen ? description : firstLine(description) });
+    const fixed = (child) => Box({ flexShrink: 0, children: child });
+    const close = Button({ plain: true, dimColor: true, key: `toast:${entry.id}:close`, label: "✕", onPress: () => hide(entry) });
+    const actions = entry.actions.map((action, index) => Button({ plain: true, key: `toast:${entry.id}:${index === 0 ? "action" : `action-${index}`}`, label: action.label, onPress: press(entry, action.onClick) }));
+    const time = Text({ dimColor: true, children: entry.count > 1 ? `${clockTime(entry.at)} · ${entry.count} times` : clockTime(entry.at) });
+    const buttons = actions.length === 0 ? [] : [Box({ gap: columnGap, flexWrap: "wrap", children: [...actions, time].map(fixed) })];
+    const trying = entry.trying === undefined ? undefined : Box({ gap: 1, children: [Text({ dimColor: true, children: "Trying again:" }), typeof entry.trying === "string" ? Text({ dimColor: true, wrap: "truncate-end", children: entry.trying }) : entry.trying] });
+    const text = details === undefined ? [] : [trying ?? details];
+    const under = trying !== undefined && details === undefined ? [trying] : entry.reporting === undefined ? buttons : reportChoices(entry, entry.reporting);
+    return Box({
+      width: columns,
+      gap: columnGap,
+      justifyContent: "space-between",
+      children: [
+        Box({
+          gap: columnGap,
+          flexShrink: 1,
+          children: [
+            fixed(Text({ ...icon.color === undefined ? {} : { color: icon.color }, children: icon.glyph })),
+            fixed(Text({ dimColor: true, children: name.padEnd(nameColumn) })),
+            Box({ flexDirection: "column", flexShrink: 1, children: [message, ...text, ...under] })
+          ]
+        }),
+        fixed(close)
+      ]
+    });
+  };
+  const reportChoices = (entry, { contact, details, status }) => {
+    const say = (said) => {
+      entry.reporting = { contact, details, status: said };
+      changed();
+    };
+    const back = () => {
+      entry.reporting = undefined;
+      changed();
+    };
+    const askClaude = async () => {
+      await claude.prompt.submit({ text: reportPrompt(name, contact, details), asUser: true });
+      back();
+    };
+    const copyError = async () => {
+      const copied = await claude.ui.copy({ text: details });
+      say(copied.isCopied ? "Copied the error." : `Could not copy it: ${copied.reason}`);
+    };
+    const report = contact === undefined ? [] : [reportLink(`toast:${entry.id}:report`, contact, name, entry.message, details)];
+    return [
+      Text({ dimColor: true, children: "Claude writes up the problem and files it with your tools. You approve each step before anything is posted." }),
+      Box({
+        gap: 2,
+        flexWrap: "wrap",
+        children: [
+          Button({ plain: true, key: `toast:${entry.id}:ask-claude`, label: "Ask Claude to report it", onPress: press(entry, askClaude) }),
+          ...report,
+          Button({ plain: true, key: `toast:${entry.id}:copy`, label: "Copy the error", onPress: press(entry, copyError) }),
+          Button({ plain: true, dimColor: true, key: `toast:${entry.id}:back`, label: "Back", onPress: back })
+        ]
+      }),
+      ...status === undefined ? [] : [Text({ dimColor: true, children: status })]
+    ];
+  };
+  return {
+    toast,
+    copy,
+    fail,
+    warn,
+    get shown() {
+      return [...entries.values()].map(({ type, message, options }) => ({ type, message, ...typeof options.description === "string" ? { description: options.description } : {} }));
+    },
+    draw(drawn, table, band, drawnIn) {
+      bandId = drawnIn;
+      isHeld = band.hasSurvey === true;
+      if (isHeld || entries.size === 0)
+        return drawn;
+      const all = [...entries.values()];
+      const hidden = showsAll ? 0 : Math.max(all.length - visibleToasts, 0);
+      for (const entry of all.slice(hidden))
+        arm(entry);
+      const more = Button({
+        plain: true,
+        dimColor: true,
+        key: "toasts:more",
+        label: `+${hidden} more`,
+        onPress: () => {
+          showsAll = true;
+          changed();
+        }
+      });
+      return drawWith(table, () => Box({ flexDirection: "column", children: [drawn, ...hidden > 0 ? [more] : [], ...all.slice(hidden).map((entry) => row(entry, band.bodyColumns))] }));
+    }
+  };
+}
+function describe(error) {
+  const messages = [];
+  for (let cause = error;cause !== undefined; cause = cause instanceof Error ? cause.cause : undefined) {
+    const text = messageOf(cause);
+    if (!messages.some((earlier) => earlier.includes(text) || text.includes(earlier)))
+      messages.push(text);
+  }
+  return messages.join(`
+`);
+}
+async function contactOf(claude) {
+  const manifest = await claude.fs.read(`${claude.plugin.root}/.claude-plugin/plugin.json`).then((text) => JSON.parse(text)).catch((error) => {
+    claude.ui.log(`${claude.plugin.name}: could not read whom to report to: ${messageOf(error)}`, { to: "debug" });
+    return {};
+  });
+  const repositoryUrl = isObject(manifest["repository"]) ? manifest["repository"]["url"] : manifest["repository"];
+  const repository = [manifest["supportUrl"], repositoryUrl].map((url) => typeof url === "string" ? githubRepository.exec(url)?.[1] : undefined).find((found) => found !== undefined);
+  if (repository !== undefined)
+    return { kind: "github", repository };
+  const author = manifest["author"];
+  const address = isObject(author) ? author["email"] : undefined;
+  return typeof address === "string" && address !== "" ? { kind: "email", address } : undefined;
+}
+function reportLink(key, contact, name, message, details) {
+  const title = `${name}: ${message}`.slice(0, 120);
+  const linkOf = (body) => contact.kind === "github" ? `https://github.com/${contact.repository}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}` : `mailto:${contact.address}?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+  let body = details;
+  while (linkOf(body).length > linkLimit && body.length > 0)
+    body = `${body.slice(0, Math.floor(body.length * 0.8))}…`;
+  return Button({ plain: true, key, href: linkOf(body), label: contact.kind === "github" ? "Report it on GitHub (opens your browser)" : "Email the author (opens your mail app)" });
+}
+function reportPrompt(name, contact, details) {
+  const where = contact === undefined ? `${name} names no place to report it, so find its author from its plugin.json or its marketplace.` : contact.kind === "github" ? `Report it as an issue on https://github.com/${contact.repository}.` : `Email it to ${contact.address}.`;
+  return `The ${name} mod failed. Report it to its author. ${where} First check whether it is reported already, and add to that report instead of filing a new one. Show me the report before you post it.
+
+${details}`;
+}
+function clockTime(at) {
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+}
+
+// node_modules/@cmodjs/core/runtime/hotkeys.js
+async function readCombos(claude, configRoot) {
+  if (configRoot === undefined)
+    return new Map;
+  const text = await claude.fs.read(`${configRoot}/keybindings.json`).catch(ifMissing("{}"));
+  try {
+    return boundCombos(JSON.parse(text));
+  } catch (error) {
+    claude.ui.warn("hotkeys:read", `${configRoot}/keybindings.json is not JSON, so cmod reads no combos from it: ${messageOf(error)}`);
+    return new Map;
+  }
+}
+async function createHotkeys({ name, declared, configRoot, claude, router, answerInput, report }) {
+  if (name === cmodPluginName) {
+    router.add("command.describe", async (e, next) => {
+      const described = await next(e);
+      return e.command.startsWith(hotkeyCommand(e.provider.plugin.replace(/@[^@]*$/, ""), "")) ? { ...described, isHidden: true } : described;
+    });
+  }
+  const entries = Object.entries(declared);
+  if (entries.length === 0)
+    return {};
+  const combos = await readCombos(claude, configRoot);
+  const listeners = new Map;
+  const commands = new Map;
+  for (const [hotkey, { title }] of entries) {
+    listeners.set(hotkey, new Set);
+    claude.command.register({ name: hotkeyCommand(name, hotkey), description: title, immediate: true }).then(({ command }) => void commands.set(command, hotkey), (error) => report({ id: `hotkey:${hotkey}`, message: `The ${title} hotkey is not added`, error }));
+  }
+  router.add("command.run", async (e, next) => {
+    const hotkey = commands.get(e.command);
+    if (hotkey === undefined)
+      return next(e);
+    return answerInput(async () => {
+      for (const listener of listeners.get(hotkey) ?? []) {
+        try {
+          await listener();
+        } catch (error) {
+          report({ id: `hotkey:${hotkey}`, message: `The ${declared[hotkey]?.title ?? hotkey} hotkey failed`, error, isCritical: true });
+        }
+      }
+      return {};
+    }, () => next(e));
+  });
+  return Object.fromEntries(entries.map(([hotkey, { title }]) => [
+    hotkey,
+    {
+      title,
+      combo: combos.get(hotkeyCommand(name, hotkey)),
+      onPress(listener) {
+        listeners.get(hotkey)?.add(listener);
+        return { remove: () => void listeners.get(hotkey)?.delete(listener) };
+      }
+    }
+  ]));
+}
+
+// node_modules/@cmodjs/core/runtime/parts.js
+var keptDrawings = 200;
+function drawnParts({ claude, report, press }) {
+  const drawn = new Map;
+  const drawing = new Map;
+  const generations = new Map;
+  const keyOf = (mod, cached) => `${mod}\x00${cached}`;
+  const generationOf = (mod) => generations.get(mod) ?? 0;
+  return {
+    fill(mod, cached, input, name) {
+      const key = keyOf(mod, cached);
+      const generation = generationOf(mod);
+      if (drawn.get(key)?.generation === generation)
+        return;
+      const keep = (data, failure) => {
+        drawn.delete(key);
+        drawn.set(key, { data, ...failure === undefined ? {} : { failure }, generation });
+        const [oldest] = drawn.keys();
+        if (drawn.size > keptDrawings && oldest !== undefined)
+          drawn.delete(oldest);
+        if (generationOf(mod) !== generation)
+          claude.ui.invalidate("ui.render");
+      };
+      const pending = drawing.get(key) ?? claude.cmod.call({ to: mod, method: partMethods.draw, input }).then((data) => keep(data ?? null), (error) => {
+        if (isStillInstalling(mod, error))
+          return keep(drawn.get(key)?.data ?? null);
+        report(`draw:${mod}`, `${name} drew nothing`, error);
+        keep(drawn.get(key)?.data ?? null, messageOf(error));
+      }).finally(() => drawing.delete(key));
+      drawing.set(key, pending);
+      return pending;
+    },
+    element(mod, cached, keyPrefix, name, reportId) {
+      const key = keyOf(mod, cached);
+      const entry = drawn.get(key);
+      if (entry === undefined)
+        return;
+      drawn.delete(key);
+      drawn.set(key, entry);
+      const { data } = entry;
+      if (data === null || data.tree === null)
+        return;
+      try {
+        return elementOf(data.tree, keyPrefix, (handler, args) => press(mod, { draw: data.draw, handler, args }));
+      } catch (error) {
+        report(reportId, `${name} could not draw`, error);
+        return;
+      }
+    },
+    failure(mod, cached) {
+      return drawn.get(keyOf(mod, cached))?.failure;
+    },
+    forget(mod) {
+      generations.set(mod, generationOf(mod) + 1);
+    }
+  };
+}
+
+// node_modules/@cmodjs/core/runtime/watches.js
+var watchMs = 500;
+var missingEvery = 4;
+var watchedFiles = 2000;
+function createWatches(claude, report) {
+  const watches = new Set;
+  let polling;
+  let isPolling = false;
+  let ticks = 0;
+  const stampsOf = async (watch) => {
+    const { paths } = watch;
+    const stamps = new Map;
+    const missing = new Set;
+    const skipped = ticks % missingEvery === 0 ? new Set : watch.missing;
+    const visit = async (path) => {
+      const stat = await claude.fs.stat(path).catch(ifMissing(undefined));
+      if (stat === undefined)
+        return;
+      if (stat.kind !== "dir") {
+        if (stamps.size === watchedFiles)
+          throw new Error(`fs.onChange watches at most ${watchedFiles} files, and ${paths.join(", ")} holds more, so it stopped. Watch a smaller folder.`);
+        return void stamps.set(path, stat.mtimeMs);
+      }
+      for (const entry of await claude.fs.list(path).catch(ifMissing([])))
+        await visit(`${path}/${entry.name}`);
+    };
+    for (const path of paths) {
+      if (skipped.has(path)) {
+        missing.add(path);
+        continue;
+      }
+      await visit(path);
+      if (![...stamps.keys()].some((seen) => seen === path || seen.startsWith(`${path}/`)))
+        missing.add(path);
+    }
+    watch.missing = missing;
+    return stamps;
+  };
+  const stop = (watch) => {
+    watches.delete(watch);
+    if (watches.size > 0)
+      return;
+    polling?.cancel();
+    polling = undefined;
+  };
+  const stampsOrStop = (watch) => stampsOf(watch).catch((error) => {
+    stop(watch);
+    report({ id: "fs:onChange", message: "Could not read the files fs.onChange watches", error });
+    return;
+  });
+  const poll = async () => {
+    if (isPolling)
+      return;
+    isPolling = true;
+    ticks += 1;
+    try {
+      for (const watch of watches) {
+        const now = await stampsOrStop(watch);
+        if (now === undefined)
+          continue;
+        const before = watch.seen;
+        watch.seen = now;
+        if (before === undefined)
+          continue;
+        const changes = [
+          ...[...now].filter(([path, at]) => before.has(path) && before.get(path) !== at).map(([path]) => ({ path, type: "change" })),
+          ...[...now.keys()].filter((path) => !before.has(path)).map((path) => ({ path, type: "add" })),
+          ...[...before.keys()].filter((path) => !now.has(path)).map((path) => ({ path, type: "unlink" }))
+        ];
+        for (const change of changes)
+          await Promise.resolve().then(() => watch.listener(change)).catch((error) => report({ id: "fs:onChange", message: "The fs.onChange listener failed", error }));
+      }
+    } finally {
+      isPolling = false;
+    }
+  };
+  return {
+    add(paths, listener) {
+      const watch = { paths, listener, seen: undefined, missing: new Set };
+      watches.add(watch);
+      stampsOrStop(watch).then((stamps) => void (watch.seen ??= stamps));
+      polling ??= claude.clock.every(watchMs, () => void poll());
+      return { remove: () => stop(watch) };
+    }
+  };
+}
+
+// node_modules/@cmodjs/core/ui/components.js
+function Progress({ value, width = 24 }) {
+  const filled = Math.round(Math.min(Math.max(value, 0), 100) / 100 * width);
+  return Text({ children: [Text({ color: "claude", children: "█".repeat(filled) }), Text({ color: "subtle", children: "░".repeat(width - filled) })] });
+}
+
+// node_modules/@cmodjs/core/runtime/lifecycle.js
+var listenMethods = [conversationMethods.subscribe, conversationMethods.watchBefore];
+var answeredAtOnce = [...listenMethods, partMethods.draw];
+var announcedKey = "cmod:announced";
+var cmodUpdatedKey = "cmod:cmod-updated-for";
+var installId = "cmod:install";
+var askingId = "cmod:asking";
+var recordId = "cmod:record";
+var downloadId = "cmod:download";
+var installRetrySeconds = [2, 4, 8, 16, 32, 64, 128];
+var cmodCheckMs = 1000;
+var recordCheckMs = 1000;
+var drawsPerMs = 1000;
+var cmodWaitMs = 60000;
+var cmodSlowCheckMs = 1e4;
+var startHoldMs = hookMs / 2;
+var stallTicks = 3;
+var stallMs = 60000;
+var settingsLoadMs = 500;
+var shellTools = ["Bash", "PowerShell"];
+async function readPlugin(claude) {
+  const { name, root } = claude.plugin;
+  const read = async (path) => {
+    const stat = await claude.fs.stat(path).catch(ifMissing(undefined));
+    return stat?.kind === "file" ? claude.fs.read(path) : undefined;
+  };
+  const manifest = await readJson(read, `${root}/.claude-plugin/plugin.json`);
+  const version = typeof manifest?.version === "string" ? manifest.version : undefined;
+  const store = await cmodStore(claude);
+  const steps = readSteps(await readJson(read, `${root}/package.json`)) ?? {};
+  if (name === cmodPluginName) {
+    const installed = await newestCmodVersion(claude);
+    return { name, root, version, store, steps, isInstalled: version !== undefined && installed !== undefined && isAtLeast(installed, version), shouldRecord: false };
+  }
+  const plugin = { name, root, version, store, steps };
+  const record = await readRecord(read, store, name);
+  if (Object.keys(steps).length === 0)
+    return { ...plugin, isInstalled: true, shouldRecord: record?.version !== version };
+  const scripts = await scriptsSha256(steps, {
+    read: (path) => read(`${root}/${path}`),
+    list: (folder) => filesBelow(claude, `${root}/${folder}`)
+  });
+  if (version === undefined || record?.scriptsSha256 !== scripts)
+    return { ...plugin, isInstalled: false, shouldRecord: false };
+  const isInstalled = record.version === version || record.root === root;
+  const modifiedMs = await programModifiedMs(async (path) => (await claude.fs.stat(path).catch(ifMissing(undefined)))?.mtimeMs, store, record);
+  return { ...plugin, isInstalled, shouldRecord: isInstalled && (record.version !== version || isProgramNewer(record, modifiedMs)) };
+}
+async function filesBelow(claude, folder) {
+  const entries = await claude.fs.list(folder);
+  const paths = await Promise.all(entries.map(async ({ name, kind, isLink }) => {
+    if (kind === "file" || isLink)
+      return [name];
+    if (kind === "dir")
+      return (await filesBelow(claude, `${folder}/${name}`)).map((path) => `${name}/${path}`);
+    return [];
+  }));
+  return paths.flat();
+}
+async function readJson(read, path) {
+  const text = await read(path);
+  if (text === undefined)
+    return;
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${path} is not JSON (${messageOf(error)}). Fix it, then press Retry.`);
+  }
+}
+function createLifecycle(definition, permissionRoutes = () => {
+  return;
+}, options = {}, asksPerson = true, serveCmodPlugin) {
+  let router = createRouter();
+  let startingRouter;
+  let phase = "starting";
+  let runtime;
+  let programs;
+  let plugin;
+  let activation;
+  let mod;
+  const openSettings = async () => {
+    await claude().cmod.call({ to: cmodPluginName, method: partMethods.changed, input: { requests: [{ settings: true }], isAsked: true } });
+  };
+  let imports;
+  let raise;
+  let settingsLoaded;
+  let failure;
+  let pluginOptions = options;
+  let drawCount = 0;
+  const nextDraw = () => drawCount += 1;
+  const installer = createInstaller(definition.name, () => claude(), {
+    show: (open, next) => {
+      if (phase !== "active")
+        runtime?.toaster.toast.dismiss(installId);
+      runtime?.toaster.toast.info("Finish setting up", { id: askingId, description: next, duration: Infinity, action: { label: "Continue", onClick: open } });
+    },
+    hide: () => runtime?.toaster.toast.dismiss(askingId)
+  }, nextDraw);
+  let shouldRecord = false;
+  let recording;
+  let missedSessionStart;
+  let hasHeardSessionStart = false;
+  const heldListens = new Map;
+  let settleStart = () => {
+    return;
+  };
+  const startSettled = new Promise((resolve) => settleStart = resolve);
+  let installSettled;
+  let settleInstall = () => {
+    return;
+  };
+  const whenInstalled = () => phase === "installing" || phase === "waiting" ? installSettled ??= new Promise((resolve) => {
+    settleInstall = () => {
+      installSettled = undefined;
+      resolve();
+    };
+  }) : undefined;
+  const claude = () => {
+    if (runtime === undefined)
+      throw new Error(`${definition.name}: the lifecycle has not started. registerMod(addHook, mod, options) starts it at session.start.`);
+    return runtime.claude;
+  };
+  const installing = (description) => runtime?.toaster.toast.loading("Installing", { id: installId, ...description === undefined ? {} : { description } });
+  const toastFailure = (shown) => runtime?.toaster.fail(shown);
+  const fail = (reason, fix, retry, error) => {
+    phase = "failed";
+    settleInstall();
+    failure ??= new Error(`${definition.name}: ${reason}${/[.!?]$/.test(reason) ? "" : "."}${fix === undefined ? "" : ` ${fix}`}`, { cause: error });
+    const again = retry === undefined ? {} : { retry: () => (failure = undefined, stopRetrying(), retry().catch(report)) };
+    toastFailure({ id: installId, message: reason, ...fix === undefined ? {} : { description: fix }, ...error === undefined ? {} : { error }, ...again, isCritical: true });
+    watchRecord();
+  };
+  const notSetUp = () => {
+    const why = failure === undefined ? "" : messageOf(failure);
+    const own = `${definition.name}: `;
+    return why === "" ? `${definition.name} is not set up.` : `${definition.name} is not set up: ${why.startsWith(own) ? why.slice(own.length) : why}`;
+  };
+  const installAgain = () => install();
+  const updateAgain = () => claude().store.delete(cmodUpdatedKey).then(installAgain);
+  let retrying;
+  const retryLater = (next) => {
+    const seconds = installRetrySeconds[Math.min(next.tries, installRetrySeconds.length - 1)];
+    retrying?.timer.cancel();
+    retrying = { ...next, tries: next.tries + 1, timer: claude().clock.after(seconds * 1000, () => void retryInBackground().catch(report)) };
+    fail(next.reason, `Trying again in ${seconds} s.`, installAgain);
+  };
+  const stopRetrying = () => {
+    retrying?.timer.cancel();
+    retrying = undefined;
+  };
+  const failInstall = (reason, when) => {
+    if (when === undefined) {
+      stopRetrying();
+      return fail(reason, undefined, installAgain);
+    }
+    retryLater({ when, tries: retrying?.when === when ? retrying.tries : 0, reason });
+  };
+  const retryInBackground = async () => {
+    if (phase !== "failed" || retrying === undefined)
+      return;
+    if (await recover()) {
+      stopRetrying();
+      return whenActive();
+    }
+    await install(true);
+    await whenActive();
+  };
+  const finish = async () => {
+    await programs?.refresh();
+    phase = "ready";
+    activation ??= new Promise((resolve) => claude().clock.after(0, () => resolve(activate().catch(report))));
+    settleInstall();
+    claude().ui.invalidate("ui.render");
+  };
+  const recordThroughCmod = async () => {
+    if (plugin === undefined || await newestCmodVersion(claude()) === undefined)
+      return;
+    let failed;
+    const { code, lastError } = await readLines(claude().process.spawn({ argv: ["cmod", "setup", plugin.root, "--events"], env: { CLAUDE_CODE_SESSION_ID: await claude().session.id() } }), (text) => {
+      const event = parseEvent(text);
+      if (event.type === "done")
+        shouldRecord = false;
+      if (event.type === "failed")
+        failed = event.message;
+    });
+    if (!shouldRecord) {
+      runtime?.toaster.toast.dismiss(recordId);
+      return programs?.refresh();
+    }
+    if (failed !== undefined)
+      return void toastFailure({ id: recordId, message: failed, retry: record, isCritical: true });
+    throw new Error(`cmod setup ${formatExit(code, lastError)}`);
+  };
+  const isInstalledCopy = async () => {
+    await recording;
+    if (plugin === undefined)
+      return true;
+    const recorded = await readRecord((path) => claude().fs.read(path).catch(ifMissing(undefined)), plugin.store, plugin.name);
+    return recorded === undefined || recorded.root === plugin.root;
+  };
+  const record = () => {
+    recording ??= recordThroughCmod().catch((error) => claude().ui.warn("record", `${definition.name} has no cmod record yet: ${messageOf(error)}`)).finally(() => {
+      recording = undefined;
+    });
+  };
+  const saveOption = async (key, text) => {
+    const option = definition.options?.[key];
+    if (option === undefined || plugin === undefined)
+      return `${definition.name} has no option ${key}.`;
+    const value = option.type === "number" ? Number(text) : option.type === "toggle" ? text.trim() === "true" : option.type === "list" ? text.split(",").map((item) => item.trim()).filter((item) => item !== "") : text;
+    const misfit = option.type === "toggle" && !["true", "false"].includes(text.trim()) ? "takes true or false" : fitsOption(option, value);
+    if (misfit !== undefined)
+      return `${option.title} ${misfit}.`;
+    const saved = await claude().process.run(["cmod", "options", "set", plugin.name, key, Array.isArray(value) ? value.join(",") : String(value)]);
+    return saved.exitCode === 0 ? undefined : cmodError(saved.stderr, "options") || `cmod options set ${formatExit(saved.exitCode, "")}.`;
+  };
+  const askOptions = async (missing) => {
+    if (!asksPerson || plugin === undefined || (await claude().session.surfaces()).length === 0)
+      return false;
+    const declared = definition.options ?? {};
+    const asked = missing.keys.flatMap((key) => {
+      const option = declared[key];
+      return option === undefined ? [] : [[key, option]];
+    });
+    if (!await installer.options(asked, saveOption))
+      return false;
+    const prefix = `${plugin.name}.`;
+    const rows = await claude().config.list();
+    pluginOptions = { ...pluginOptions, ...Object.fromEntries(rows.filter((row) => row.key.startsWith(prefix)).map((row) => [row.key.slice(prefix.length), row.value])) };
+    return true;
+  };
+  const isStepDone = async (active, step) => {
+    try {
+      return await step.isDone(active);
+    } catch (error) {
+      toastFailure({ id: `step:${step.title}`, message: `The ${step.title} step's isDone failed`, error });
+      return;
+    }
+  };
+  const pendingSteps = async (active) => {
+    const pending = [];
+    for (const step of definition.installer ?? [])
+      if (await isStepDone(active, step) !== true)
+        pending.push(step.title);
+    return pending;
+  };
+  const runSteps = async (active) => {
+    const steps = asksPerson ? definition.installer ?? [] : [];
+    try {
+      for (const [index, step] of steps.entries()) {
+        const isDone = await isStepDone(active, step);
+        if (isDone === undefined)
+          break;
+        if (isDone)
+          continue;
+        const isAnswered = (await claude().session.surfaces()).length > 0 && await installer.step(active, step, index + 1, steps.length);
+        if (!isAnswered) {
+          runtime?.toaster.toast.warning(steps.length - index === 1 ? "Needs one more step" : `Needs ${steps.length - index} more steps`, {
+            id: "cmod:steps",
+            description: `Starting with ${step.title}.`,
+            duration: Infinity,
+            action: { label: "Finish", onClick: () => runSteps(active) }
+          });
+          break;
+        }
+      }
+    } finally {
+      await installer.close();
+    }
+  };
+  const activate = async () => {
+    if (runtime === undefined || plugin === undefined)
+      return;
+    const activeRouter = createRouter();
+    startingRouter = activeRouter;
+    const active = await createMod(definition, { ...runtime, router: activeRouter, dataFolder: dataFolder(plugin.store, plugin.name), store: plugin.store, permissionRoutes, options: pluginOptions, nextDraw, installer, serveCmodPlugin, isInstalledCopy }).catch(async (error) => {
+      if (error instanceof MissingOptions && await askOptions(error))
+        return;
+      await installer.close();
+      fail(messageOf(error), error instanceof MissingOptions ? `Retry asks for ${error.keys.length === 1 ? "it" : "them"}.` : undefined, begin, error);
+      throw error;
+    }).finally(() => {
+      startingRouter = undefined;
+    });
+    if (active === undefined)
+      return activate();
+    const { added } = active;
+    mod = active.mod;
+    imports = active.imports;
+    raise = active.raise;
+    settingsLoaded = active.settingsLoaded;
+    router = activeRouter;
+    phase = "active";
+    stopWatchingRecord();
+    const held = [...heldListens.values()];
+    heldListens.clear();
+    for (const call of held) {
+      const failed = (error) => void toastFailure({ id: `listens:${String(call.caller)}`, message: `${String(call.caller)} hears nothing from this session`, error });
+      activeRouter.dispatch("cmod.call", call, async () => ({ deny: `${definition.name} has no method ${call.method}.` })).then((answer) => ("deny" in answer) ? failed(new Error(answer.deny)) : undefined, failed);
+    }
+    runtime.claude.ui.invalidate("ui.render");
+    if (definition.name === cmodPluginName)
+      runtime.claude.ui.invalidate("command.describe");
+    runSteps(active.mod).catch((error) => toastFailure({ id: "cmod:steps", message: "Its installer stopped", error, isCritical: true }));
+    const missed = missedSessionStart;
+    missedSessionStart = undefined;
+    if (missed !== undefined)
+      await replaySessionStart(missed);
+    if (await runtime.claude.store.get(announcedKey) !== undefined) {
+      runtime.toaster.toast.dismiss(installId);
+      return;
+    }
+    await runtime.claude.store.set(announcedKey, { version: plugin.version ?? "" });
+    const { toaster } = runtime;
+    announcementOf(runtime.claude, plugin, added, openSettings).then(({ message, ...options }) => toaster.toast.success(message, { id: installId, duration: announcementMs, ...options })).catch((error) => toastFailure({ id: installId, message: "Could not say what it installed", error }));
+  };
+  const replaySessionStart = async (e) => {
+    hasHeardSessionStart = true;
+    const answer = await router.dispatch("classic.SessionStart", e, async () => ({})).catch((error) => {
+      toastFailure({ id: "classic.SessionStart", message: "The SessionStart hook failed", error });
+      return {};
+    });
+    const { additionalContext, ...unread } = answer;
+    for (const text of additionalContext ?? []) {
+      const added = await claude().session.append({ message: { type: "user", content: [{ type: "text", text }] } });
+      if (added.deny !== undefined)
+        claude().ui.warn("session-start:note", `${definition.name}: Claude Code refused its SessionStart note: ${added.deny}`);
+    }
+    if (Object.keys(unread).length > 0) {
+      claude().ui.warn("session-start:late", `${definition.name} started after Claude Code's SessionStart, so Claude Code did not read ${Object.keys(unread).join(", ")} from its SessionStart hooks.`);
+    }
+  };
+  const install = async (isQuiet = false) => {
+    if (plugin === undefined)
+      return;
+    phase = "installing";
+    if (plugin.name === cmodPluginName) {
+      download(plugin.root);
+      return finish();
+    }
+    const found = await newestCmodVersion(claude());
+    if (!fits(found))
+      return waitForcmod(found);
+    if (!isQuiet)
+      installing();
+    let outcome;
+    let retries;
+    const { code, lastError } = await readLines(claude().process.spawn({ argv: ["cmod", "setup", plugin.root, "--events"], env: { CLAUDE_CODE_SESSION_ID: await claude().session.id() } }), (text) => {
+      const event = parseEvent(text);
+      if (event.type === "progress" && !isQuiet)
+        installing(progressOf(event));
+      if (event.type === "retries")
+        retries = event.when;
+      if (event.type === "done" || event.type === "failed")
+        outcome = event;
+    });
+    if (outcome?.type === "done") {
+      stopRetrying();
+      return finish();
+    }
+    return failInstall(outcome?.type === "failed" ? outcome.message : `cmod setup ${formatExit(code, lastError)}`, retries);
+  };
+  const fits = (found) => found !== undefined && isAtLeast(found, oldestCmodVersion);
+  const waitForcmod = (found) => {
+    phase = "waiting";
+    installing("Waiting for cmod");
+    let latest = found;
+    let check;
+    const stop = () => {
+      timer.cancel();
+      longWait.cancel();
+    };
+    const poll = (ms) => claude().clock.every(ms, () => {
+      check ??= newestCmodVersion(claude()).then((version) => {
+        check = undefined;
+        latest = version;
+        if (!fits(version))
+          return;
+        stop();
+        return install();
+      }).catch((error) => {
+        stop();
+        report(error);
+      });
+    });
+    let timer = poll(cmodCheckMs);
+    const longWait = claude().clock.after(cmodWaitMs, () => {
+      timer.cancel();
+      timer = poll(cmodSlowCheckMs);
+      if (latest === undefined)
+        return installing("Still waiting for cmod to download cmod. See cmod's own line.");
+      const found = latest;
+      const tried = `${found} to ${oldestCmodVersion}`;
+      return claude().store.get(cmodUpdatedKey).then(async (updated) => {
+        if (updated === tried) {
+          stop();
+          return fail(`${definition.name} needs cmod ${oldestCmodVersion} or later, and the newest cmod is ${found}.`, undefined, updateAgain);
+        }
+        await claude().store.set(cmodUpdatedKey, tried);
+        installing(`${definition.name} needs cmod ${oldestCmodVersion} or later, and this computer has cmod ${found}, so cmod is updating itself.`);
+        const { code, lastError } = await readLines(claude().process.spawn({ argv: ["cmod", "update", "cmod"] }), () => {
+          return;
+        });
+        if (code === 0)
+          return;
+        stop();
+        fail(`${definition.name} needs cmod ${oldestCmodVersion} or later, and updating cmod ${found} ${formatExit(code, lastError)}`, undefined, updateAgain);
+      }).catch(report);
+    });
+  };
+  const download = (root) => {
+    const downloading = (description) => runtime?.toaster.toast.loading("Downloading the cmod program", { id: downloadId, ...description === undefined ? {} : { description } });
+    downloading();
+    const downloaded = readLines(claude().process.spawn({ argv: ["sh", "-c", "./setup/bootstrap.sh"], cwd: root }), (text) => {
+      const event = parseEvent(text);
+      if (event.type === "progress")
+        downloading(progressOf(event));
+    }).then(({ code, lastError }) => {
+      if (code !== 0)
+        throw new Error(`bootstrap ${formatExit(code, lastError)}`);
+    });
+    programs?.waitFor(downloaded);
+    downloaded.then(() => runtime?.toaster.toast.dismiss(downloadId), (error) => toastFailure({ id: downloadId, message: messageOf(error), retry: async () => download(root), isCritical: true }));
+  };
+  const begin = async () => {
+    if (readStarted === undefined)
+      return;
+    const started = await readStarted(claude());
+    plugin = started;
+    recordMs = await stampOf(recordPath(started.store, started.name));
+    if (started.isInstalled) {
+      shouldRecord = started.shouldRecord;
+      if (shouldRecord)
+        record();
+      activation = undefined;
+      return activate();
+    }
+    if (started.version === undefined)
+      return fail("no version to install", 'Its author adds "version" to .claude-plugin/plugin.json.');
+    install().catch(report);
+  };
+  const report = (error) => {
+    failure = error;
+    if (phase !== "failed")
+      fail(messageOf(error), undefined, begin, error);
+  };
+  const stampOf = async (path) => {
+    const stat = await claude().fs.stat(path).catch(ifMissing(undefined));
+    return stat?.kind === "file" ? stat.mtimeMs : 0;
+  };
+  let recordMs = 0;
+  let readStarted;
+  const isNewlyInstalled = async () => {
+    if (plugin === undefined || readStarted === undefined)
+      return false;
+    const modifiedMs = await stampOf(recordPath(plugin.store, plugin.name));
+    if (modifiedMs === recordMs)
+      return false;
+    recordMs = modifiedMs;
+    const current = await readStarted(claude());
+    if (!current.isInstalled)
+      return false;
+    plugin = current;
+    return true;
+  };
+  const recover = async () => {
+    if (phase !== "failed" || !await isNewlyInstalled())
+      return false;
+    failure = undefined;
+    activation = undefined;
+    await finish();
+    return true;
+  };
+  let recordCheck;
+  let checking;
+  let startingSession;
+  const watchRecord = () => {
+    recordCheck ??= claude().clock.every(recordCheckMs, () => {
+      checking ??= recover().then(() => {
+        return;
+      }).catch((error) => claude().ui.warn("record:watch", `${definition.name} could not read whether another cmod installed it: ${messageOf(error)}`)).finally(() => {
+        checking = undefined;
+      });
+    });
+  };
+  const stopWatchingRecord = () => {
+    recordCheck?.cancel();
+    recordCheck = undefined;
+  };
+  const whenActive = async () => {
+    if (phase === "ready")
+      activation ??= activate().catch(report);
+    if (activation !== undefined && phase !== "active")
+      await activation;
+  };
+  const held = (work, signal) => runtime === undefined ? work.then(() => false) : new Promise((resolve) => {
+    const limit = claude().clock.after(startHoldMs, () => resolve(true));
+    if (signal?.aborted === true)
+      resolve(false);
+    signal?.addEventListener("abort", () => resolve(false), { once: true });
+    work.then(() => {
+      limit.cancel();
+      resolve(false);
+    });
+  });
+  const holdUntilStarted = (signal) => held(startSettled.then(whenActive), signal);
+  const holdUntilInstalled = (signal) => held(startSettled.then(whenInstalled).then(whenActive), signal);
+  const holdUntilActive = (signal) => {
+    const activating = whenActive();
+    return activation !== undefined && phase !== "active" ? held(activating, signal) : activating.then(() => false);
+  };
+  const routed = async (event, e, next, signal) => {
+    if (imports !== undefined)
+      bind(imports);
+    const asked = e;
+    if (event === "cmod.call" && asked.to === definition.name && asked.caller === cmodPluginName) {
+      if (asked.method === partMethods.shown)
+        installer.hear(asked.input);
+      const answered = installer.answer(asked.method, asked.input);
+      if (answered !== undefined)
+        return await answered.catch((error) => ({ deny: `${definition.name}: ${messageOf(error)}` }));
+      if (asked.method === partMethods.shown && phase !== "active")
+        return { value: null };
+    }
+    if (event === "classic.SessionStart") {
+      missedSessionStart = undefined;
+      hasHeardSessionStart = true;
+    }
+    if (event === "classic.SessionStart" && runtime === undefined) {
+      missedSessionStart = e;
+      return next(e);
+    }
+    if (shouldRecord && event === "classic.UserPromptSubmit")
+      record();
+    if (event === "classic.UserPromptSubmit" || event === "classic.SessionStart")
+      await recover().catch((error) => claude().ui.warn("recover", `${definition.name} stays stopped: ${messageOf(error)}`));
+    const tool = e.tool;
+    const isCallToThisMod = event === "cmod.call" && e.to === definition.name || event === "tool.call" && typeof tool === "string" && tool.startsWith(`mcp__${definition.name}__`);
+    if (event === "cmod.call" && !isCallToThisMod)
+      return next(e);
+    const isListen = isCallToThisMod && event === "cmod.call" && listenMethods.includes(asked.method);
+    if (isListen && phase !== "active") {
+      heldListens.set(`${asked.caller}
+${asked.method}
+${String(asked.input.session)}`, asked);
+      startSettled.then(whenInstalled).then(whenActive);
+      return { value: null };
+    }
+    const waitsForInstall = isCallToThisMod && !(event === "cmod.call" && answeredAtOnce.includes(asked.method));
+    const isLate = await (waitsForInstall ? holdUntilInstalled(signal) : event === "classic.SessionStart" || event === "session.append" || isCallToThisMod ? holdUntilStarted(signal) : holdUntilActive(signal));
+    if (event === "classic.SessionStart" && phase !== "active") {
+      missedSessionStart = e;
+      return next(e);
+    }
+    if (isCallToThisMod && phase !== "active")
+      return { deny: phase === "failed" ? notSetUp() : stillInstalling(definition.name) };
+    if (isLate && phase !== "active")
+      return (startingRouter ?? router).dispatchFailure(event, e, new Error(`it was still starting after ${startHoldMs / 1000} s`), next, false);
+    const call = e;
+    if (event === "cmod.call" && call.to === definition.name && mod !== undefined) {
+      if (call.method === pendingStepsMethod)
+        return { value: await pendingSteps(mod) };
+      if (call.method === finishStepsMethod) {
+        const active = mod;
+        const opened = await installer.collect(() => Promise.race([runSteps(active).catch((error) => void toastFailure({ id: "cmod:steps", message: "Could not finish the setup", error, isCritical: true })), installer.shown()]));
+        return { value: opened };
+      }
+    }
+    if (event === "classic.UserPromptSubmit" && phase === "active" && !hasHeardSessionStart) {
+      const { session_id, transcript_path, cwd } = e;
+      await replaySessionStart({ session_id, transcript_path, cwd, hook_event_name: "SessionStart", source: "resume" });
+    }
+    const answer = router.dispatch(event, e, next, signal);
+    const render = e;
+    if (event !== "ui.render" || render.component !== "AbovePrompt" || runtime === undefined)
+      return answer;
+    return runtime.toaster.draw(await answer, runtime.claude.ui.resolve(render), render.props, render.requestId);
+  };
+  return {
+    get phase() {
+      return phase;
+    },
+    get mod() {
+      return mod;
+    },
+    get failure() {
+      return failure;
+    },
+    get toasts() {
+      return runtime?.toaster.shown ?? [];
+    },
+    async raise(method, payload) {
+      if (raise === undefined || imports === undefined)
+        throw new Error(`${definition.name} has not started, so ${method} has no listener yet.`);
+      bind(imports);
+      return raise(method, payload, unaborted);
+    },
+    async settingsLoaded() {
+      await settingsLoaded?.();
+    },
+    async start(claudeCalls, read) {
+      if (runtime !== undefined)
+        return;
+      const open = (href, press) => void openLink(claudeCalls, href, press.surface).then((done) => done === "copied" && runtime?.toaster.toast.success("Copied the link", { description: "Paste it in your browser." }), (error) => toastFailure({ id: "open-link", message: "Could not open the link", error, isCritical: true }));
+      const naming = {
+        ...claudeCalls,
+        ui: {
+          ...claudeCalls.ui,
+          warn: (id, text) => runtime === undefined ? claudeCalls.ui.warn(id, text) : runtime.toaster.warn(id, text),
+          resolve: (e) => forClaudeCode(claudeCalls.ui.resolve(e), e.surface, open)
+        },
+        session: { ...claudeCalls.session, id: async () => startingSession ?? claudeCalls.session.id() }
+      };
+      programs = locatingPrograms(naming);
+      const callingCmod = {
+        ...naming,
+        cmod: {
+          async call(input) {
+            if (input.to === definition.name)
+              await holdUntilStarted();
+            return answeringOwnCalls(claudeCalls, router).cmod.call(input);
+          }
+        }
+      };
+      runtime = { claude: programs.claude, toaster: createToaster(callingCmod, definition.name, () => plugin?.version) };
+      readStarted = read;
+      try {
+        drawCount = await claudeCalls.clock.now() * drawsPerMs;
+        await programs.refresh();
+        await begin().catch(report);
+      } finally {
+        settleStart();
+      }
+    },
+    async route(event, e, next, signal) {
+      if (event !== "classic.SessionStart")
+        return settledAfterAbort(routed(event, e, next, signal), signal);
+      const started = e.session_id;
+      startingSession = started;
+      try {
+        return await settledAfterAbort(routed(event, e, next, signal), signal);
+      } finally {
+        if (startingSession === started)
+          startingSession = undefined;
+      }
+    },
+    async caught(event, e, next, { error: { kind, message }, called }) {
+      const call = e;
+      const isAsk = event === "cmod.call" && call.to === definition.name && beforeAskOf(call) !== undefined;
+      const reasons = { timeout: overranHook, throw: message ?? "it threw" };
+      const reason = reasons[kind];
+      if (reason === undefined)
+        return isAsk ? { value: null } : next(e);
+      const error = new Error(reason);
+      const failedBeneath = called && kind === "throw" ? await next(e).then(() => {
+        return;
+      }, messageOf) : undefined;
+      if (failedBeneath === undefined || failedBeneath !== message)
+        toastFailure({ id: `stopped:${event}`, message: `Claude Code stopped its ${event.replace(/^classic\./, "")} hook`, error });
+      return (startingRouter ?? router).dispatchFailure(event, e, error, next, called);
+    }
+  };
+}
+async function createMod(definition, runtime) {
+  const { router, toaster } = runtime;
+  const report = (failure) => void toaster.fail(failure);
+  const claude = answeringOwnCalls(withBareRefusals(runtime.claude), router);
+  const added = [];
+  const announce = (feature) => {
+    added.push(feature);
+  };
+  const [session, root, startCwd, home, configHome, cacheHome] = await Promise.all([claude.session.id(), claude.session.root(), claude.session.cwd(), claude.env.home(), claude.env.configHome(), claude.env.cacheHome()]);
+  const configRoot = configHome ?? (home === undefined ? undefined : `${home}/.claude`);
+  const places = { home, configRoot, projectRoot: () => modState.root };
+  const files = createModFiles({ name: definition.name, claude, places, report });
+  let cwd = startCwd;
+  let loadedCwd = startCwd;
+  let staleCwd;
+  let forkedFrom;
+  let parentAsked;
+  let hasEarlierPrompts = true;
+  let agentType;
+  let parts;
+  const borrowed = (styler, cached, input, scope) => {
+    const name = `The markdown style of ${styler}`;
+    parts?.fill(styler, cached, input, name)?.then(() => claude.ui.invalidate("ui.render"));
+    return parts?.element(styler, cached, `${styler}/markdown:${scope}:`, name, `markdown:${styler}`);
+  };
+  const provided = createProviders({
+    name: definition.name,
+    call: (to, method, input) => claude.cmod.call({ to, method, input }),
+    changed: () => area.relisted(),
+    after: (ms, run) => claude.clock.after(ms, run),
+    report: (error) => report({ id: "interfaces", message: "A provider listener failed", error })
+  });
+  const area = createUi({ name: definition.name, claude, router, report, announce, mod: () => mod, borrowed, nextDraw: runtime.nextDraw, provided: () => provided.provided() });
+  const askParent = async () => {
+    if (definition.name === cmodPluginName)
+      return;
+    try {
+      const parent = await claude.cmod.call({ to: cmodPluginName, method: "forkParent", input: null });
+      return typeof parent === "string" ? parent : undefined;
+    } catch (error) {
+      claude.ui.warn("fork:values", `${definition.name} starts without the session values of the conversation it was forked from: ${messageOf(error)}`);
+      return;
+    }
+  };
+  const forkParent = () => parentAsked ??= askParent().then((parent) => {
+    forkedFrom = parent;
+    return parent;
+  });
+  const stateChanged = () => {
+    area.changed();
+    runtime.installer.changed();
+  };
+  const modState = createState({ name: definition.name, initial: definition.state ?? {}, session, root, claude, report, changed: stateChanged, forkParent });
+  const modOptions = createOptions({ name: definition.name, declared: definition.options ?? {}, fromClaude: runtime.options, claude, report, changed: modState.changed });
+  const hookOn = (hook, listener, failed) => router.add(`classic.${hook}`, classicHook(hook, listener, report), failed === undefined ? undefined : classicFailure(failed));
+  const expand = (path) => homePrefix.test(path) ? resolvedPath(path, places) : path;
+  const settingsFile = (source) => ({
+    read: () => claude.settings.read({ source }),
+    async update(values) {
+      await claude.cmod.call({ to: cmodPluginName, method: "updateSettings", input: { mod: definition.name, source, project: modState.root, values } });
+    }
+  });
+  const client = createSessionsClient({
+    name: definition.name,
+    claude,
+    report: (id, message, error) => report({ id, message, error }),
+    hookOn: (hook, listener, failed) => hookOn(hook, listener, failed),
+    routeOn: (event, hook, failed) => router.add(event, hook, failed),
+    permissionRoutes: runtime.permissionRoutes
+  });
+  let followed;
+  const watches = createWatches(claude, report);
+  const followFolders = (project, folder) => {
+    if (followed === undefined)
+      return;
+    followed = { ...followed, project, cwd: folder };
+    client.follow(followed);
+  };
+  let device;
+  const settingsChangeOf = ({ source, file_path }) => ({ source: source.replace("_settings", ""), ...file_path === undefined ? {} : { path: file_path } });
+  const matchedListener = (matcherOrListener, maybeListener) => (change) => (maybeListener === undefined || matches(change, matcherOrListener)) && (maybeListener ?? matcherOrListener)(change);
+  const settingsListeners = new Set;
+  const loadingSettings = [];
+  const settingsLoaded = async () => {
+    bind(imports);
+    await Promise.all(loadingSettings.splice(0).flatMap((change) => [...settingsListeners].map(async (listener) => {
+      try {
+        await listener(change);
+      } catch (error) {
+        report({ id: "settings:onChange", message: "The settings.onChange listener failed", error });
+      }
+    })));
+  };
+  router.add("classic.ConfigChange", async (e, next) => {
+    const below = await next(e);
+    if (below.block === undefined && settingsListeners.size > 0) {
+      loadingSettings.push(settingsChangeOf(e));
+      claude.clock.after(settingsLoadMs, () => void settingsLoaded());
+    }
+    return below;
+  });
+  const imports = {
+    sessions: client.sessions,
+    commands: {
+      list: async () => (await claude.command.list()).map(({ name, description, source, plugin }) => ({ name, description, source, ...plugin === undefined ? {} : { plugin } })),
+      run: async (command, args) => {
+        const { text, context } = await claude.command.run({ command, ...args === undefined ? {} : { args } });
+        return { ...text === undefined ? {} : { text }, ...context === undefined || context.length === 0 ? {} : { note: context.join(`
+`) } };
+      },
+      beforeRun: (...args) => client.listen("beforeRun", args),
+      onRun: (...args) => client.listen("onRun", args)
+    },
+    config: {
+      list: async () => (await claude.config.list()).map(({ key, label, description, kind, value, options, provider, isLocked }) => ({
+        key,
+        label,
+        kind,
+        value,
+        isLocked,
+        ...description === undefined ? {} : { description },
+        ...options === undefined ? {} : { options },
+        ...provider.plugin === "engine" ? {} : { plugin: provider.plugin }
+      }))
+    },
+    settings: {
+      user: settingsFile("user"),
+      project: settingsFile("project"),
+      local: settingsFile("local"),
+      beforeChange: (matcherOrListener, maybeListener) => {
+        const listener = matchedListener(matcherOrListener, maybeListener);
+        return hookOn("ConfigChange", async (input) => {
+          const refuse = (await listener(settingsChangeOf(input)))?.refuse;
+          return typeof refuse === "string" ? { block: refuse } : undefined;
+        });
+      },
+      onChange: (matcherOrListener, maybeListener) => {
+        const listener = matchedListener(matcherOrListener, maybeListener);
+        settingsListeners.add(listener);
+        return { remove: () => void settingsListeners.delete(listener) };
+      }
+    },
+    model: { complete: (completion, options) => claude.model.complete(completion, options) },
+    fs: {
+      read: (path) => claude.fs.read(expand(path)),
+      write: (path, text) => claude.fs.write(expand(path), text),
+      exists: (path) => claude.fs.exists(expand(path)),
+      find: (glob) => files.find(glob),
+      list: async (path) => (await claude.fs.list(path === undefined ? undefined : expand(path))).map(({ name, kind, size, mtimeMs, isLink }) => ({ name, isFile: kind === "file", isFolder: kind === "dir", isLink, size, modifiedAt: mtimeMs })),
+      async stat(path, options) {
+        const { kind, size, mtimeMs, isLink, realPath } = await claude.fs.stat(expand(path), options);
+        return { isFile: kind === "file", isFolder: kind === "dir", isLink, size, modifiedAt: mtimeMs, ...realPath === undefined ? {} : { realPath } };
+      },
+      onChange: ({ path }, listener) => watches.add([path].flat().map((each) => resolvedPath(each, places)), (change) => {
+        bind(imports);
+        return listener(change);
+      })
+    },
+    metadata: {
+      read: (path) => files.read(path),
+      update: (path, change) => files.update(path, change)
+    },
+    process: {
+      run: (argv, init) => claude.process.run(argv, init),
+      spawn: (argv, init) => claude.process.spawn({ ...init, argv })
+    },
+    http: { fetch: (url, init) => claude.http.fetch(url, init) },
+    device: {
+      read: () => device ??= claude.device.read().catch((error) => {
+        device = undefined;
+        throw error;
+      })
+    },
+    clipboard: {
+      async write(text) {
+        await toaster.copy(text);
+      }
+    },
+    mods: {
+      isLoaded: async (name) => await claude.cmod.call({ to: cmodPluginName, method: loadedMethod, input: { name } }) === true
+    },
+    provide: (name, methods) => provided.provide(name, methods),
+    providers: (name) => provided.providers(name)
+  };
+  const timer = (ms, subject, repeats, listener) => {
+    let isFiring = false;
+    let isRunning = true;
+    let firedAt = 0;
+    let isStallTold = false;
+    const tellStall = async () => {
+      const ranMs = await claude.clock.now() - firedAt;
+      if (isStallTold || ranMs < Math.max(checked * stallTicks, stallMs))
+        return;
+      isStallTold = true;
+      claude.ui.warn(`${subject}:${ms}:stalled`, `${definition.name}: one run of its ${subject} ${ms} ms timer has gone on for ${Math.round(ranMs / 1000)} s, so the timer skipped every tick since. Give what the listener awaits a deadline.`);
+    };
+    const fire = () => {
+      if (!repeats)
+        isRunning = false;
+      if (isFiring) {
+        tellStall();
+        return;
+      }
+      isFiring = true;
+      isStallTold = false;
+      Promise.resolve().then(async () => {
+        firedAt = await claude.clock.now();
+        bind(imports);
+        return listener();
+      }).catch((error) => report({ id: `${subject}:${ms}`, message: `The ${subject} ${ms} ms timer failed`, error })).finally(() => {
+        isFiring = false;
+      });
+    };
+    const checked = checkedMs(definition.name, `mod.${subject}`, ms);
+    const started = repeats ? claude.clock.every(checked, fire) : claude.clock.after(checked, fire);
+    return {
+      get isRunning() {
+        return isRunning;
+      },
+      stop() {
+        isRunning = false;
+        started.cancel();
+      }
+    };
+  };
+  const hotkeys = await createHotkeys({ name: definition.name, declared: definition.hotkeys ?? {}, configRoot, claude, router, answerInput: area.answerInput, report });
+  const secret = async (action, key, value) => {
+    const { exitCode, stdout, stderr } = await claude.process.run(["cmod", "secrets", action, definition.name, key], value === undefined ? undefined : { stdin: value });
+    if (exitCode !== 0)
+      throw new Error(`${definition.name}: mod.secrets.${action}: ${cmodError(stderr, "secrets") || `cmod secrets ${formatExit(exitCode, "")}.`}`);
+    return stdout;
+  };
+  const mod = {
+    name: definition.name,
+    folder: claude.plugin.root,
+    dataFolder: runtime.dataFolder,
+    cacheFolder: cacheFolder({ HOME: home, XDG_CACHE_HOME: cacheHome }, claude.plugin.name),
+    secrets: {
+      get: async (key) => await secret("get", key) || undefined,
+      store: async (key, value) => void await secret("store", key, value),
+      delete: async (key) => void await secret("delete", key)
+    },
+    state: modState.state,
+    get options() {
+      return modOptions.values;
+    },
+    hotkeys,
+    every: (ms, listener) => timer(ms, "every", true, listener),
+    after: (ms, listener) => timer(ms, "after", false, listener),
+    use: (job) => job({ mod, announce, reserveName }),
+    log: (text, options) => {
+      if (options?.level === "error")
+        report({ id: `log:${text}`, message: text });
+      else if (options?.level === "warning")
+        claude.ui.warn(`log:${text}`, `${definition.name}: ${text}`);
+      else
+        claude.ui.log(`${definition.name}: ${text}`, { to: options?.to ?? "debug" });
+    },
+    panes: area.panes,
+    views: area.views,
+    pages: area.pages,
+    settings: area.settings,
+    widgets: area.widgets,
+    styles: area.styles,
+    toast: toaster.toast,
+    ask: (question, options) => claude.ui.ask(question, options),
+    dependencies: dependencyCalls(claude, (call, task) => beforeDeadline(claude.clock, callDeadline, call, () => task))
+  };
+  bind(imports);
+  const followSession = async (isAfterCd = false) => {
+    try {
+      const [nextRoot, reportedCwd] = await Promise.all([claude.session.root(), claude.session.cwd()]);
+      const oldCwd = cwd;
+      const hasMovedRoot = nextRoot !== modState.root;
+      if (isAfterCd && hasMovedRoot && relativePath(nextRoot, reportedCwd) === undefined)
+        staleCwd = reportedCwd;
+      if (reportedCwd !== staleCwd)
+        staleCwd = undefined;
+      const nextCwd = staleCwd === undefined ? reportedCwd : nextRoot;
+      if (!hasMovedRoot && nextCwd === oldCwd)
+        return;
+      cwd = nextCwd;
+      followFolders(nextRoot, nextCwd);
+      await modState.moveTo(nextRoot).catch((error) => {
+        if (cwd === nextCwd)
+          cwd = loadedCwd;
+        followFolders(modState.root, cwd);
+        throw error;
+      });
+      if (hasMovedRoot)
+        await modOptions.load(nextRoot);
+      loadedCwd = nextCwd;
+      if (!hasMovedRoot)
+        area.changed();
+      if (nextCwd === oldCwd)
+        return;
+      const moved = { session_id: await claude.session.id(), cwd: nextCwd, hook_event_name: "CwdChanged", old_cwd: oldCwd, new_cwd: nextCwd };
+      await router.dispatch("classic.CwdChanged", moved, async () => ({}));
+    } catch (error) {
+      report({ id: "cmod:follow", message: `Keeps the state of ${modState.root} until the next prompt or folder move`, error });
+    }
+  };
+  const followCurrent = async (id, title) => {
+    const [model, usage] = await Promise.all([claude.session.model(), claude.session.usage()]);
+    followed = { id, title: title ?? "", project: modState.root, cwd, model, startedAt: new Date(usage.startedAt).toISOString(), ...forkedFrom === undefined ? {} : { forkedFrom }, ...agentType === undefined ? {} : { agentType } };
+    client.follow(followed);
+  };
+  router.add("classic.SessionStart", async (e, next) => {
+    agentType = e.agent_id === undefined ? e.agent_type : agentType;
+    const previous = followed?.id;
+    if (e.source === "fork" && previous !== undefined && previous !== e.session_id)
+      forkedFrom = previous;
+    else if (e.session_id !== previous) {
+      forkedFrom = undefined;
+      parentAsked = undefined;
+    }
+    hasEarlierPrompts = e.source !== "startup" && e.source !== "clear";
+    await followCurrent(e.session_id, e.session_title).catch((error) => report({ id: "cmod:current", message: "Kept the details of the session from before", error }));
+    await modState.switchSession(e.session_id, e.source, e.transcript_path).catch((error) => {
+      report({ id: "cmod:session", message: `Kept its session values from before the ${e.source}`, error });
+    });
+    return next(e);
+  });
+  router.add("classic.UserPromptSubmit", async (e, next) => {
+    staleCwd = undefined;
+    await followSession();
+    const isPerson = e.source === undefined || e.source === "user" || e.source === "sdk";
+    await followCurrent(e.session_id, e.session_title || (isPerson && !hasEarlierPrompts && client.sessions.current.title === "" ? firstLine(e.prompt) : undefined)).catch((error) => report({ id: "cmod:current", message: "Kept the details of the session from before", error }));
+    return next(e);
+  });
+  for (const event of ["classic.PostToolUse", "classic.PostToolUseFailure"]) {
+    router.add(event, async (e, next) => {
+      if (shellTools.includes(e.tool_name))
+        await followSession();
+      return next(e);
+    });
+  }
+  router.add("command.run", async (e, next) => {
+    const answer = await next(e);
+    if (e.command === "cd") {
+      await followSession(true);
+      conversations?.moved();
+    }
+    return answer;
+  });
+  router.add("skill.prompt", userSkillHook(claude));
+  router.add("ui.press", (e, next) => area.asked(() => next(e)));
+  let api = {};
+  let servedParts;
+  const reportPart = (id, message, error) => report({ id, message, error });
+  const tellRefusedPress = (to, error) => {
+    if (messageOf(error).includes(stalePress))
+      toaster.toast.warning(`The ${to} button was from an older drawing, so nothing ran`, { id: `press:${to}`, description: "Press the button it shows now." });
+    else
+      report({ id: `press:${to}`, message: `${to} did not take the press`, error, isCritical: true });
+  };
+  const pressElsewhere = (to, input) => void claude.cmod.call({ to, method: partMethods.press, input }).catch((error) => {
+    parts?.forget(to);
+    claude.ui.invalidate("ui.render");
+    tellRefusedPress(to, error);
+  });
+  parts = drawnParts({ claude, report: reportPart, press: (to, input) => servedParts === undefined ? pressElsewhere(to, input) : servedParts.press(to, input) });
+  const served = runtime.serveCmodPlugin?.({ claude, router, store: runtime.store, project: () => modState.root, report: reportPart, clear: (id) => toaster.toast.dismiss(id), tellRefusedPress, parts, markdownIn: area.markdownIn, tellStylers: area.restyled });
+  const conversations = served?.conversations;
+  const widgets = served?.widgets;
+  servedParts = served?.parts;
+  const tellColor = (to, told) => {
+    if (told.session === "" || to === cmodPluginName)
+      return;
+    claude.clock.after(0, () => void claude.cmod.call({ to, method: conversationMethods.sessionColor, input: told }).catch((error) => {
+      if (!isStillInstalling(to, error))
+        claude.ui.warn("color:tell", `cmod: ${to} did not hear the session's color: ${messageOf(error)}`);
+    }));
+  };
+  conversations?.onColor((told) => {
+    client.recolor(told);
+    for (const { mod: to } of servedParts?.declared() ?? [])
+      tellColor(to, told);
+  });
+  router.add("cmod.call", async (e, next) => {
+    if (e.to !== definition.name)
+      return next(e);
+    const call = e;
+    if (e.method === conversationMethods.changed && call.caller === cmodPluginName) {
+      const { session: changedSession, change } = e.input;
+      client.changed(changedSession, change, next.signal);
+      return { value: null };
+    }
+    if (e.method === conversationMethods.sessionColor && call.caller === cmodPluginName) {
+      client.recolor(e.input);
+      return { value: null };
+    }
+    const forProvider = call.caller === undefined ? undefined : provided.answer(e.method, e.input ?? {}, call.caller, next.signal);
+    if (forProvider !== undefined)
+      return { value: await forProvider };
+    const ask = beforeAskOf(call);
+    if (ask !== undefined)
+      return { value: await client.answerBefore(ask.session, ask.event, ask.change, next.signal) ?? null };
+    if (e.method === partMethods.changed && call.caller !== undefined && servedParts !== undefined) {
+      const update = e.input;
+      if (update.parts !== undefined && conversations !== undefined)
+        tellColor(call.caller, conversations.color());
+      return { value: { isHeld: servedParts.update(call.caller, update), stylers: servedParts.stylers() } };
+    }
+    if (call.caller !== undefined) {
+      const turn = e.method === partMethods.draw ? e.input.turn : undefined;
+      const answered = area.answer(e.method, turn === undefined ? e.input : { ...e.input, turn: client.turn(turn) }, call.caller);
+      if (answered !== undefined)
+        return answered.catch((error) => ({ deny: `${definition.name}: ${messageOf(error)}` }));
+    }
+    const served = await conversations?.answer(call);
+    return served ?? answerCall(definition.name, api, e);
+  }, (e, error) => {
+    if (e.to !== definition.name)
+      return;
+    const ask = beforeAskOf(e);
+    return ask === undefined ? { deny: `${definition.name}: ${error.message}` } : { value: client.failedBefore(ask.session, ask.event, ask.change, error) ?? null };
+  });
+  const agents = toolCalls(claude, router);
+  keepEngine(mod, {
+    claude,
+    router,
+    toolCalls: agents,
+    report,
+    hasPermissionCheck: () => runtime.permissionRoutes() !== undefined,
+    answerInput: area.answerInput,
+    spawnCmod: (args, env) => spawnCmod(claude, args, session, env),
+    isInstalledCopy: runtime.isInstalledCopy,
+    watches,
+    interfaces: provided,
+    ...widgets === undefined ? {} : { widgets },
+    onServeUnreached: (listener) => conversations?.onUnreached(listener),
+    ...servedParts === undefined ? {} : { parts: servedParts }
+  });
+  const names = new Set;
+  const reserveName = (type, name, taken) => {
+    const key = `${type}:${name}`;
+    if (names.has(key))
+      throw new Error(taken);
+    names.add(key);
+    return { remove: () => void names.delete(key) };
+  };
+  const removeUndeclaredServices = async () => {
+    if (!await runtime.isInstalledCopy())
+      return;
+    for (const { name } of await claude.fs.list(serviceFolder(runtime.store, definition.name)).catch(ifMissing([]))) {
+      const program = name.endsWith(".json") ? name.slice(0, -".json".length) : undefined;
+      if (program !== undefined && !names.has(`service:${program}`))
+        await runCmod(claude, ["program", definition.name, "--remove-service", "--", program], session);
+    }
+  };
+  await failsAs("its state did not load", () => modState.load());
+  await failsAs("its options did not load", () => modOptions.load(root));
+  const missing = modOptions.missing;
+  if (missing.length > 0)
+    throw new MissingOptions(missing, missing.map((key) => definition.options?.[key]?.title ?? key));
+  await failsAs("the details of its session did not load", () => followCurrent(session, undefined));
+  const returned = await failsAs("its setup function threw", () => definition.setup(mod));
+  api = apiOf(definition.name, returned);
+  await failsAs("its open panes did not load", () => area.restorePanes());
+  area.started();
+  removeUndeclaredServices().catch((error) => report({ id: "program:services", message: "Could not stop a service it no longer runs", error }));
+  return { mod, added, imports, raise: client.raise, settingsLoaded, area };
+}
+function apiOf(name, returned) {
+  if (returned === undefined || returned === null)
+    return {};
+  if (typeof returned !== "object" || !Object.values(returned).every((method) => typeof method === "function"))
+    throw new Error(`${name}: setup returns its API, an object of methods other mods call, or nothing. It returned ${typeof returned === "object" ? "an object with values that are not methods" : typeof returned}.`);
+  return returned;
+}
+var longestTimerMs = 2147483647;
+function checkedMs(name, subject, ms) {
+  if (!Number.isInteger(ms) || ms <= 0 || ms > longestTimerMs)
+    throw new Error(`${name}: ${subject} is ${ms}. Give a whole number of milliseconds above 0 and at most ${longestTimerMs}.`);
+  return ms;
+}
+function beforeAskOf(call) {
+  return call.method === conversationMethods.before && call.caller === cmodPluginName ? call.input : undefined;
+}
+async function failsAs(subject, step) {
+  try {
+    return await step();
+  } catch (error) {
+    throw new Error(`${subject}: ${messageOf(error)}`, { cause: error });
+  }
+}
+function progressOf({ done, total, label }) {
+  return Box({ gap: 2, children: [Progress({ value: total > 0 ? done / total * 100 : 0 }), Text({ dimColor: true, wrap: "truncate-end", children: label })] });
+}
+
+// node_modules/@cmodjs/core/register.js
+var lifecycle;
+var permissionCheck;
+var registered;
+var lockedRetryMs = [100, 300, 600];
+var heldLock = "Lock file is already being held";
+var timers2 = globalThis;
+async function whenUnlocked(write) {
+  for (const waitMs of lockedRetryMs) {
+    try {
+      return await write();
+    } catch (error) {
+      if (!messageOf(error).includes(heldLock))
+        throw error;
+      await new Promise((resolve) => void timers2.setTimeout(resolve, waitMs));
+    }
+  }
+  return write();
+}
+async function startMod($, eventInput, passOn) {
+  const claude = {
+    plugin: { name: $.plugin.name, root: $.plugin.root },
+    ui: {
+      log: (text, options) => $.ui.log(text, options),
+      warn: (_id, text) => $.ui.log(text, { to: "debug" }),
+      notice: (toolUseId, text) => $.ui.notice(toolUseId, text),
+      toast: (text, options) => $.ui.toast(text, options),
+      invalidate: (event) => $.ui.invalidate(event),
+      ask: (question, options) => $.ui.ask(question, options),
+      open: (pane) => $.ui.open(pane),
+      close: (pane) => $.ui.close(pane),
+      panes: () => $.ui.panes(),
+      scroll: (args) => $.ui.scroll(args),
+      copy: (args) => $.ui.copy(args),
+      focus: (args) => $.ui.focus(args),
+      resolve: (render) => $.ui.resolve(render)
+    },
+    process: {
+      run: (argv, init) => $.process.run(argv, init),
+      spawn: (request) => $.process.spawn(request)
+    },
+    fs: {
+      read: (path) => $.fs.read(path),
+      write: (path, text) => $.fs.write(path, text),
+      list: (path) => $.fs.list(path),
+      exists: (path) => $.fs.exists(path),
+      stat: (path, options) => $.fs.stat(path, options)
+    },
+    http: { fetch: (url, init) => $.http.fetch(url, init) },
+    settings: { read: (args) => $.settings.read(args) },
+    config: { list: () => $.config.list() },
+    store: {
+      get: (key) => $.store.get(key),
+      set: (key, value) => whenUnlocked(() => $.store.set(key, value)),
+      delete: (key) => whenUnlocked(() => $.store.delete(key)),
+      keys: () => $.store.keys()
+    },
+    clock: {
+      now: () => $.clock.now(),
+      after: (ms, fn) => $.clock.after(ms, fn),
+      every: (ms, fn) => $.clock.every(ms, fn)
+    },
+    session: {
+      id: () => $.session.id(),
+      root: () => $.session.root(),
+      cwd: () => $.session.cwd(),
+      model: () => $.session.model(),
+      usage: () => $.session.usage(),
+      surfaces: () => $.session.surfaces(),
+      version: async () => (await $.session.version()).version,
+      messages: (args) => args === undefined ? $.session.messages() : $.session.messages(args),
+      append: (args) => $.session.append(args),
+      send: (args) => $.session.send(args)
+    },
+    prompt: { submit: (args) => $.prompt.submit(args) },
+    turn: { abort: (args) => $.turn.abort(args) },
+    model: { complete: (request, options) => $.model.complete(request, options) },
+    command: { register: (command) => $.command.register(command), list: () => $.command.list(), run: (args) => $.command.run(args) },
+    tool: { register: (tool) => $.tool.register(tool), call: (input) => $.tool.call(input) },
+    agent: {
+      list: () => $.agent.list(),
+      spawn: (args) => $.agent.spawn(args)
+    },
+    env: {
+      home: () => $.env.get("HOME"),
+      dataHome: () => $.env.get("XDG_DATA_HOME"),
+      cacheHome: () => $.env.get("XDG_CACHE_HOME"),
+      configHome: () => $.env.get("CLAUDE_CONFIG_DIR"),
+      browser: () => $.env.get("BROWSER"),
+      sshConnection: () => $.env.get("SSH_CONNECTION"),
+      display: () => $.env.get("DISPLAY"),
+      waylandDisplay: () => $.env.get("WAYLAND_DISPLAY")
+    },
+    device: { read: () => readDevice(claude) },
+    cmod: { call: (input) => $.cmod.call(input) }
+  };
+  const [, answer] = await settledAfterAbort(Promise.all([lifecycle.start(claude, readPlugin), passOn(eventInput)]), passOn.signal);
+  return answer;
+}
+function routeToMod(_$, eventInput, passOn) {
+  return lifecycle.route(passOn.event, eventInput, (passed) => passOn(passed), passOn.signal);
+}
+function routeFailure(_$, eventInput, passOn) {
+  return lifecycle.caught(passOn.event, eventInput, (passed) => passOn(passed), passOn);
+}
+var withCaller = (eventInput, passOn) => ({ ...eventInput, caller: passOn.origin.plugin });
+var withoutCaller = (passOn) => (passed) => passOn(Object.fromEntries(Object.entries(passed).filter(([key]) => key !== "caller")));
+function routeCallToMod(_$, eventInput, passOn) {
+  return lifecycle.route("cmod.call", withCaller(eventInput, passOn), withoutCaller(passOn), passOn.signal);
+}
+function routeCallFailure(_$, eventInput, passOn) {
+  return lifecycle.caught("cmod.call", withCaller(eventInput, passOn), withoutCaller(passOn), passOn);
+}
+function registerMod(addHook, definition, options) {
+  registerHooks(addHook, definition, options);
+  addHook("ui.render", routeToMod).catch(routeFailure);
+}
+function registerHooks(addHook, definition, options, serve) {
+  permissionCheck = undefined;
+  registered = definition;
+  lifecycle = createLifecycle(definition, () => permissionCheck, options, true, serve);
+  addHook("session.start", startMod);
+  addHook("classic.Setup", routeToMod).catch(routeFailure);
+  addHook("classic.SessionStart", routeToMod).catch(routeFailure);
+  addHook("classic.SessionEnd", routeToMod).catch(routeFailure);
+  addHook("classic.UserPromptSubmit", routeToMod).catch(routeFailure);
+  addHook("classic.UserPromptExpansion", routeToMod).catch(routeFailure);
+  addHook("classic.InstructionsLoaded", routeToMod).catch(routeFailure);
+  addHook("classic.ConfigChange", routeToMod).catch(routeFailure);
+  addHook("classic.DirectoryAdded", routeToMod).catch(routeFailure);
+  addHook("classic.PreModelSwitch", routeToMod).catch(routeFailure);
+  addHook("classic.PostModelSwitch", routeToMod).catch(routeFailure);
+  addHook("classic.PermissionDenied", routeToMod).catch(routeFailure);
+  addHook("classic.PostToolUse", routeToMod).catch(routeFailure);
+  addHook("classic.PostToolUseFailure", routeToMod).catch(routeFailure);
+  addHook("classic.PostToolBatch", routeToMod).catch(routeFailure);
+  addHook("classic.MessageDisplay", routeToMod).catch(routeFailure);
+  addHook("classic.SubagentStart", routeToMod).catch(routeFailure);
+  addHook("classic.SubagentStop", routeToMod).catch(routeFailure);
+  addHook("classic.TaskCreated", routeToMod).catch(routeFailure);
+  addHook("classic.TaskCompleted", routeToMod).catch(routeFailure);
+  addHook("classic.TeammateIdle", routeToMod).catch(routeFailure);
+  addHook("classic.Elicitation", routeToMod).catch(routeFailure);
+  addHook("classic.ElicitationResult", routeToMod).catch(routeFailure);
+  addHook("classic.Notification", routeToMod).catch(routeFailure);
+  addHook("classic.PreCompact", routeToMod).catch(routeFailure);
+  addHook("classic.PostCompact", routeToMod).catch(routeFailure);
+  addHook("classic.Stop", routeToMod).catch(routeFailure);
+  addHook("classic.StopFailure", routeToMod).catch(routeFailure);
+  addHook("classic.WorktreeCreate", routeToMod).catch(routeFailure);
+  addHook("classic.WorktreeRemove", routeToMod).catch(routeFailure);
+  addHook("tool.call", routeToMod).catch(routeFailure);
+  addHook("prompt.submit", routeToMod).catch(routeFailure);
+  addHook("prompt.context", routeToMod).catch(routeFailure);
+  addHook("command.run", routeToMod).catch(routeFailure);
+  addHook("session.measure", routeToMod).catch(routeFailure);
+  addHook("skill.prompt", routeToMod).catch(routeFailure);
+  addHook("ui.press", routeToMod).catch(routeFailure);
+  addHook("ui.scroll", routeToMod).catch(routeFailure);
+  addHook("ui.close", routeToMod).catch(routeFailure);
+  addHook("cmod.call", { to: definition.name }, routeCallToMod).catch(routeCallFailure);
+  addHook("session.compact", routeToMod).catch(routeFailure);
+}
+
+// node_modules/@cmodjs/core/installer.js
+var stepId = /^[A-Za-z0-9_-]{1,64}$/;
+function checkSteps(name, steps) {
+  const seen = new Set;
+  for (const step of steps) {
+    if (!stepId.test(step.id))
+      throw new Error(`${name}: the install step "${step.id}" has no valid id. Use 1 to 64 letters, digits, "_", or "-".`);
+    if (step.title.trim() === "")
+      throw new Error(`${name}: the install step "${step.id}" needs a title, the line the installer shows above it.`);
+    if (seen.has(step.id))
+      throw new Error(`${name}: two install steps have the id "${step.id}". Give each step its own id.`);
+    seen.add(step.id);
+  }
+}
+
+// node_modules/@cmodjs/core/mod.js
+var sessions = {
+  get current() {
+    return bound().sessions.current;
+  },
+  list: (options) => bound().sessions.list(options),
+  get: (id) => bound().sessions.get(id),
+  search: (text, matcher, options) => bound().sessions.search(text, matcher, options)
+};
+var commands = {
+  list: () => bound().commands.list(),
+  run: (name, args) => bound().commands.run(name, args),
+  beforeRun: (...args) => bound().commands.beforeRun(...args),
+  onRun: (...args) => bound().commands.onRun(...args)
+};
+var http = {
+  fetch: (url, options) => bound().http.fetch(url, options)
+};
+var device = {
+  read: () => bound().device.read()
+};
+function defineMod(definition) {
+  if (definition.name.trim() === "")
+    throw new Error("defineMod: the mod needs a name, such as the name in .claude-plugin/plugin.json.");
+  if (definition.options !== undefined)
+    checkOptions(definition.name, definition.options);
+  if (definition.hotkeys !== undefined)
+    checkHotkeys(definition.name, definition.hotkeys);
+  if (definition.installer !== undefined)
+    checkSteps(definition.name, definition.installer);
+  return definition;
+}
+
+// node_modules/@cmodjs/core/jobs/program.js
+var backoffSeconds = [1, 2, 4, 8, 16];
+var leaseCheckMs = 5000;
+var staleMs = 15000;
+var retryWithinMs = 1000;
+function program(options) {
+  const { command, environment, singleInstance = false, isService = false, isWebApp = false, processType } = options;
+  return ({ mod, announce, reserveName }) => {
+    const { claude, report, spawnCmod, isInstalledCopy, watches, interfaces } = engineOf(mod);
+    const [executable] = command;
+    if (executable === undefined)
+      throw new Error(`${mod.name}: the program has no command. Name the program on PATH and its arguments, such as ['preview-server', '--port', '0'].`);
+    if (isService)
+      for (const type of ["program", "service"])
+        reserveName(type, ft(executable), `${mod.name}: the service ${executable} is already added. Give each isService program its own executable.`);
+    else if (singleInstance)
+      reserveName("program", ft(executable), `${mod.name}: the single instance of ${executable} is already added. Give each singleInstance program its own executable.`);
+    const isElected = singleInstance || isService;
+    if (isWebApp && !isElected)
+      throw new Error(`${mod.name}: the web app ${executable} runs a copy per session, and your tailnet reaches one copy per computer. Add singleInstance: true or isService: true.`);
+    if (processType !== undefined && !processTypes.includes(processType))
+      throw new Error(`${mod.name}: ${executable}'s processType is ${String(processType)}. Give ${processTypes.join(" or ")}.`);
+    if (processType !== undefined && !isService)
+      throw new Error(`${mod.name}: ${executable}'s processType names the launchd class of a service. Add isService: true.`);
+    const holderFlags = isWebApp ? ["--web-app"] : [];
+    const serviceClass = processType === undefined ? [] : ["--process-type", processType];
+    const request = { argv: command, env: { CMOD_DATA: mod.dataFolder, CMOD_CACHE: mod.cacheFolder, ...environment } };
+    let state = "stopped";
+    let address;
+    let failure;
+    let exits = 0;
+    const waiting = [];
+    const failing = new Set;
+    let isFollowing = false;
+    let isWatching = false;
+    let instance;
+    let leaseCheck;
+    const spawn = (isOwnService) => {
+      if (isOwnService)
+        return spawnCmod(["program", mod.name, ...holderFlags, "--service", ...serviceClass, ...Object.keys(environment ?? {}).flatMap((name) => ["--env", name]), "--", ...command], environment);
+      return isElected ? spawnCmod(["program", mod.name, ...holderFlags, "--no-wait", "--", ...command], environment) : claude.process.spawn(request);
+    };
+    const instanceFile = () => instance ??= cmodStore(claude).then((store) => instancePath(store, mod.name, ft(executable)));
+    const following = (run) => void run.catch((error) => report({ id: `program:${executable}:follow`, message: `Could not follow the ${executable} program`, error }));
+    const stop = (reason) => {
+      address = undefined;
+      state = "fatal";
+      failure = new Error(`${mod.name}: the ${executable} program stopped: ${reason}`);
+      const retry = () => {
+        exits = 0;
+        failure = undefined;
+        start();
+      };
+      report({ id: `program:${executable}`, message: `The ${executable} program stopped`, description: reason, retry });
+      for (const waiter of waiting.splice(0))
+        waiter.reject(failure);
+      for (const fail of failing)
+        fail(failure);
+      failing.clear();
+    };
+    const ownProvider = async (name) => {
+      const found = await claude.cmod.call({ to: cmodPluginName, method: interfaceMethods.provider, input: { interface: name, mod: mod.name, program: ft(executable) } });
+      if (found === null)
+        return;
+      return (await interfaces.providers(name)).find((each) => each["mod"] === found.mod && each["program"] === found.program && each["device"]?.id === found.device?.id);
+    };
+    const providedHere = async (name) => {
+      while (state !== "fatal") {
+        const own = await ownProvider(name).catch((error) => {
+          if (isUnanswered(error))
+            return;
+          throw error;
+        });
+        if (own !== undefined)
+          return own;
+      }
+      throw failure;
+    };
+    const recordedInstance = async (file) => {
+      const recorded = await claude.fs.read(file).catch(ifMissing(undefined));
+      if (recorded === undefined)
+        return;
+      const instance = JSON.parse(recorded);
+      const next = typeof instance.address === "string" ? addressOf(instance.address.trim()) : undefined;
+      if (next === undefined)
+        return {};
+      return { address: typeof instance.tailnetUrl === "string" ? { ...next, tailnetUrl: instance.tailnetUrl } : next };
+    };
+    const show = (next) => {
+      address = next;
+      state = "running";
+      exits = 0;
+      for (const waiter of waiting.splice(0))
+        waiter.resolve(next);
+    };
+    const noAddress = () => new Error(`${mod.name}: the ${executable} program printed no address, because it only provides interfaces. Reach them through provider(name).`);
+    const started = () => {
+      if (state !== "starting")
+        return;
+      state = "running";
+      exits = 0;
+      for (const waiter of waiting.splice(0))
+        waiter.reject(noAddress());
+    };
+    const checkLease = (file) => leaseCheck ??= (async () => {
+      if (!isFollowing || await isHeld(claude, `${file}.lock`, staleMs))
+        return;
+      isFollowing = false;
+      start();
+    })().finally(() => {
+      leaseCheck = undefined;
+    });
+    const track = async (file) => {
+      if (!isFollowing)
+        return;
+      const instance = await recordedInstance(file);
+      if (instance?.address !== undefined)
+        return show(instance.address);
+      if (instance !== undefined)
+        return started();
+      address = undefined;
+      state = "starting";
+      claude.clock.after(Math.random() * retryWithinMs, () => following(checkLease(file)));
+    };
+    const follow = async (file) => {
+      isFollowing = true;
+      if (!isWatching) {
+        isWatching = true;
+        watches.add([file], () => following(track(file)));
+        claude.clock.every(leaseCheckMs, () => following(checkLease(file)));
+      }
+      await track(file);
+    };
+    const start = async () => {
+      isFollowing = false;
+      address = undefined;
+      state = "starting";
+      let pending = "";
+      let lastError = "";
+      let isShown = false;
+      try {
+        const isOwnService = isService && await isInstalledCopy();
+        if (isElected && !isOwnService) {
+          const file = await instanceFile();
+          if (await isHeld(claude, `${file}.lock`, staleMs))
+            return await follow(file);
+        }
+        for await (const piece of spawn(isOwnService)) {
+          if (piece.stream === "stderr") {
+            lastError = piece.text.trim().split(`
+`).at(-1) ?? lastError;
+            continue;
+          }
+          if (isShown)
+            continue;
+          const lines = `${pending}${piece.text}`.split(`
+`);
+          pending = lines.pop() ?? "";
+          for (const line of lines.slice(0, 1)) {
+            if (isElected && line.trim() === "held")
+              return await follow(await instanceFile());
+            isShown = true;
+            const next = addressOf(line.trim());
+            if (isElected && line.trim() === "provided")
+              started();
+            else if (next === undefined) {
+              stop(`its first line is "${line.trim()}". Write 127.0.0.1:<port> or unix:<socket path> as the first line on standard output.`);
+              return;
+            } else
+              show(isWebApp ? (await recordedInstance(await instanceFile()))?.address ?? next : next);
+          }
+        }
+      } catch (error) {
+        lastError = messageOf(error);
+      }
+      address = undefined;
+      exits += 1;
+      const wait = backoffSeconds[exits - 1];
+      if (wait === undefined) {
+        stop(`it did not start again after ${backoffSeconds.length} tries: ${lastError === "" ? "no standard error" : lastError}.`);
+        return;
+      }
+      state = "backoff";
+      claude.clock.after(wait * 1000, () => void start());
+    };
+    announce(`the ${executable} program`);
+    claude.session.surfaces().then((surfaces) => {
+      if (surfaces.length > 0 && state === "stopped")
+        start();
+    });
+    return {
+      get state() {
+        return state;
+      },
+      ready() {
+        if (state === "running")
+          return address === undefined ? Promise.reject(noAddress()) : Promise.resolve(address);
+        if (state === "fatal")
+          return Promise.reject(failure);
+        if (state === "stopped")
+          start();
+        return new Promise((resolve, reject) => waiting.push({ resolve, reject }));
+      },
+      provider(name) {
+        if (!isElected)
+          return Promise.reject(new Error(`${mod.name}: provider(${name}) needs the ${executable} program to run as singleInstance or isService, because only one copy of a program can provide an interface.`));
+        if (state === "fatal")
+          return Promise.reject(failure);
+        if (state === "stopped")
+          start();
+        return new Promise((resolve, reject) => {
+          failing.add(reject);
+          providedHere(name).then((own) => resolve(own), reject).finally(() => failing.delete(reject));
+        });
+      }
+    };
+  };
+}
+function addressOf(line) {
+  const tcp = /^127\.0\.0\.1:(\d{1,5})$/.exec(line);
+  if (tcp !== null)
+    return { url: `http://127.0.0.1:${tcp[1]}` };
+  const unix = /^unix:(\/.+)$/.exec(line);
+  if (unix?.[1] !== undefined)
+    return { url: "http://localhost", socketPath: unix[1] };
+  return;
+}
+
+// node_modules/@cmodjs/core/jobs/context.js
+function withinDeadline(mod, deadline, subject, run) {
+  return beforeDeadline(engineOf(mod).claude.clock, deadline, subject, () => Promise.resolve().then(run));
+}
+
+// node_modules/@cmodjs/core/jobs/slash-command.js
+var deadline = { ms: 30000, job: "slashCommand" };
+var commandName = /^[A-Za-z0-9_-]{1,64}$/;
+function slashCommand(options) {
+  const { name, description, argumentHint, immediate, reply } = options;
+  return (job) => {
+    const { mod, announce, reserveName } = job;
+    const { claude, router, report, answerInput } = engineOf(mod);
+    if (!commandName.test(name))
+      throw new Error(`${mod.name}: "${name}" is not a slash command name. Use 1 to 64 letters, digits, "_", or "-", without the slash.`);
+    const reserved = reserveName("slashCommand", name, `${mod.name}: the slash command /${name} is already added. Give each slashCommand its own name.`);
+    let registered;
+    claude.command.register({ name, description, ...argumentHint === undefined ? {} : { argumentHint }, ...immediate === undefined ? {} : { immediate } }).then(({ command }) => {
+      registered = command;
+    }, (error) => {
+      report({ id: `command:${name}`, message: `/${name} is not added`, error });
+    });
+    announce(`/${name}`);
+    const answering = router.add("command.run", async (e, next) => {
+      if (e.command !== registered)
+        return next(e);
+      try {
+        return await answerInput(async () => answerOf(mod.name, await withinDeadline(mod, deadline, `/${name}`, () => reply({ args: e.args, positionals: splitWords(e.args) }, mod))), () => next(e));
+      } catch (error) {
+        return { text: `/${name} failed: ${oneLine(error)}` };
+      }
+    });
+    return {
+      name,
+      remove() {
+        answering.remove();
+        reserved.remove();
+      }
+    };
+  };
+}
+function answerOf(name, reply) {
+  if (reply === undefined)
+    return {};
+  if (typeof reply === "string")
+    return { text: reply };
+  return { ...reply.text === undefined ? {} : { text: reply.text }, ...reply.note === undefined ? {} : { context: [modNote(name, reply.note)] } };
+}
+function splitWords(args) {
+  return Dt(args, (key) => `$${key}`).flatMap((entry) => {
+    if (typeof entry === "string")
+      return [entry];
+    if ("comment" in entry)
+      return [];
+    if (entry.op === "glob")
+      return [entry.pattern];
+    return [entry.op];
+  });
+}
+function oneLine(error) {
+  return messageOf(error).replace(/\s*\n\s*/g, " ");
+}
+
+// node_modules/@cmodjs/core/jobs/tool.js
+var toolName = /^[A-Za-z0-9_-]{1,64}$/;
+function tool(options) {
+  const { name, description, inputSchema, isDeferred, execute } = options;
+  return (job) => {
+    const { mod, announce, reserveName } = job;
+    const { claude, router, report } = engineOf(mod);
+    if (!toolName.test(name))
+      throw new Error(`${mod.name}: "${name}" is not a tool name. Use 1 to 64 letters, digits, "_", or "-".`);
+    const properties = inputSchema?.properties ?? {};
+    const reserved = reservedKeys.filter((key) => Object.hasOwn(properties, key));
+    if (reserved.length > 0)
+      throw new Error(`${mod.name}: the ${name} tool's inputSchema has the property ${reserved.join(", ")}, which Claude Code keeps for itself. Rename it.`);
+    const named = reserveName("tool", name, `${mod.name}: the tool ${name} is already added. Give each tool its own name.`);
+    const validator = new rt(inputSchema ?? { type: "object" }, "2020-12", false);
+    let registered;
+    claude.tool.register({ name, description, ...inputSchema === undefined ? {} : { inputSchema }, ...isDeferred === undefined ? {} : { isDeferred } }).then((answer) => {
+      registered = answer.tool;
+    }, (error) => {
+      report({ id: `tool:${name}`, message: `The ${name} tool is not added`, error });
+    });
+    announce(`the ${name} tool`);
+    const answering = router.add("tool.call", async (e, next) => {
+      if (e.tool !== registered)
+        return next(e);
+      const input = toolInputOf(e);
+      const { valid, errors } = validator.validate(input);
+      if (!valid)
+        return { deny: `The ${name} tool input is not valid:
+${errors.map((error) => `- ${error.instanceLocation}: ${error.error}`).join(`
+`)}` };
+      try {
+        return { result: resultOf2(await withinDeadline(mod, toolDeadline, `the ${name} tool`, () => execute(input, mod))) };
+      } catch (error) {
+        return { deny: `The ${name} tool failed: ${messageOf(error)}` };
+      }
+    });
+    return {
+      name: `mcp__${claude.plugin.name}__${name}`,
+      remove() {
+        answering.remove();
+        named.remove();
+      }
+    };
+  };
+}
+function resultOf2(value) {
+  if (value === undefined || typeof value === "string")
+    return value;
+  if (Array.isArray(value) && value.every((block) => typeof block === "object" && block !== null && ("type" in block)))
+    return value;
+  return JSON.stringify(value);
+}
+
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-qOJhFD/release/src/pages/machines.tsx
+var initialState = {
+  memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null }
+};
+var CONNECT_WAIT_MS = 15000;
+var READY_MS = 1e4;
+var FOLLOW_MS = 1000;
+var programs = new WeakMap;
+var reachProgram = (mod, program) => void programs.set(mod, program);
+
+class NoAnswer extends Error {
+}
+async function askProgram(mod, path, body) {
+  const program = programs.get(mod);
+  if (program === undefined)
+    throw new Error("The anyhost mod has not started its program yet.");
+  const { url, socketPath } = await new Promise((resolve, reject) => {
+    const timer = mod.after(READY_MS, () => reject(new NoAnswer(`The anyhost program is restarting and did not answer ${path} within ${READY_MS / 1000} s. Ask again in a few seconds.`)));
+    program.ready().then((ready) => {
+      timer.stop();
+      resolve(ready);
+    }, (error) => {
+      timer.stop();
+      reject(error);
+    });
+  });
+  const answer = await http.fetch(`${url}${path}`, {
+    ...socketPath === undefined ? {} : { socketPath },
+    ...body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }
+  }).catch((error) => {
+    throw new NoAnswer(`The anyhost program did not answer ${path}: ${messageOf(error)}`);
+  });
+  const read = (() => {
+    try {
+      return JSON.parse(answer.text);
+    } catch {
+      return;
+    }
+  })();
+  if (!answer.ok)
+    throw new Error(read?.message ?? `The anyhost program answered ${answer.status}: ${answer.text}`);
+  return read;
+}
+var pause = (mod, ms) => new Promise((resolve) => void mod.after(ms, resolve));
+function follow(mod) {
+  if (mod.state.memory.isFollowing)
+    return;
+  mod.state.memory.isFollowing = true;
+  const timer = mod.every(FOLLOW_MS, async () => {
+    const status = await askProgram(mod, "/status").catch((error) => void mod.log(`anyhost could not follow Connect Cloudflare: ${messageOf(error)}`, { level: "warning" }));
+    if (status === undefined)
+      return;
+    const { connecting, joining } = status;
+    mod.state.memory.connecting = connecting ?? null;
+    mod.state.memory.joining = joining ?? null;
+    if (connecting?.is === "running")
+      return;
+    timer.stop();
+    mod.state.memory.isFollowing = false;
+  });
+}
+async function connectAsk(mod, path, body) {
+  const answered = await askProgram(mod, path, body).catch((error) => ({ is: "failed", lines: mod.state.memory.connecting?.lines ?? [], error: messageOf(error) }));
+  mod.state.memory.connecting = answered;
+  if (answered.is === "running")
+    follow(mod);
+}
+async function joinWith(mod, link) {
+  mod.state.memory.joined = await askProgram(mod, "/join", { link }).catch((error) => ({ problem: messageOf(error) }));
+  if ("url" in mod.state.memory.joined)
+    mod.state.memory.joining = null;
+}
+async function needsStep(mod) {
+  const started = Date.now();
+  for (;; ) {
+    const status = await askProgram(mod, "/status").catch((error) => {
+      if (error instanceof NoAnswer)
+        return Date.now() - started < CONNECT_WAIT_MS ? undefined : null;
+      throw error;
+    });
+    if (status === null)
+      return false;
+    if (status === undefined) {
+      await pause(mod, 250);
+      continue;
+    }
+    const { relay, connecting, joining } = status;
+    if (connecting?.is === "running")
+      follow(mod);
+    mod.state.memory.joining = joining ?? null;
+    if (joining?.is === "running" || relay.state === "connecting" && Date.now() - started < CONNECT_WAIT_MS) {
+      await pause(mod, 250);
+      continue;
+    }
+    mod.state.memory.relayState = relay.state;
+    const isRemoved = relay.state === "unjoined";
+    mod.state.memory.connecting = isRemoved && connecting?.is === "joined" ? null : connecting ?? null;
+    if (isRemoved && mod.state.memory.joined !== null && "url" in mod.state.memory.joined)
+      mod.state.memory.joined = null;
+    return isRemoved || relay.state === "outdated" && (status.needsLogin === true || connecting?.is === "joined");
+  }
+}
+var connectStep = {
+  id: "machines",
+  title: "Connect your machines",
+  render: (mod) => /* @__PURE__ */ h(ConnectView, {
+    mod
+  }),
+  isDone: async (mod) => !await needsStep(mod)
+};
+function ConnectView({ mod }) {
+  const { connecting, joined, joining } = mod.state.memory;
+  return /* @__PURE__ */ h(Box, {
+    flexDirection: "column",
+    gap: 1
+  }, /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, "anyhost keeps every session of every machine in your own Cloudflare account, through a relay it sets up there. Connect each machine once."), /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Text, {
+    bold: true
+  }, "On your first machine, or any machine with your Cloudflare login"), connecting !== null && connecting.is !== "failed" ? null : /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
+    key: "connect",
+    plain: true,
+    onPress: () => connectAsk(mod, "/connect", {})
+  }, /* @__PURE__ */ h(Text, {
+    color: "claude"
+  }, connecting?.is === "failed" ? "[Connect Cloudflare again]" : "[Connect Cloudflare]"))), connecting === null ? null : /* @__PURE__ */ h(ConnectingView, {
+    mod,
+    connecting
+  }), connecting?.is === "joined" && mod.state.memory.relayState === "outdated" ? /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, "Cloudflare still runs your relay's older version, for up to 5 minutes after the upload. Press Finish once it runs the new one.") : null), /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Text, {
+    bold: true
+  }, "On every other machine"), /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, "Add it from /machines on a joined machine, which installs anyhost here over ssh, or ask Claude there to add it. A machine it can't reach over ssh joins here with the command anyhost machines --invite prints there."), joining === null ? null : joining.is === "running" ? /* @__PURE__ */ h(Text, {
+    dimColor: true,
+    wrap: "wrap"
+  }, "Joining with the invite link of the install command") : /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Text, {
+    color: "error",
+    wrap: "wrap"
+  }, `The invite link of the install command joined no relay: ${joining.error}`), /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, "anyhost tries a link once. Add this machine again from /machines on a joined machine.")), /* @__PURE__ */ h(Input, {
+    key: "invite",
+    label: "› ",
+    placeholder: "cmod install … --option 'join=https://…/v1/join#…'",
+    submitLabel: "join",
+    onSubmit: (link) => void joinWith(mod, link)
+  }), joined === null ? null : ("url" in joined) ? /* @__PURE__ */ h(Text, {
+    color: "success"
+  }, `✔ Joined ${joined.url}`) : /* @__PURE__ */ h(Text, {
+    color: "error",
+    wrap: "wrap"
+  }, joined.problem)));
+}
+function ConnectingView({ mod, connecting }) {
+  return /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, connecting.lines.map((line) => /* @__PURE__ */ h(Text, {
+    dimColor: true,
+    wrap: "wrap"
+  }, line)), connecting.accounts === undefined ? null : /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Text, null, "Your Cloudflare login reaches several accounts. Pick the one your relay goes in:"), connecting.accounts.map((account) => /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
+    key: `account-${account.id}`,
+    plain: true,
+    onPress: () => connectAsk(mod, "/connect/account", { id: account.id })
+  }, `[${account.name}]`)))), connecting.r2Page === undefined ? null : /* @__PURE__ */ h(Box, {
+    gap: 2
+  }, /* @__PURE__ */ h(Button, {
+    key: "r2-page",
+    plain: true,
+    href: connecting.r2Page
+  }, "[Open Cloudflare's R2 page]"), /* @__PURE__ */ h(Text, null, "Turn R2 on there, then press Next."), /* @__PURE__ */ h(Button, {
+    key: "r2-next",
+    plain: true,
+    onPress: () => connectAsk(mod, "/connect/r2", {})
+  }, "[Next]")), connecting.is === "joined" ? /* @__PURE__ */ h(Text, {
+    color: "success"
+  }, "✔ This machine is joined to your relay.") : null, connecting.error === undefined ? null : /* @__PURE__ */ h(Text, {
+    color: "error",
+    wrap: "wrap"
+  }, connecting.error));
+}
+function momentOf(iso) {
+  const at = new Date(iso);
+  const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
+}
+async function act(mod, work) {
+  mod.state.memory.problem = null;
+  await work().catch((error) => void (mod.state.memory.problem = messageOf(error)));
+}
+async function showMachines(mod) {
+  await act(mod, async () => void (mod.state.memory.machines = await askProgram(mod, "/machines")));
+}
+async function toggleMachines(mod, view) {
+  if (!view.isOpen) {
+    mod.state.memory.isAdding = false;
+    mod.state.memory.removing = null;
+    showMachines(mod);
+  }
+  await view.toggle({ focus: true });
+}
+var addMachine = (mod, target) => act(mod, async () => {
+  await askProgram(mod, "/machines/add", { target: target.trim() });
+  await showMachines(mod);
+});
+var remove = (mod, id) => act(mod, async () => {
+  await askProgram(mod, "/machines/remove", { id });
+  mod.state.memory.removing = null;
+  await showMachines(mod);
+});
+var machinesView = {
+  id: "machines",
+  title: "Machines",
+  render: (mod) => {
+    const { machines, isAdding, removing, problem } = mod.state.memory;
+    return /* @__PURE__ */ h(Box, {
+      flexDirection: "column",
+      gap: 1,
+      paddingX: 1
+    }, machines === null ? /* @__PURE__ */ h(Text, {
+      dimColor: true
+    }, problem === null ? "Reading your machines" : "") : /* @__PURE__ */ h(MachineList, {
+      mod,
+      machines,
+      removing
+    }), machines?.adding.map(({ target, error }) => error === undefined ? /* @__PURE__ */ h(Text, {
+      key: `adding-${target}`,
+      dimColor: true
+    }, `Adding ${target}: anyhost installs there and joins it`) : /* @__PURE__ */ h(Text, {
+      key: `adding-${target}`,
+      color: "error",
+      wrap: "wrap"
+    }, `${target} was not added: ${error}`)), !isAdding ? /* @__PURE__ */ h(Box, null, /* @__PURE__ */ h(Button, {
+      key: "add",
+      plain: true,
+      onPress: () => void (mod.state.memory.isAdding = true)
+    }, /* @__PURE__ */ h(Text, {
+      color: "claude"
+    }, "[Add a machine]"))) : /* @__PURE__ */ h(Box, {
+      flexDirection: "column"
+    }, machines === null || machines.candidates.length === 0 ? null : /* @__PURE__ */ h(Box, {
+      gap: 2
+    }, /* @__PURE__ */ h(Text, {
+      dimColor: true
+    }, "On your Tailscale network:"), machines.candidates.map(({ target, online }) => /* @__PURE__ */ h(Button, {
+      key: `candidate-${target}`,
+      plain: true,
+      onPress: () => addMachine(mod, target)
+    }, /* @__PURE__ */ h(Text, {
+      color: online ? "claude" : undefined,
+      dimColor: !online
+    }, `[${target}]`)))), /* @__PURE__ */ h(Input, {
+      key: "target",
+      label: "› ",
+      placeholder: "how ssh reaches it: devbox, me@10.0.0.7",
+      submitLabel: "add",
+      onSubmit: (target) => void addMachine(mod, target)
+    })), problem === null ? null : /* @__PURE__ */ h(Text, {
+      color: "error",
+      wrap: "wrap"
+    }, problem));
+  }
+};
+function MachineList({ mod, machines, removing }) {
+  const width = Math.max(...machines.machines.map(({ name }) => name.length));
+  const kind = ({ os, arch }) => `${os}-${arch}`;
+  const kindWidth = Math.max(...machines.machines.map((machine) => kind(machine).length));
+  return /* @__PURE__ */ h(Box, {
+    flexDirection: "column"
+  }, machines.machines.map((machine) => /* @__PURE__ */ h(Box, {
+    key: machine.id,
+    flexDirection: "column"
+  }, /* @__PURE__ */ h(Box, {
+    gap: 2
+  }, /* @__PURE__ */ h(Box, {
+    flexShrink: 0
+  }, /* @__PURE__ */ h(Text, {
+    bold: machine.id === machines.here
+  }, machine.name.padEnd(width))), /* @__PURE__ */ h(Box, {
+    flexShrink: 0
+  }, /* @__PURE__ */ h(Text, {
+    dimColor: true
+  }, kind(machine).padEnd(kindWidth))), machine.connected ? /* @__PURE__ */ h(Text, {
+    color: "success"
+  }, "connected") : /* @__PURE__ */ h(Text, {
+    dimColor: true
+  }, `last seen ${momentOf(machine.seenAt)}`), machine.id === machines.here ? /* @__PURE__ */ h(Text, {
+    dimColor: true
+  }, "this machine") : /* @__PURE__ */ h(Button, {
+    key: `remove-${machine.id}`,
+    plain: true,
+    dimColor: true,
+    onPress: () => void (mod.state.memory.removing = machine.id)
+  }, "[Remove]")), removing !== machine.id ? null : /* @__PURE__ */ h(Box, {
+    flexDirection: "column",
+    paddingLeft: 2
+  }, /* @__PURE__ */ h(Text, {
+    wrap: "wrap"
+  }, `Remove ${machine.name}? It stops uploading at once, and its sessions stay listed and resumable here. Add a machine joins it again.`), /* @__PURE__ */ h(Box, {
+    gap: 2
+  }, /* @__PURE__ */ h(Button, {
+    key: `remove-yes-${machine.id}`,
+    plain: true,
+    onPress: () => remove(mod, machine.id)
+  }, /* @__PURE__ */ h(Text, {
+    color: "error"
+  }, "[Remove]")), /* @__PURE__ */ h(Button, {
+    key: `remove-no-${machine.id}`,
+    plain: true,
+    dimColor: true,
+    onPress: () => void (mod.state.memory.removing = null)
+  }, "[Cancel]"))))));
+}
+
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-qOJhFD/release/src/agents.ts
+var AGENT = { type: "string", description: "The agent id, or its first 8 characters." };
+var WAKES = "An idle agent takes the message at once, works, and rests again on its own.";
+function agentTools(mod) {
+  const tell = (agent, told) => askProgram(mod, "/agents/tell", { session: agent, ...told });
+  const agentsNow = async () => (await askProgram(mod, "/agents")).agents;
+  const found = (agents, agent) => {
+    const matches = agents.filter(({ id }) => id.startsWith(agent));
+    if (matches[0] === undefined)
+      throw new Error(`No agent's id begins with ${agent}. list_agents lists them.`);
+    if (matches.length > 1)
+      throw new Error(`${matches.length} agents' ids begin with ${agent}. Give more of it.`);
+    return matches[0];
+  };
+  return [
+    tool({
+      name: "list_machines",
+      description: "List every machine joined to your relay: its name, whether it is connected, and when it was last seen. `here` is the id of this machine. `candidates` are machines on your Tailscale network not joined yet, which add_machine adds, and `adding` the adds still running, with why one failed.",
+      execute: () => askProgram(mod, "/machines")
+    }),
+    tool({
+      name: "add_machine",
+      description: "Add a machine this one reaches over ssh: anyhost installs herdr-core, cmod and anyhost there and joins it to your relay, and every machine then shows its agents and terminals. It takes a few minutes and runs on after this call: list_machines shows it under adding until it joins, or why it failed.",
+      inputSchema: { type: "object", properties: { target: { type: "string", description: "How ssh reaches the machine: a Host of the ssh config, a Tailscale name such as mac-studio, or user@host." } }, required: ["target"] },
+      execute: async ({ target }) => {
+        await askProgram(mod, "/machines/add", { target });
+        return `Adding ${target}. list_machines shows it under adding until it joins.`;
+      }
+    }),
+    tool({
+      name: "remove_machine",
+      description: "Remove a machine from your relay by its name. Its agents stay listed and can be taken onto another machine.",
+      inputSchema: { type: "object", properties: { machine: { type: "string" } }, required: ["machine"] },
+      execute: async ({ machine }) => {
+        const found = (await askProgram(mod, "/machines")).machines.find((each) => each.name === machine);
+        if (found === undefined)
+          throw new Error(`No machine joined to your relay is named ${machine}.`);
+        await askProgram(mod, "/machines/remove", { id: found.id });
+        return `Removed ${machine}.`;
+      }
+    }),
+    tool({
+      name: "list_agents",
+      description: "List the Claude Code and Codex agents of every machine, newest first: id, title, first prompt, the machine that last ran it, the machine that holds it, its status, last activity, repository, folder, whether it is archived, its parent: the agent that started it with start_agent and manages it, and its source: the agent whose conversation it was forked from, each with that agent's title and the machine that holds it, or null. A fork has a source and no parent. The status is working, idle, waiting (at a permission prompt, which press_keys answers), or empty when it runs on no connected machine. tell_agent, read_agent's screen, press_keys and show_agent reach a Codex agent only while it runs in a terminal of herdr-core, and sleep_agent, read_agent's messages, move_agent and open_agent reach Claude Code agents alone. Archived agents are left out unless archived is true. children_of lists only the agents one agent started, `me` the ones this agent started.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", minimum: 1, description: "How many to list, 30 by default." },
+          archived: { type: "boolean", description: "List archived agents too." },
+          children_of: { type: "string", description: "An agent id, its first 8 characters, or `me`: list only the agents it started." }
+        }
+      },
+      execute: async ({ limit = 30, archived = false, children_of: childrenOf }) => {
+        const agents = await agentsNow();
+        const parent = childrenOf === undefined ? undefined : childrenOf === "me" ? sessions.current.id : found(agents, childrenOf).id;
+        const byId = new Map(agents.map((agent) => [agent.id, agent]));
+        const named = (agent) => {
+          const known = byId.get(agent);
+          return agent === "" ? null : { id: agent, title: known?.title ?? "", machine: known === undefined ? "" : known.holder || known.machine };
+        };
+        return agents.filter((agent) => (archived || !agent.archived) && (parent === undefined || agent.parent === parent)).slice(0, limit).map(({ id, tool: kind, title, firstPrompt, machine, holder, status, lastActivity, repo, cwd, archived: isArchived, parent: startedBy, source }) => ({
+          id,
+          tool: kind,
+          title,
+          firstPrompt: firstPrompt.slice(0, 200),
+          machine,
+          holder,
+          status,
+          lastActivity,
+          repo,
+          cwd,
+          archived: isArchived,
+          parent: named(startedBy),
+          source: named(source)
+        }));
+      }
+    }),
+    tool({
+      name: "start_agent",
+      description: `Start a new Claude Code agent on a machine, this one when machine is left out, in its checkout of the repository the folder is in, and type prompt into it as its first message. It never reaches an agent that exists: to message one, find it with list_agents and use tell_agent, which wakes it wherever it sleeps, and when list_agents fails, call it again instead of starting an agent. This agent becomes its parent: the prompt names this agent and its machine as its sender, so the new agent reports back with tell_agent when it is done or stuck, which wakes this agent, and list_agents lists it with children_of me. Answers the agent's id and machine. ${WAKES}`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          folder: { type: "string", description: "An absolute folder on this machine. Another machine works in its own checkout of the same repository." },
+          machine: { type: "string", description: "The machine name, from list_machines." },
+          prompt: { type: "string", description: "The first message the agent gets." }
+        },
+        required: ["folder"]
+      },
+      execute: ({ folder, machine = "", prompt = "" }) => askProgram(mod, "/new", { folder, machine, prompt, parent: sessions.current.id })
+    }),
+    tool({
+      name: "tell_agent",
+      description: `Send an agent a message wherever it runs: anyhost types it into its terminal and presses Enter, then answers its status and screen once its turn started. The message names this agent as its sender, so the other agent answers with tell_agent when it is done or stuck. A message that starts with / runs that slash command in it, as /exit. An agent waiting at a permission prompt refuses messages until press_keys answers it. ${WAKES}`,
+      inputSchema: { type: "object", properties: { agent: AGENT, text: { type: "string" } }, required: ["agent", "text"] },
+      execute: ({ agent, text }) => tell(agent, { text, sender: sessions.current.id })
+    }),
+    tool({
+      name: "read_agent",
+      description: "Read an agent wherever it runs, without waking it: its status and screen, or with messages its conversation, what it was told and what it answered, from the machine that holds it, running or not. An agent's answer to the task start_agent gave it is its last assistant message, messages 1. skip pages back through its whole history.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          agent: AGENT,
+          lines: { type: "integer", minimum: 0, description: "Lines of the terminal above the screen, 0 by default. herdr-core reads them only while the agent is not working." },
+          messages: { type: "integer", minimum: 1, description: "Read this many of its messages instead of its screen, the newest last." },
+          skip: { type: "integer", minimum: 0, description: "With messages: leave out this many of the newest first, 0 by default, so messages 20 skip 20 reads the 20 before the last 20." }
+        },
+        required: ["agent"]
+      },
+      execute: ({ agent, lines = 0, messages, skip = 0 }) => tell(agent, messages === undefined ? { lines } : { messages, skip })
+    }),
+    tool({
+      name: "sleep_agent",
+      description: "Stop an agent wherever it runs: its Claude Code ends once its turn ends, and its terminal stays with its last reply, so its tab and place on screen stay. tell_agent wakes it with its whole conversation. press_keys esc stops a turn without stopping the agent.",
+      inputSchema: { type: "object", properties: { agent: AGENT }, required: ["agent"] },
+      execute: async ({ agent }) => {
+        const told = await tell(agent, { sleep: true });
+        return `${told.session.slice(0, 8)} on ${told.machine} goes to sleep once its turn ends. It is ${told.status} now.`;
+      }
+    }),
+    tool({
+      name: "show_agent",
+      description: "Show an agent's terminal on this machine's Herdr app, as a terminal multiplexer shows a pane: focus brings it on screen in its tab, peek shows it over the screen with Keep and Close, tab gives it a tab of its own, right and down show it live beside or below the person's focused pane, and hide takes its pane away while the agent runs on. An agent another machine runs shows from there; one that runs nowhere starts here.",
+      inputSchema: {
+        type: "object",
+        properties: { agent: AGENT, place: { type: "string", enum: ["focus", "peek", "tab", "right", "down", "hide"], description: "focus by default." } },
+        required: ["agent"]
+      },
+      execute: ({ agent, place = "focus" }) => askProgram(mod, "/agents/show", { session: agent, place })
+    }),
+    tool({
+      name: "press_keys",
+      description: "Press named keys in an agent's terminal wherever it runs, then answer its status and screen: down and enter pick and answer a permission prompt, esc stops its turn. Names are enter, esc, tab, up, down, left, right, ctrl+c, a single character, and the like.",
+      inputSchema: { type: "object", properties: { agent: AGENT, keys: { type: "array", items: { type: "string" }, minItems: 1 } }, required: ["agent", "keys"] },
+      execute: ({ agent, keys }) => tell(agent, { keys })
+    }),
+    tool({
+      name: "move_agent",
+      description: "Move an agent to another machine, which runs it from then on with its whole conversation and code. The machine that runs the agent moves it once its turn ends.",
+      inputSchema: { type: "object", properties: { agent: AGENT, machine: { type: "string" } }, required: ["agent", "machine"] },
+      execute: async ({ agent, machine }) => {
+        const [agents, { here, machines }] = await Promise.all([agentsNow(), askProgram(mod, "/machines")]);
+        const moved = found(agents, agent);
+        const runsOn = moved.holder || moved.machine;
+        if (runsOn === machines.find(({ id }) => id === here)?.name)
+          return await askProgram(mod, "/move", { session: moved.id, machine });
+        await tell(moved.id, { text: `/move ${machine}` });
+        return `${runsOn} moves ${moved.id.slice(0, 8)} to ${machine} once its turn ends. read_agent shows how it goes.`;
+      }
+    }),
+    tool({
+      name: "archive_agent",
+      description: "Archive an agent whose work is finished, which moves it out of the active list on every machine, or bring an archived one back with archived false. Working in an archived agent brings it back by itself.",
+      inputSchema: { type: "object", properties: { agent: AGENT, archived: { type: "boolean", description: "true by default." } }, required: ["agent"] },
+      execute: async ({ agent, archived = true }) => {
+        const { id } = found(await agentsNow(), agent);
+        await askProgram(mod, "/agents/archive", { session: id, archived });
+        return `${archived ? "Archived" : "Brought back"} ${id.slice(0, 8)}.`;
+      }
+    }),
+    tool({
+      name: "settle_agent",
+      description: "Settle an agent whose work rests, which moves it to the Settled shelf on every machine until its next message, and clears its pin and snooze, or with settled false keep it out of Settled until its next message, as an agent settles by itself once it sits idle the days the person chose.",
+      inputSchema: { type: "object", properties: { agent: AGENT, settled: { type: "boolean", description: "true by default." } }, required: ["agent"] },
+      execute: async ({ agent, settled = true }) => {
+        await askProgram(mod, "/agents/settle", { session: agent, settled });
+        return `${settled ? "Settled" : "Unsettled"} ${agent.slice(0, 8)}.`;
+      }
+    }),
+    tool({
+      name: "snooze_agent",
+      description: "Snooze an agent on every machine until a time, which hides it on the Snoozed shelf until then, until a prompt reaches it, or until it waits for the person at a permission prompt. A finished turn never wakes it. until null wakes it now.",
+      inputSchema: {
+        type: "object",
+        properties: { agent: AGENT, until: { type: ["string", "null"], description: "The ISO time it wakes, such as 2026-11-16T09:00:00.000Z, or null to wake it now." } },
+        required: ["agent", "until"]
+      },
+      execute: async ({ agent, until }) => {
+        await askProgram(mod, "/agents/snooze", { session: agent, until });
+        return until === null ? `Woke ${agent.slice(0, 8)}.` : `Snoozed ${agent.slice(0, 8)} until ${until}.`;
+      }
+    }),
+    tool({
+      name: "delete_agent",
+      description: "Delete an agent wherever it is held: the machine that holds it stops it, working or not, and deletes its conversation and files there and in R2, so every machine lists it under Deleted. Opening a deleted agent with open_agent brings it back. An agent cannot delete itself.",
+      inputSchema: { type: "object", properties: { agent: AGENT }, required: ["agent"] },
+      execute: async ({ agent }) => {
+        const { id } = found(await agentsNow(), agent);
+        if (id === sessions.current.id)
+          throw new Error(`${id.slice(0, 8)} is this agent, which cannot delete itself.`);
+        await askProgram(mod, "/agents/delete", { session: id });
+        return `Deleted ${id.slice(0, 8)}.`;
+      }
+    }),
+    tool({
+      name: "fork_agent",
+      description: "Fork a Claude Code agent into a new agent that holds its conversation up to a message, by default its end, on the machine that holds it, titled after it with (fork), with the agent forked as its source in list_agents. A fork is an agent of its own, never a child of the agent forked. A fork at the end that nobody opens is a duplicate, and one at an earlier message a split. Its history refers to the source's and uploads only what it adds. open_agent or tell_agent then runs it.",
+      inputSchema: {
+        type: "object",
+        properties: { agent: AGENT, at: { type: "string", description: "The uuid of the message the fork ends with, from the agent's transcript. Leave it out to fork at the end." } },
+        required: ["agent"]
+      },
+      execute: ({ agent, at = "" }) => askProgram(mod, "/agents/fork", { session: agent, at })
+    }),
+    tool({
+      name: "open_agent",
+      description: "Run an agent on this machine in a terminal of herdr-core and answer that terminal: the one it runs in when it runs here, else one that resumes it, from its history in R2 when the machine that holds it is not connected, as when it is closed, offline or died, which then stops its copy as it next connects. An agent whose machine is connected stays there, and move_agent moves it.",
+      inputSchema: { type: "object", properties: { agent: AGENT }, required: ["agent"] },
+      execute: ({ agent }) => askProgram(mod, "/agents/open", { session: agent })
+    })
+  ];
+}
+
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-qOJhFD/release/src/mod.ts
+var MACHINES_EVERY_MS = 1e4;
+var PROMPT_ASK_MS = 1500;
+var PROMPT_MS = 3000;
+var MOVING = new Set(["waiting", "uploading", "moving"]);
+var anyhost = defineMod({
+  name: "anyhost",
+  state: initialState,
+  options: {
+    uploadEvery: option.number({
+      title: "Upload every",
+      description: "Seconds between uploads of a session to your Cloudflare account. 0 uploads every write.",
+      default: 5,
+      min: 0
+    }),
+    checkouts: option.folder({
+      title: "Checkouts folder",
+      description: "Where anyhost resume clones a repository this machine lacks. Empty: the folder your checkouts share, else your home folder.",
+      default: ""
+    }),
+    join: option.text({
+      title: "Join with",
+      description: "An invite link, which Add a machine sets as it installs anyhost here, or anyhost machines --invite prints on a joined machine. anyhost joins this machine with it within a minute, then empties it.",
+      default: ""
+    })
+  },
+  installer: [connectStep],
+  async setup(mod) {
+    const here = await device.read();
+    const capture = mod.use(program({
+      command: ["anyhost", "serve"],
+      environment: { ANYHOST_DEVICE_ID: here.id, ANYHOST_DEVICE_NAME: here.name, ANYHOST_DEVICE_OS: here.os, ANYHOST_DEVICE_ARCH: here.arch },
+      isService: true
+    }));
+    reachProgram(mod, capture);
+    for (const job of agentTools(mod))
+      mod.use(job);
+    const view = mod.views.add(machinesView);
+    mod.use(slashCommand({
+      name: "machines",
+      description: "Show every machine joined to your relay, add a machine, or remove one",
+      reply: () => toggleMachines(mod, view)
+    }));
+    mod.every(MACHINES_EVERY_MS, () => view.isOpen ? showMachines(mod) : undefined);
+    const shown = new Set;
+    const showOnce = (message, description) => {
+      if (shown.has(message))
+        return;
+      shown.add(message);
+      mod.toast.error(message, { description, duration: Infinity });
+    };
+    const known = new Map;
+    const following = new Set;
+    const check = async () => {
+      const session = sessions.current.id;
+      if (await capture.ready().catch(() => {
+        return;
+      }) === undefined)
+        return;
+      const holder = await askProgram(mod, `/claims/${session}`).catch((error) => {
+        if (!(error instanceof NoAnswer))
+          showOnce("anyhost could not check which machine holds this session", messageOf(error));
+        return;
+      });
+      if (holder === undefined)
+        return;
+      known.set(session, holder);
+      if (holder.problem !== undefined)
+        showOnce("anyhost captures nothing on this machine", holder.problem);
+      const untold = `untold ${session} ${holder.untold}`;
+      if (holder.untold !== undefined && !shown.has(untold)) {
+        shown.add(untold);
+        mod.toast.warning(`${holder.untold} may take one more prompt of this session`, {
+          description: `${holder.untold}'s anyhost was not connected when this machine took the session, so it learns that this machine holds the session when it next connects.`,
+          duration: Infinity
+        });
+      }
+      if (holder.move !== undefined && MOVING.has(holder.move.step))
+        follow();
+      return holder;
+    };
+    const clearedFrom = new Map;
+    let ended = "";
+    const changed = (event, at = new Date().toISOString(), title = "") => {
+      const session = sessions.current.id;
+      return askProgram(mod, "/sessions/changed", { session, folder: sessions.current.cwd, event, at, source: clearedFrom.get(session) ?? "", title }).then(() => {
+        return;
+      }, (error) => error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: "warning" }));
+    };
+    sessions.current.onSessionStart(async (started) => {
+      if (started.source === "clear" && ended !== "" && ended !== started.session)
+        clearedFrom.set(started.session, ended);
+      await check();
+      await changed("started");
+    });
+    sessions.current.onSessionEnd((end) => {
+      ended = end.session;
+      return changed(end.reason === "exit" ? "quit" : "ended");
+    });
+    sessions.current.onTurnStart((turn) => {
+      if (!turn.prompt.text.startsWith("/"))
+        return changed("turnStart", turn.openedAt);
+      const answered = turn.onMessage({ type: /^(reply|toolCall)$/ }, () => {
+        answered.remove();
+        return changed("turnStart", turn.openedAt);
+      });
+      return;
+    });
+    sessions.current.onTurnEnd((turn) => changed("turnEnd", turn.closedAt));
+    sessions.current.onElicitation(() => changed("asked"));
+    sessions.current.onNotification({ type: /^(permission_prompt|elicitation_dialog)$/ }, () => changed("asked"));
+    sessions.current.onCwdChange(() => changed("moved"));
+    commands.onRun({ name: "rename" }, (run) => changed("renamed", undefined, run.args.trim() || sessions.current.title));
+    const continuesOn = (machine) => `This session continues on ${machine}, in a terminal of herdr-core there. The anyhost pane of the Herdr app opens it.`;
+    sessions.current.beforePrompt(async () => {
+      const session = sessions.current.id;
+      const answered = await new Promise((resolve) => {
+        const late = mod.after(PROMPT_ASK_MS, () => resolve(undefined));
+        check().then((holder) => {
+          late.stop();
+          resolve(holder);
+        });
+      });
+      const { machine, move } = answered ?? known.get(session) ?? {};
+      if (machine === undefined)
+        return;
+      return { refuse: move?.step === "moved" ? continuesOn(machine) : `This session continues on ${machine}.` };
+    }, { timeoutMs: PROMPT_MS, onFailure: "pass" });
+    const follow = () => {
+      const session = sessions.current.id;
+      if (following.has(session))
+        return;
+      following.add(session);
+      const toast = `move-${session}`;
+      let drawn = "";
+      const end = () => {
+        timer.stop();
+        following.delete(session);
+      };
+      const timer = mod.every(FOLLOW_MS, async () => {
+        const holder = await askProgram(mod, `/claims/${session}`).catch((error) => {
+          mod.log(`anyhost could not follow the move of ${session}: ${messageOf(error)}`, { level: "warning" });
+          return;
+        });
+        if (holder === undefined)
+          return;
+        known.set(session, holder);
+        const { move } = holder;
+        if (move === undefined) {
+          end();
+          mod.toast.error("anyhost lost track of the move, as its program restarted", { id: toast, description: "anyhost list shows which machine holds the session now.", duration: Infinity });
+          return;
+        }
+        if (`${move.step} ${move.line}` === drawn)
+          return;
+        drawn = `${move.step} ${move.line}`;
+        if (move.step === "moved")
+          mod.toast.info(continuesOn(move.to), { id: toast, description: move.line, duration: Infinity });
+        else if (move.step === "failed")
+          mod.toast.error(move.line, { id: toast, duration: Infinity });
+        else {
+          const keep = { label: "Keep it here", onClick: () => askProgram(mod, "/move/keep", { session }) };
+          mod.toast.loading(`Moving to ${move.to}…`, { id: toast, description: move.line, action: keep });
+        }
+        if (!MOVING.has(move.step))
+          end();
+      });
+    };
+    mod.use(slashCommand({
+      name: "move",
+      description: "Move this session to another of your machines, which runs it from then on",
+      argumentHint: "<machine>",
+      reply: async ({ positionals }) => {
+        const [machine, ...more] = positionals;
+        if (machine === undefined || more.length > 0)
+          return "Name the one machine to move this session to, as in /move devbox. /machines lists your machines.";
+        const session = sessions.current.id;
+        const { to, step, line } = await askProgram(mod, "/move", { session, machine });
+        known.set(session, { ...known.get(session), move: { to, step, line } });
+        mod.toast.loading(`Moving to ${machine}…`, { id: `move-${session}` });
+        follow();
+        return;
+      }
+    }));
+  }
+});
+
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-qOJhFD/release/hooks/register.ts
+function register(addHook, options) {
+  registerMod(addHook, anyhost, options);
+}
+export {
+  register
+};
