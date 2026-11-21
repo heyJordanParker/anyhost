@@ -1,6 +1,6 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, appHome, closeOverlay, exec, focused, hc, home, keys, layout, machines, nextCommand, notify, openOverlay, panes, props, readTextFile, run, setAgentOrder, setShared, shared, spaces, terminals, theme, updates, window, writeTextFile } from "herdr";
+import { agents, appHome, closeOverlay, exec, focused, hc, home, keys, layout, machines, nextCommand, notify, openOverlay, panes, pickFolder, props, readTextFile, run, setAgentOrder, setShared, shared, spaces, terminals, theme, updates, window, writeTextFile } from "herdr";
 import { createHash } from "crypto";
 
 const REFRESH_MS = 30_000;
@@ -176,6 +176,7 @@ const INSTANT = { duration: 0 };
 const MOTION_MOST = 40;
 const FILTER_BODY_MOST = 460;
 const CARD_HEIGHT = UI.space.xs * 2 + UI.height.inline * 3;
+const PICKER_HEIGHT = UI.height.row * 10 + UI.space.lg;
 const MENU_WIDTH = 220;
 const MENU_SEPARATOR = UI.space.xs * 2 + 1;
 const BUSY_REASON = "Not while it runs or waits for you";
@@ -5172,66 +5173,118 @@ export default class Anyhost extends View {
 
 
   initNew(cx) {
-    const pulse = shared(PULSE);
-    const p = props();
-    this.machine = pulse?.here ?? "";
+    this.machine = shared(PULSE)?.here ?? "";
     this.cursorAt = 0;
     this.newScroll = ScrollHandle.new();
-    this.handle = cx.focus_handle();
-    this.folder = InputState.new({ placeholder: "Or a folder: ~/Developer/app" });
-    this.folder.on("submit", () => {
-      const folder = this.folder.value().trim().replace(/^~(?=\/|$)/, props().homes?.[this.machine] || home());
-      if (folder === "") return;
-      const on = shared(PULSE)?.all.machines.find((m) => m.name === this.machine)?.on ?? null;
-      startSession(this.machine, folder, on, "anyhost could not start a session");
-      closeOverlay(props().overlay);
+    this.listing = null;
+    this.where = InputState.new({ placeholder: "Search projects, or type a folder: ~/Developer/app" });
+    this.where.on("change", (_e, cx) => this.whereChanged(cx));
+    this.where.on("submit", () => {
+      const choice = this.newChoices()[this.cursorAt];
+      if (choice) this.startChosen(choice);
     });
-    this.choices = () => {
-      const list = (shared(PULSE)?.projects ?? []).filter((project) => (project.checkouts?.[this.machine] ?? []).length > 0 && project.key !== NONE);
-      const current = list.find((project) => project.key === p.current);
-      const ordered = [...(current ? [current] : []), ...list.filter((project) => project !== current).sort((a, b) => b.newest - a.newest)];
-      return ordered.flatMap((project) => (project.checkouts[this.machine] ?? []).map((folder, n) => ({ project, folder, isFirst: n === 0, isCurrent: project === current })));
-    };
-    cx.timer.after(0, () => this.handle.focus());
+    cx.timer.after(0, () => this.where.focus());
+  }
+
+  typedFolder() {
+    const typed = this.where.value().trim();
+    if (!/^[~/]/.test(typed)) return null;
+    const path = typed.replace(/^~(?=\/|$)/, props().homes?.[this.machine] || home());
+    const cut = path.lastIndexOf("/");
+    return { path, dir: path.slice(0, cut) || "/", start: path.slice(cut + 1) };
+  }
+
+  whereChanged(cx) {
+    this.cursorAt = 0;
+    this.newScroll.scroll_to_item(0);
+    const typed = this.typedFolder();
+    if (typed && (this.listing?.dir !== typed.dir || this.listing.machine !== this.machine)) this.listFolders(cx, this.machine, typed.dir);
+    cx.notify();
+  }
+
+  listFolders(cx, machine, dir) {
+    this.listing = { machine, dir, names: [], failed: null };
+    const on = shared(PULSE)?.all.machines.find((m) => m.name === machine)?.on || null;
+    cx.spawn(async (cx) => {
+      const listed = await exec("find", ["-L", dir, "-mindepth", "1", "-maxdepth", "1", "-type", "d"], { on, timeout: 10_000 }).catch((e) => ({ code: 1, stdout: "", stderr: String(e) }));
+      if (this.listing?.dir !== dir || this.listing.machine !== machine) return;
+      const names = listed.stdout.split("\n").filter(Boolean).map((found) => found.slice(found.lastIndexOf("/") + 1));
+      this.listing = { machine, dir, names: names.sort((a, b) => a.localeCompare(b)), failed: names.length === 0 && listed.code !== 0 ? `${machine} can't read ${dir}` : null };
+      cx.notify();
+    });
+  }
+
+  newChoices() {
+    const typed = this.typedFolder();
+    if (typed) {
+      const start = typed.start.toLowerCase();
+      const listed = this.listing?.dir === typed.dir && this.listing.machine === this.machine ? this.listing.names : [];
+      const inside = listed.filter((name) => name.toLowerCase().startsWith(start) && (start.startsWith(".") || !name.startsWith("."))).map((name) => ({ folder: `${typed.dir === "/" ? "" : typed.dir}/${name}` }));
+      const exact = inside.find((choice) => choice.folder === typed.path);
+      const typedItself = start === "" ? [{ folder: typed.dir }] : !exact && inside.length === 0 ? [{ folder: typed.path }] : [];
+      return [...typedItself, ...(exact ? [exact] : []), ...inside.filter((choice) => choice !== exact)];
+    }
+    const text = this.where.value().trim().toLowerCase();
+    const homeFolder = props().homes?.[this.machine] ?? "";
+    const list = (shared(PULSE)?.projects ?? []).filter((project) => (project.checkouts?.[this.machine] ?? []).length > 0 && project.key !== NONE);
+    const current = list.find((project) => project.key === props().current);
+    const ordered = [...(current ? [current] : []), ...list.filter((project) => project !== current).sort((a, b) => b.newest - a.newest)];
+    return ordered
+      .flatMap((project) => (project.checkouts[this.machine] ?? []).map((folder) => ({ project, folder, isCurrent: project === current })))
+      .filter((choice) => text === "" || choice.project.name.toLowerCase().includes(text) || tildeOf(choice.folder, homeFolder).toLowerCase().includes(text))
+      .map((choice, n, shown) => ({ ...choice, isFirst: n === 0 || shown[n - 1].project !== choice.project }));
+  }
+
+  startChosen({ project = null, folder }) {
+    const holder = project ?? (shared(PULSE)?.projects ?? []).find((p) => p.key !== NONE && (p.checkouts?.[this.machine] ?? []).includes(folder));
+    if (holder) this.startIn(holder, { machine: this.machine, folder });
+    else startSession(this.machine, folder, shared(PULSE)?.all.machines.find((m) => m.name === this.machine)?.on ?? null, `anyhost could not start a session in ${folder.split("/").pop()}`);
+    closeOverlay(props().overlay);
   }
 
   renderNew(t) {
     const p = props();
     const pulse = shared(PULSE);
-    const choices = this.choices();
+    const choices = this.newChoices();
     this.cursorAt = Math.min(this.cursorAt, Math.max(0, choices.length - 1));
     const homeFolder = p.homes?.[this.machine] ?? "";
-    const pick = (choice) => {
-      this.startIn(choice.project, { machine: this.machine, folder: choice.folder });
-      closeOverlay(p.overlay);
-    };
+    const typed = this.typedFolder();
     const machinesList = (pulse?.all.machines ?? []).filter((m) => m.connected);
+    const emptyLine = typed ? (this.listing?.failed ?? "No folder matches") : this.where.value().trim() !== "" ? "No project matches. Type a folder, as ~/Developer/app" : "No project has a checkout on this machine yet";
     return v_flex()
       .id("ah-new")
-      .track_focus(this.handle)
       .on_key_down((e, cx) => {
         const roved = rovedTo(e, this.cursorAt, choices.length);
         if (roved !== null) {
           this.cursorAt = roved;
           this.newScroll.scroll_to_item(roved);
         }
-        if (e.key === "enter" && choices[this.cursorAt]) pick(choices[this.cursorAt]);
         if (e.key === "escape") closeOverlay(p.overlay);
         cx.notify();
       })
       .w_full()
-      .p(UI.space.lg)
-      .gap(UI.space.md)
       .bg(t.popover)
       .text_color(t.foreground)
-      .child(h_flex().items_center().child(div().flex_1().text_size(UI.text.title).font_semibold().child("New session in…")).child(div().text_size(UI.text.caption).text_color(t.dim).child("↑↓ Enter")))
+      .child(
+        h_flex()
+          .h(UI.height.row + UI.space.lg)
+          .px(UI.space.lg)
+          .gap(UI.space.sm)
+          .flex_none()
+          .items_center()
+          .border_b(1)
+          .border_color(t.border)
+          .child(this.searchField(t, this.where, (cx) => this.whereChanged(cx))),
+      )
       .child(
         v_flex()
           .id("ah-new-list")
-          .max_h(340)
+          .h(PICKER_HEIGHT)
+          .p(UI.space.sm)
           .gap(1)
           .overflow_y_scrollbar()
           .track_scroll(this.newScroll)
+          .when(choices.length === 0, (el) => el.child(this.empty(t, emptyLine)))
           .children(
             choices.map((choice, n) =>
               this.item(`ah-new-${n}`)
@@ -5244,32 +5297,47 @@ export default class Anyhost extends View {
                     cx.notify();
                   }
                 })
-                .on_click(() => pick(choice))
-                .child(choice.isFirst ? this.mark(t, choice.project.name) : this.leadIcon("git-branch").text_color(t.dim))
-                .when(choice.isFirst, (el) => el.child(div().flex_none().text_size(UI.text.body).text_color(t.foreground).child(choice.project.name)))
-                .child(div().flex_1().min_w(0).text_size(UI.text.caption).text_color(t.dim).whitespace_nowrap().overflow_hidden().truncate().child(tildeOf(choice.folder, homeFolder)))
-                .when(choice.isCurrent && choice.isFirst, (el) => el.child(div().flex_none().text_size(UI.text.caption).text_color(t.muted).child("Current"))),
+                .on_click(() => this.startChosen(choice))
+                .when(!choice.project, (el) => el.child(this.leadIcon("folder").text_color(t.dim)).child(div().flex_1().min_w(0).truncate().text_size(UI.text.body).child(tildeOf(choice.folder, homeFolder))))
+                .when(Boolean(choice.project), (el) =>
+                  el
+                    .child(choice.isFirst ? this.mark(t, choice.project.name) : this.leadIcon("git-branch").text_color(t.dim))
+                    .when(choice.isFirst, (row) => row.child(div().flex_none().text_size(UI.text.body).text_color(t.foreground).child(choice.project.name)))
+                    .child(div().flex_1().min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(tildeOf(choice.folder, homeFolder)))
+                    .when(choice.isCurrent && choice.isFirst, (row) => row.child(div().flex_none().text_size(UI.text.caption).text_color(t.muted).child("Current"))),
+                ),
             ),
-          )
-          .when(choices.length === 0, (el) => el.child(this.empty(t, "No project has a checkout on this machine yet"))),
+          ),
       )
-      .child(this.input(t, this.folder))
-      .when(machinesList.length > 1, (el) =>
-        el.child(
-          h_flex()
-            .gap(UI.space.xs)
-            .items_center()
-            .flex_wrap()
-            .child(div().pr(UI.space.xs).text_size(UI.text.caption).text_color(t.dim).child("Runs on"))
-            .children(
+      .child(
+        h_flex()
+          .px(UI.space.lg)
+          .py(UI.space.sm)
+          .gap(UI.space.xs)
+          .flex_none()
+          .items_center()
+          .border_t(1)
+          .border_color(t.border)
+          .when(machinesList.length > 1, (el) =>
+            el.child(div().pr(UI.space.xs).text_size(UI.text.caption).text_color(t.dim).child("Runs on")).children(
               machinesList.map((m) =>
-                this.choice(t, `ah-m-${m.name}`, m.place, m.name === this.machine, () => {
+                this.choice(t, `ah-m-${m.name}`, m.place, m.name === this.machine, (cx) => {
                   this.machine = m.name;
-                  this.cursorAt = 0;
+                  this.whereChanged(cx);
                 }, "server"),
               ),
             ),
-        ),
+          )
+          .child(div().flex_1())
+          .when(this.machine === pulse?.here, (el) =>
+            el.child(
+              this.choice(t, "ah-new-pick", "Choose folder…", false, (cx) =>
+                cx.spawn(async () => {
+                  const folder = await pickFolder({ prompt: "Start session" });
+                  if (folder) this.startChosen({ folder });
+                }), "folder"),
+            ),
+          ),
       );
   }
 

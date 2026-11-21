@@ -17,10 +17,11 @@ anyhost keeps every Claude Code and Codex session of every machine the Architect
 - CI runs these on macOS and Linux:
   - `bun run --cwd cli check` type-checks the program.
   - `bun run --cwd relay check` type-checks the Worker against Cloudflare's types.
-  - `bun run --cwd cli test` runs `cli/tests/`, each file in its own worker.
+  - `bun run --cwd cli test` runs `cli/tests/`, each file in its own worker, slowest first by `cli/tests/timings.json`. CI splits it into 3 shards per system with `--shard`, balanced by the same file.
   - `cmod check .` type-checks, lints with oxlint and runs the mod's and the relay's tests.
 - `bun run --cwd cli check` and `bun run --cwd cli test` build `relay/dist/relay.js` first, which the program embeds as text. `bun install --cwd relay` comes before the program's tests, which load Miniflare from there.
 - `herdr-app check herdr/anyhost` loads the pane once.
+- `bun test --timings tests/timings.json --update-timings ./tests` in `cli/` records each file's time again, after a file's time changes by a lot.
 - A release raises only `.claude-plugin/plugin.json`'s `version`. A push to `main` publishes `v<version>` once CI passes on both systems. `docs/releasing.md` holds the steps.
 
 ## Code
@@ -52,6 +53,7 @@ anyhost keeps every Claude Code and Codex session of every machine the Architect
 - Claude Code's record `sessions/<pid>.json` is the program's source of a session's status (`busy`, `shell`, `waiting`, `idle`, `parkedJobId`), read only through `recordedSessions` and `recordAt` in `claude.ts`.
 - Claude Code saves no transcript under a parent Claude Code's `CLAUDE_CODE_CHILD_SESSION`, so every anyhost process drops `CLAUDE_MARKERS` as it starts.
 - herdr-core gives new terminals the environment its core started with, which `hc server restart` keeps and a stop and start replaces.
+- In local workerd, the Pool's own close of a hibernated socket reaches the machine only when the Pool is evicted, after 10 s with no event or later. A test reads a removed or silent machine from the `devices` op, not from its socket's close. The relay's tests give the Pool `LIVE_MS` as a binding of 3 s, and the test socket ends with `terminate()`, as the program's does.
 - The Herdr app interrupts a render after 50 ms and an event after 500 ms (`Budgets` in gpui-kit's `sandbox.rs`), so a render only draws a model built in a task (`computeModel` in `main.js`). The interrupt runs no `catch` and no `finally` and ends the task, so the pane holds no flag across an `await`, builds cards one step per `sync` (`building`), and takes each list it reads in a timer of its own (`receive`), never in the task that follows the list.
 
 ## Tests

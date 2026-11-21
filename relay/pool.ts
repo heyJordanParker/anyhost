@@ -42,6 +42,7 @@ export type Env = {
   readonly POOL: DurableObjectNamespace<Pool>
   readonly BUCKET_NAME: string
   readonly SETUP_CODE_SHA256?: string
+  readonly LIVE_MS?: string
 }
 
 export type Reply = { readonly status: number; readonly body: object }
@@ -184,9 +185,11 @@ export class Pool extends DurableObject<Env> {
   readonly #sql: Sql
   readonly #writes = new Map<string, Set<Promise<void>>>()
   readonly #heardAt = new WeakMap<WebSocket, number>()
+  readonly #liveMs: number
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
+    this.#liveMs = Number(env.LIVE_MS ?? LIVE_MS)
     this.#sql = loggedSql(ctx.storage.sql)
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'))
     void ctx.blockConcurrencyWhile(() => this.#start())
@@ -319,12 +322,12 @@ export class Pool extends DurableObject<Env> {
     if (socket.readyState !== WebSocket.OPEN) return false
     const pingedAt = this.ctx.getWebSocketAutoResponseTimestamp(socket)?.getTime() ?? 0
     const { connectedAt } = socket.deserializeAttachment() as Attachment
-    return Date.now() - Math.max(this.#heardAt.get(socket) ?? 0, pingedAt, connectedAt) <= LIVE_MS
+    return Date.now() - Math.max(this.#heardAt.get(socket) ?? 0, pingedAt, connectedAt) <= this.#liveMs
   }
 
   #closeSilent(sockets: readonly WebSocket[]): void {
     const silent = sockets.filter((socket) => socket.readyState === WebSocket.OPEN && !this.#isLive(socket))
-    for (const socket of silent) socket.close(1000, `The relay heard nothing on this socket for ${LIVE_MS / 1000} seconds`)
+    for (const socket of silent) socket.close(1000, `The relay heard nothing on this socket for ${this.#liveMs / 1000} seconds`)
     for (const device of new Map(silent.map((socket) => [deviceOf(socket).id, deviceOf(socket)])).values()) this.#tellGone(device)
   }
 
@@ -343,12 +346,12 @@ export class Pool extends DurableObject<Env> {
   }
 
   async #watchLinks(): Promise<void> {
-    if (this.#liveDevices().length > 1 && (await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + LIVE_MS)
+    if (this.#liveDevices().length > 1 && (await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + this.#liveMs)
   }
 
   override async alarm(): Promise<void> {
     this.#closeSilent(this.ctx.getWebSockets())
-    if (this.#liveDevices().length > 1) await this.ctx.storage.setAlarm(Date.now() + LIVE_MS)
+    if (this.#liveDevices().length > 1) await this.ctx.storage.setAlarm(Date.now() + this.#liveMs)
   }
 
   #deliver(device: string, message: string | Uint8Array, sockets = this.ctx.getWebSockets(device)): boolean {

@@ -52,7 +52,7 @@ const startLocal: StartRelay = async ({ objects, setupCode }) => {
       compatibilityDate: COMPATIBILITY_DATE,
       durableObjects: { POOL: { className: 'Pool', useSQLite: true } },
       r2Buckets: { BUCKET },
-      bindings: { BUCKET_NAME: BUCKET, SETUP_CODE_SHA256: sha256(code) },
+      bindings: { BUCKET_NAME: BUCKET, SETUP_CODE_SHA256: sha256(code), LIVE_MS: String(live) },
       resourcePersistencePath: folder,
     })
   let miniflare = new Miniflare(options(setupCode))
@@ -87,6 +87,7 @@ async function startSplit(code: string, poolCode: string): Promise<Miniflare> {
 }
 
 const target = process.env['ANYHOST_RELAY_TARGET']
+const live = target === undefined ? 3000 : LIVE_MS
 const startRelay: StartRelay = target === undefined ? startLocal : ((await import(target)) as { startRelay: StartRelay }).startRelay
 
 setDefaultTimeout(60_000)
@@ -103,7 +104,7 @@ class Socket {
   readonly ws: WebSocket
   readonly closed: Promise<{ code: number; reason: string }>
   readonly #inbox: Message[] = []
-  readonly #pinger = setInterval(() => this.ws.readyState === WebSocket.OPEN && this.ws.send('ping'), LIVE_MS / 4)
+  readonly #pinger = setInterval(() => this.ws.readyState === WebSocket.OPEN && this.ws.send('ping'), live / 4)
   #wake = (): void => undefined
   #id = 0
 
@@ -183,7 +184,7 @@ class Socket {
 
   close(): void {
     clearInterval(this.#pinger)
-    this.ws.close()
+    this.ws.terminate()
   }
 }
 
@@ -410,20 +411,20 @@ describe('the socket', () => {
     expect(await mac.socket.message('pong')).toEqual({ t: 'pong' })
   })
 
-  test('counts a machine connected while its uploads arrive, though its ping waits 15 s behind them, past LIVE_MS', async () => {
+  test('counts a machine connected while its uploads arrive, though its ping waits behind them past LIVE_MS', async () => {
     const busy = await joinNew(mac, 'busy-link')
     busy.socket.silence()
-    const pingArrives = Date.now() + LIVE_MS + 5000
+    const pingArrives = Date.now() + live + live / 9
     for (let upload = 0; Date.now() < pingArrives; upload += 1) {
       const { answer } = await busy.socket.request([{ op: 'put', key: `${prefix}busy/${upload}`, size: 1 }], [bytesOf(1)])
       expect(answer['results']).toEqual([{ status: 200, etag: md5(bytesOf(1)) }])
-      await Bun.sleep(5000)
+      await Bun.sleep(live / 9)
     }
     const [devices] = await mac.socket.results({ op: 'devices' })
     expect((devices!['devices'] as Json[]).find((device) => device['id'] === busy.device.id)).toMatchObject({ connected: true })
     mac.socket.send({ t: 'tell', id: 'busy', to: busy.device.id, session: crypto.randomUUID(), text: '', keys: [], lines: 0, sender: '' })
     expect(await busy.socket.message('tell')).toMatchObject({ id: 'busy', from: { id: mac.device.id } })
-  }, 90_000)
+  })
 
   test('closes an unknown token with 4401', async () => {
     const stranger = await connect(hex(32), 'stranger', roots('/home/stranger'))
@@ -801,7 +802,7 @@ describe('the holder', () => {
     expect(await asleep.socket.results({ op: 'claim', session: sleeping, take: false })).toEqual([{ status: 200, told: true }])
     expect(await awake.socket.results({ op: 'claim', session: pinging, take: false })).toEqual([{ status: 200, told: true }])
     asleep.socket.silence()
-    await Bun.sleep(LIVE_MS + 2000)
+    await Bun.sleep(live + live / 2)
 
     expect(await mac.socket.results({ op: 'claim', session: sleeping, take: true })).toEqual([{ status: 200, previous: { id: asleep.device.id, name: asleep.device.name }, told: false }])
     expect(await mac.socket.results({ op: 'claim', session: pinging, take: true })).toEqual([{ status: 200, told: true }])
@@ -810,8 +811,8 @@ describe('the holder', () => {
     const [devices] = await mac.socket.results({ op: 'devices' })
     const connected = (id: string): unknown => (devices!['devices'] as Json[]).find((device) => device['id'] === id)?.['connected']
     expect([connected(asleep.device.id), connected(awake.device.id)]).toEqual([false, true])
-    expect(await asleep.socket.closed).toEqual({ code: 1000, reason: `The relay heard nothing on this socket for ${LIVE_MS / 1000} seconds` })
-  }, 90_000)
+    expect(await asleep.socket.closed).toEqual({ code: 1000, reason: `The relay heard nothing on this socket for ${live / 1000} seconds` })
+  })
 
   test("a want names the machine a session should run on and a start's spec, reaches every machine with its holder as claimed and in changes, and the next want replaces all of it", async () => {
     const worker = await joinNew(mac, 'wanted-on')
@@ -975,7 +976,8 @@ describe('presence', () => {
     const asleep = await joinNew(mac, 'present-asleep')
     await presenceOf(awake, asleep, true)
     asleep.socket.silence()
-    expect(await presenceOf(awake, asleep, false, 2 * LIVE_MS + 15_000)).toEqual({ t: 'presence', device: { id: asleep.device.id, name: asleep.device.name }, connected: false })
-    expect(await asleep.socket.closed).toEqual({ code: 1000, reason: `The relay heard nothing on this socket for ${LIVE_MS / 1000} seconds` })
-  }, 2 * LIVE_MS + 30_000)
+    expect(await presenceOf(awake, asleep, false, 2 * live + 15_000)).toEqual({ t: 'presence', device: { id: asleep.device.id, name: asleep.device.name }, connected: false })
+    const [devices] = await awake.socket.results({ op: 'devices' })
+    expect((devices!['devices'] as Json[]).find((device) => device['id'] === asleep.device.id)).toMatchObject({ connected: false })
+  })
 })

@@ -7,7 +7,7 @@
   },
   "scripts": {
     "check": "bun run --cwd ../relay build && tsc",
-    "test": "bun run --cwd ../relay build && bun test --parallel --timeout 60000 ./tests",
+    "test": "bun run --cwd ../relay build && bun test --parallel --timeout 60000 --timings tests/timings.json ./tests",
     "build": "trap 'rm -f .*.bun-build' EXIT; bun install --frozen-lockfile || exit 1; bun run --cwd ../relay build || exit 1; for machine in ${CMOD_MACHINES:-darwin-arm64 darwin-x64 linux-arm64 linux-x64}; do bun build --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --target=bun-$machine src/main.ts --outfile dist/anyhost-$machine || exit 1; done"
   },
   "cmod": {
@@ -19,6 +19,6 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@cmodjs/core": "^8.3.0"
+    "@cmodjs/core": "^8.3.3"
   }
 }

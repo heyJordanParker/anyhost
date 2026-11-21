@@ -10,39 +10,36 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
-  check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    env:
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
-      GH_TOKEN: ${{ github.token }}
+  mod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          filter: blob:none
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
 
       - name: Install Claude Code and cmod, which check the mod
         run: |
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           npm install -g @cmodjs/cli
-
-      - name: Start the user's systemd, which runs each hc run in a scope on Linux
-        if: runner.os == 'Linux'
-        run: |
-          sudo loginctl enable-linger "$USER"
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-          timeout 30 bash -c 'until [ -S "/run/user/$(id -u)/bus" ]; do sleep 1; done'
 
       - name: Install the packages of the mod, the program and the relay
         run: |
@@ -55,33 +52,79 @@ jobs:
           bun run --cwd cli check
           bun run --cwd relay check
 
-      # cmod check runs tests/mod.test.ts and relay/relay.test.ts with bun test, and no file of cli/tests, so this step
-      # runs only the program's
-      - name: Test the anyhost program
-        run: bun run --cwd cli test
-
       - name: Check the mod, and test the mod and the relay
         run: cmod check .
 
-  # A release goes out only once the Mac and Linux both passed.
-  release:
-    needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: macos-latest
-    timeout-minutes: 30
-    env:
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
-      GH_TOKEN: ${{ github.token }}
+  program:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        shard: [1, 2, 3]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          filter: blob:none
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
 
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Start the user's systemd, which runs each hc run in a scope on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          timeout 30 bash -c 'until [ -S "/run/user/$(id -u)/bus" ]; do sleep 1; done'
+
+      - name: Install the packages of the program and the relay
+        run: |
+          bun install --cwd cli --frozen-lockfile
+          bun install --cwd relay --frozen-lockfile
+
+      - name: Test the anyhost program, shard ${{ matrix.shard }} of 3
+        run: bun run --cwd cli test --shard=${{ matrix.shard }}/3
+
+  # A release goes out only once every check passed on the Mac and on Linux.
+  release:
+    needs: [mod, program]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Skip the release when its version is released already
+        id: version
+        run: |
+          tag="v$(node -p "require('./.claude-plugin/plugin.json').version")"
+          if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then echo "released=true" >> "$GITHUB_OUTPUT"; fi
+
+      - uses: oven-sh/setup-bun@v2
+        if: steps.version.outputs.released != 'true'
+        with:
+          bun-version: 1.4.4
+
+      - uses: actions/cache@v4
+        if: steps.version.outputs.released != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
       - name: Install Claude Code and cmod, which publish the mod
+        if: steps.version.outputs.released != 'true'
         run: |
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -90,18 +133,14 @@ jobs:
       # cmod publish runs cmod check first, which runs relay/relay.test.ts on Miniflare from the relay's packages, and the
       # program's build installs its own.
       - name: Install the packages of the mod and the relay
+        if: steps.version.outputs.released != 'true'
         run: |
           bun install --frozen-lockfile
           bun install --cwd relay --frozen-lockfile
 
-      - name: Release the version when it is new
+      - name: Release the version
+        if: steps.version.outputs.released != 'true'
         run: |
-          version=$(node -p "require('./.claude-plugin/plugin.json').version")
-          tag="v$version"
-          if git rev-parse -q --verify "refs/tags/$tag" > /dev/null; then
-            echo "$tag is released already"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           cmod publish .
