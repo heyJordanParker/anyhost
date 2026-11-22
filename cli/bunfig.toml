@@ -1,0 +1,26 @@
+[test]
+preload = ["./tests/times.ts"]
+concurrentTestGlob = [
+  "**/tests/activity.test.ts",
+  "**/tests/agents.test.ts",
+  "**/tests/asleep.test.ts",
+  "**/tests/backup.test.ts",
+  "**/tests/cmod-sessions.test.ts",
+  "**/tests/commands.test.ts",
+  "**/tests/delete.test.ts",
+  "**/tests/devices.test.ts",
+  "**/tests/histories.test.ts",
+  "**/tests/keep.test.ts",
+  "**/tests/list.test.ts",
+  "**/tests/marks.test.ts",
+  "**/tests/move.test.ts",
+  "**/tests/new.test.ts",
+  "**/tests/open.test.ts",
+  "**/tests/relay.test.ts",
+  "**/tests/restart.test.ts",
+  "**/tests/takeover.test.ts",
+  "**/tests/tell.test.ts",
+  "**/tests/terminals.test.ts",
+  "**/tests/trust.test.ts",
+  "**/tests/watcher.test.ts",
+]

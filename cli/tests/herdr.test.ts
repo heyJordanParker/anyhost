@@ -1,4 +1,5 @@
-import { expect, onTestFinished, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test, whenTestEnds } from './test.ts'
 import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { claudeStart } from '../src/claude.ts'
@@ -19,7 +20,7 @@ const claudeRunIn = async (run: readonly string[]): Promise<{ readonly home: str
   const home = temporaryFolder()
   const before = process.env['XDG_STATE_HOME']
   process.env['XDG_STATE_HOME'] = join(home, 'state')
-  onTestFinished(() => {
+  whenTestEnds(() => {
     if (before === undefined) delete process.env['XDG_STATE_HOME']
     else process.env['XDG_STATE_HOME'] = before
   })
@@ -289,7 +290,7 @@ test('an install after an uninstall switches the Herdr app to the anyhost layout
   script(join(home, 'bin', 'herdr-app'), `#!/bin/sh\necho "$*" >> ${switches}\n`)
   const path = process.env['PATH']
   process.env['PATH'] = `${join(home, 'bin')}:${path ?? ''}`
-  onTestFinished(() => void (process.env['PATH'] = path))
+  whenTestEnds(() => void (process.env['PATH'] = path))
   await installHerdr(record, herdr)
 
   await uninstallHerdr(record, herdr)

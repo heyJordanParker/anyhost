@@ -2,6 +2,15 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.6] - 2026-11-22
+
+### Changed
+- Each machine pings the relay as soon as it connects, instead of 30 seconds later, so the relay hears a new machine's link at once.
+
+### Fixed
+- Every machine hears at once when another machine's link closes. The relay sometimes never learned of a closed link, so the others kept showing that machine connected. anyhost updates the relay in your Cloudflare account to version 11 for this.
+- Undo puts everything back exactly as it was. Closing a tab, archiving, settling, unpinning, snoozing, deleting a session and deleting a tag or a stage now wait until their "Click to undo" note goes away, so undoing one changes nothing: a closed tab comes back at once in its place, still running, and an unpinned session goes back to its spot among the pins.
+
 ## [0.11.5] - 2026-11-21
 
 ### Changed

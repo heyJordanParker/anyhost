@@ -1,8 +1,10 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, until } from './memory.ts'
 import { anyhostOn, copiesOn, CTO, LAPTOP, logOf, machineFor, postTo, runningOn, runsOn, script, sentOn, serveOn, SESSION, startedOn, stepsOf, tripOn, WORKER, workerOn } from './program.ts'
+import { TELL_MS } from './times.ts'
 
 test('anyhost tell types into a session another machine runs and prints its screen, and with no text only reads it', async () => {
   const relay = await memoryRelay()
@@ -164,12 +166,12 @@ test('a tell to a session the person runs here outside herdr-core, as in tmux, s
   expect(sentOn(laptop.folder)).toEqual([])
 }, 60_000)
 
-test('a tell to a machine that holds the session and does not answer gets its answer after 25 s over the socket, which keeps a request open past 10 s', async () => {
+test('a tell to a machine that holds the session and does not answer gets its answer after TELL_MS over the socket, which keeps a request open past 10 s', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const worker = await workerOn(relay)
   laptop.child.kill('SIGSTOP')
   const told = await postTo(worker.socket, '/agents/tell', { session: SESSION, text: 'Book the train' }).finally(() => laptop.child.kill('SIGCONT'))
 
-  expect(told).toEqual({ status: 400, body: { message: `${LAPTOP.name}, which holds 11111111, did not answer within 25 s. An anyhost older than 0.4.0 there does not answer at all.` } })
+  expect(told).toEqual({ status: 400, body: { message: `${LAPTOP.name}, which holds 11111111, did not answer within ${TELL_MS / 1000} s. An anyhost older than 0.4.0 there does not answer at all.` } })
 }, 60_000)

@@ -1,4 +1,3 @@
-import { onTestFinished } from 'bun:test'
 import type { ServerWebSocket } from 'bun'
 import { Miniflare, convertV4MiniflareOptions } from '../../relay/node_modules/miniflare'
 import { bundleRelay } from '../../relay/build.ts'
@@ -7,6 +6,8 @@ import type { Code, Problems } from '../src/capture.ts'
 import type { Device, MachineRoots } from '../src/device.ts'
 import { connectRelay, type Relay } from '../src/relay.ts'
 import type { Status } from '../src/serve.ts'
+import { whenTestEnds } from './test.ts'
+import { LIVE_MS } from './times.ts'
 
 export const noCode: Code = { captureCode: async () => undefined, restoreCode: async (_header, _readPart, folder) => folder }
 export const failTest: Problems = {
@@ -129,7 +130,7 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
       compatibilityDate: COMPATIBILITY_DATE,
       durableObjects: { POOL: { className: 'Pool', useSQLite: true } },
       r2Buckets: { BUCKET: bucket },
-      bindings: { BUCKET_NAME: bucket },
+      bindings: { BUCKET_NAME: bucket, LIVE_MS: String(LIVE_MS) },
       unsafeInspectDurableObjects: true,
     }),
   )
@@ -402,6 +403,6 @@ export async function memoryRelay(bucket = MEMORY): Promise<MemoryRelay> {
         await miniflare.dispose()
       })()),
   }
-  onTestFinished(() => relay.stop())
+  whenTestEnds(() => relay.stop())
   return relay
 }

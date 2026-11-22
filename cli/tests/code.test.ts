@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, expect, setDefaultTimeout, test } from 'bun:test'
+import { afterAll, beforeAll, expect, setDefaultTimeout } from 'bun:test'
+import { test } from './test.ts'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'

@@ -23,7 +23,7 @@ A push to `main` that raises the version releases it. The [CI workflow](../.gith
 
 CI then:
 
-1. runs, in parallel jobs, `bun run --cwd cli check`, `bun run --cwd relay check` and `cmod check .` on Linux, and the program's tests in 3 shards each on macOS and on Linux, balanced by `cli/tests/timings.json`, where Linux first starts the runner user's systemd, which runs each `hc run` in a scope;
+1. runs, in parallel jobs, `bun run --cwd cli check`, `bun run --cwd relay check` and `cmod check .` on Linux, and the program's tests in 3 shards each on macOS and on Linux, four files at a time and four tests of each file `cli/bunfig.toml` lists at once, balanced by `cli/tests/timings.json`, where Linux first starts the runner user's systemd, which runs each `hc run` in a scope;
 2. cancels a run of the same branch that a newer push replaced, releases only once every job passed, and skips the release when the tag `v<version>` exists, so a push that keeps the version releases nothing;
 3. installs the mod's and the relay's packages, and runs `cmod publish .`, which:
    - runs `cmod check .` and releases nothing it fails, so the relay's tests need Miniflare from `relay/node_modules` there too;

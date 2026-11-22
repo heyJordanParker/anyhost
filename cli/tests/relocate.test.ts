@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { relocate, type Roots } from '../src/relocate.ts'
 
 const mac: Roots = { home: '/Users/alice', claudeHome: '/Users/alice/.claude', claudeTmp: '/private/tmp/claude-501', codexHome: '/Users/alice/.codex', checkout: '/Users/alice/code/app' }

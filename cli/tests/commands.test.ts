@@ -1,16 +1,17 @@
-import { expect, onTestFinished, test } from 'bun:test'
+import { expect } from 'bun:test'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { askProgram, serveSocket, type Status } from '../src/serve.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { anyhostOn, DAILY_LIMIT, HOST, machineFor, script, serveOn, SESSION, spawnForTest, temporaryFolder } from './program.ts'
+import { test, whenTestEnds } from './test.ts'
 
-test('the program counts as absent only while no socket file exists or nothing listens on it, and an answer lost on the way is an error', async () => {
+test.serial('the program counts as absent only while no socket file exists or nothing listens on it, and an answer lost on the way is an error', async () => {
   const state = temporaryFolder()
   const before = process.env['XDG_STATE_HOME']
   process.env['XDG_STATE_HOME'] = state
-  onTestFinished(() => {
+  whenTestEnds(() => {
     if (before === undefined) delete process.env['XDG_STATE_HOME']
     else process.env['XDG_STATE_HOME'] = before
   })
@@ -19,7 +20,7 @@ test('the program counts as absent only while no socket file exists or nothing l
   const absent = await askProgram('/agents/open', { session: SESSION })
   const dropping = createServer((socket) => socket.destroy())
   await new Promise<void>((resolve) => dropping.listen(serveSocket(), resolve))
-  onTestFinished(() => void dropping.close())
+  whenTestEnds(() => void dropping.close())
 
   expect(absent).toBeUndefined()
   await expect(askProgram('/agents/open', { session: SESSION })).rejects.toThrow(`The anyhost program at ${serveSocket()} gave no answer to /agents/open: ECONNRESET`)

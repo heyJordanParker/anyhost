@@ -1,10 +1,12 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { hotKey } from '../src/capture.ts'
 import { isPaused } from '../src/claude.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { childrenOf, claimOn, hookOn, keepsWriting, LAPTOP, postTo, roots, runningOn, runsOn, script, serveOn, SESSION, spawnForTest, stepsOf, textOfFrame, WORKER, workerOn } from './program.ts'
+import { EXIT_MS } from './times.ts'
 
 const OTHER = '99999999-2222-3333-4444-555555555555'
 
@@ -267,7 +269,7 @@ test('a program that restarts while a move paused its copy resumes that copy onc
 
 const IGNORES_SIGTERM = ['bash', '-c', "trap '' TERM; while true; do sleep 1; done"]
 
-test('a moved copy here that ignores its SIGTERM ends with SIGKILL 10 s later, and the move reaches moved, with no problem in /status', async () => {
+test('a moved copy here that ignores its SIGTERM ends with SIGKILL EXIT_MS later, and the move reaches moved, with no problem in /status', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay, LAPTOP, {}, IGNORES_SIGTERM)
   await workerOn(relay)
@@ -279,7 +281,7 @@ test('a moved copy here that ignores its SIGTERM ends with SIGKILL 10 s later, a
 
   expect(last.step).toBe('moved')
   expect(steps).toEqual(['uploading', 'moving'])
-  expect(Date.now() - askedAt).toBeGreaterThan(9000)
+  expect(Date.now() - askedAt).toBeGreaterThanOrEqual(EXIT_MS)
   await laptop.claude.exited
   expect(laptop.claude.signalCode).toBe('SIGKILL')
   expect((await relay.claims()).get(SESSION)).toBe(WORKER.id)
@@ -289,7 +291,7 @@ test('a moved copy here that ignores its SIGTERM ends with SIGKILL 10 s later, a
 
 let stubborn: readonly number[] = []
 
-test('a test machine whose Claude Code stand-in ignores SIGTERM runs it, its program and every child they start in process groups its test owns', async () => {
+test.serial('a test machine whose Claude Code stand-in ignores SIGTERM runs it, its program and every child they start in process groups its test owns', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay, LAPTOP, {}, IGNORES_SIGTERM)
   await until(() => childrenOf(laptop.claude.pid).length > 0, 'the stand-in starting its sleep')
@@ -299,7 +301,7 @@ test('a test machine whose Claude Code stand-in ignores SIGTERM runs it, its pro
   expect(laptop.claude.signalCode).toBeNull()
 }, 60_000)
 
-test('the test before it leaves no process once it ends', () => {
+test.serial('the test before it leaves no process once it ends', () => {
   expect(stubborn.length).toBeGreaterThan(2)
   expect(stubborn.filter((pid) => Bun.spawnSync(['kill', '-0', String(pid)]).exitCode === 0)).toEqual([])
 })

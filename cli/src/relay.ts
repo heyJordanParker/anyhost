@@ -32,8 +32,9 @@ import {
   type Welcome,
 } from '../../relay/protocol.ts'
 
-const PONG_MS = 40_000
-const ANSWER_MS = 40_000
+const PING_EVERY_MS = Number(process.env['ANYHOST_PING_MS'] ?? PING_MS)
+const PONG_MS = Number(process.env['ANYHOST_PONG_MS'] ?? 40_000)
+const ANSWER_MS = Number(process.env['ANYHOST_ANSWER_MS'] ?? 40_000)
 const CONNECT_MS = 10_000
 const RETRY_MS = [1000, 2000, 4000, 8000, 16_000, 32_000, 60_000]
 export const waitAfter = (failures: number): number => RETRY_MS[Math.min(failures, RETRY_MS.length) - 1] ?? 0
@@ -303,13 +304,15 @@ export function connectRelay(options: RelayOptions): Relay {
         console.error(`${new Date().toISOString()} anyhost read no message of the relay: ${messageOf(error)}`)
       }
     })
+    const ping = (): void => {
+      if (socket !== ws) return
+      ws.send('ping')
+      if (pongDue === undefined) awaitPong()
+    }
     ws.addEventListener('open', () => {
       if (socket !== ws) return
-      pinger = setInterval(() => {
-        if (socket !== ws) return
-        ws.send('ping')
-        if (pongDue === undefined) awaitPong()
-      }, PING_MS)
+      ping()
+      pinger = setInterval(ping, PING_EVERY_MS)
     })
     ws.addEventListener('error', (event) => void (failed = (event as ErrorEvent).message ?? ''))
     ws.addEventListener('close', (event) => {

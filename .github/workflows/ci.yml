@@ -19,7 +19,7 @@ env:
 jobs:
   mod:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,7 +62,7 @@ jobs:
         os: [macos-latest, ubuntu-latest]
         shard: [1, 2, 3]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,7 +98,7 @@ jobs:
     needs: [mod, program]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: macos-latest
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
         with:

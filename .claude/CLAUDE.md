@@ -39,6 +39,7 @@ anyhost keeps every Claude Code and Codex session of every machine the Architect
 - Placement is Kubernetes' desired state. The Pool's claims row holds the holder (`device`), the machine the session should run on (`wanted`), a start's `spec` and the last `error`, and each program reconciles every session against it (`placeSession` in `move.ts`). Only the holder writes a session's journal: every frame carries `holder`, and the Pool refuses another machine's with 409.
 - Marks, pins, tags, parents, project names and preferences live in `shared.json` in R2. Every change is an intent applied to the newest copy with an etag (`updateObject` in `shared.ts`), as Kubernetes' Server-Side Apply. A mark holds while its `at` is at or after the session's last activity.
 - The pane's changes go through one queue, `anyhost.outbox`, as Replicache's pending mutations, and it follows the list with `anyhost list --wait <version>`, as a Kubernetes watch.
+- Undo follows Gmail's Undo Send: an action with an undo toast waits in `anyhost.outbox` while the toast shows (`isHeld`), and undo drops it unsent (`undoHeld`).
 - `relocate` rewrites every path of the writer's machine into this machine's, so a moved session reads as if it ran here.
 
 ## The limits the code is shaped around
@@ -53,11 +54,13 @@ anyhost keeps every Claude Code and Codex session of every machine the Architect
 - Claude Code's record `sessions/<pid>.json` is the program's source of a session's status (`busy`, `shell`, `waiting`, `idle`, `parkedJobId`), read only through `recordedSessions` and `recordAt` in `claude.ts`.
 - Claude Code saves no transcript under a parent Claude Code's `CLAUDE_CODE_CHILD_SESSION`, so every anyhost process drops `CLAUDE_MARKERS` as it starts.
 - herdr-core gives new terminals the environment its core started with, which `hc server restart` keeps and a stop and start replaces.
-- In local workerd, the Pool's own close of a hibernated socket reaches the machine only when the Pool is evicted, after 10 s with no event or later. A test reads a removed or silent machine from the `devices` op, not from its socket's close. The relay's tests give the Pool `LIVE_MS` as a binding of 3 s, and the test socket ends with `terminate()`, as the program's does.
+- workerd delivers the Pool's own close of a hibernated socket that never sent a frame only when the Pool is evicted, 10 s or more later (workerd issue #7566). So the program pings as its socket opens, and so does the relay tests' socket. A test reads a silent machine from the `devices` op, not from its socket's close. The relay's tests give the Pool `LIVE_MS` as a binding of 3 s, and the test socket ends with `terminate()`, as the program's does.
 - The Herdr app interrupts a render after 50 ms and an event after 500 ms (`Budgets` in gpui-kit's `sandbox.rs`), so a render only draws a model built in a task (`computeModel` in `main.js`). The interrupt runs no `catch` and no `finally` and ends the task, so the pane holds no flag across an `await`, builds cards one step per `sync` (`building`), and takes each list it reads in a timer of its own (`receive`), never in the task that follows the list.
 
 ## Tests
 
+- `cli/tests/times.ts`, which `cli/bunfig.toml` preloads, shortens the program's waits for every test and every program a test starts, through `ANYHOST_*_MS` variables such as `ANYHOST_LIVE_MS`, which `memoryRelay` hands the Pool as `LIVE_MS`. A test reads each wait from there.
+- Tests take `test` from `cli/tests/test.ts`, whose `whenTestEnds` cleans up each test. The files `concurrentTestGlob` in `cli/bunfig.toml` lists run 4 tests at once, with `test.serial` for one that changes process-wide state. A file that times the test process's own thread stays off the list.
 - Every process a test starts goes through `spawnForTest` and every folder comes from `temporaryFolder`, both in `cli/tests/program.ts`. A file fails when it leaves a process behind (`processesLeftBehind`).
 - Tests run against `memoryRelay` in `cli/tests/memory.ts`, the real Worker and Pool in Miniflare, and a fake herdr-core (`fakeHc`, `coreSays`), so no test reaches a real relay or the machine's herdr-core. `connect.test.ts` answers every Cloudflare call with a stand-in, and every test bucket is `anyhost-test`, never `anyhost`.
 - Bun 1.4.4's `mock.module` leaks into the other test files of a run, so no test uses it. Its `toMatchObject` writes each `expect.any(…)` into the received value, so a test reads a value before it matches it.

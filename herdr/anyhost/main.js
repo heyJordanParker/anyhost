@@ -25,8 +25,6 @@ const PICKED_WORKTREE = "anyhost.pickedWorktree";
 const TAB_NAMES = "anyhost.tabNames";
 const SPACE_NAMES = "anyhost.spaceNames";
 const CHANGED = "anyhost.changed";
-const UNDO = "anyhost.undo";
-const UNDONE = "anyhost.undone";
 const WORKSPACES = "anyhost.workspaces";
 const WANTED = "anyhost.wanted";
 const PRESENTED = "anyhost.presented";
@@ -100,7 +98,7 @@ const RATIO_LEAST = 0.2;
 const SCROLL_WIDTH = 560;
 const TILE_WIDTH = 420;
 const CLOSED_MOST = 20;
-const RETIRED = ["anyhost.scope", "anyhost.projectSpace", "anyhost.moving", "anyhost.menu", "anyhost.views", "anyhost.projectMachine", "anyhost.ask", "anyhost.reveal", "anyhost.openingSpace", "anyhost.discarded"];
+const RETIRED = ["anyhost.scope", "anyhost.projectSpace", "anyhost.moving", "anyhost.menu", "anyhost.views", "anyhost.projectMachine", "anyhost.ask", "anyhost.reveal", "anyhost.openingSpace", "anyhost.discarded", "anyhost.undo", "anyhost.undone"];
 const SESSION_LABEL = "anyhost.session";
 const VIEW_LABEL = "anyhost.view";
 const NONE = "none";
@@ -484,10 +482,28 @@ const unadopted = () => {
   const adopted = new Set(shared(PULSE)?.adopted ?? []);
   return queued().filter(([id]) => !adopted.has(id));
 };
-const enqueue = ({ changes = {}, ops = [], run = [], failed = "anyhost could not change it", toast = null, opens = null }) => {
+const enqueue = ({ changes = {}, ops = [], run = [], failed = "anyhost could not change it", toast = null, opens = null, hold = null, show = null }) => {
   const id = idOf();
-  setShared(OUTBOX, { ...outboxOf(), [id]: { at: Date.now(), changes, ops, run, failed, toast, opens } });
+  setShared(OUTBOX, { ...outboxOf(), [id]: { at: Date.now(), changes, ops, run, failed, toast, opens, ...(hold ? { hold } : {}), ...(show ? { show } : {}) } });
   return id;
+};
+const isHeld = (entry, now = Date.now()) => entry.hold !== undefined && entry.sent === undefined && (now - entry.at < TOAST_MS || (shared(TOASTS) ?? []).some((x) => x.hold === entry.hold));
+const heldKeys = () => new Set(queued().filter(([, entry]) => isHeld(entry)).flatMap(([, entry]) => Object.keys(entry.changes)));
+const heldArchiveOf = (key) => queued().find(([, entry]) => isHeld(entry) && entry.changes[key]?.archived === true)?.[1].hold ?? null;
+const undoHeld = (hold) => {
+  const outbox = outboxOf();
+  const isDropped = (entry) => entry.hold === hold && entry.sent === undefined;
+  const dropped = Object.values(outbox).filter(isDropped);
+  setShared(TOASTS, (shared(TOASTS) ?? []).filter((x) => x.hold !== hold));
+  if (dropped.length === 0) return false;
+  setShared(OUTBOX, Object.fromEntries(Object.entries(outbox).filter(([, entry]) => !isDropped(entry))));
+  const show = dropped.find((entry) => entry.show)?.show;
+  if (show) {
+    cancelWant();
+    if (show.space && show.space !== spaces().find((sp) => sp.active)?.id) run("space.select", { id: show.space });
+    run("tab.select", { id: show.tab });
+  }
+  return true;
 };
 const LOADED_AT = Date.now();
 const deadlineOf = (entry) => entry.run.reduce((total, step) => total + (step.timeout ?? COMMAND_MS), 0);
@@ -506,17 +522,17 @@ const withPreference = (preferences, change, value) => {
   const next = value === null ? Object.fromEntries(Object.entries(entries).filter(([each]) => each !== entry)) : { ...entries, [entry]: value };
   return Object.keys(next).length === 0 ? withPreference(preferences, `pref:${key}`, null) : { ...preferences, [key]: next };
 };
-const sendPreference = (change, op) => {
+const sendPreference = (change, op, hold = null) => {
   const preferences = withPreference(preferencesOf(), change, op.value);
   if (JSON.stringify(preferences) === JSON.stringify(preferencesOf())) return;
   setShared(PREFERENCES, preferences);
   const outbox = outboxOf();
   const unsent = Object.keys(outbox).filter((id) => outbox[id].done === undefined && !outbox[id].sent && change in outbox[id].changes);
   if (unsent.length > 0) setShared(OUTBOX, Object.fromEntries(Object.entries(outbox).filter(([id]) => !unsent.includes(id))));
-  enqueue({ changes: { [change]: { value: op.value } }, run: [{ args: ["organize", JSON.stringify([{ op: "prefer", ...op }])] }] });
+  enqueue({ changes: { [change]: { value: op.value } }, run: [{ args: ["organize", JSON.stringify([{ op: "prefer", ...op }])] }], hold });
 };
 const prefer = (key, value) => sendPreference(`pref:${key}`, { key, value });
-const preferEntry = (key, entry, value) => sendPreference(`pref:${key}\0${entry}`, { key, entry, value });
+const preferEntry = (key, entry, value, hold = null) => sendPreference(`pref:${key}\0${entry}`, { key, entry, value }, hold);
 const closedKeys = () =>
   Object.entries(entriesOf("closed"))
     .sort(([, a], [, b]) => b - a)
@@ -1497,7 +1513,7 @@ export default class Anyhost extends View {
   }
 
   inputsOf(live, modelInputs, opening) {
-    return `${opening}|${modelInputs?.key ?? ""}|${Math.floor(Date.now() / TICK_MS)}|${this.snapshotAt}|${live.placed}|${shared(CHANGED) ?? 0}|${wantedOf()?.id ?? ""}|${JSON.stringify(outboxOf())}|${JSON.stringify(preferencesOf())}|${Boolean(shared(DRAG_TAB))}|${Boolean(shared(SPLIT))}|${this.pressed?.isMoving === true}`;
+    return `${opening}|${modelInputs?.key ?? ""}|${Math.floor(Date.now() / TICK_MS)}|${this.snapshotAt}|${live.placed}|${shared(CHANGED) ?? 0}|${wantedOf()?.id ?? ""}|${JSON.stringify(outboxOf())}|${(shared(TOASTS) ?? []).map((x) => x.id).join()}|${JSON.stringify(preferencesOf())}|${Boolean(shared(DRAG_TAB))}|${Boolean(shared(SPLIT))}|${this.pressed?.isMoving === true}`;
   }
 
   signatureOf(live, filter) {
@@ -1595,7 +1611,10 @@ export default class Anyhost extends View {
   adoptOutbox(cx) {
     const outbox = shared(OUTBOX) ?? null;
     const seen = `${this.snapshotAt}|${JSON.stringify(outbox)}`;
-    if (seen === this.outboxSeen) return false;
+    if (seen === this.outboxSeen) {
+      this.sendOutbox(cx);
+      return false;
+    }
     this.outboxSeen = seen;
     const pending = new Map();
     let tags = { ...this.snapshot?.tags };
@@ -1686,7 +1705,7 @@ export default class Anyhost extends View {
       const keys = [...Object.keys(entry.changes), ...(entry.ops.length > 0 ? ["ops"] : [])];
       const isBehind = keys.some((key) => held.has(key));
       for (const key of keys) held.add(key);
-      if (isBehind || isInFlight(entry, now)) continue;
+      if (isBehind || isInFlight(entry, now) || isHeld(entry, now)) continue;
       this.sendEntry(cx, id, entry, now);
     }
   }
@@ -1717,6 +1736,7 @@ export default class Anyhost extends View {
       if (answer.code !== 0) throw new Error((answer.stderr || answer.stdout).trim());
       return;
     }
+    if (step.app) return void run(step.app[0], step.app[1]);
     if (step.exec) {
       const answer = await exec(step.exec[0], step.exec.slice(1), { on: step.on ?? null, timeout: step.timeout ?? COMMAND_MS });
       if (answer.code !== 0) throw new Error((answer.stderr || answer.stdout).trim());
@@ -1943,9 +1963,16 @@ export default class Anyhost extends View {
   }
 
 
-  change(cx, changes, run, failed, toast = null, ops = []) {
-    enqueue({ changes, ops, run: run.map((step) => (Array.isArray(step) ? { args: step } : step)), failed, toast });
+  change(cx, changes, run, failed, hold = null, ops = [], show = null) {
+    enqueue({ changes, ops, run: run.map((step) => (Array.isArray(step) ? { args: step } : step)), failed, hold, show });
     if (this.pending !== undefined) this.adoptOutbox(cx);
+  }
+
+  holdFor(cx, title, body = "Click to undo.") {
+    const hold = idOf();
+    notify({ title, body, level: "info", timeout: TOAST_MS, hold, action: { name: `anyhost.undo-${hold}` } });
+    if (this.pending !== undefined) cx.timer.after(TOAST_MS, (cx) => this.sendOutbox(cx));
+    return hold;
   }
 
   redraw(cx) {
@@ -1961,14 +1988,24 @@ export default class Anyhost extends View {
     if (view) cx.notify(view);
   }
 
-  archive(cx, r, archived, isClosed = false) {
+  archive(cx, r, archived, { isClosed = false, hold = null, show = null } = {}) {
+    const held = archived ? null : heldArchiveOf(r.key);
+    if (held !== null) return void undoHeld(held);
     if (r.archived === archived) return;
+    const undo = archived ? (hold ?? this.holdFor(cx, `Archived ${r.title.slice(0, 50)}`)) : null;
     if (archived && (isClosed || Boolean(r.address))) {
-      preferEntry("closed", r.key, Date.now());
-      for (const key of closedKeys().slice(CLOSED_MOST)) preferEntry("closed", key, null);
+      preferEntry("closed", r.key, Date.now(), undo);
+      for (const key of closedKeys().slice(CLOSED_MOST)) preferEntry("closed", key, null, undo);
     } else if (!archived) preferEntry("closed", r.key, null);
-    if (archived) this.keepUndone(r.key, { target: { ...targetOf(r), archived: true } });
-    this.change(cx, { [r.key]: { archived } }, [["archive", r.key, ...(archived ? [] : ["--undo"])]], archived ? "anyhost could not archive it" : "anyhost could not restore it", archived ? { title: `Archived ${r.title.slice(0, 50)}`, body: isClosed ? "Click to reopen it." : "Click to undo.", level: "info", action: { name: `anyhost.restore-${r.key.slice(0, 8)}` } } : null);
+    this.change(cx, { [r.key]: { archived } }, [["archive", r.key, ...(archived ? [] : ["--undo"])]], archived ? "anyhost could not archive it" : "anyhost could not restore it", undo, [], show);
+  }
+
+  archiveAll(cx, rows, { isClosed = false, panes: closed = [], show = null } = {}) {
+    if (rows.length === 0) return closed.forEach((pane) => run("pane.close", { pane }));
+    const [first] = rows;
+    const hold = this.holdFor(cx, rows.length === 1 ? `${isClosed ? "Closed" : "Archived"} ${first.title.slice(0, 50)}` : `${isClosed ? "Closed" : "Archived"} ${rows.length} sessions`);
+    rows.forEach((r, i) => this.archive(cx, r, true, { isClosed, hold, show: i === 0 ? show : null }));
+    if (closed.length > 0) enqueue({ run: closed.map((pane) => ({ app: ["pane.close", { pane }] })), hold });
   }
 
   restore(cx, r) {
@@ -1983,9 +2020,10 @@ export default class Anyhost extends View {
     this.restore(cx, r);
   }
 
-  closeTabs(cx, tabs) {
+  closeTabs(cx, tabs, show = null) {
     const byAddress = new Map(terminals().map((x) => [x.address, x]));
     const leaving = [];
+    const closed = [];
     for (const tab of tabs) {
       const ps = panes().filter((p) => p.tab === tab);
       const rows = [...new Set(ps.map((p) => byAddress.get(p.terminal)?.labels?.[SESSION_LABEL]).filter(Boolean))].map((key) => this.sessionRowOf(key)).filter(Boolean);
@@ -1994,10 +2032,10 @@ export default class Anyhost extends View {
         run("tab.close", { id: tab, confirmed: true });
         continue;
       }
-      for (const p of ps.filter((p) => !byAddress.get(p.terminal)?.labels?.[SESSION_LABEL])) run("pane.close", { pane: p.pane });
+      closed.push(...ps.filter((p) => !byAddress.get(p.terminal)?.labels?.[SESSION_LABEL]).map((p) => p.pane));
       leaving.push(...rows);
     }
-    this.askArchive(cx, leaving, true);
+    this.askArchive(cx, leaving, { isClosed: true, panes: closed, show });
   }
 
   sessionRowOf(key) {
@@ -2006,16 +2044,16 @@ export default class Anyhost extends View {
     return known ? { key, ...known } : undefined;
   }
 
-  askArchive(cx, rows, isClosed = false) {
+  askArchive(cx, rows, { isClosed = false, panes: closed = [], show = null } = {}) {
     const leaving = rows.filter((r) => !r.pinned && !r.archived);
     const running = leaving.filter((r) => isRunning(r.state) || r.state === "blocked");
-    if (running.length === 0) return leaving.forEach((r) => this.archive(cx, r, true, isClosed));
+    if (running.length === 0) return this.archiveAll(cx, leaving, { isClosed, panes: closed, show });
     const [first] = running;
     this.confirm({
       title: running.length === 1 ? `Archive ${first.title.slice(0, 50)}?` : `Archive ${running.length} running sessions?`,
       body: running.length === 1 ? `${STATE[first.state].sentence}. Archiving stops it once its current work ends, and Restore opens it again.` : "Archiving stops each once its current work ends, and Restore opens it again.",
       go: "Archive",
-      archive: { rows: leaving.map((r) => ({ ...targetOf(r), archived: false })), isClosed },
+      archive: { rows: leaving.map((r) => ({ ...targetOf(r), archived: false })), isClosed, panes: closed, show },
     });
   }
 
@@ -2036,32 +2074,16 @@ export default class Anyhost extends View {
     this.visit(cx, r, new Date(Math.max(Date.now(), Date.parse(r.at) || 0)).toISOString(), failed);
   }
 
-  undoToastOf(done, r, command) {
-    return { title: `${done} ${r.title.slice(0, 50)}`, body: "Click to undo.", level: "info", action: { name: `anyhost.${command}-${r.key.slice(0, 8)}` } };
-  }
-
-  takeUndone(key) {
-    const { [key]: undone = {}, ...rest } = shared(UNDONE) ?? {};
-    setShared(UNDONE, rest);
-    return undone;
-  }
-
-  keepUndone(key, fields) {
-    setShared(UNDONE, { ...shared(UNDONE), [key]: fields });
-  }
-
   togglePin(cx, r) {
     return r.pinned ? this.unpin(cx, r) : this.pin(cx, r);
   }
 
-  pin(cx, r, snoozedUntil = "") {
-    const restored = isFuture(snoozedUntil) ? snoozedUntil : "";
-    this.change(cx, { [r.key]: { pinned: new Date().toISOString(), settled: false, snoozedUntil: restored } }, [["pin", r.key], ...(restored ? [["snooze", r.key, restored]] : [])], "anyhost could not pin it");
+  pin(cx, r) {
+    this.change(cx, { [r.key]: { pinned: new Date().toISOString(), settled: false, snoozedUntil: "" } }, [["pin", r.key]], "anyhost could not pin it");
   }
 
   unpin(cx, r) {
-    this.keepUndone(r.key, { snoozedUntil: r.snoozedUntil });
-    this.change(cx, { [r.key]: { pinned: "" } }, [["pin", r.key, "--undo"]], "anyhost could not unpin it", this.undoToastOf("Unpinned", r, "repin"));
+    this.change(cx, { [r.key]: { pinned: "" } }, [["pin", r.key, "--undo"]], "anyhost could not unpin it", this.holdFor(cx, `Unpinned ${r.title.slice(0, 50)}`));
   }
 
   toggleSettle(cx, r) {
@@ -2070,18 +2092,15 @@ export default class Anyhost extends View {
   }
 
   settle(cx, r) {
-    this.keepUndone(r.key, { pinned: r.pinned, snoozedUntil: r.snoozedUntil });
-    this.change(cx, { [r.key]: { settled: true, settledAt: new Date().toISOString(), pinned: "", snoozedUntil: "" } }, [["settle", r.key]], "anyhost could not settle it", this.undoToastOf("Settled", r, "unsettle"));
+    this.change(cx, { [r.key]: { settled: true, settledAt: new Date().toISOString(), pinned: "", snoozedUntil: "" } }, [["settle", r.key]], "anyhost could not settle it", this.holdFor(cx, `Settled ${r.title.slice(0, 50)}`));
   }
 
-  unsettle(cx, r, { pinned = false, snoozedUntil = "" } = {}) {
-    const restored = isFuture(snoozedUntil) ? snoozedUntil : "";
-    this.change(cx, { [r.key]: { settled: false, ...(pinned ? { pinned: new Date().toISOString() } : {}), ...(restored ? { snoozedUntil: restored } : {}) } }, [["settle", r.key, "--undo"], ...(pinned ? [["pin", r.key]] : []), ...(restored ? [["snooze", r.key, restored]] : [])], "anyhost could not unsettle it");
+  unsettle(cx, r) {
+    this.change(cx, { [r.key]: { settled: false } }, [["settle", r.key, "--undo"]], "anyhost could not unsettle it");
   }
 
   snooze(cx, r, until) {
-    if (until) this.keepUndone(r.key, { target: targetOf(r) });
-    this.change(cx, { [r.key]: { snoozedUntil: until ?? "" } }, [["snooze", r.key, ...(until ? [until] : ["--undo"])]], until ? "anyhost could not snooze it" : "anyhost could not wake it", until ? { title: `Snoozed ${r.title.slice(0, 50)}`, body: `It comes back ${wakeAtOf(until)}. Click to undo.`, level: "info", action: { name: `anyhost.wake-${r.key.slice(0, 8)}` } } : null);
+    this.change(cx, { [r.key]: { snoozedUntil: until ?? "" } }, [["snooze", r.key, ...(until ? [until] : ["--undo"])]], until ? "anyhost could not snooze it" : "anyhost could not wake it", until ? this.holdFor(cx, `Snoozed ${r.title.slice(0, 50)}`, `It comes back ${wakeAtOf(until)}. Click to undo.`) : null);
   }
 
   nameProject(cx, key, name) {
@@ -2092,26 +2111,14 @@ export default class Anyhost extends View {
     openOverlay({ mod: "anyhost", kind: "dialog", width: 460, props: { view: "settings", settleAfterDays: shared(PULSE)?.settleAfterDays ?? null } });
   }
 
-  undoOf(changes) {
-    const pulse = shared(PULSE);
-    const undo = [];
-    for (const change of changes) {
-      const tag = change.op === "dropTag" ? pulse?.tags[change.id] : undefined;
-      if (tag) undo.push({ op: "defineTag", id: change.id, ...tag }, ...(pulse.tagUses[change.id] ?? []).map((session) => ({ op: "tagSession", session, tag: change.id, on: true })));
-      if (change.op === "defineStages" && (pulse?.stages ?? []).some((s) => !change.stages.some((kept) => kept.id === s.id))) undo.push({ op: "defineStages", stages: pulse.stages });
-    }
-    return undo;
-  }
-
   organize(cx, changes, optimistic = []) {
-    const undo = this.undoOf(changes);
-    if (undo.length > 0) {
-      setShared(UNDO, { at: Date.now(), changes: undo });
-      notify({ title: changes.some((c) => c.op === "dropTag") ? "Deleted the tag" : "Deleted the stage", body: "Click to undo.", level: "info", action: { name: "anyhost.undo" } });
-    }
+    const pulse = shared(PULSE);
+    const isTagDropped = changes.some((c) => c.op === "dropTag" && pulse?.tags[c.id]);
+    const isStageDropped = changes.some((c) => c.op === "defineStages" && (pulse?.stages ?? []).some((s) => !c.stages.some((kept) => kept.id === s.id)));
+    const hold = isTagDropped || isStageDropped ? this.holdFor(cx, isTagDropped ? "Deleted the tag" : "Deleted the stage") : null;
     const fields = {};
     for (const [key, changed] of optimistic) fields[key] = { ...fields[key], ...changed };
-    this.change(cx, fields, [["organize", JSON.stringify(changes)]], "anyhost could not change it", null, changes);
+    this.change(cx, fields, [["organize", JSON.stringify(changes)]], "anyhost could not change it", hold, changes);
     if (this.pending !== undefined) this.redraw(cx);
   }
 
@@ -2123,8 +2130,7 @@ export default class Anyhost extends View {
   }
 
   dispatchDelete(cx, r, on) {
-    this.keepUndone(r.key, { target: { ...targetOf(r), deleted: true } });
-    this.change(cx, { [r.key]: { deleted: true } }, [{ args: ["delete", r.key], timeout: LONG_MS, on: on || null }], "anyhost could not delete it", { title: `Deleted ${r.title.slice(0, 50)}`, body: "Click to undo.", level: "info", action: { name: `anyhost.open-${r.key.slice(0, 8)}` } });
+    this.change(cx, { [r.key]: { deleted: true } }, [{ args: ["delete", r.key], timeout: LONG_MS, on: on || null }], "anyhost could not delete it", this.holdFor(cx, `Deleted ${r.title.slice(0, 50)}`));
   }
 
   confirmDelete(r) {
@@ -2544,7 +2550,8 @@ export default class Anyhost extends View {
   }
 
   parkLeaving(model, live) {
-    const isOpen = new Map(model.rows.filter((r) => r.address).map((r) => [r.key, r.isChild || OPEN_SECTIONS.has(r.section)]));
+    const held = heldKeys();
+    const isOpen = new Map(model.rows.filter((r) => r.address).map((r) => [r.key, r.isChild || OPEN_SECTIONS.has(r.section) || held.has(r.key)]));
     const before = this.wasOpen;
     this.wasOpen = isOpen;
     if (before === null) return;
@@ -3272,6 +3279,7 @@ export default class Anyhost extends View {
       level: TOAST_LOOK[given.level] ? given.level : "info",
       icon: given.icon ?? null,
       action: given.action ?? null,
+      hold: given.hold ?? null,
       timeout: given.timeout ?? (given.level === "error" ? TOAST_ERROR_MS : TOAST_MS),
       session: facts === null ? null : { title: facts.title, project: facts.projectName ?? "", machine: facts.machine ?? "", tool: facts.tool ?? "claude" },
     };
@@ -3325,7 +3333,8 @@ export default class Anyhost extends View {
         cx.notify();
       })
       .on_click(() => {
-        if (x.action?.name) run(x.action.name, x.action.args ?? {});
+        if (x.hold) undoHeld(x.hold);
+        else if (x.action?.name) run(x.action.name, x.action.args ?? {});
         this.dismissToast(x.id);
       })
       .child(
@@ -5543,7 +5552,7 @@ export default class Anyhost extends View {
               if (p.removeWorktree) return this.removeConfirmed(cx, p);
               closeOverlay(p.overlay);
               if (p.delete) return this.dispatchDelete(cx, p.delete.row, p.delete.on);
-              for (const r of p.archive.rows) this.archive(cx, r, true, p.archive.isClosed);
+              this.archiveAll(cx, p.archive.rows, p.archive);
             }),
           ),
       );
@@ -5682,7 +5691,7 @@ export default class Anyhost extends View {
     const work = this.workNow();
     const [, verb, direction] = /^(go|move)-(left|right|up|down)$/.exec(command) ?? [];
     const [, mode] = /^view-(\w+)$/.exec(command) ?? [];
-    const [, undone, id] = /^(open|restore|unsettle|repin|wake)-(.+)$/.exec(command) ?? [];
+    const [, held] = /^undo-(.+)$/.exec(command) ?? [];
     if (verb === "go" || command === "next" || command === "prev") cancelWant();
     if (verb === "go") return this.go(work, direction);
     if (verb === "move") return this.move(work, direction);
@@ -5691,33 +5700,13 @@ export default class Anyhost extends View {
     if (command === "new") return this.newHere();
     if (command === "close") return this.closeShownWindow(cx);
     if (command === "reopen") return this.reopenClosed(cx);
-    if (command === "undo") return this.undoDrop(cx);
-    if (undone) return this.undoToast(cx, undone, id);
+    if (held) return undoHeld(held);
     if (command === "zoom") return this.zoom(work);
     if (command === "promote") return this.promote(work);
     if (command === "mode") return this.setMode(work, CYCLED[(CYCLED.indexOf(work.layoutMode) + 1) % CYCLED.length]);
     if (command === "grow" || command === "shrink") return this.resize(work, command === "grow" ? RATIO_STEP : -RATIO_STEP);
     if (command === "scroll-left" || command === "scroll-right") return this.scroll(work, command === "scroll-left" ? -1 : 1);
     if (mode && MODES.some(([each]) => each === mode)) this.setMode(work, mode);
-  }
-
-  undoDrop(cx) {
-    const undone = shared(UNDO);
-    if (!undone?.changes) return;
-    setShared(UNDO, null);
-    this.organize(cx, undone.changes);
-  }
-
-  undoToast(cx, verb, id) {
-    const [key, undone] = Object.entries(shared(UNDONE) ?? {}).find(([each]) => each.startsWith(id)) ?? [];
-    if (!key) return;
-    const target = undone.target ?? { key, title: key.slice(0, 8) };
-    if (verb === "unsettle") return this.unsettle(cx, target, this.takeUndone(key));
-    if (verb === "repin") return this.pin(cx, target, this.takeUndone(key).snoozedUntil);
-    this.takeUndone(key);
-    if (verb === "open") return this.open(target, cx);
-    if (verb === "restore") return this.restore(cx, target);
-    if (verb === "wake") return this.snooze(cx, target, null);
   }
 
   workNow() {
@@ -5793,7 +5782,7 @@ export default class Anyhost extends View {
   refreshTabs(work) {
     const root = layout();
     const tabIds = new Set(spaces().flatMap((sp) => sp.tabs.map((x) => x.id)));
-    const archived = new Map(queued().flatMap(([, entry]) => Object.entries(entry.changes).filter(([, fields]) => "archived" in fields).map(([key, fields]) => [key, fields.archived])));
+    const archived = new Map(queued().flatMap(([, entry]) => Object.entries(entry.changes).filter(([, fields]) => "archived" in fields || fields.deleted === true).map(([key, fields]) => [key, fields.archived ?? fields.deleted])));
     const archiving = new Set([...archived].filter(([, isArchived]) => isArchived).map(([key]) => key));
     const ps = panes();
     const sessionAt = new Map(terminals().map((x) => [x.address, x.labels?.[SESSION_LABEL]]));
@@ -6403,7 +6392,7 @@ export default class Anyhost extends View {
       const next = this.nextWindow(tab.id);
       if (pill.isShown && next) this.showWindow(next);
     }
-    this.closeTabs(cx, [tab.id]);
+    this.closeTabs(cx, [tab.id], pill.isShown ? { tab: tab.id, space: pill.space } : null);
     cx.notify();
   }
 

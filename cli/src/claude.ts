@@ -6,7 +6,7 @@ import type { AgentStatus } from '../../relay/protocol.ts'
 import { stateFolder } from './device.ts'
 import { hcPath, killTerminal, labelledTerminals } from './hc.ts'
 
-const EXIT_MS = 10_000
+const EXIT_MS = Number(process.env['ANYHOST_EXIT_MS'] ?? 10_000)
 
 export type RunningSession = {
   readonly pid: number

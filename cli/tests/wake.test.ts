@@ -1,8 +1,9 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { appendFileSync } from 'node:fs'
-import { LIVE_MS, PING_MS } from '../../relay/protocol.ts'
 import { memoryRelay, until, welcomed } from './memory.ts'
 import { claimOn, DESKTOP, LAPTOP, listedConnected, roots, runningOn, SESSION } from './program.ts'
+import { LIVE_MS, PING_MS } from './times.ts'
 
 test('a program whose socket outlives a sleep past LIVE_MS while another machine takes its session has that socket closed by the relay, connects again, reads the new holder and stores no frame of the session', async () => {
   const relay = await memoryRelay()

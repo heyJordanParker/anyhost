@@ -1,5 +1,6 @@
 import { Database } from 'bun:sqlite'
-import { expect, spyOn, test } from 'bun:test'
+import { expect, spyOn } from 'bun:test'
+import { test } from './test.ts'
 import * as fs from 'node:fs'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
