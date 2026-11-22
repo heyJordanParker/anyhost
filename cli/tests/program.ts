@@ -1,4 +1,4 @@
-import { afterAll, onTestFinished } from 'bun:test'
+import { afterAll } from 'bun:test'
 import type { SpawnOptions, Subprocess } from 'bun'
 import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,6 +9,8 @@ import { commandOf, currentFolderOf, processes } from '../src/claude.ts'
 import { machinesOf, type Device, type MachineRoots } from '../src/device.ts'
 import type { Relay } from '../src/relay.ts'
 import { failTest, noCode, statusOn, until, type MemoryRelay } from './memory.ts'
+import { whenTestEnds } from './test.ts'
+import { TIMES } from './times.ts'
 
 const RUN = crypto.randomUUID()
 process.env['ANYHOST_TEST_RUN'] = RUN
@@ -33,8 +35,8 @@ export function spawnForTest<const In extends SpawnOptions.Writable = 'ignore', 
   argv: string[],
   options: SpawnOptions.SpawnOptions<In, Out, Err> = {},
 ): Subprocess<In, Out, Err> {
-  const child = Bun.spawn(argv, { ...options, env: { ...(options.env ?? process.env), ANYHOST_TEST_RUN: RUN }, detached: true })
-  onTestFinished(async () => {
+  const child = Bun.spawn(argv, { ...options, env: { ...TIMES, ...(options.env ?? process.env), ANYHOST_TEST_RUN: RUN }, detached: true })
+  whenTestEnds(async () => {
     kill(-child.pid)
     await child.exited
     kill(-child.pid)
@@ -447,7 +449,7 @@ export function cmodServeOf(machine: { readonly env: Record<string, string> }, {
       return Response.json(await new Promise<Rpc[]>((resolve) => void (poll = resolve)))
     },
   })
-  onTestFinished(() => void server.stop(true))
+  whenTestEnds(() => void server.stop(true))
   const tell = (name: string, event: string, payload: unknown): Promise<void> => {
     const readAt = polls + (poll === undefined ? 2 : 1)
     for (const { id } of listening.filter((each) => each.name === name && each.event === event)) send({ jsonrpc: '2.0', method: '$/on', params: { id, payload, cursor: String((told += 1)) } })

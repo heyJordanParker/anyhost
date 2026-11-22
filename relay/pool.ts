@@ -185,6 +185,7 @@ export class Pool extends DurableObject<Env> {
   readonly #sql: Sql
   readonly #writes = new Map<string, Set<Promise<void>>>()
   readonly #heardAt = new WeakMap<WebSocket, number>()
+  readonly #ended = new WeakSet<WebSocket>()
   readonly #liveMs: number
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -328,7 +329,9 @@ export class Pool extends DurableObject<Env> {
   #closeSilent(sockets: readonly WebSocket[]): void {
     const silent = sockets.filter((socket) => socket.readyState === WebSocket.OPEN && !this.#isLive(socket))
     for (const socket of silent) socket.close(1000, `The relay heard nothing on this socket for ${this.#liveMs / 1000} seconds`)
-    for (const device of new Map(silent.map((socket) => [deviceOf(socket).id, deviceOf(socket)])).values()) this.#tellGone(device)
+    const ended = sockets.filter((socket) => socket.readyState !== WebSocket.OPEN && !this.#ended.has(socket))
+    for (const socket of ended) this.#ended.add(socket)
+    for (const device of new Map(ended.map((socket) => [deviceOf(socket).id, deviceOf(socket)])).values()) this.#tellGone(device)
   }
 
   #tellGone(device: DeviceRef): void {
@@ -464,6 +467,8 @@ export class Pool extends DurableObject<Env> {
 
   override async webSocketClose(ws: WebSocket): Promise<void> {
     this.#sql.exec('update devices set seen_at = ? where id = ?', Date.now(), deviceOf(ws).id)
+    if (this.#ended.has(ws)) return
+    this.#ended.add(ws)
     this.#tellGone(deviceOf(ws))
   }
 

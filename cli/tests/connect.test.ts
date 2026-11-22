@@ -1,4 +1,5 @@
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, expect } from 'bun:test'
+import { test } from './test.ts'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { COMPATIBILITY_DATE, PROTOCOL_VERSION, RELAY_VERSION } from '../../relay/protocol.ts'

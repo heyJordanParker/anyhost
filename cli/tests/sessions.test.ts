@@ -1,5 +1,5 @@
 import { Database } from 'bun:sqlite'
-import { expect, onTestFinished, test } from 'bun:test'
+import { expect } from 'bun:test'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { Activity } from '../src/activity.ts'
@@ -12,6 +12,7 @@ import { agentsOf, downloadJournal, listSessions } from '../src/sessions.ts'
 import type { AgentStatus } from '../../relay/protocol.ts'
 import { pin, settle, snooze, type Shared } from '../src/shared.ts'
 import { copyT3Marks } from '../src/t3.ts'
+import { test, whenTestEnds } from './test.ts'
 import { statusesHere } from '../src/move.ts'
 import { eventLoopDuring, failTest, memoryRelay, noCode, until, type MemoryRelay } from './memory.ts'
 import { captureOn, SESSION, temporaryFolder, uploadFiles } from './program.ts'
@@ -171,7 +172,7 @@ test('a read of the holders that a closed connection cuts off fails that read al
   const unhandled: unknown[] = []
   const heard = (reason: unknown): void => void unhandled.push(reason)
   process.on('unhandledRejection', heard)
-  onTestFinished(() => void process.off('unhandledRejection', heard))
+  whenTestEnds(() => void process.off('unhandledRejection', heard))
 
   for (const welcome of welcomes) welcome({ changed: 5 })
 

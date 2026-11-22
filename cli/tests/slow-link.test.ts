@@ -1,12 +1,14 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { appendFileSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES } from '../../relay/protocol.ts'
 import { journalOf, QUIET_MS, sealQuiet, spoolOf } from '../src/capture.ts'
 import { failTest, memoryRelay } from './memory.ts'
 import { captureOn, HOST, SESSION, uploadFiles } from './program.ts'
+import { ANSWER_MS, PONG_MS } from './times.ts'
 
-test('a seal over a link paced both ways, whose 16 answers queued ahead of any pong take past 70 seconds, finishes on its one socket, asking for each frame once', async () => {
+test('a seal over a link paced both ways, whose 16 answers queued ahead of any pong take past PONG_MS, finishes on its one socket, asking for each frame once', async () => {
   const relay = await memoryRelay()
   const { roots, capture } = captureOn(HOST, relay)
   const transcript = join(roots.claudeHome, 'projects', '-work-trip', `${SESSION}.jsonl`)
@@ -24,9 +26,10 @@ test('a seal over a link paced both ways, whose 16 answers queued ahead of any p
   expect((sizes.at(-1) ?? 0) * 2).toBeGreaterThan(MAX_MESSAGE_BYTES)
   rmSync(spoolOf(capture.db, SESSION), { recursive: true, force: true })
   const quiet = (journalOf(capture.db, SESSION)?.writtenAt ?? 0) + QUIET_MS + 60_000
-  relay.downloadBytesPerMs = 150
-  relay.uploadBytesPerMs = 150
-  expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(70_000)
+  relay.downloadBytesPerMs = 1000
+  relay.uploadBytesPerMs = 1000
+  expect(sizes.slice(1).reduce((sum, size) => sum + size, 0) / relay.downloadBytesPerMs).toBeGreaterThan(PONG_MS)
+  expect((sizes[0] ?? 0) / relay.downloadBytesPerMs).toBeLessThan(ANSWER_MS / 4)
   let welcomes = 0
   capture.relay.on('welcome', () => (welcomes += 1))
   const asked = relay.requests.length

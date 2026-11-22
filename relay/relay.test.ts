@@ -112,6 +112,7 @@ class Socket {
     const headers = { authorization: `Bearer ${token}`, 'x-anyhost-name': name, 'x-anyhost-roots': JSON.stringify(roots), ...(version === undefined ? {} : { 'x-anyhost-version': version }) }
     this.ws = new WebSocket(`${url.replace(/^http/, 'ws')}/v1/connect`, { headers } as any)
     this.ws.binaryType = 'arraybuffer'
+    this.ws.addEventListener('open', () => this.ws.send('ping'))
     this.ws.addEventListener('message', (event) => {
       const message = typeof event.data === 'string' ? (event.data === 'pong' ? { t: 'pong' } : (JSON.parse(event.data) as Json)) : new Uint8Array(event.data as ArrayBuffer)
       this.#inbox.push(message)
@@ -384,7 +385,7 @@ describe('joining', () => {
   test('a machine that connects under a new name while no socket holds the old one was renamed', async () => {
     const renamed = await joinNew(mac, 'before')
     renamed.socket.close()
-    await renamed.socket.closed
+    await mac.socket.next((m) => !(m instanceof Uint8Array) && m['t'] === 'presence' && m['device']['id'] === renamed.device.id && m['connected'] === false, 'presence of the renamed machine, connected false')
     const after = await connect(renamed.token, `after-${run}`, renamed.device.roots)
     expect(await after.message('welcome')).toMatchObject({ device: { id: renamed.device.id, name: `after-${run}` } })
     const [devices] = await mac.socket.results({ op: 'devices' })

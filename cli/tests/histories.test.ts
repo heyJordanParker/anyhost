@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'

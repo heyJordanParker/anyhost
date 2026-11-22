@@ -1,10 +1,11 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { LIVE_MS } from '../../relay/protocol.ts'
 import { openCapture, openDatabase } from '../src/capture.ts'
 import { memoryRelay, noCode, statusOn, until, welcomed } from './memory.ts'
 import { claimOn, DESKTOP, LAPTOP, listedConnected, roots, runningOn, SESSION, temporaryFolder } from './program.ts'
+import { LIVE_MS } from './times.ts'
 
 test('a laptop gone silent with a drain in flight while the desktop takes its session refuses that session\'s next prompt once it connects again, and the Pool stores no frame of it after the take', async () => {
   const relay = await memoryRelay()
@@ -30,14 +31,13 @@ test('a laptop gone silent with a drain in flight while the desktop takes its se
   expect(relay.puts.slice(stored).filter(({ key }) => key.startsWith(`journals/${SESSION}/`))).toEqual([])
 }, 180_000)
 
-test('a take of a session whose holder went silent 5 s after the Pool last heard it answers told true, as the Pool counts that holder live, and the holder reads the new holder as it wakes', async () => {
+test('a take of a session whose holder went silent moments after the Pool last heard it answers told true, as the Pool counts that holder live, and the holder reads the new holder as it wakes', async () => {
   const relay = await memoryRelay()
   const home = join(temporaryFolder(), 'home')
   const laptop = openCapture(relay.connect(LAPTOP, roots(home)), LAPTOP, roots(home), { db: openDatabase(join(temporaryFolder(), 'state')), code: noCode })
   const desktop = relay.connect(DESKTOP, roots('/home/desktop'))
   await Promise.all([welcomed(laptop.relay), welcomed(desktop)])
   expect(await laptop.relay.runOne({ op: 'claim', session: SESSION, take: false })).toEqual({ status: 200, told: true })
-  await Bun.sleep(5000)
   const wake = relay.silence(LAPTOP.id)
   expect(await listedConnected(desktop, LAPTOP.id)).toBe(true)
 

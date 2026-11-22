@@ -1,4 +1,5 @@
-import { expect, onTestFinished, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test, whenTestEnds } from './test.ts'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { MAX_MESSAGE_BYTES, cloneFixFor } from '../../relay/protocol.ts'
@@ -10,11 +11,12 @@ import { listSessions } from '../src/sessions.ts'
 import { failTest, memoryRelay, until, welcomed } from './memory.ts'
 import plugin from '../../.claude-plugin/plugin.json'
 import { anyhostOn, captureOn, HOST, machineFor, roots, SESSION, temporaryFolder, uploadFiles } from './program.ts'
+import { ANSWER_MS } from './times.ts'
 
 const device: Device = { id: 'device-a', name: 'anyhost-a', os: 'linux', arch: 'arm64' }
 const connect = (options: Omit<RelayOptions, 'forget'>): Relay => {
   const relay = connectRelay({ ...options, forget: async () => undefined })
-  onTestFinished(() => relay.close())
+  whenTestEnds(() => relay.close())
   return relay
 }
 
@@ -184,7 +186,7 @@ test('a machine that joins again while connected puts an object over 1 MiB with 
   expect(await service.runOne({ op: 'put', key: 'files/big.bin', bytes })).toEqual({ status: 200, etag: md5(bytes) })
 })
 
-test('a request the relay leaves unanswered goes again on a new socket 40 seconds later though messages still arrive on the old one, so the seal that ends a backup pass ends', async () => {
+test('a request the relay leaves unanswered goes again on a new socket ANSWER_MS later though messages still arrive on the old one, so the seal that ends a backup pass ends', async () => {
   const relay = await memoryRelay()
   const { roots: at, capture } = captureOn(device, relay)
   const there = relay.connect({ id: 'device-b', name: 'anyhost-b', os: 'linux', arch: 'arm64' }, roots('/home/bob'))
@@ -195,7 +197,7 @@ test('a request the relay leaves unanswered goes again on a new socket 40 second
   await uploadFiles(capture, SESSION, transcript)
   const heard: string[] = []
   capture.relay.on('told', ({ id }) => void heard.push(id))
-  const sending = setInterval(() => there.send({ t: 'told', id: `tell-${heard.length}`, to: device.id, error: 'Plan the trip' }), 5000)
+  const sending = setInterval(() => there.send({ t: 'told', id: `tell-${heard.length}`, to: device.id, error: 'Plan the trip' }), ANSWER_MS / 8)
   try {
     const asked = relay.requests.length
     relay.unanswered = 1
@@ -203,7 +205,7 @@ test('a request the relay leaves unanswered goes again on a new socket 40 second
 
     const started = Date.now()
     expect(await sealQuiet(capture, failTest, quiet)).toEqual(new Map())
-    expect(Date.now() - started).toBeGreaterThanOrEqual(40_000)
+    expect(Date.now() - started).toBeGreaterThanOrEqual(ANSWER_MS)
     expect(heard.length).toBeGreaterThanOrEqual(7)
     expect(relay.requests.slice(asked, asked + 2)).toEqual([
       [{ op: 'claim', session: SESSION, take: false }],

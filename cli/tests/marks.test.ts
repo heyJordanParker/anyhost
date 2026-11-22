@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { memoryRelay, statusOn, until } from './memory.ts'
 import { anyhostOn, LAPTOP, postTo, runningOn, serveOn, SESSION, sharedIn, workerOn } from './program.ts'
 

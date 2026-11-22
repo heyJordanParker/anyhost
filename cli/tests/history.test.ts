@@ -1,4 +1,5 @@
-import { expect, onTestFinished, spyOn, test } from 'bun:test'
+import { expect, spyOn } from 'bun:test'
+import { test, whenTestEnds } from './test.ts'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import zlib from 'node:zlib'
@@ -371,7 +372,7 @@ test('a chunk whose delta does not round-trip goes up whole, and still restores 
       if ('dictionary' in options) out[0] = (out[0] ?? 0) ^ 1
       done(error, out)
     })) as typeof zlib.zstdDecompress)
-  onTestFinished(() => spied.mockRestore())
+  whenTestEnds(() => spied.mockRestore())
   const fork = 'f0f0f0f0-0000-4000-8000-000000000001'
   const path = join(folder, `${fork}.jsonl`)
   const text = rewrittenFork(history, fork, 'Only in the fork')
@@ -903,7 +904,7 @@ test('a chunk whose key already holds other bytes is written over once read, and
   mkdirSync(dirname(result), { recursive: true })
   writeFileSync(result, 'y'.repeat(2 * 2 ** 20))
   const logged = spyOn(console, 'error').mockImplementation(() => undefined)
-  onTestFinished(() => logged.mockRestore())
+  whenTestEnds(() => logged.mockRestore())
   writeFileSync(parent, grown)
   await uploadFiles(a.capture, PARENT, parent, result)
 

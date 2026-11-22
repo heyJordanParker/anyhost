@@ -1,4 +1,4 @@
-export const RELAY_VERSION = 10
+export const RELAY_VERSION = 11
 export const PROTOCOL_VERSION = 3
 export const COMPATIBILITY_DATE = '2026-11-01'
 

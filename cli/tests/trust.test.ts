@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { memoryRelay, until } from './memory.ts'

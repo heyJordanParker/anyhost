@@ -1,4 +1,5 @@
-import { expect, onTestFinished, spyOn, test } from 'bun:test'
+import { expect, spyOn } from 'bun:test'
+import { test, whenTestEnds } from './test.ts'
 import type { Subprocess } from 'bun'
 import { mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -62,11 +63,11 @@ test("a herdr-core that gives its terminals a Claude Code session's markers show
   expect(marked).toContain('CLAUDECODE, CLAUDE_CODE_CHILD_SESSION')
 }, 60_000)
 
-test("the launcher starts Claude Code with the saved login environment, without a Claude Code session's markers, and with the home folder's trust as its own pid and start", async () => {
+test.serial("the launcher starts Claude Code with the saved login environment, without a Claude Code session's markers, and with the home folder's trust as its own pid and start", async () => {
   const state = temporaryFolder()
   const before = process.env['XDG_STATE_HOME']
   process.env['XDG_STATE_HOME'] = state
-  onTestFinished(() => {
+  whenTestEnds(() => {
     if (before === undefined) delete process.env['XDG_STATE_HOME']
     else process.env['XDG_STATE_HOME'] = before
   })
@@ -135,7 +136,7 @@ test('an idle session counts its stop time from the later of going idle and the 
     ],
   })
 
-  await serveOn({ ...laptop.env, ANYHOST_STOP_MS: '120000' })
+  await serveOn({ ...laptop.env, ANYHOST_STOP_MS: '120000', ANYHOST_DISCARD_EVERY_MS: '1000' })
   await until(() => hasEnded(unseen), 'the unseen idle session ending', 15_000)
 
   expect([hasEnded(seen), hasEnded(justIdle)]).toEqual([false, false])
@@ -148,7 +149,7 @@ test('an open or a message restarts an idle session\'s stop time, as T3 Code tou
   const opened = claudeIn(laptop, 't0', OTHER_SESSION, 'idle', anHourAgo)
   const unopened = claudeIn(laptop, 't1', SESSION, 'idle', anHourAgo)
   coreSays(laptop.folder, { seq: 1, terminals: [] })
-  await serveOn({ ...laptop.env, ANYHOST_STOP_MS: '120000' })
+  await serveOn({ ...laptop.env, ANYHOST_STOP_MS: '120000', ANYHOST_DISCARD_EVERY_MS: '1000' })
 
   expect(await anyhostOn(laptop.env, ['open', OTHER_SESSION, '--json'])).toMatchObject({ code: 0 })
   coreSays(laptop.folder, coreEvent('created', 't0', terminalIn('t0', CLAUDE, { 'anyhost.session': OTHER_SESSION })))
@@ -169,7 +170,7 @@ test("a press or a show cmod makes in an idle session's terminal restarts its st
   const untouched = claudeIn(laptop, 't2', SESSION, 'idle', anHourAgo)
   coreSays(laptop.folder, { seq: 1, terminals: [] })
   const cmod = cmodServeOf(laptop)
-  await serveOn(withCmod({ ...laptop.env, ANYHOST_STOP_MS: '120000' }))
+  await serveOn(withCmod({ ...laptop.env, ANYHOST_STOP_MS: '120000', ANYHOST_DISCARD_EVERY_MS: '1000' }))
   await hookOn(laptop.socket, 'started', cwd, FOURTH_SESSION)
   expect((await postTo(laptop.socket, '/agents/archive', { session: FOURTH_SESSION, archived: true })).status).toBe(200)
 
@@ -195,7 +196,7 @@ test("a press cmod makes in an idle session's terminal restarts its stop time wh
   const untouched = claudeIn(laptop, 't1', SESSION, 'idle', anHourAgo)
   coreSays(laptop.folder, { seq: 1, terminals: [] })
   const cmod = cmodServeOf(laptop, { providesTerminal: false })
-  await serveOn(withCmod({ ...laptop.env, ANYHOST_STOP_MS: '120000' }))
+  await serveOn(withCmod({ ...laptop.env, ANYHOST_STOP_MS: '120000', ANYHOST_DISCARD_EVERY_MS: '1000' }))
 
   await cmod.listens('cmod/Providers', 'Change')
   await cmod.provideTerminal()
@@ -371,7 +372,7 @@ test('a Codex started in a terminal is labelled with the session of the rollout 
   await until(async () => (await sharedIn(relay)).archived?.[THIRD_SESSION]?.archived === true, 'the closed Codex session archiving', 15_000)
 }, 60_000)
 
-test("a process's parent, the files it holds open, its command line and its current folder read from the system with no process started", async () => {
+test.serial("a process's parent, the files it holds open, its command line and its current folder read from the system with no process started", async () => {
   const folder = realpathSync(temporaryFolder())
   const held = join(folder, 'held.jsonl')
   writeFileSync(held, '')
@@ -379,7 +380,7 @@ test("a process's parent, the files it holds open, its command line and its curr
   const child = spawnForTest(argv, { cwd: folder })
   await until(() => Bun.file(held).size > 0, 'the child holding its file open')
   const spawns = [spyOn(Bun, 'spawn'), spyOn(Bun, 'spawnSync')]
-  onTestFinished(() => {
+  whenTestEnds(() => {
     for (const spawn of spawns) spawn.mockRestore()
   })
 

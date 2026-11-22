@@ -1,4 +1,5 @@
-import { expect, onTestFinished, setSystemTime, test } from 'bun:test'
+import { expect, setSystemTime } from 'bun:test'
+import { test, whenTestEnds } from './test.ts'
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { decompress, hotKey, journalOf, openCapture, openDatabase, uploadSessions } from '../src/capture.ts'
@@ -75,7 +76,7 @@ test('a job ends at once when its program dies by SIGKILL in the middle of it, s
   expect(Date.now() - killed).toBeLessThan(5000)
 }, 30_000)
 
-test("the program's start stats every captured file, and uploads a line a quiet session gained while the program did not run", async () => {
+test.serial("the program's start stats every captured file, and uploads a line a quiet session gained while the program did not run", async () => {
   const relay = await memoryRelay()
   const host = await machineFor(relay, HOST)
   const home = host.env['HOME'] ?? ''
@@ -152,7 +153,7 @@ test('a listing of the watched folders and of a session\'s files follows no syml
   const locked = join(sessionFolder, 'locked')
   mkdirSync(locked)
   chmodSync(locked, 0)
-  onTestFinished(() => chmodSync(locked, 0o755))
+  whenTestEnds(() => chmodSync(locked, 0o755))
   const subagents = join(home, '.claude', 'projects', '-work', SESSION, 'subagents')
   mkdirSync(subagents, { recursive: true })
   symlinkSync('loop', join(subagents, 'loop'))

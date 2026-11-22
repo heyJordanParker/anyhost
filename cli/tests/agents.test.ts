@@ -1,8 +1,9 @@
-import { expect, test } from 'bun:test'
+import { expect } from 'bun:test'
+import { test } from './test.ts'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { memoryRelay, until } from './memory.ts'
-import { copiesOn, CTO, isIndexed, isUploaded, LAPTOP, machineFor, postTo, runningOn, runsOn, sentOn, serveOn, SESSION, tripOn, WORKER, workerOn } from './program.ts'
+import { copiesOn, CTO, isIndexed, isUploaded, LAPTOP, machineFor, PASS_MS, postTo, runningOn, runsOn, sentOn, serveOn, SESSION, tripOn, WORKER, workerOn } from './program.ts'
 
 test('an agent started on another machine for an agent gets its first message from that agent and its machine, lists it as its parent, answers its last messages from there, and is deleted there', async () => {
   const relay = await memoryRelay()
@@ -73,7 +74,7 @@ test('an agent that starts waiting while its machine hears no change of Claude C
   laptop.status('idle')
   expect((await postTo(laptop.socket, '/agents/open', { session: SESSION })).status).toBe(200)
   const worker = await machineFor(relay, WORKER)
-  const served = await serveOn({ ...worker.env, ANYHOST_WATCHER_DROPS: '1' })
+  const served = await serveOn({ ...worker.env, ANYHOST_WATCHER_DROPS: '1', ANYHOST_BACKUP_MS: PASS_MS })
   await until(() => relay.isConnected(WORKER.id), 'the worker connecting')
   const started = await postTo(laptop.socket, '/new', { machine: WORKER.name, folder: tripOn(laptop), prompt: 'Book the train', parent: SESSION })
   const child = String(started.body['session'])
