@@ -279,7 +279,7 @@ function readHotkeys(hotkeys) {
     throw new Error(`package.json "cmod.hotkeys" is not a map of hotkeys to their title and optional default combo. ${fix}`);
   return { hotkeys: checkHotkeys('package.json "cmod"', hotkeys) };
 }
-var coreVersion = "8.3.3";
+var coreVersion = "8.7.1";
 var oldestCmodVersion = "8.0.0";
 function hotkeyCommand(mod, hotkey) {
   return `${mod}--${hotkey}`;
@@ -5458,6 +5458,14 @@ function fitsOption(declared, value) {
 // node_modules/@cmodjs/core/ui/elements.js
 var unbuilt = Symbol("an element built outside a render");
 var drawing;
+var lowerings = new Map;
+function hostComponent(name, canonical, lower) {
+  lowerings.set(name, lower);
+  return (props) => elementNamed(name, canonical(props));
+}
+function elementNamed(name, props) {
+  return drawing === undefined ? { [unbuilt]: { name, props } } : build(drawing, name, props);
+}
 function drawWith(table, draw, markdown) {
   const outer = drawing;
   const current = { table, markdown };
@@ -5469,10 +5477,12 @@ function drawWith(table, draw, markdown) {
   }
 }
 function element(name) {
-  const construct = (props) => drawing === undefined ? { [unbuilt]: { name, props } } : build(drawing, name, props);
-  return construct;
+  return (props) => elementNamed(name, props);
 }
 function build(current, name, props) {
+  const lower = lowerings.get(name);
+  if (lower !== undefined)
+    return lower(props);
   const ready = "children" in props ? { ...props, children: built(current, props.children) } : props;
   if (name === "Markdown" && current.markdown !== undefined)
     return current.markdown(ready);
@@ -5536,10 +5546,11 @@ function elementOf(data, keyPrefix, press) {
   const name = fields[elementKey];
   if (name === undefined)
     return Object.fromEntries(Object.entries(fields).map(([key, each]) => [key, elementOf(each, keyPrefix, press)]));
-  if (typeof name !== "string" || !Object.hasOwn(constructors, name))
-    throw new Error(`a widget drew ${String(name)}, which is not an element of ui/elements.js.`);
+  if (typeof name !== "string" || !(Object.hasOwn(constructors, name) || lowerings.has(name)))
+    throw new Error(`a widget drew ${String(name)}, which is not an element of ui/elements.js or ui/components.js.`);
   const props = elementOf(fields["props"], keyPrefix, press);
-  return constructors[name](typeof props["key"] === "string" ? { ...props, key: `${keyPrefix}${props["key"]}` } : props);
+  const keyed = typeof props["key"] === "string" ? { ...props, key: `${keyPrefix}${props["key"]}` } : props;
+  return Object.hasOwn(constructors, name) ? constructors[name](keyed) : elementNamed(name, keyed);
 }
 var focusable = new Set(["Button", "Input", "Select"]);
 function drawsFocusable(data, key) {
@@ -5589,6 +5600,7 @@ function filledButton({ key, label, hotkey, variant = "secondary", onPress }) {
     plain: true,
     key,
     label,
+    variant,
     ...hotkey === undefined ? {} : { hotkey },
     onPress,
     children: Text({ backgroundColor: isPrimary ? "claude" : "userMessageBackground", color: isPrimary ? "inverseText" : "text", bold: isPrimary, children: ` ${label} ` })
@@ -7396,10 +7408,101 @@ function createWatches(claude, report) {
 }
 
 // node_modules/@cmodjs/core/ui/components.js
-function Progress({ value, width = 24 }) {
-  const filled = Math.round(Math.min(Math.max(value, 0), 100) / 100 * width);
-  return Text({ children: [Text({ color: "claude", children: "█".repeat(filled) }), Text({ color: "subtle", children: "░".repeat(width - filled) })] });
+var toneColors = { neutral: undefined, info: "suggestion", success: "success", warning: "warning", critical: "error" };
+var textOf2 = (tone) => {
+  const color = toneColors[tone];
+  return color === undefined ? { dimColor: true } : { color };
+};
+var Tabs = hostComponent("Tabs", ({ tabs, selected, onSelect, children }) => ({
+  key: "",
+  tabs: tabs.map(({ key, label, hotkey }) => ({ key, label, ...hotkey === undefined ? {} : { hotkey }, isSelected: key === selected, onSelect: () => onSelect(key) })),
+  ...children === undefined ? {} : { children }
+}), ({ key: prefix, tabs, children }) => {
+  const row = tabs.map(({ key, label, hotkey, isSelected, onSelect }) => isSelected ? Text({ children: [...hotkey === undefined ? [] : [Text({ color: "claude", children: hotkey }), ": "], Text({ bold: true, underline: true, children: label })] }) : Button({ plain: true, dimColor: true, key: `${prefix}tab:${key}`, ...hotkey === undefined ? {} : { hotkey }, label, onPress: onSelect }));
+  return Box({ flexDirection: "column", gap: 1, children: [Box({ gap: 3, children: row }), children] });
+});
+var Split = hostComponent("Split", ({ children }) => ({ children }), ({ children }) => {
+  const width = `${Math.floor(100 / Math.max(children.length, 1))}%`;
+  return Box({ gap: 1, children: children.map((child) => Box({ width, children: child })) });
+});
+var Panel = hostComponent("Panel", ({ title, description, actions, children }) => ({ title, ...description === undefined ? {} : { description }, ...actions === undefined ? {} : { actions }, ...children === undefined ? {} : { children } }), ({ title, description, actions, children }) => {
+  const header = description === undefined && actions === undefined ? [] : [Box({ justifyContent: "space-between", columnGap: 2, flexWrap: "wrap", children: [Text({ dimColor: true, wrap: "wrap", children: description ?? "" }), ...actions === undefined ? [] : [Box({ gap: 2, flexShrink: 0, children: actions })]] })];
+  return Box({
+    flexDirection: "column",
+    flexGrow: 1,
+    children: [
+      Box({ flexDirection: "column", flexGrow: 1, gap: header.length === 0 ? 0 : 1, minWidth: [...title].length + 6, borderStyle: "round", borderColor: "subtle", paddingX: 1, children: [...header, children] }),
+      Box({ position: "absolute", top: 0, left: 2, children: Text({ bold: true, wrap: "truncate-end", children: ` ${title} ` }) })
+    ]
+  });
+});
+var Toggle = hostComponent("Toggle", ({ label, checked, onChange }) => ({ key: "", label, checked, onToggle: () => onChange(!checked) }), ({ key, label, checked, onToggle }) => Button({ plain: true, key: `${key}toggle:${label}`, label: `${checked ? "[x]" : "[ ]"} ${label}`, onPress: onToggle }));
+var cardColumns = 36;
+function card(text, isShown) {
+  return Box({
+    position: "absolute",
+    bottom: 1,
+    left: 0,
+    width: Math.min(text.length + 2, cardColumns),
+    ...isShown ? {} : { display: "none", hover: { display: "flex" } },
+    backgroundColor: "text",
+    paddingX: 1,
+    children: Text({ color: "inverseText", wrap: "wrap", children: text })
+  });
 }
+var Tooltip = hostComponent("Tooltip", ({ text, children }) => ({ key: "", text, ...children === undefined ? {} : { children } }), ({ key, text, children }) => Box({ key: `${key}tooltip:${text}`, children: [children, card(text, false)] }));
+var Help = hostComponent("Help", ({ text, isOpen, onOpenChange }) => ({ key: "", text, isOpen, onToggle: () => onOpenChange(!isOpen) }), ({ key, text, isOpen, onToggle }) => Box({ key: `${key}help:${text}`, children: [Button({ plain: true, key: `${key}help-button:${text}`, label: "?", onPress: onToggle }), card(text, isOpen)] }));
+var Dialog = hostComponent("Dialog", ({ title, children, actions }) => ({ title, actions, ...children === undefined ? {} : { children } }), ({ title, children, actions }) => Box({ flexDirection: "column", gap: 1, paddingX: 1, children: [Text({ bold: true, children: title }), children, Box({ gap: 2, children: actions })] }));
+var Pagination = hostComponent("Pagination", ({ page, pages, onPage }) => ({
+  page,
+  pages,
+  ...page > 1 ? { onPrevious: () => onPage(page - 1) } : {},
+  ...page < pages ? { onNext: () => onPage(page + 1) } : {}
+}), ({ page, pages, onPrevious, onNext }) => Box({
+  gap: 2,
+  children: [
+    onPrevious === undefined ? Text({ dimColor: true, children: "p: Previous" }) : Button({ plain: true, hotkey: "p", label: "Previous", onPress: onPrevious }),
+    Text({ dimColor: true, children: `${page} of ${pages}` }),
+    onNext === undefined ? Text({ dimColor: true, children: "n: Next" }) : Button({ plain: true, hotkey: "n", label: "Next", onPress: onNext })
+  ]
+}));
+var Progress = hostComponent("Progress", ({ value, width = 24, label }) => ({ value: Math.min(Math.max(value, 0), 100), width, ...label === undefined ? {} : { label } }), ({ value, width }) => {
+  const filled = Math.round(value / 100 * width);
+  return Text({ children: [Text({ color: "claude", children: "█".repeat(filled) }), Text({ color: "subtle", children: "░".repeat(width - filled) })] });
+});
+var List = hostComponent("List", ({ label, children }) => ({ label, ...children === undefined ? {} : { children } }), ({ children }) => Box({ flexDirection: "column", children }));
+var statusOf = (tone) => tone === undefined ? [] : [tone === "off" ? Text({ dimColor: true, children: "○ " }) : Text({ ...textOf2(tone), children: "● " })];
+function treeRow({ key, label, description, leading, trailing, tone, isSelected, depth = 0, isOpen, onToggle, onPress }) {
+  const opener = isOpen !== undefined && onToggle !== undefined ? Button({ plain: true, key: `${key}:toggle`, onPress: onToggle, children: Text({ dimColor: true, children: isOpen ? "▾" : "▸" }) }) : Text({ children: " " });
+  const shown = Text({ wrap: "truncate-end", ...isSelected === true ? { bold: true } : {}, children: [...statusOf(tone), ...leading === undefined ? [] : [Text({ dimColor: true, children: `${leading} ` })], label] });
+  const row = Box({ columnGap: 1, minWidth: 0, children: [opener, onPress === undefined ? shown : Button({ plain: true, key, onPress, children: shown })] });
+  const end = [...description === undefined ? [] : [Text({ dimColor: true, children: description })], ...trailing === undefined ? [] : [trailing]];
+  if (end.length === 0)
+    return Box({ paddingLeft: depth * 2, children: row });
+  return Box({ width: "100%", paddingLeft: depth * 2, columnGap: 1, justifyContent: "space-between", children: [row, Box({ flexShrink: 0, columnGap: 1, children: end })] });
+}
+var ListItem = hostComponent("ListItem", ({ onOpenChange, ...props }) => ({ ...props, ...onOpenChange === undefined || props.isOpen === undefined ? {} : { onToggle: () => onOpenChange(props.isOpen !== true) } }), (props) => {
+  const { key, label, description, leading, trailing, tone, isSelected, depth, onPress } = props;
+  if (depth !== undefined)
+    return treeRow(props);
+  const shown = [...statusOf(tone), ...leading === undefined ? [] : [Text({ dimColor: true, children: `${leading} ` })], label, ...description === undefined ? [] : [Text({ dimColor: true, children: ` ${description}` })], ...trailing === undefined ? [] : [" ", trailing]];
+  if (isSelected === true || onPress === undefined)
+    return Box({ ...isSelected === true ? { backgroundColor: "userMessageBackground" } : {}, paddingX: 1, children: Text({ wrap: "truncate-end", ...isSelected === true ? { bold: true } : {}, children: shown }) });
+  return Box({ paddingX: 1, children: Button({ plain: true, dimColor: true, key, onPress, children: shown }) });
+});
+var Badge = hostComponent("Badge", ({ tone = "neutral", children }) => ({ tone, children }), ({ tone, children }) => Text({ ...textOf2(tone), children }));
+var wordsOf = (children) => {
+  const all = [children].flat(Infinity).filter((each) => each !== null && each !== undefined && typeof each !== "boolean");
+  return all.every((each) => typeof each === "string" || typeof each === "number") ? all.join("") : undefined;
+};
+var Banner = hostComponent("Banner", ({ tone = "info", title, children, actions }) => ({ tone, ...title === undefined ? {} : { title }, ...children === undefined ? {} : { children }, ...actions === undefined ? {} : { actions } }), ({ tone, title, children, actions }) => Box({
+  flexDirection: "column",
+  children: [
+    ...title === undefined ? [] : [Text({ ...textOf2(tone), bold: true, wrap: "wrap", children: title })],
+    ...children === undefined ? [] : [wordsOf(children) === undefined ? children : Text({ ...title === undefined ? textOf2(tone) : {}, wrap: "wrap", children: wordsOf(children) })],
+    ...actions === undefined ? [] : [Box({ gap: 2, flexShrink: 0, children: actions })]
+  ]
+}));
 
 // node_modules/@cmodjs/core/runtime/lifecycle.js
 var listenMethods = [conversationMethods.subscribe, conversationMethods.watchBefore];
@@ -9118,7 +9221,7 @@ function resultOf2(value) {
   return JSON.stringify(value);
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-64QxhJ/release/src/program.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-GinuPT/release/src/program.ts
 var READY_MS = 1e4;
 var FOLLOW_MS = 1000;
 var programs = new WeakMap;
@@ -9158,7 +9261,7 @@ async function askProgram(mod, path, body) {
   return read;
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-64QxhJ/release/src/agents.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-GinuPT/release/src/agents.ts
 var AGENT = { type: "string", description: "The agent id, or its first 8 characters." };
 var WAKES = "An idle agent takes the message at once, works, and rests again on its own.";
 function agentTools(mod) {
@@ -9372,7 +9475,7 @@ function agentTools(mod) {
   ];
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-64QxhJ/release/src/connect.tsx
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-GinuPT/release/src/connect.tsx
 var CONNECT_WAIT_MS = 15000;
 var pause = (mod, ms) => new Promise((resolve) => void mod.after(ms, resolve));
 function follow(mod) {
@@ -9522,12 +9625,12 @@ function ConnectingView({ mod, connecting }) {
   }, connecting.error));
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-64QxhJ/release/src/state.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-GinuPT/release/src/state.ts
 var initialState = {
   memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null }
 };
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-64QxhJ/release/src/views/machines.tsx
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-GinuPT/release/src/views/machines.tsx
 function momentOf(iso) {
   const at = new Date(iso);
   const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -9661,7 +9764,7 @@ function MachineList({ mod, machines, removing }) {
   }, "[Cancel]"))))));
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-64QxhJ/release/src/mod.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-GinuPT/release/src/mod.ts
 var MACHINES_EVERY_MS = 1e4;
 var PROMPT_ASK_MS = 1500;
 var PROMPT_MS = 3000;
@@ -9848,7 +9951,7 @@ var anyhost = defineMod({
   }
 });
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-64QxhJ/release/hooks/register.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-GinuPT/release/hooks/register.ts
 function register(addHook, options) {
   registerMod(addHook, anyhost, options);
 }

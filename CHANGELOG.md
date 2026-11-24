@@ -2,6 +2,16 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.7] - 2026-11-24
+
+### Changed
+- anyhost needs cmod 8.7.1 or newer, and cmod updates itself to it with anyhost.
+
+### Fixed
+- A running session no longer shows Done when Claude Code leaves its status file damaged. Claude Code sometimes writes extra bytes after a session's status and then stops updating that file, so anyhost read the session as not running. anyhost now reads the status before the extra bytes and follows the session's turns.
+- Backups and large uploads keep running after the disk fills up. A write that failed on a full disk while the relay welcomed a machine left that machine's waiting requests unsent for good, which stopped the backup loop and every large upload until anyhost restarted. Those requests now go out as soon as the relay welcomes the machine.
+- Keep it here reports that the session stayed only once every machine reads it as staying, so no machine still sees the move as wanted after the note.
+
 ## [0.11.6] - 2026-11-22
 
 ### Changed
