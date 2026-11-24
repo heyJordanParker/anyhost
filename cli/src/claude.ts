@@ -242,7 +242,7 @@ const isProcess = (pid: number, procStart: string | undefined): boolean => isAli
 
 function jsonOf(path: string): unknown {
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as unknown
+    return Bun.JSONL.parseChunk(readFileSync(path, 'utf8')).values[0]
   } catch {
     return undefined
   }

@@ -42,6 +42,21 @@ test('a request whose answer the dropped socket lost goes again on the next sock
   expect(journalOf(capture.db, SESSION)?.end).toBeGreaterThan(0)
 })
 
+test('a request made before the welcome gets its answer, and every listener hears the welcome, when one welcome listener fails, as a write to a full disk does', async () => {
+  const relay = await memoryRelay()
+  const here = relay.connect(device, roots('/home/ada'))
+  const heard: string[] = []
+  here.on('welcome', () => {
+    throw new Error('database or disk is full')
+  })
+  here.on('welcome', () => void heard.push('welcome'))
+
+  const answer = await here.runOne({ op: 'devices' })
+
+  expect(answer.status).toBe(200)
+  expect(heard).toEqual(['welcome'])
+})
+
 test('a read the relay answers after this machine wrote the same object keeps the write, so the list never steps back to what another machine wrote before it', async () => {
   const relay = await memoryRelay()
   const here = relay.connect(device, roots('/home/ada'))

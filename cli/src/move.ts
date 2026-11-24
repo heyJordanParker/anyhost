@@ -377,8 +377,9 @@ async function reconcile(capture: Capture, session: string, here: MoveHere): Pro
       await takeClaim(relay, session, isTaken ? { take: true, if: { gone: true } } : { take: false })
       await continueHere(capture, session, journalOf(capture.db, session)?.tool ?? 'claude', here)
     } else holdHere(capture.db, session)
-    sayOn(moving, 'failed', await resumedHere(capture, session, here, line))
+    const resumed = await resumedHere(capture, session, here, line)
     if (placement.wanted !== '' || placement.error !== undefined) await want(relay, session, '', { if: placement.wanted })
+    sayOn(moving, 'failed', resumed)
   } catch (error) {
     if (!(error instanceof HeldElsewhere)) sayOn(moving, 'failed', `${line} anyhost could not take it back here: ${messageOf(error)}`)
   }

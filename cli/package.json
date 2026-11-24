@@ -19,6 +19,6 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@cmodjs/core": "^8.3.3"
+    "@cmodjs/core": "^8.7.1"
   }
 }

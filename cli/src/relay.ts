@@ -143,7 +143,16 @@ type Pending = {
 export function connectRelay(options: RelayOptions): Relay {
   const listeners: Partial<Record<keyof Events, ((message: never) => void)[]>> = {}
   const emit = <K extends keyof Events>(kind: K, message: Events[K]): void => {
-    for (const listener of listeners[kind] ?? []) (listener as (message: Events[K]) => void)(message)
+    for (const listener of listeners[kind] ?? []) {
+      try {
+        ;(listener as (message: Events[K]) => void)(message)
+      } catch (error) {
+        console.error(`${new Date().toISOString()} anyhost could not act on the relay's ${kind}: ${messageOf(error)}`)
+      }
+    }
+  }
+  const claiming = (message: Claiming): void => {
+    for (const listener of listeners.claiming ?? []) (listener as (message: Claiming) => void)(message)
   }
   const pending = new Map<number, Pending>()
   const waiting = new Set<{ readonly resolve: (login: Login) => void; readonly reject: (error: Error) => void }>()
@@ -490,8 +499,8 @@ export function connectRelay(options: RelayOptions): Relay {
       bytes = 0
     }
     for (const call of calls) {
-      if (call.op === 'claim') emit('claiming', { session: call.session, call })
-      if (call.op === 'put' && call.holder !== undefined) emit('claiming', { session: call.holder, call })
+      if (call.op === 'claim') claiming({ session: call.session, call })
+      if (call.op === 'put' && call.holder !== undefined) claiming({ session: call.holder, call })
     }
     for (const [position, call] of calls.entries()) {
       if (call.op === 'put' && call.bytes.length > MAX_MESSAGE_BYTES) {

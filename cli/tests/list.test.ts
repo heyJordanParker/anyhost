@@ -24,6 +24,20 @@ test('a session whose record says busy after its turn ended, as while its backgr
   expect(await statusOf(claudeHome, SESSION)).toBe('working')
 }, 60_000)
 
+test('a session whose record Claude Code left with bytes after its JSON, as when two of its writes cross, still lists running and follows its turns', async () => {
+  const relay = await memoryRelay()
+  const laptop = await runningOn(relay)
+  const claudeHome = laptop.env['CLAUDE_CONFIG_DIR'] ?? ''
+  writeFileSync(join(claudeHome, 'sessions', `${laptop.claude.pid}.json`), `${JSON.stringify({ pid: laptop.claude.pid, sessionId: SESSION, kind: 'interactive', cwd: laptop.cwd, status: 'busy', statusUpdatedAt: Date.now() - 60_000 })}}`)
+  const listed = async (): Promise<string | undefined> =>
+    ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; status: string }[] }).agents.find(({ id }) => id === SESSION)?.status
+
+  await hookOn(laptop.socket, 'turnStart', laptop.cwd)
+
+  expect(await listed()).toBe('working')
+  expect(await statusOf(claudeHome, SESSION)).toBe('working')
+}, 60_000)
+
 test('a record that says shell, as while a background command or Monitor runs after the turn, reads working, and one Claude Code handed to the background reads idle', async () => {
   const claudeHome = join(temporaryFolder(), '.claude')
   mkdirSync(join(claudeHome, 'sessions'), { recursive: true })
