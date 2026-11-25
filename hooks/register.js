@@ -9221,7 +9221,7 @@ function resultOf2(value) {
   return JSON.stringify(value);
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-15U9of/release/src/program.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-cbbJxO/release/src/program.ts
 var READY_MS = 1e4;
 var FOLLOW_MS = 1000;
 var programs = new WeakMap;
@@ -9261,7 +9261,7 @@ async function askProgram(mod, path, body) {
   return read;
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-15U9of/release/src/agents.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-cbbJxO/release/src/agents.ts
 var AGENT = { type: "string", description: "The agent id, or its first 8 characters." };
 var WAKES = "An idle agent takes the message at once, works, and rests again on its own.";
 function agentTools(mod) {
@@ -9475,7 +9475,7 @@ function agentTools(mod) {
   ];
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-15U9of/release/src/connect.tsx
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-cbbJxO/release/src/connect.tsx
 var CONNECT_WAIT_MS = 15000;
 var pause = (mod, ms) => new Promise((resolve) => void mod.after(ms, resolve));
 function follow(mod) {
@@ -9625,12 +9625,12 @@ function ConnectingView({ mod, connecting }) {
   }, connecting.error));
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-15U9of/release/src/state.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-cbbJxO/release/src/state.ts
 var initialState = {
   memory: { connecting: null, isFollowing: false, joined: null, joining: null, relayState: null, machines: null, isAdding: false, removing: null, problem: null }
 };
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-15U9of/release/src/views/machines.tsx
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-cbbJxO/release/src/views/machines.tsx
 function momentOf(iso) {
   const at = new Date(iso);
   const time = at.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
@@ -9764,7 +9764,7 @@ function MachineList({ mod, machines, removing }) {
   }, "[Cancel]"))))));
 }
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-15U9of/release/src/mod.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-cbbJxO/release/src/mod.ts
 var MACHINES_EVERY_MS = 1e4;
 var PROMPT_ASK_MS = 1500;
 var PROMPT_MS = 3000;
@@ -9962,7 +9962,7 @@ var anyhost = defineMod({
   }
 });
 
-// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-15U9of/release/hooks/register.ts
+// ../../../../../private/var/folders/q2/p1t6rgxj5fj32g1dc7dmd49r0000gn/T/cmod-publish-anyhost-cbbJxO/release/hooks/register.ts
 function register(addHook, options) {
   registerMod(addHook, anyhost, options);
 }
