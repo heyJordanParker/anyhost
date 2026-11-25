@@ -8,15 +8,19 @@ export type Roots = {
   readonly checkout: string
 }
 
+const isJsonPath = (path: string): boolean => path.endsWith('.jsonl') || path.endsWith('.json') || basename(path) === 'state_5.sqlite'
+
+export const rewritesContent = (head: Uint8Array, path: string, from: Roots, to: Roots): boolean =>
+  !ROOTS.every((key) => from[key] === to[key]) && !path.startsWith(`${from.claudeHome}/file-history/`) && (isJsonPath(path) || isText(head))
+
 export function relocate(bytes: Uint8Array, path: string, from: Roots, to: Roots): { path: string; bytes: Uint8Array } {
   check(from, 'from')
   check(to, 'to')
   if (ROOTS.every((key) => from[key] === to[key])) return { path, bytes }
   const plain = new Relocation(from, to, (text) => text)
   const moved = new TextDecoder().decode(plain.rewrite(encoder.encode(path)))
-  if (path.startsWith(`${from.claudeHome}/file-history/`)) return { path: moved, bytes }
-  if (path.endsWith('.jsonl') || path.endsWith('.json') || basename(path) === 'state_5.sqlite') return { path: moved, bytes: new Relocation(from, to, jsonText).rewrite(bytes) }
-  return { path: moved, bytes: isText(bytes) ? plain.rewrite(bytes) : bytes }
+  if (!rewritesContent(bytes, path, from, to)) return { path: moved, bytes }
+  return { path: moved, bytes: isJsonPath(path) ? new Relocation(from, to, jsonText).rewrite(bytes) : plain.rewrite(bytes) }
 }
 
 const ROOTS = ['home', 'claudeHome', 'claudeTmp', 'codexHome', 'checkout'] as const

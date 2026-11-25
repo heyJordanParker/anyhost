@@ -5,7 +5,7 @@ import type { Shown } from './activity.ts'
 import { bytesOfChunks, chainOf, chunkReader, chunksIn, decompressDelta, downloadBase, framesOf, journalPrefix, ownIndex, type Capture, type ChunkReader, type IndexedSession, type RecordHeader } from './capture.ts'
 import { devicesOf } from './device.ts'
 import type { Read, Relay } from './relay.ts'
-import { isArchived, isSnoozed, settledAtOf, sharedOf, windowsIn, windowsKeyOf, type Shared, type Stage, type Tag, type Windows, type Worktree } from './shared.ts'
+import { isArchived, isSnoozed, settledAtOf, sharedOf, windowsIn, windowsKeyOf, type Attention, type Shared, type Stage, type Tag, type Windows, type Worktree } from './shared.ts'
 
 export type ListedSession = IndexedSession & { readonly machine: string; readonly device: string; readonly holder: string }
 export type Segment = Pick<RecordHeader, 'device' | 'checkout' | 'path'> & { readonly offset: number; readonly size: number }
@@ -114,23 +114,54 @@ export async function agentsOf(
   ])
   const sessions = await listSessions(capture, { devices, indexes: new Map([...indexes, [capture.device.id, own]]), holders })
   const background = new Set(shown.background)
-  const agents = sessions.filter((session) => session.firstPrompt !== '' || session.named === true || (shown.statuses[session.id] ?? '') !== '').map((session) => {
+  const listed = sessions.filter((session) => session.firstPrompt !== '' || session.named === true || (shown.statuses[session.id] ?? '') !== '')
+  const byId = new Map(listed.map((session) => [session.id, session]))
+  const parentOf = (id: string): string => {
+    const parent = shared.parents[id] ?? ''
+    return parent === id ? '' : parent
+  }
+  const childrenOf = new Map<string, string[]>()
+  for (const { id } of listed) if (parentOf(id) !== '') childrenOf.set(parentOf(id), [...(childrenOf.get(parentOf(id)) ?? []), id])
+  const familyOf = (id: string, seen: Set<string> = new Set()): IndexedSession[] => {
+    const session = byId.get(id)
+    if (session === undefined || seen.has(id)) return []
+    seen.add(id)
+    return [session, ...(childrenOf.get(id) ?? []).flatMap((child) => familyOf(child, seen))]
+  }
+  const statusOf = (id: string): Agent['status'] => (background.has(id) ? 'working' : (shown.statuses[id] ?? ''))
+  const latest = (times: readonly string[]): string => times.reduce((most, each) => (each > most ? each : most), '')
+  const attentionOf = (session: IndexedSession): Attention => {
+    const family = familyOf(session.id)
+    const waiting = family.filter(({ id }) => statusOf(id) === 'waiting').map(({ id }) => new Date(shown.since[id] ?? now).toISOString())
+    return { ...session, lastActivity: latest(family.map(({ lastActivity }) => lastActivity)), waitingSince: latest(waiting) }
+  }
+  const familyStatusOf = (session: IndexedSession): Agent['status'] => {
+    const statuses = familyOf(session.id).map(({ id }) => statusOf(id))
+    return statuses.includes('waiting') ? 'waiting' : statuses.includes('working') ? 'working' : statusOf(session.id)
+  }
+  const isArchivedIn = (id: string, seen: Set<string> = new Set()): boolean => {
+    const session = byId.get(id)
+    if (session === undefined || seen.has(id)) return false
+    seen.add(id)
+    return isArchived(shared, attentionOf(session)) || isArchivedIn(parentOf(id), seen)
+  }
+  const agents = listed.map((session) => {
     const status: Agent['status'] = shown.statuses[session.id] ?? ''
-    const isBackground = background.has(session.id)
-    const settledAt = settledAtOf(shared, session, isBackground ? 'working' : status, now)
+    const attention = attentionOf(session)
+    const settledAt = settledAtOf(shared, attention, familyStatusOf(session), now)
     return {
       ...session,
       title: session.title || titleOfPrompt(session.firstPrompt) || NEW_SESSION,
       terminal: terminals.get(session.id) ?? '',
       status,
       statusSince: shown.since[session.id] ? new Date(shown.since[session.id] ?? 0).toISOString() : '',
-      background: isBackground,
-      archived: isArchived(shared, session),
+      background: background.has(session.id),
+      archived: isArchivedIn(session.id),
       settled: settledAt !== '',
       settledAt,
-      snoozedUntil: isSnoozed(shared, session, status, now) ? (shared.snoozed[session.id]?.until ?? '') : '',
+      snoozedUntil: isSnoozed(shared, attention, now) ? (shared.snoozed[session.id]?.until ?? '') : '',
       visitedAt: shared.visited[session.id] ?? '',
-      parent: shared.parents[session.id] ?? '',
+      parent: parentOf(session.id),
       source: session.source ?? '',
       pinned: shared.pinned[session.id] ?? '',
       tags: shared.tagged[session.id] ?? [],

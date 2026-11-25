@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto'
-import { copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { stateFolder } from './device.ts'
 
 const PUSH_GAP_MS = 10_000
-const LARGEST_PUSHED_FILE = 100 * 1024 * 1024
+const LARGEST_CODE_FILE = 100 * 1024 * 1024
 const NETWORK_MS = 10 * 60_000
 const PART_LIMIT = 64 * 1024
 const EMPTY_TREE: Readonly<Record<string, string>> = {
@@ -17,7 +17,8 @@ const ANYHOST = { GIT_AUTHOR_NAME: 'anyhost', GIT_AUTHOR_EMAIL: 'anyhost@anyhost
 const GIT_ENV = { GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' }
 
 type Stage = { readonly path: string; readonly mode: string; readonly stage: string; readonly id: string }
-type Trees = { readonly index: string; readonly worktree: string; readonly conflicts: readonly Stage[] }
+type LeftOut = { readonly path: string; readonly size: number }
+type Trees = { readonly index: string; readonly worktree: string; readonly conflicts: readonly Stage[]; readonly leftOut: readonly LeftOut[] }
 type Remote = { readonly name: string; readonly url: string }
 type Stashed = { readonly id: string; readonly message: string }
 
@@ -100,9 +101,15 @@ async function openRepository(cwd: string, kind: Repository['kind'], env: Readon
   return { kind, cwd: top, env, subfolder: prefix.replace(/\/$/, ''), gitDir, commonDir, index, emptyTree: EMPTY_TREE[format] ?? EMPTY_TREE['sha1'] ?? '' }
 }
 
+const creating = new Map<string, Promise<unknown>>()
+
 async function folderRepository(folder: string): Promise<Repository> {
   const gitDir = join(stateFolder(), 'folders', `${sha256(await realpath(folder)).slice(0, 16)}.git`)
-  if (!(await exists(gitDir))) await git({ cwd: folder, env: {} }, ['init', '-q', '--bare', gitDir])
+  if (!(await exists(gitDir))) {
+    const created = creating.get(gitDir) ?? git({ cwd: folder, env: {} }, ['init', '-q', '--bare', gitDir]).finally(() => creating.delete(gitDir))
+    creating.set(gitDir, created)
+    await created
+  }
   const repo = await openRepository(folder, 'folder', { GIT_DIR: gitDir, GIT_WORK_TREE: folder })
   if (repo === undefined) throw new Error(`git refused ${gitDir} as the git folder of ${folder}.`)
   return repo
@@ -127,36 +134,66 @@ async function copyIndex(from: string, to: string): Promise<void> {
   await utimes(to, atime, mtime)
 }
 
+async function sizesOf(repo: Repository, ids: readonly string[]): Promise<Map<string, number>> {
+  if (ids.length === 0) return new Map()
+  return new Map(linesOf(await git(repo, ['cat-file', '--batch-check=%(objectname) %(objectsize)'], { input: `${ids.join('\n')}\n` })).map((line) => [line.split(' ')[0] ?? '', Number(line.split(' ')[1])] as const))
+}
+
+async function resetToHead(repo: Repository, head: string | null, paths: readonly string[], env: Readonly<Record<string, string>>): Promise<void> {
+  const zero = '0'.repeat(repo.emptyTree.length)
+  const inHead = head === null ? [] : textOf(await git(repo, ['ls-tree', '-z', '--full-tree', head, '--', ...paths], { env: { GIT_LITERAL_PATHSPECS: '1' } })).split('\0').filter((entry) => entry !== '')
+  const atHead = inHead.map((entry) => {
+    const [meta = '', path = ''] = entry.split('\t')
+    const [mode = '', , id = ''] = meta.split(' ')
+    return `${mode} ${id} 0\t${path}`
+  })
+  await git(repo, ['update-index', '-z', '--index-info'], { env, input: [...paths.map((path) => `0 ${zero}\t${path}`), ...atHead].map((line) => `${line}\0`).join('') })
+}
+
+type Changes = { readonly conflicts: Stage[]; readonly staged: { readonly path: string; readonly id: string; readonly isOnDisk: boolean }[]; readonly changed: string[] }
+
+async function changesOf(repo: Repository, env: Readonly<Record<string, string>>): Promise<Changes> {
+  const changes: Changes = { conflicts: [], staged: [], changed: [] }
+  const zero = /^0+$/
+  for (const entry of textOf(await git(repo, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-renames', '--ignore-submodules=all'], { env })).split('\0')) {
+    const fields = entry.split(' ')
+    if (fields[0] === '?') changes.changed.push(entry.slice(2))
+    if (fields[0] === 'u') {
+      const path = fields.slice(10).join(' ')
+      for (const stage of [1, 2, 3]) if (!zero.test(fields[2 + stage] ?? '0')) changes.conflicts.push({ path, mode: fields[2 + stage] ?? '', stage: String(stage), id: fields[6 + stage] ?? '' })
+    }
+    if (fields[0] !== '1') continue
+    const [, flags = '..', , , , , head = '', id = ''] = fields
+    const path = fields.slice(8).join(' ')
+    if (flags[0] !== '.' && !zero.test(id) && id !== head) changes.staged.push({ path, id, isOnDisk: flags[1] === '.' })
+    if (flags[1] !== '.') changes.changed.push(path)
+  }
+  return changes
+}
+
 async function treesOf(repo: Repository, head: string | null): Promise<Trees> {
   const temp = await mkdtemp(join(tmpdir(), 'anyhost-code-'))
   try {
     const index = join(temp, 'index')
     if (await exists(repo.index)) await copyIndex(repo.index, index)
     const env = { GIT_INDEX_FILE: index }
-    const conflicts = textOf(await git(repo, ['ls-files', '-s', '-z'], { env }))
-      .split('\0')
-      .filter((entry) => entry !== '' && !/^\d+ [0-9a-f]+ 0\t/.test(entry))
-      .map((entry) => {
-        const [meta = '', path = ''] = entry.split('\t')
-        const [mode = '', id = '', stage = ''] = meta.split(' ')
-        return { path, mode, stage, id }
-      })
-    if (conflicts.length > 0) {
-      const paths = [...new Set(conflicts.map(({ path }) => path))]
-      const zero = '0'.repeat(repo.emptyTree.length)
-      const inHead = head === null ? [] : textOf(await git(repo, ['ls-tree', '-z', '--full-tree', head, '--', ...paths], { env: { GIT_LITERAL_PATHSPECS: '1' } })).split('\0').filter((entry) => entry !== '')
-      const atHead = inHead.map((entry) => {
-        const [meta = '', path = ''] = entry.split('\t')
-        const [mode = '', , id = ''] = meta.split(' ')
-        return `${mode} ${id} 0\t${path}`
-      })
-      await git(repo, ['update-index', '-z', '--index-info'], { env, input: [...paths.map((path) => `0 ${zero}\t${path}`), ...atHead].map((line) => `${line}\0`).join('') })
-    }
-    const staged = repo.kind === 'folder' ? repo.emptyTree : await valueOf(repo, ['write-tree'], { env })
-    await git(repo, ['add', '-A', '--', ':/'], { env })
+    const { conflicts, staged: stagedFiles, changed } = await changesOf(repo, env)
+    if (conflicts.length > 0) await resetToHead(repo, head, [...new Set(conflicts.map(({ path }) => path))], env)
+    const sizeOnDisk = async (path: string): Promise<number> => (await lstat(join(repo.cwd, path)).catch(() => undefined))?.size ?? 0
+    const isFolder = repo.kind === 'folder'
+    const sizes = await sizesOf(repo, isFolder ? [] : [...new Set(stagedFiles.filter(({ isOnDisk }) => !isOnDisk).map(({ id }) => id))])
+    const stagedSized = await Promise.all(stagedFiles.filter(({ isOnDisk }) => isOnDisk || !isFolder).map(async ({ path, id, isOnDisk }) => ({ path, size: isOnDisk ? await sizeOnDisk(path) : (sizes.get(id) ?? 0) })))
+    const largeStaged = stagedSized.filter(({ size }) => size > LARGEST_CODE_FILE)
+    if (largeStaged.length > 0) await resetToHead(repo, head, largeStaged.map(({ path }) => path), env)
+    const staged = isFolder ? repo.emptyTree : await valueOf(repo, ['write-tree'], { env })
+    const onDisk = await Promise.all([...new Set([...changed, ...largeStaged.map(({ path }) => path)])].map(async (path) => ({ path, size: await sizeOnDisk(path) })))
+    const largeChanges = onDisk.filter(({ size }) => size > LARGEST_CODE_FILE)
+    const stillIndexed = largeChanges.filter(({ path }) => !largeStaged.some((file) => file.path === path))
+    if (isFolder && stillIndexed.length > 0) await resetToHead(repo, null, stillIndexed.map(({ path }) => path), env)
+    await git(repo, ['add', '-A', '--', ':/', ...largeChanges.map(({ path }) => `:(exclude,literal)${path}`)], { env })
     const worktree = await valueOf(repo, ['write-tree'], { env })
     if (repo.kind === 'folder') await copyIndex(index, repo.index)
-    return { index: staged, worktree, conflicts }
+    return { index: staged, worktree, conflicts, leftOut: [...new Map([...largeStaged, ...largeChanges].map((file) => [file.path, file])).values()] }
   } finally {
     await rm(temp, { recursive: true, force: true })
   }
@@ -189,11 +226,11 @@ async function remotesOf(repo: Repository): Promise<Remote[]> {
 }
 
 async function refsOf(repo: Repository) {
-  const head = await commitOf(repo, 'HEAD')
   const symbolic = textOf((await run(repo, ['symbolic-ref', '-q', 'HEAD'])).out).trim()
   const refs = linesOf(await git(repo, ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(upstream:short)%00%(upstream:remotename)', 'refs/heads', 'refs/stash'])).map((line) => line.split('\0'))
   const branches = Object.fromEntries(refs.filter(([name = '']) => name.startsWith('refs/heads/')).map(([name = '', id = '']) => [name.slice('refs/heads/'.length), id]))
   const current = refs.find(([name]) => name === symbolic)
+  const head = symbolic === '' ? await commitOf(repo, 'HEAD') : (current?.[1] ?? null)
   const stash = refs.some(([name]) => name === 'refs/stash')
     ? linesOf(await git(repo, ['log', '-g', '--format=%H%x00%gs', 'refs/stash'])).map((line) => {
         const [id = '', message = ''] = line.split('\0')
@@ -280,7 +317,7 @@ function pushRef(repo: Repository, remote: string, ref: string): Promise<string 
 async function pushKeep(repo: Repository, remote: Remote, session: string, keep: string): Promise<string | undefined> {
   const key = `${repo.commonDir}\0${remote.name}\0${session}`
   if (pushedKeeps.get(key) === keep) return undefined
-  const omitted = linesOf(await git(repo, ['rev-list', '--objects', `--filter=blob:limit=${LARGEST_PUSHED_FILE + 1}`, '--filter-print-omitted', keep, '--not', '--remotes'])).filter((line) => line.startsWith('~'))
+  const omitted = linesOf(await git(repo, ['rev-list', '--objects', `--filter=blob:limit=${LARGEST_CODE_FILE + 1}`, '--filter-print-omitted', keep, '--not', '--remotes'])).filter((line) => line.startsWith('~'))
   if (omitted.length > 0) return `its commits hold ${omitted.length === 1 ? 'a file' : `${omitted.length} files`} over the 100 MiB GitHub takes in a push`
   const refused = await pushRef(repo, remote.name, `refs/anyhost/${session}`)
   if (refused === undefined) pushedKeeps.set(key, keep)
@@ -313,10 +350,7 @@ async function patchesOf(repo: Repository, from: string, to: string, journaled: 
     const [oldMode = '', newMode = '', oldId = '', newId = ''] = (raw[at] ?? '').slice(1).split(' ')
     entries.push({ key: [raw[at + 1], oldMode, newMode, oldId, newId].join('\0'), path: raw[at + 1] ?? '', ids: [oldId, newId].filter((id) => !/^0+$/.test(id)) })
   }
-  const ids = [...new Set(entries.flatMap((entry) => entry.ids))]
-  const sizes = new Map(
-    ids.length === 0 ? [] : linesOf(await git(repo, ['cat-file', '--batch-check=%(objectname) %(objectsize)'], { input: `${ids.join('\n')}\n` })).map((line) => [line.split(' ')[0] ?? '', Number(line.split(' ')[1])] as const),
-  )
+  const sizes = await sizesOf(repo, [...new Set(entries.flatMap((entry) => entry.ids))])
   const big = entries.filter((entry) => entry.ids.some((id) => (sizes.get(id) ?? 0) > PART_LIMIT))
   const patch = async (pathspecs: readonly string[]): Promise<Part> => partOf(await git(repo, ['diff-tree', '-p', '--binary', '--full-index', '--no-renames', from, to, '--', ...pathspecs]))
   const parts = big.length < entries.length ? [await patch(big.map((entry) => `:(exclude,literal)${entry.path}`))] : []
@@ -357,6 +391,7 @@ async function decode(header: Uint8Array, readPart: (path: string) => Promise<Ui
 }
 
 const recorded = new Map<string, string>()
+const leftOutSaid = new Map<string, string>()
 
 export async function captureCode(folder: string, session: string): Promise<CodeCapture | undefined> {
   if (!(await exists(folder))) throw new Error(`Session ${session} works in ${folder}, which no longer exists, so anyhost keeps its last code record.`)
@@ -365,6 +400,11 @@ export async function captureCode(folder: string, session: string): Promise<Code
   const refs = repo.kind === 'repo' ? await refsOf(repo) : { head: null, branch: null, upstream: null, branches: {}, stash: [], remote: null }
   const operation = repo.kind === 'repo' ? await operationFilesOf(repo) : []
   const trees = await treesOf(repo, refs.head)
+  const leftOut = trees.leftOut.map(({ path, size }) => `${path} (${Math.round(size / 2 ** 20)} MiB)`).join(', ')
+  if (leftOut !== '' && leftOutSaid.get(repo.cwd) !== leftOut) {
+    console.error(`${new Date().toISOString()} anyhost leaves ${leftOut} out of the code it keeps of ${repo.cwd}, as it keeps a file of code up to the ${LARGEST_CODE_FILE / 2 ** 20} MiB GitHub takes in a push.`)
+  }
+  leftOutSaid.set(repo.cwd, leftOut)
   const tips = [refs.head, ...Object.values(refs.branches), ...refs.stash.map(({ id }) => id), ...(await operationCommitsOf(repo, operation))].filter((id) => id !== null)
   const keep = repo.kind === 'repo' ? await keepCommits(repo, session, tips) : null
   const record = { session, kind: repo.kind, subfolder: repo.subfolder, ...refs, trees: { index: trees.index, worktree: trees.worktree }, conflicts: trees.conflicts, keep }

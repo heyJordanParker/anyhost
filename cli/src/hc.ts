@@ -28,8 +28,8 @@ const isTemporary = (cwd: string, roots: { readonly home: string; readonly claud
 
 export const spaceOf = (cwd: string, checkout: string): string => (isTemporary(cwd, rootsHere()) ? 'anyhost-temporary' : checkout === '' ? 'anyhost-none' : `anyhost-w-${hex12(checkout)}`)
 
-export async function openTerminal(cwd: string, session: string, argv: readonly string[], checkout: string): Promise<string> {
-  const placed = { [SPACE_LABEL]: spaceOf(cwd, checkout), 'herdr.tab': session.slice(0, 8), [SESSION_LABEL]: session }
+export async function openTerminal(cwd: string, session: string, argv: readonly string[], checkout: string, isSubagent: boolean): Promise<string> {
+  const placed = isSubagent ? { [SESSION_LABEL]: session } : { [SPACE_LABEL]: spaceOf(cwd, checkout), 'herdr.tab': session.slice(0, 8), [SESSION_LABEL]: session }
   const labels = Object.entries(placed).flatMap(([key, value]) => ['--label', `${key}=${value}`])
   const { address } = JSON.parse(await run(inScope([hcHere(), 'run', '--bg', '--json', '--no-parent', '--cwd', cwd, ...labels, '--', ...argv]), { cwd })) as { readonly address: string }
   return address

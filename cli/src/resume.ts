@@ -9,11 +9,12 @@ import { claimsOf, HeldElsewhere, takeClaim } from './claims.ts'
 import { claudeStart, resumeArgv, resumedOf, statusOf } from './claude.ts'
 import { cloneRemote } from './code.ts'
 import { cmod, dataFolders, devicesOf, rootsHere, type MachineRoots } from './device.ts'
-import { relocate, type Roots } from './relocate.ts'
+import { relocate, rewritesContent, type Roots } from './relocate.ts'
 import { downloadJournal, indexesOf, listSessions, type ListedSession, type Replayed, type ReplayedFile } from './sessions.ts'
 import { codexState, filesUnder, historyOf, linesFiles, ownerOf, transcriptOf, transcriptTailOf, type Tool } from './transcript.ts'
 
 const NOTHING = new Uint8Array()
+const VIEW_PIECE_BYTES = 4 * 2 ** 20
 
 export const repoSlug = (remote: string): string =>
   remote
@@ -116,10 +117,15 @@ function rulesPathOf(path: string, from: Roots, writers: Writers): string | unde
 
 async function* viewOf(file: ReplayedFile, writers: Writers, to: Roots): AsyncGenerator<Uint8Array> {
   for (const segment of file.segments) {
-    const bytes = await readStaged(file, segment.offset, segment.size)
     const from = writers.rootsOf(segment)
     const rules = rulesPathOf(segment.path, from, writers)
-    yield rules === undefined ? bytes : relocate(bytes, rules, from, to).bytes
+    const head = await readStaged(file, segment.offset, Math.min(segment.size, VIEW_PIECE_BYTES))
+    if (rules !== undefined && rewritesContent(head, rules, from, to)) {
+      yield relocate(await readStaged(file, segment.offset, segment.size), rules, from, to).bytes
+      continue
+    }
+    yield head
+    for (let at = head.length; at < segment.size; at += VIEW_PIECE_BYTES) yield await readStaged(file, segment.offset + at, Math.min(VIEW_PIECE_BYTES, segment.size - at))
   }
 }
 

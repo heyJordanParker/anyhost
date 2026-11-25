@@ -107,11 +107,11 @@ const ALL = "all";
 const TEMPORARY = "temporary";
 const NO_FILTER = { project: null, worktree: null, machine: null, tags: [], states: [], include: [] };
 const STATE = {
-  blocked: { name: "Needs you", sentence: "It waits for your answer", icon: "mods/anyhost/icons/circle-alert", colors: ["#d97706", "#fbbf24"] },
-  done: { name: "Done", sentence: "It finished", icon: "circle-check", colors: ["#059669", "#34d399"] },
-  working: { name: "Working", sentence: "It is working", icon: "mods/anyhost/icons/circle-dashed", colors: ["#0284c7", "#38bdf8"] },
-  tasks: { name: "Tasks running", sentence: "Its tasks are still running", icon: "mods/anyhost/icons/square-stack", colors: ["#7c3aed", "#a78bfa"] },
-  idle: { name: "Idle", sentence: "It is idle", icon: "mods/anyhost/icons/circle", colors: ["#787774", "#9b9b9b"] },
+  blocked: { name: "Needs you", icon: "mods/anyhost/icons/circle-alert", colors: ["#d97706", "#fbbf24"] },
+  done: { name: "Done", icon: "circle-check", colors: ["#059669", "#34d399"] },
+  working: { name: "Working", icon: "mods/anyhost/icons/circle-dashed", colors: ["#0284c7", "#38bdf8"] },
+  tasks: { name: "Tasks running", icon: "mods/anyhost/icons/square-stack", colors: ["#7c3aed", "#a78bfa"] },
+  idle: { name: "Idle", icon: "mods/anyhost/icons/circle", colors: ["#787774", "#9b9b9b"] },
 };
 const isRunning = (state) => state === "working" || state === "tasks";
 const noteStatusWords = (all) => {
@@ -174,10 +174,12 @@ const INSTANT = { duration: 0 };
 const MOTION_MOST = 40;
 const FILTER_BODY_MOST = 460;
 const CARD_HEIGHT = UI.space.xs * 2 + UI.height.inline * 3;
+const SUBAGENT_HEIGHT = UI.space.xs * 2 + UI.height.inline * 2;
+const SUBAGENT_ORDER = { blocked: 0, working: 1, tasks: 1, done: 2, idle: 3, archived: 4, deleted: 5 };
+const SUBAGENT_GONE = { archived: ["Archived", "archive"], deleted: ["Deleted", `${OWN}/trash`] };
 const PICKER_HEIGHT = UI.height.row * 10 + UI.space.lg;
 const MENU_WIDTH = 220;
 const MENU_SEPARATOR = UI.space.xs * 2 + 1;
-const BUSY_REASON = "Not while it runs or waits for you";
 const HUES = [
   ["#4b5563", "#9ca3af"],
   ["#dc2626", "#f87171"],
@@ -776,7 +778,7 @@ const reachOf = (machine) => {
   if (!pulse || machine === pulse.here) return "";
   return pulse.all.machines.find((m) => m.name === machine)?.on ?? null;
 };
-const targetOf = (r) => ({ key: r.key, title: r.title, tool: r.tool ?? r.session?.tool ?? r.harness ?? "claude", machine: r.machine, space: r.space, checkout: r.checkout ?? null, address: r.address ?? null, archived: Boolean(r.archived), deleted: Boolean(r.deleted), isRemote: Boolean(r.isRemote) });
+const targetOf = (r) => ({ key: r.key, title: r.title, tool: r.tool ?? r.session?.tool ?? r.harness ?? "claude", machine: r.machine, space: r.space, checkout: r.checkout ?? null, address: r.address ?? null, archived: Boolean(r.archived), deleted: Boolean(r.deleted), isRemote: Boolean(r.isRemote), isChild: Boolean(r.isChild) });
 const liveTabs = () => new Set(spaces().flatMap((sp) => sp.tabs.map((x) => x.id)));
 const awakeSessions = () => new Set(terminals().filter((x) => x.state === "live").map((x) => x.labels?.[SESSION_LABEL]).filter(Boolean));
 const sleptSessionOf = (key) => {
@@ -805,7 +807,7 @@ const sleptWindows = () => {
 const openStepOf = (s, on) =>
   s.tool === "claude"
     ? { args: ["open", s.key, "--json"], timeout: LONG_MS, on: on || null }
-    : { hc: ["run", "--bg", "--keep", "--no-parent", "--json", ...(on ? ["--on", on] : []), "--label", `herdr.space=${s.space}`, "--label", `herdr.tab=${s.key.slice(0, 8)}`, "--label", `${SESSION_LABEL}=${s.key}`, "--", ...anyhostArgv("resume", s.key, ...(on === "" && s.isRemote ? ["--take"] : []))] };
+    : { hc: ["run", "--bg", "--keep", "--no-parent", "--json", ...(on ? ["--on", on] : []), ...(s.isChild ? [] : ["--label", `herdr.space=${s.space}`, "--label", `herdr.tab=${s.key.slice(0, 8)}`]), "--label", `${SESSION_LABEL}=${s.key}`, "--", ...anyhostArgv("resume", s.key, ...(on === "" && s.isRemote ? ["--take"] : []))] };
 const startOpening = (s, on) => {
   if (isOpening(s.key)) return;
   markSessionOpening(s.key, true);
@@ -1290,9 +1292,9 @@ export default class Anyhost extends View {
       Boolean(r.address) && (r.address === terminal || r.views.includes(terminal)),
       this.worktreeOf(r),
       r.session.source ? (model.byKey.get(r.session.source)?.title ?? "") : "",
-      r.session.parent ? (model.byKey.get(r.session.parent)?.title ?? "") : "",
+      r.isChild ? (model.byKey.get(r.parent)?.title ?? "") : "",
       subs.isOpen,
-      subs.rows.map((row) => [row.id, row.title, row.state]),
+      subs.rows.map((row) => [row.id, row.title, row.state, row.isAsleep, row.status, row.said]),
       tags,
       this.data.stages.find((stage) => stage.id === r.stage)?.name ?? "",
       this.found !== null,
@@ -1573,6 +1575,7 @@ export default class Anyhost extends View {
       tags: change.tags ?? s.tags ?? [],
       stage: change.stage ?? s.stage ?? "",
       visitedAt,
+      parent: change.parent ?? s.parent ?? "",
       lastSaid: s.lastSaid ?? "",
       isRemote: machine !== here,
       at: s.lastActivity,
@@ -1819,11 +1822,28 @@ export default class Anyhost extends View {
       const kid = live.all.find((x) => x.parent === r.address && statusOf.get(x.address)?.status === "blocked");
       if (kid) Object.assign(r, { state: "blocked", label: `Subagent: ${ASKS[kid.report?.kind] ?? "Needs you"}`, since: kid.status_ms ?? r.since });
     }
-    const childrenOf = new Map();
     for (const r of rows) {
-      const parent = r.session.parent ? rowByKey.get(r.session.parent) : undefined;
-      r.isChild = Boolean(parent) && !parent.archived && !parent.deleted;
-      if (r.isChild && !r.archived && !r.deleted) childrenOf.set(parent.key, [...(childrenOf.get(parent.key) ?? []), r]);
+      r.isChild = rowByKey.has(r.parent);
+      if (r.parent && !r.isChild) r.kind = "background";
+    }
+    const childrenOf = new Map();
+    for (const r of rows.filter((r) => r.isChild)) {
+      const seen = new Set([r.key]);
+      let root = rowByKey.get(r.parent);
+      while (root.isChild && !seen.has(root.key)) {
+        seen.add(root.key);
+        root = rowByKey.get(root.parent);
+      }
+      childrenOf.set(root.key, [...(childrenOf.get(root.key) ?? []), r]);
+    }
+    for (const [key, children] of childrenOf) {
+      const r = rowByKey.get(key);
+      if (r.isOffline || r.state === "blocked") continue;
+      const shown = children.filter((c) => !c.archived && !c.deleted);
+      const waiting = shown.find((c) => c.state === "blocked" && !c.isOffline);
+      const working = shown.filter((c) => isRunning(c.state));
+      if (waiting) Object.assign(r, { state: "blocked", label: `Subagent: ${waiting.label}`, since: waiting.since });
+      else if (working.length > 0 && !isRunning(r.state)) Object.assign(r, { state: "tasks", label: STATE.tasks.name, since: Math.min(...working.map((c) => c.since)) });
     }
     const isShownKind = (r) => r.kind === "own" || filter.include.includes(r.kind);
     const passes = (r) =>
@@ -1850,7 +1870,7 @@ export default class Anyhost extends View {
     for (const x of live.all) if (x.parent && !x.labels?.[SESSION_LABEL]) kidsOf.set(x.parent, [...(kidsOf.get(x.parent) ?? []), x]);
     let pulse = null;
     const model = { rows, byKey: rowByKey, childrenOf, worktrees, sections, now, kidsOf, statusOf };
-    Object.defineProperty(model, "pulse", { get: () => (pulse ??= this.pulseOf(rows, live)) });
+    Object.defineProperty(model, "pulse", { get: () => (pulse ??= this.pulseOf(rows)) });
     return model;
   }
 
@@ -1869,13 +1889,14 @@ export default class Anyhost extends View {
     const state = liveStateOf({ state: listed, since: c.statusSinceMs, background: c.background }, terminal);
     const since = state === "blocked" || isRunning(state) ? ((state === listed ? c.statusSinceMs : wordChangedAt(terminal.address)) ?? terminal?.status_ms ?? at) : at;
     const label = isOffline ? "Offline" : state === "blocked" ? (ASKS[terminal?.report?.kind] ?? (terminal?.status === "error" ? "Error" : "Needs you")) : state === "idle" ? "" : STATE[state].name;
-    return { state, label, since, isUnread, isOffline, seenAt: isOffline ? (holder.seenAt ?? null) : null };
+    return { state, label, since, isUnread, isOffline, isAsleep: !c.address && !c.session.status, seenAt: isOffline ? (holder.seenAt ?? null) : null };
   }
 
   sectionOf(r, now, isShownKind, filter) {
+    if (r.isChild) return null;
     if (r.deleted) return filter.include.includes("deleted") ? "deleted" : null;
     if (r.archived) return null;
-    if (r.isChild || r.kind !== "own") return r.state === "blocked" && !r.isOffline ? "active" : !r.isChild && isShownKind ? r.kind : null;
+    if (r.kind !== "own") return r.state === "blocked" && !r.isOffline ? "active" : isShownKind ? r.kind : null;
     if (r.snoozedMs > now) return "snoozed";
     if (r.settled) return "settled";
     if (r.pinned) return "pinned";
@@ -1933,12 +1954,11 @@ export default class Anyhost extends View {
   }
 
   factsOf(r) {
-    return { ...targetOf(r), state: r.state, since: r.statusSinceMs, background: r.background, pinned: r.pinned, section: r.section, snoozedUntil: r.snoozedUntil, projectKey: r.projectKey, projectName: r.projectName, kind: r.kind, isUnread: r.isUnread, cwd: r.session.cwd, tags: r.tags, stage: r.stage, views: r.views, at: r.at };
+    return { ...targetOf(r), isChild: Boolean(r.isChild), state: r.state, since: r.statusSinceMs, background: r.background, pinned: r.pinned, section: r.section, snoozedUntil: r.snoozedUntil, projectKey: r.projectKey, projectName: r.projectName, kind: r.kind, isUnread: r.isUnread, cwd: r.session.cwd, tags: r.tags, stage: r.stage, views: r.views, at: r.at };
   }
 
-  pulseOf(rows, live) {
+  pulseOf(rows) {
     const here = this.hereName();
-    const kidsWorking = live.all.filter((x) => x.parent && !x.labels?.[SESSION_LABEL] && live.listed.find((a) => a.address === x.address)?.status === "working").length;
     const machinesListed = [...this.data.devices]
       .sort((a, b) => (a.name === here ? -1 : b.name === here ? 1 : a.name.localeCompare(b.name)))
       .map((d) => ({ name: d.name, place: this.placeOf(d.name), home: d.roots?.home ?? "", on: this.onOf(d.name), connected: d.id === this.data.here || d.connected, seenAt: d.seenAt ?? null, working: rows.filter((r) => r.machine === d.name && r.kind === "own" && !r.isChild && isRunning(r.state)).length }));
@@ -1959,7 +1979,7 @@ export default class Anyhost extends View {
     });
     const order = this.orderNow();
     listed.sort((a, b) => placeIn(order, a.key) - placeIn(order, b.key) || b.newest - a.newest);
-    return { here, device: this.data.here, adopted: this.adopted, projectOrder: order, pinOrder: this.pinOrderNow(), all: { ...this.countsOf(counted), overall: rows.filter((r) => !r.isOffline && isRunning(r.state)).length + kidsWorking, machines: machinesListed }, projects: listed, workspaces: this.workspacesOf(rows), sessions: Object.fromEntries(rows.filter((r) => r.address || (!r.isChild && OPEN_SECTIONS.has(r.section))).map((r) => [r.key, this.factsOf(r)])), closed: closedKeys().map((key) => rows.find((r) => r.key === key)).filter((r) => r?.archived && !r.deleted).map((r) => this.factsOf(r)), tags: this.data.tags, stages: this.data.stages, tagUses: Object.fromEntries(Object.keys(this.data.tags).map((id) => [id, rows.filter((r) => r.tags.includes(id)).map((r) => r.key)])), targets: this.data.devices.filter((d) => d.id !== this.data.here && d.connected).map((d) => d.name), settleAfterDays: this.data.settleAfterDays, pinned: this.pinnedOf(rows.filter((r) => r.section === "pinned")).map((r) => ({ key: r.key, title: r.title, harness: r.harness, state: r.state, space: this.onOf(r.machine) === null ? null : placedSpace(this.onOf(r.machine), r.space) })), known: [...new Map(rows.filter((r) => !r.deleted && r.projectKey !== TEMPORARY).map((r) => [r.projectKey, { key: r.projectKey, name: r.projectName }])).values()] };
+    return { here, device: this.data.here, adopted: this.adopted, projectOrder: order, pinOrder: this.pinOrderNow(), all: { ...this.countsOf(counted), machines: machinesListed }, projects: listed, workspaces: this.workspacesOf(rows), sessions: Object.fromEntries(rows.filter((r) => r.address || (!r.isChild && OPEN_SECTIONS.has(r.section))).map((r) => [r.key, this.factsOf(r)])), closed: closedKeys().map((key) => rows.find((r) => r.key === key)).filter((r) => r?.archived && !r.deleted).map((r) => this.factsOf(r)), tags: this.data.tags, stages: this.data.stages, tagUses: Object.fromEntries(Object.keys(this.data.tags).map((id) => [id, rows.filter((r) => r.tags.includes(id)).map((r) => r.key)])), targets: this.data.devices.filter((d) => d.id !== this.data.here && d.connected).map((d) => d.name), settleAfterDays: this.data.settleAfterDays, pinned: this.pinnedOf(rows.filter((r) => r.section === "pinned")).map((r) => ({ key: r.key, title: r.title, harness: r.harness, state: r.state, space: this.onOf(r.machine) === null ? null : placedSpace(this.onOf(r.machine), r.space) })), known: [...new Map(rows.filter((r) => !r.deleted && r.projectKey !== TEMPORARY).map((r) => [r.projectKey, { key: r.projectKey, name: r.projectName }])).values()] };
   }
 
 
@@ -2001,10 +2021,11 @@ export default class Anyhost extends View {
   }
 
   archiveAll(cx, rows, { isClosed = false, panes: closed = [], show = null } = {}) {
-    if (rows.length === 0) return closed.forEach((pane) => run("pane.close", { pane }));
-    const [first] = rows;
-    const hold = this.holdFor(cx, rows.length === 1 ? `${isClosed ? "Closed" : "Archived"} ${first.title.slice(0, 50)}` : `${isClosed ? "Closed" : "Archived"} ${rows.length} sessions`);
-    rows.forEach((r, i) => this.archive(cx, r, true, { isClosed, hold, show: i === 0 ? show : null }));
+    const leaving = rows.filter((r) => !r.pinned && !r.archived);
+    if (leaving.length === 0) return closed.forEach((pane) => run("pane.close", { pane }));
+    const [first] = leaving;
+    const hold = this.holdFor(cx, leaving.length === 1 ? `${isClosed ? "Closed" : "Archived"} ${first.title.slice(0, 50)}` : `${isClosed ? "Closed" : "Archived"} ${leaving.length} sessions`);
+    leaving.forEach((r, i) => this.archive(cx, r, true, { isClosed, hold, show: i === 0 ? show : null }));
     if (closed.length > 0) enqueue({ run: closed.map((pane) => ({ app: ["pane.close", { pane }] })), hold });
   }
 
@@ -2035,7 +2056,7 @@ export default class Anyhost extends View {
       closed.push(...ps.filter((p) => !byAddress.get(p.terminal)?.labels?.[SESSION_LABEL]).map((p) => p.pane));
       leaving.push(...rows);
     }
-    this.askArchive(cx, leaving, { isClosed: true, panes: closed, show });
+    this.archiveAll(cx, leaving, { isClosed: true, panes: closed, show });
   }
 
   sessionRowOf(key) {
@@ -2044,18 +2065,6 @@ export default class Anyhost extends View {
     return known ? { key, ...known } : undefined;
   }
 
-  askArchive(cx, rows, { isClosed = false, panes: closed = [], show = null } = {}) {
-    const leaving = rows.filter((r) => !r.pinned && !r.archived);
-    const running = leaving.filter((r) => isRunning(r.state) || r.state === "blocked");
-    if (running.length === 0) return this.archiveAll(cx, leaving, { isClosed, panes: closed, show });
-    const [first] = running;
-    this.confirm({
-      title: running.length === 1 ? `Archive ${first.title.slice(0, 50)}?` : `Archive ${running.length} running sessions?`,
-      body: running.length === 1 ? `${STATE[first.state].sentence}. Archiving stops it once its current work ends, and Restore opens it again.` : "Archiving stops each once its current work ends, and Restore opens it again.",
-      go: "Archive",
-      archive: { rows: leaving.map((r) => ({ ...targetOf(r), archived: false })), isClosed, panes: closed, show },
-    });
-  }
 
   confirm(shown) {
     openOverlay({ mod: "anyhost", kind: "dialog", width: 380, props: { view: "confirm", ...shown } });
@@ -2087,7 +2096,6 @@ export default class Anyhost extends View {
   }
 
   toggleSettle(cx, r) {
-    if (isRunning(r.state) || r.state === "blocked") return;
     return r.section === "settled" ? this.unsettle(cx, r) : this.settle(cx, r);
   }
 
@@ -2134,7 +2142,6 @@ export default class Anyhost extends View {
   }
 
   confirmDelete(r) {
-    if (isRunning(r.state) || r.state === "blocked") return;
     const on = this.deleteOn(r);
     if (on === undefined) return;
     this.confirm({ title: `Delete ${r.title}?`, body: "Its files leave every machine. Its backup in R2 stays, so Restore brings it back.", go: "Delete", delete: { row: targetOf(r), on } });
@@ -2142,6 +2149,8 @@ export default class Anyhost extends View {
 
 
   open(r, cx) {
+    const child = r.isChild ? this.model?.byKey.get(r.key) : undefined;
+    if (child?.isChild) return this.showSubagent(cx, this.rootOf(child), child);
     const filter = filterOf();
     const worktree = { machine: r.machine, folder: r.checkout };
     if (r.projectKey !== undefined && filter.project !== null && filter.project !== r.projectKey) setFilter({ project: r.projectKey });
@@ -2168,7 +2177,8 @@ export default class Anyhost extends View {
   present(cx, r, shape) {
     if (shape === "tab") {
       closePresented();
-      return this.open(r, cx);
+      if (r.isChild) this.organize(cx, [{ op: "parentSession", session: r.key, parent: "" }], [[r.key, { parent: "" }]]);
+      return this.open({ ...r, isChild: false }, cx);
     }
     if (r.address) return presentTerminal(r, r.address, shape);
     openSession(targetOf(r), { act: "present", shape });
@@ -2383,7 +2393,7 @@ export default class Anyhost extends View {
     if (asked.action === "pin") return this.togglePin(cx, r);
     if (asked.action === "settle") return this.toggleSettle(cx, r);
     if (asked.action === "snooze") return this.snooze(cx, r, asked.until ?? null);
-    if (asked.action === "archive") return this.askArchive(cx, [r]);
+    if (asked.action === "archive") return this.archiveAll(cx, [r]);
     if (asked.action === "restore") return this.archive(cx, r, false);
     if (asked.action === "unread") return this.markUnread(cx, r);
     if (asked.action === "read") return this.markRead(cx, r);
@@ -2669,7 +2679,7 @@ export default class Anyhost extends View {
   foundOf(model) {
     const query = this.search.value().trim().toLowerCase();
     if (query === "" || !model) return null;
-    const matches = model.rows.filter((r) => !r.isChild && this.searchedOf(r).includes(query));
+    const matches = model.rows.filter((r) => this.searchedOf(r).includes(query));
     return { rows: matches.filter((r) => !r.archived).slice(0, FOUND_MAX), archived: matches.filter((r) => r.archived).slice(0, FOUND_MAX) };
   }
 
@@ -2782,7 +2792,7 @@ export default class Anyhost extends View {
     const { t, model } = ctx;
     const card = (r) => {
       const subs = this.subsOf(r, model);
-      return { key: r.key, r, height: CARD_HEIGHT + (subs.isOpen ? UI.space.xs + subs.rows.length * UI.height.row : 0), el: () => this.cardFor(ctx, r, ctx.mounted) };
+      return { key: r.key, r, height: CARD_HEIGHT + subs.height, el: () => this.cardFor(ctx, r, ctx.mounted) };
     };
     const head = (id, label) => ({ key: `head-${id}`, height: UI.height.row, el: () => this.sectionHead(t, id, label) });
     const hasPins = sections.pinned.length > 0;
@@ -3018,14 +3028,14 @@ export default class Anyhost extends View {
     const { t, shown, model } = ctx;
     const isShown = Boolean(r.address) && (r.address === shown || r.views.includes(shown));
     const isHovered = this.hovered === r.key && this.pressed?.isMoving !== true;
-    const recedes = !isShown && (r.archived || r.deleted || r.isOffline || r.state === "idle" || r.section === "settled" || r.section === "snoozed");
+    const recedes = !isShown && (r.archived || r.deleted || r.isOffline || r.isAsleep || r.section === "settled" || r.section === "snoozed");
     const opening = isOpening(r.key) && !r.address;
     const status = isHovered ? this.actions(t, r) : opening ? this.spinnerLabel(t, "Opening") : this.status(t, r);
     const frame = this.frame(t, r, isShown);
     const worktree = this.worktreeOf(r);
     const shelfName = r.deleted ? "Deleted" : r.archived ? "Archived" : r.section === "snoozed" ? "Snoozed" : r.section === "settled" ? "Settled" : null;
     const source = r.session.source ? model.byKey.get(r.session.source) : undefined;
-    const meta = [withShelf ? shelfName : null, r.projectName, r.isRemote ? this.placeOf(r.machine) : null, r.app, r.isChild ? `subagent of ${model.byKey.get(r.session.parent)?.title?.slice(0, 30) ?? ""}` : source ? `fork of ${source.title.slice(0, 30)}` : null].filter(Boolean).join(" · ");
+    const meta = [withShelf ? shelfName : null, r.projectName, r.isRemote ? this.placeOf(r.machine) : null, r.app, r.isChild ? `subagent of ${model.byKey.get(r.parent)?.title?.slice(0, 30) ?? ""}` : source ? `fork of ${source.title.slice(0, 30)}` : null].filter(Boolean).join(" · ");
     const subs = this.subsOf(r, model);
     const tags = r.tags.map((id) => this.data.tags[id]).filter(Boolean);
     const stage = this.data.stages.find((s) => s.id === r.stage);
@@ -3054,7 +3064,8 @@ export default class Anyhost extends View {
               .items_center()
               .child(this.harnessIcon(t, r))
               .child(div().min_w(0).truncate().text_size(UI.text.body).when(r.isUnread, (el) => el.font_semibold()).when(!recedes && !r.isUnread, (el) => el.font_medium()).text_color(recedes ? t.muted : t.foreground).child(r.title))
-              .child(div().flex_1()),
+              .child(div().flex_1())
+              .when(subs.rows.length > 0, (line) => line.child(this.subagentFold(t, r, subs))),
           )
           .child(
             h_flex()
@@ -3064,8 +3075,7 @@ export default class Anyhost extends View {
               .when(Boolean(stage), (row) => row.child(this.chip(t, stage.name, this.tagColor("gray"), { isOutlined: true })))
               .children(tags.slice(0, 3).map((tag) => this.chip(t, tag.name, this.tagColor(tag.color))))
               .when(tags.length > 3, (row) => row.child(div().flex_none().text_size(UI.text.caption).text_color(t.dim).child(`+${tags.length - 3}`)))
-              .child(div().flex_1().min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(r.lastSaid || "No reply yet"))
-              .when(subs.rows.length > 0, (row) => row.child(this.subagentFold(t, r, subs))),
+              .child(div().flex_1().min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(r.lastSaid || "No reply yet")),
           ),
       )
       .when(subs.isOpen, (el) => el.pb(UI.space.xs).children(this.subRows(t, subs)));
@@ -3154,7 +3164,7 @@ export default class Anyhost extends View {
     if (r.section === "snoozed") return this.iconButton(t, `ah-unsnooze-${r.key}`, `${OWN}/alarm-clock-off`, "Wake now", () => this.act((cx) => this.snooze(cx, r, null)), UI.height.inline);
     if (r.section === "settled") return this.iconButton(t, `ah-unsettle-${r.key}`, `${OWN}/undo-2`, "Unsettle", () => this.act((cx) => this.unsettle(cx, r)), UI.height.inline);
     const pin = this.iconButton(t, `ah-pin-${r.key}`, r.pinned ? "pin-off" : "pin", r.pinned ? "Unpin" : "Pin", () => this.act((cx) => this.togglePin(cx, r)), UI.height.inline);
-    const settle = isRunning(r.state) || r.state === "blocked" ? this.status(t, r) : this.iconButton(t, `ah-settle-${r.key}`, "check", "Settle", () => this.act((cx) => this.settle(cx, r)), UI.height.inline);
+    const settle = this.iconButton(t, `ah-settle-${r.key}`, "check", "Settle", () => this.act((cx) => this.settle(cx, r)), UI.height.inline);
     return h_flex().flex_none().gap(UI.space.xs).items_center().child(pin).child(settle);
   }
 
@@ -3211,48 +3221,104 @@ export default class Anyhost extends View {
   }
 
   subsOf(r, model) {
-    const children = (model.childrenOf.get(r.key) ?? []).map((c) => ({ id: `ah-child-${c.key}`, title: c.title, state: c.state, open: (cx) => this.open(c, cx) }));
-    const kids = r.address ? (model.kidsOf.get(r.address) ?? []).map((k) => ({ id: `ah-kid-${k.address}`, title: k.name || k.template || k.program?.name || k.address, state: model.statusOf.get(k.address)?.status ?? "idle", open: () => run(model.statusOf.has(k.address) ? "pane.focus" : "terminal.peek", { terminal: k.address }) })) : [];
+    const children = (model.childrenOf.get(r.key) ?? [])
+      .map((c) => [c, c.deleted ? "deleted" : c.archived ? "archived" : c.state])
+      .map(([c, state]) => ({ id: `ah-child-${c.key}`, title: c.title, state, isAsleep: c.isAsleep, status: SUBAGENT_GONE[state]?.[0] ?? (c.isOffline || c.state === "idle" ? (c.isOffline ? c.label : ago(c.at)) : c.state === "done" ? c.label : `${c.label} ${ago(c.since)}`), said: c.lastSaid || "No reply yet", height: SUBAGENT_HEIGHT, row: c, open: (cx) => this.showSubagent(cx, r, c) }))
+      .sort((a, b) => SUBAGENT_ORDER[a.state] - SUBAGENT_ORDER[b.state]);
+    const kids = r.address
+      ? (model.kidsOf.get(r.address) ?? []).map((k) => {
+          const state = model.statusOf.get(k.address)?.status ?? "idle";
+          return { id: `ah-kid-${k.address}`, title: k.name || k.template || k.program?.name || k.address, state, isAsleep: false, status: state === "idle" ? "" : (STATE[state] ?? STATE.idle).name, said: null, height: UI.height.row, open: () => run(model.statusOf.has(k.address) ? "pane.focus" : "terminal.peek", { terminal: k.address }) };
+        })
+      : [];
     const rows = [...children, ...kids];
-    return { rows, working: rows.filter((row) => row.state === "working").length, isOpen: rows.length > 0 && this.unfolded.has(r.key) };
+    const isOpen = rows.length > 0 && this.unfolded.has(r.key);
+    return { rows, working: rows.filter((row) => isRunning(row.state)).length, waiting: rows.filter((row) => row.state === "blocked").length, isOpen, height: isOpen ? UI.space.xs + rows.reduce((sum, row) => sum + row.height, 0) : 0 };
+  }
+
+  showSubagent(cx, parent, r) {
+    const pane = parent.address ? panes().find((p) => p.terminal === parent.address) : undefined;
+    if (pane) this.focusTerminal(parent.address, pane);
+    else if (r.address || parent.deleted || parent.archived) this.open(parent, cx);
+    if (r.archived) this.archive(cx, r, false);
+    this.present(cx, r, "panel");
+  }
+
+  rootOf(r) {
+    const seen = new Set();
+    let root = r;
+    while (root.isChild && !seen.has(root.key)) {
+      seen.add(root.key);
+      root = this.model.byKey.get(root.parent) ?? root;
+    }
+    return root;
   }
 
   subagentFold(t, r, subs) {
-    return div()
+    const count = subs.rows.length;
+    const color = subs.waiting > 0 ? this.stateColor("blocked") : subs.working > 0 ? this.stateColor("working") : t.dim;
+    return h_flex()
       .id(`ah-fold-${r.key}`)
       .h(UI.height.inline)
       .px(UI.space.xs)
       .gap(UI.space.xs)
-      .flex()
       .flex_none()
       .items_center()
-      .rounded(UI.radius.pill)
+      .rounded(UI.radius.control)
       .text_size(UI.text.caption)
-      .text_color(subs.working > 0 ? this.stateColor("working") : t.dim)
+      .text_color(color)
       .cursor_pointer()
-      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(`${count} ${count === 1 ? "subagent" : "subagents"}${subs.waiting > 0 ? ` · ${subs.waiting} need${subs.waiting === 1 ? "s" : ""} you` : ""}${subs.working > 0 ? ` · ${subs.working} working` : ""}`)
+      .hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => {
         cx.stop_propagation();
         if (!this.unfolded.delete(r.key)) this.unfolded.add(r.key);
         preferEntry("unfolded", r.key, this.unfolded.has(r.key) ? true : null);
         this.act((cx) => this.redrawList(cx));
       })
-      .child(svg(`${ICON}/chevron-${subs.isOpen ? "down" : "right"}.svg`).size(UI.icon.small).flex_none())
-      .child(`${subs.rows.length} ${subs.rows.length === 1 ? "subagent" : "subagents"}${subs.working > 0 ? ` · ${subs.working} working` : ""}`);
+      .child(svg(iconPath(`${OWN}/square-stack`)).size(UI.icon.small).flex_none())
+      .child(String(count))
+      .child(svg(`${ICON}/chevron-${subs.isOpen ? "down" : "right"}.svg`).size(UI.icon.small).flex_none().text_color(t.dim));
   }
 
   subRows(t, subs) {
     return subs.rows.map((s) =>
-      this.item(s.id)
-        .pl(UI.space.sm + UI.icon.body + UI.space.sm)
-        .text_size(UI.text.caption)
+      h_flex()
+        .id(s.id)
+        .h(s.height)
+        .flex_none()
+        .px(UI.space.sm)
+        .gap(UI.space.sm)
+        .items_center()
+        .rounded(UI.radius.control)
+        .cursor_pointer()
         .hover((st) => st.bg(t.hover))
         .on_click((_e, cx) => {
           cx.stop_propagation();
           this.act((cx) => s.open(cx));
         })
-        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(s.title))
-        .when(s.state !== "idle", (el) => el.child(this.stateChip(t, s.state, (STATE[s.state] ?? STATE.idle).name))),
+        .when(s.row !== undefined, (el) =>
+          el.on_mouse_down("right", (_e, cx) => {
+            cx.stop_propagation();
+            this.menu(s.row);
+          }),
+        )
+        .child(div().size(UI.icon.body).flex_none().flex().items_center().justify_center().child(this.stateLead(s.state) ?? svg(iconPath(SUBAGENT_GONE[s.state]?.[1] ?? STATE.idle.icon)).size(UI.icon.small).text_color(t.dim)))
+        .child(
+          v_flex()
+            .flex_1()
+            .min_w(0)
+            .child(
+              h_flex()
+                .h(UI.height.inline)
+                .gap(UI.space.sm)
+                .items_center()
+                .text_size(UI.text.caption)
+                .child(div().flex_1().min_w(0).truncate().text_color(s.isAsleep || SUBAGENT_GONE[s.state] ? t.muted : t.foreground).child(s.title))
+                .when(s.status !== "", (line) => line.child(div().flex_none().text_color(t.dim).child(s.status))),
+            )
+            .when(s.said !== null, (el) => el.child(div().h(UI.height.inline).min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(s.said))),
+        ),
     );
   }
 
@@ -3378,6 +3444,7 @@ export default class Anyhost extends View {
       key: f.key,
       title: f.title,
       row: f,
+      isChild: Boolean(f.isChild),
       hasTerminal: Boolean(f.address),
       canSleep: Boolean(f.address) && f.tool === "claude",
       isLocal: Boolean(f.address) && !f.address.includes("/"),
@@ -3423,7 +3490,7 @@ export default class Anyhost extends View {
     if (e.key === "enter") return this.act((cx) => this.open(r, cx));
     if (e.key === "space") return this.peek(r);
     if (e.key === "u") return r.isUnread ? this.markRead(cx, r) : this.markUnread(cx, r);
-    if (e.key === "e") return r.archived ? this.archive(cx, r, false) : this.askArchive(cx, [r]);
+    if (e.key === "e") return r.archived ? this.archive(cx, r, false) : this.archiveAll(cx, [r]);
     if (e.key === "p") return this.togglePin(cx, r);
     if (e.keystroke === "s" && !r.archived && !r.deleted) return this.toggleSettle(cx, r);
     if (e.key === "t") return this.openTags(r);
@@ -4455,8 +4522,7 @@ export default class Anyhost extends View {
 
   sessionMenuGroups(p) {
     const w = p.window;
-    const isBusy = isRunning(p.state) || p.state === "blocked";
-    const rename = { id: "rename", icon: `${OWN}/pencil`, label: "Rename…", disabled: p.key !== null && isBusy, reason: BUSY_REASON, open: "renameWindow" };
+    const rename = { id: "rename", icon: `${OWN}/pencil`, label: "Rename…", open: "renameWindow" };
     const windowItems = w
       ? [
           [rename, { id: "new-session", icon: "square-pen", label: "New session", detail: keyFor("anyhost.new"), ask: { action: "newSession" } }, { id: "new-terminal", icon: "terminal", label: "New terminal", detail: keyFor("tab.new"), ask: { action: "newTerminal" } }],
@@ -4493,23 +4559,24 @@ export default class Anyhost extends View {
     return [
       ...windowItems,
       [
+        ...(p.isChild ? [{ id: "promote", icon: `${OWN}/app-window`, label: "Make it an agent", ask: { action: "present", shape: "tab" } }] : []),
         { id: "peek", icon: `${OWN}/eye`, label: "Peek", ask: { action: "peek" } },
-        ...(p.canSleep ? [{ id: "sleep", icon: `${OWN}/moon`, label: "Sleep", disabled: isBusy, reason: BUSY_REASON, ask: { action: "sleep" } }] : []),
+        ...(p.canSleep ? [{ id: "sleep", icon: `${OWN}/moon`, label: "Sleep", ask: { action: "sleep" } }] : []),
         ...(!w && p.canStartHere ? [{ id: "start-here", icon: "square-pen", label: "New session in its folder", ask: { action: "startHere" } }] : []),
       ],
       p.archived || p.deleted
         ? []
         : [
             { id: "pin", icon: p.pinned ? "pin-off" : "pin", label: p.pinned ? "Unpin" : "Pin", ask: { action: "pin" } },
-            { id: "settle", icon: "circle-check", label: p.settled ? "Unsettle" : "Settle", disabled: isBusy, reason: BUSY_REASON, ask: { action: "settle" } },
-            p.snoozed ? { id: "wake", icon: `${OWN}/alarm-clock-off`, label: "Wake now", ask: { action: "snooze", until: null } } : { id: "snooze", icon: "clock", label: "Snooze", disabled: p.state === "blocked", reason: "It waits for you, which wakes a snooze at once", sub: snoozeItems },
+            { id: "settle", icon: "circle-check", label: p.settled ? "Unsettle" : "Settle", ask: { action: "settle" } },
+            p.snoozed ? { id: "wake", icon: `${OWN}/alarm-clock-off`, label: "Wake now", ask: { action: "snooze", until: null } } : { id: "snooze", icon: "clock", label: "Snooze", sub: snoozeItems },
           ],
       [
         { id: "tags", icon: `${OWN}/tag`, label: "Tags", sub: tagItems },
         { id: "stage", icon: `${OWN}/kanban`, label: "Stage", sub: stageItems },
       ],
       [
-        ...(!p.archived && !p.deleted && (p.state === "idle" || p.state === "done") ? [p.isUnread ? { id: "read", icon: "circle-check", label: "Mark read", ask: { action: "read" } } : { id: "unread", icon: `${OWN}/mail-open`, label: "Mark unread", ask: { action: "unread" } }] : []),
+        ...(!p.archived && !p.deleted ? [p.isUnread ? { id: "read", icon: "circle-check", label: "Mark read", ask: { action: "read" } } : { id: "unread", icon: `${OWN}/mail-open`, label: "Mark unread", ask: { action: "unread" } }] : []),
         p.isFiltered ? { id: "all", icon: "layers", label: "Show all projects", filter: null } : { id: "only", icon: `${OWN}/list-filter`, label: `Filter by ${p.projectName}`, ask: { action: "filterProject" } },
       ],
       [
@@ -4528,7 +4595,7 @@ export default class Anyhost extends View {
       closeItems,
       [
         ...(p.deleted ? [{ id: "undelete", icon: `${OWN}/archive-restore`, label: "Restore", ask: { action: "open" } }] : p.archived ? [{ id: "restore", icon: `${OWN}/archive-restore`, label: "Restore", ask: { action: "restore" } }] : [{ id: "archive", icon: "archive", label: "Archive", ask: { action: "archive" }, disabled: p.pinned, reason: "Unpin it to archive it" }]),
-        ...(!p.deleted ? [{ id: "delete", icon: `${OWN}/trash`, label: "Delete…", ask: { action: "confirmDelete" }, isDestructive: true, disabled: isBusy, reason: BUSY_REASON }] : []),
+        ...(!p.deleted ? [{ id: "delete", icon: `${OWN}/trash`, label: "Delete…", ask: { action: "confirmDelete" }, isDestructive: true }] : []),
       ],
     ];
   }
@@ -4707,7 +4774,7 @@ export default class Anyhost extends View {
         this.apply(await anyhost(["list", "--json", "--brief"]), Date.now(), Date.now());
         const { list } = this.cardsNow();
         const byKey = new Map(list.map((c) => [c.key, c]));
-        const isChild = (c) => Boolean(byKey.get(c.session.parent ?? "")) && !byKey.get(c.session.parent).archived && !byKey.get(c.session.parent).deleted;
+        const isChild = (c) => byKey.has(c.parent);
         this.archived = list.filter((c) => c.archived && !c.deleted && !isChild(c)).sort(byRecent).map((c) => ({ ...targetOf(c), harness: c.harness, at: c.at, projectKey: c.projectKey, projectName: c.projectName, place: c.isRemote ? this.placeOf(c.machine) : "", state: "idle" }));
       } catch (error) {
         notify({ title: "anyhost could not read the archived sessions", body: messageOf(error), level: "error" });
@@ -5551,8 +5618,7 @@ export default class Anyhost extends View {
             this.button(t, "ah-confirm-go", this.isGoing ? `${p.go}…` : p.go, false, (cx) => {
               if (p.removeWorktree) return this.removeConfirmed(cx, p);
               closeOverlay(p.overlay);
-              if (p.delete) return this.dispatchDelete(cx, p.delete.row, p.delete.on);
-              this.archiveAll(cx, p.archive.rows, p.archive);
+              this.dispatchDelete(cx, p.delete.row, p.delete.on);
             }),
           ),
       );
@@ -6387,11 +6453,9 @@ export default class Anyhost extends View {
   closeNow(cx, pill) {
     const { tab } = pill;
     if (pill.isPinned) return;
-    if (!isRunning(pill.state) && pill.state !== "blocked") {
-      this.closing.add(tab.id);
-      const next = this.nextWindow(tab.id);
-      if (pill.isShown && next) this.showWindow(next);
-    }
+    this.closing.add(tab.id);
+    const next = this.nextWindow(tab.id);
+    if (pill.isShown && next) this.showWindow(next);
     this.closeTabs(cx, [tab.id], pill.isShown ? { tab: tab.id, space: pill.space } : null);
     cx.notify();
   }
@@ -6411,7 +6475,7 @@ export default class Anyhost extends View {
 
   archiveSlept(cx, session) {
     const r = shared(PULSE)?.sessions?.[session.key] ?? sleptSessionOf(session.key);
-    if (r) this.askArchive(cx, [{ ...r, pinned: session.isPinned, state: session.state ?? r.state ?? "idle" }]);
+    if (r) this.archiveAll(cx, [{ ...r, pinned: session.isPinned, state: session.state ?? r.state ?? "idle" }]);
   }
 
   panelButton(t, id, label, icon, isOpen) {

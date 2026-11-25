@@ -47,6 +47,23 @@ test('an agent started on another machine for an agent gets its first message fr
   expect(copiesOn(worker.folder).filter(({ isRunning }) => isRunning)).toEqual([])
 }, 90_000)
 
+test('a subagent an agent starts runs in a terminal with no tab of its own, while a session started for no agent gets its tab', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const worker = await workerOn(relay)
+  await serveOn(laptop.env)
+  await until(() => relay.isConnected(LAPTOP.id), 'the laptop connecting')
+  const checkout = tripOn(laptop)
+
+  const subagent = String((await postTo(laptop.socket, '/new', { machine: WORKER.name, folder: checkout, prompt: 'Book the train', parent: CTO })).body['session'])
+  const own = String((await postTo(laptop.socket, '/new', { machine: WORKER.name, folder: checkout, prompt: 'Book the hotel' })).body['session'])
+  await until(() => sentOn(worker.folder).length === 2, 'both first messages going in', 30_000)
+  const spaceOf = new Map(readFileSync(join(worker.folder, 'spaces.log'), 'utf8').trim().split('\n').map((line) => line.split(' ') as [string, string]))
+
+  expect(spaceOf.get(subagent)).toBe('')
+  expect(spaceOf.get(own)).toStartWith('anyhost-w-')
+}, 90_000)
+
 test('an agent that starts waiting at a permission prompt on another machine tells the agent that started it which keys answer it', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)

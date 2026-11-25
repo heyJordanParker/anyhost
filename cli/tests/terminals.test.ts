@@ -14,6 +14,7 @@ const SHELL = ['/bin/zsh', '-l']
 const CLAUDE = ['claude']
 const THIRD_SESSION = '33333333-4444-5555-6666-777777777777'
 const FOURTH_SESSION = '44444444-5555-6666-7777-888888888888'
+const FIFTH_SESSION = '55555555-6666-7777-8888-999999999999'
 
 type Machine = Awaited<ReturnType<typeof machineFor>>
 
@@ -95,29 +96,52 @@ test('a resumed session runs on the model and effort its last turn ran with, in 
   expect(lastFolderOf(tail)).toBe('/work/trip')
 })
 
-test('an idle session no screen shows is discarded after the stop time, while one that works, one a screen shows and the rest of its terminals stay, and Sleep discards an idle one at once', async () => {
+test('an idle session no screen shows is discarded after the stop time, while one that works, one a screen shows, a pinned one and the rest of its terminals stay, and Sleep discards an idle one at once', async () => {
   const relay = await memoryRelay()
   const laptop = await machineFor(relay, LAPTOP)
   const idle = claudeIn(laptop, 't0', SESSION, 'idle')
   const working = claudeIn(laptop, 't1', OTHER_SESSION, 'busy')
   const shown = claudeIn(laptop, 't2', THIRD_SESSION, 'idle')
   const backgrounded = claudeIn(laptop, 't3', FOURTH_SESSION, 'shell')
+  const pinned = claudeIn(laptop, 't4', FIFTH_SESSION, 'idle')
+  await relay.objects.put('shared.json', JSON.stringify({ pinned: { [FIFTH_SESSION]: new Date().toISOString() } }))
   const shownLabels = { 'anyhost.session': THIRD_SESSION, 'anyhost.shown.device-desktop': String(Date.now()) }
   coreSays(laptop.folder, {
     seq: 1,
-    terminals: [terminalIn('t0', CLAUDE, { 'anyhost.session': SESSION }), terminalIn('t1', CLAUDE, { 'anyhost.session': OTHER_SESSION }), terminalIn('t2', CLAUDE, shownLabels), terminalIn('t3', CLAUDE, { 'anyhost.session': FOURTH_SESSION })],
+    terminals: [
+      terminalIn('t0', CLAUDE, { 'anyhost.session': SESSION }),
+      terminalIn('t1', CLAUDE, { 'anyhost.session': OTHER_SESSION }),
+      terminalIn('t2', CLAUDE, shownLabels),
+      terminalIn('t3', CLAUDE, { 'anyhost.session': FOURTH_SESSION }),
+      terminalIn('t4', CLAUDE, { 'anyhost.session': FIFTH_SESSION }),
+    ],
   })
 
   await serveOn({ ...laptop.env, ANYHOST_STOP_MS: '2000' })
   await until(() => hasEnded(idle), 'the idle session ending', 15_000)
   await Bun.sleep(2000)
-  const kept = [working, shown, backgrounded].map(hasEnded)
+  const kept = [working, shown, backgrounded, pinned].map(hasEnded)
   coreSays(laptop.folder, coreEvent('labels', 't2', { labels: { ...shownLabels, 'anyhost.sleep': String(Date.now()) } }))
 
-  expect(kept).toEqual([false, false, false])
+  expect(kept).toEqual([false, false, false, false])
   await until(() => hasEnded(shown), 'Sleep ending the shown session', 10_000)
   expect(logOf(laptop.folder, 'labels.log')).toContain('t0 anyhost.session=')
   expect(Object.keys((await sharedIn(relay)).archived ?? {})).toEqual([])
+}, 60_000)
+
+test('Sleep asked while a session works, which a screen shows, puts it to sleep once its turn ends', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const labels = { 'anyhost.session': SESSION, 'anyhost.shown.device-desktop': String(Date.now()) }
+  const working = claudeIn(laptop, 't0', SESSION, 'busy', Date.now())
+  coreSays(laptop.folder, { seq: 1, terminals: [terminalIn('t0', CLAUDE, labels)] })
+  await serveOn(laptop.env)
+
+  coreSays(laptop.folder, coreEvent('labels', 't0', { labels: { ...labels, 'anyhost.sleep': String(Date.now()) } }))
+  writeFileSync(join(laptop.env['CLAUDE_CONFIG_DIR'] ?? '', 'sessions', `${working.pid}.json`), JSON.stringify({ pid: working.pid, sessionId: SESSION, procStart: startOf(working.pid), kind: 'interactive', status: 'idle', statusUpdatedAt: Date.now() + 1000 }))
+  await working.exited
+
+  expect(hasEnded(working)).toBe(true)
 }, 60_000)
 
 test('an idle session counts its stop time from the later of going idle and the last time a screen showed it, so one a screen showed 100 s ago and one that went idle 100 s ago stay', async () => {
@@ -226,6 +250,27 @@ test("a session another machine archived stops here at the next backup, and one 
   await unshown.exited
 
   expect(hasEnded(shown)).toBe(false)
+}, 60_000)
+
+test('archiving a session stops its idle subagents here at the next backup, as they archive with it', async () => {
+  const relay = await memoryRelay()
+  const laptop = await machineFor(relay, LAPTOP)
+  const cwd = join(laptop.env['HOME'] ?? '', 'work')
+  mkdirSync(cwd, { recursive: true })
+  const projects = join(laptop.env['CLAUDE_CONFIG_DIR'] ?? '', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(projects, { recursive: true })
+  for (const [session, prompt] of [[SESSION, 'Plan the trip'], [OTHER_SESSION, 'Book the hotel']] as const) writeFileSync(join(projects, `${session}.jsonl`), `${JSON.stringify({ type: 'user', cwd, sessionId: session, message: { role: 'user', content: prompt } })}\n`)
+  const parent = claudeIn(laptop, 't0', SESSION, 'idle')
+  const subagent = claudeIn(laptop, 't1', OTHER_SESSION, 'idle')
+  coreSays(laptop.folder, { seq: 1, terminals: [terminalIn('t0', CLAUDE, { 'anyhost.session': SESSION }), terminalIn('t1', CLAUDE, { 'anyhost.session': OTHER_SESSION })] })
+  await relay.connect(LAPTOP, { home: '/', claudeHome: '/', claudeTmp: '/', codexHome: '/' }).runOne({ op: 'put', key: 'shared.json', bytes: new TextEncoder().encode(JSON.stringify({ parents: { [OTHER_SESSION]: SESSION } })) })
+  await serveOn({ ...laptop.env, ANYHOST_BACKUP_MS: '1000' })
+  for (const session of [SESSION, OTHER_SESSION]) await hookOn(laptop.socket, 'started', cwd, session)
+
+  expect((await postTo(laptop.socket, '/agents/archive', { session: SESSION, archived: true })).status).toBe(200)
+  await Promise.all([parent.exited, subagent.exited])
+
+  expect((await sharedIn(relay)).archived?.[OTHER_SESSION]).toBeUndefined()
 }, 60_000)
 
 test("a 0.9.0 runner asleep, also one whose session runs elsewhere, is closed without archiving its session, and every other terminal, an awake runner too, stays", async () => {

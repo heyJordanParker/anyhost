@@ -35,14 +35,14 @@ function withHolder(holder: { machine?: string; problem?: string; untold?: strin
   return { tested, spawned, fetched }
 }
 
-test('the mod runs the anyhost program as a service of the computer, with the machine in its environment', async () => {
+test('the mod runs the anyhost program as a service of the computer at the priority of an app, with the machine in its environment', async () => {
   const { tested, spawned } = withHolder({})
   await tested.start()
 
   expect(spawned).toEqual([
     {
       argv: [
-        '/test/home/.local/share/cmod/programs/cmod', 'program', 'anyhost', '--service',
+        '/test/home/.local/share/cmod/programs/cmod', 'program', 'anyhost', '--service', '--process-type', 'Interactive',
         '--env', 'ANYHOST_DEVICE_ID', '--env', 'ANYHOST_DEVICE_NAME', '--env', 'ANYHOST_DEVICE_OS', '--env', 'ANYHOST_DEVICE_ARCH',
         '--', 'anyhost', 'serve',
       ],
@@ -114,6 +114,24 @@ test("a session's start, end, quit, turn start and end, permission prompt, folde
   const bodies = posted.map((body) => JSON.parse(body) as { session: string; folder: string; event: string; at: string })
   expect(bodies.map(({ event }) => event)).toEqual(['started', 'turnStart', 'turnEnd', 'moved', 'asked', 'renamed', 'ended', 'quit'])
   expect(bodies.every(({ session, folder, at }) => session === 'test-session' && folder === '/test/plugins/anyhost' && !Number.isNaN(Date.parse(at)))).toBe(true)
+})
+
+test('each background session this session starts, on any machine, lists as its subagent, as does each one its goal started before a resume, and a subagent in its own window does not', async () => {
+  const tested = testMod(anyhost, { files: instance })
+  const organized: { readonly op: string; readonly session: string; readonly parent: string }[] = []
+  tested.fakes.process.spawn = () => held()
+  tested.fakes.http.fetch = async (url, init) => {
+    if (url.endsWith('/organize')) organized.push(...(JSON.parse(textOf(init?.body ?? '')) as { changes: typeof organized }).changes)
+    return { status: 200, ok: true, headers: {}, text: '{}' }
+  }
+
+  const earlier = await tested.startTask({ title: 'Book the hotel', isBackground: true })
+  await tested.raise.onSessionStart({ source: 'resume' })
+  await tested.startTask({ title: 'Read the docs', agentType: 'Explore' })
+  const later = await tested.startTask({ title: 'Book the train', isBackground: true })
+  await tested.settle()
+
+  expect(new Set(organized.map(({ op, session, parent }) => `${op} ${session} ${parent}`))).toEqual(new Set([`parentSession ${earlier} test-session`, `parentSession ${later} test-session`]))
 })
 
 test("a turn's start and end tell the program the times of the turn's own lines in Claude Code's transcript, not when the mod heard them", async () => {

@@ -1,6 +1,6 @@
-import { afterAll, beforeAll, expect, setDefaultTimeout } from 'bun:test'
+import { afterAll, beforeAll, expect, setDefaultTimeout, spyOn } from 'bun:test'
 import { test } from './test.ts'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
@@ -362,6 +362,46 @@ test('a part over 64 KiB is its own record, returned once, so the next change re
   expect(second?.parts).toEqual([])
   expect(second?.header.length).toBeLessThan(4096)
   expect(filesOf(restored)).toEqual(filesOf(work))
+})
+
+test('a file over 100 MiB in a folder outside git, as a database a session copied there, stays out of the code anyhost keeps, the rest restores, and anyhost says so once', async () => {
+  const base = temporaryFolder()
+  const work = join(base, 'scratchpad')
+  write(join(work, 'notes.md'), '# notes\n')
+  write(join(work, 'store/history.sqlite'), '')
+  truncateSync(join(work, 'store/history.sqlite'), 100 * 2 ** 20 + 1)
+  const logged = spyOn(console, 'error').mockImplementation(() => undefined)
+  const journal = journalOf()
+
+  const first = await captureCode(work, SESSION)
+  write(join(work, 'notes.md'), '# notes, edited\n')
+  const restored = await journal.restore(await journal.capture(work), join(base, 'restored'))
+  const said = logged.mock.calls.map(([line]) => String(line))
+  logged.mockRestore()
+
+  expect([first?.parts, (first?.header.length ?? Infinity) < 4096]).toEqual([[], true])
+  expect(filesOf(restored)).toEqual(filesOf(work).filter((line) => !line.startsWith('store')))
+  expect(said).toEqual([expect.stringContaining('anyhost leaves store/history.sqlite (100 MiB) out of the code it keeps of ')])
+})
+
+test('a file over 100 MiB a session staged or left untracked in its checkout stays out of the code anyhost keeps, and the checkout restores the rest exactly', async () => {
+  const { base, work } = repository()
+  write(join(work, 'staged.bin'), '')
+  truncateSync(join(work, 'staged.bin'), 100 * 2 ** 20 + 1)
+  sh(work, ['add', 'staged.bin'])
+  write(join(work, 'untracked.bin'), '')
+  truncateSync(join(work, 'untracked.bin'), 100 * 2 ** 20 + 1)
+  write(join(work, 'a.txt'), 'a unstaged\n')
+  const logged = spyOn(console, 'error').mockImplementation(() => undefined)
+  const journal = journalOf()
+
+  const header = await journal.capture(work)
+  const restored = await journal.restore(header, join(base, 'restored'))
+  logged.mockRestore()
+
+  expect(header.length).toBeLessThan(4096)
+  expect(filesOf(restored)).toEqual(filesOf(work).filter((line) => !line.startsWith('staged.bin ') && !line.startsWith('untracked.bin ')))
+  expect(sh(restored, ['status', '--porcelain'])).toBe(' M a.txt\n')
 })
 
 test('bundles are incremental: each holds only the commits since the last one', async () => {

@@ -36,6 +36,7 @@ export type Organize =
   | { readonly op: 'tagSession'; readonly session: string; readonly tag: string; readonly on: boolean }
   | { readonly op: 'defineStages'; readonly stages: readonly Stage[] }
   | { readonly op: 'stageSession'; readonly session: string; readonly stage: string }
+  | { readonly op: 'parentSession'; readonly session: string; readonly parent: string }
   | { readonly op: 'moveProjects'; readonly projects: readonly string[]; readonly before: string | null }
   | { readonly op: 'movePins'; readonly sessions: readonly string[]; readonly before: string | null }
   | { readonly op: 'moveWorktrees'; readonly project: string; readonly worktrees: readonly Worktree[]; readonly before: Worktree | null }
@@ -80,22 +81,24 @@ export async function updateObject<T>(relay: Relay, key: string, decode: (answer
 
 export const updateShared = (relay: Relay, change: (shared: Shared) => Shared): Promise<Shared> => updateObject(relay, SHARED_KEY, sharedIn, change)
 
-export function isArchived(shared: Shared, session: Pick<IndexedSession, 'id' | 'lastActivity'>): boolean {
+export type Attention = Pick<IndexedSession, 'id' | 'lastActivity' | 'lastPromptAt'> & { readonly waitingSince: string }
+
+const holds = (at: string, session: Attention): boolean => at >= session.lastPromptAt && at >= session.waitingSince
+
+export function isArchived(shared: Shared, session: Attention): boolean {
   const mark = shared.archived[session.id]
-  return mark !== undefined && mark.at >= session.lastActivity && mark.archived
+  return mark !== undefined && mark.archived && holds(mark.at, session)
 }
 
-type Activity = Pick<IndexedSession, 'id' | 'lastActivity' | 'lastPromptAt'>
-
-export function isSnoozed(shared: Shared, session: Activity, status: AgentStatus | '', now = Date.now()): boolean {
+export function isSnoozed(shared: Shared, session: Attention, now = Date.now()): boolean {
   const snooze = shared.snoozed[session.id]
-  return snooze !== undefined && Date.parse(snooze.until) > now && status !== 'waiting' && !(session.lastPromptAt > snooze.at)
+  return snooze !== undefined && Date.parse(snooze.until) > now && holds(snooze.at, session)
 }
 
-export function settledAtOf(shared: Shared, session: Activity, status: AgentStatus | '', now = Date.now()): string {
+export function settledAtOf(shared: Shared, session: Attention, status: AgentStatus | '', now = Date.now()): string {
   const mark = shared.settled[session.id]
-  if (mark !== undefined && mark.at >= session.lastActivity) return mark.settled ? mark.at : ''
-  if (shared.settleAfterDays === null || shared.pinned[session.id] !== undefined || status === 'working' || status === 'waiting' || isSnoozed(shared, session, status, now)) return ''
+  if (mark !== undefined && holds(mark.at, session)) return mark.settled ? mark.at : ''
+  if (shared.settleAfterDays === null || shared.pinned[session.id] !== undefined || status === 'working' || status === 'waiting' || isSnoozed(shared, session, now)) return ''
   const until = Date.parse(shared.snoozed[session.id]?.until ?? '')
   const settlesAt = Math.max(Date.parse(session.lastActivity), until <= now ? until : 0) + shared.settleAfterDays * DAY_MS
   return now > settlesAt ? new Date(settlesAt).toISOString() : ''
@@ -166,6 +169,8 @@ function organized(shared: Shared, change: Exclude<Organize, { op: 'window' }>):
     case 'stageSession':
       if (change.stage !== '' && !shared.stages.some(({ id }) => id === change.stage)) throw new Error(`No stage has the id ${change.stage}.`)
       return { ...shared, staged: change.stage === '' ? without(shared.staged, change.session) : { ...shared.staged, [change.session]: change.stage } }
+    case 'parentSession':
+      return { ...shared, parents: change.parent === '' || change.parent === change.session ? without(shared.parents, change.session) : { ...shared.parents, [change.session]: change.parent } }
     case 'moveProjects':
       return { ...shared, projectOrder: moved(shared.projectOrder, change.projects, change.before) }
     case 'movePins':

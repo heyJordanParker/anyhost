@@ -36,7 +36,7 @@ export class Activity {
 
   #newer(record: RunningSession): Heard | undefined {
     const heard = this.#heard.get(record.sessionId)
-    return heard !== undefined && heard.at > (record.statusSince ?? 0) ? heard : undefined
+    return heard !== undefined && (record.isFrozen === true || heard.at > (record.statusSince ?? 0)) ? heard : undefined
   }
 
   #isInTurn(record: RunningSession): boolean {
@@ -54,11 +54,12 @@ export class Activity {
   of(record: RunningSession | undefined): AgentStatus | undefined {
     if (record === undefined) return undefined
     const heard = this.#newer(record)
+    if (record.isFrozen === true) return heard?.status ?? 'idle'
     return heard !== undefined && heard.status !== 'idle' ? heard.status : statusOfRecord(record.status)
   }
 
   mainOf(record: RunningSession): AgentStatus {
-    return this.#newer(record)?.status ?? (this.isBackground(record) ? 'idle' : statusOfRecord(record.status))
+    return this.#newer(record)?.status ?? (record.isFrozen === true || this.isBackground(record) ? 'idle' : statusOfRecord(record.status))
   }
 
   mainSince(record: RunningSession): number {
@@ -66,7 +67,7 @@ export class Activity {
   }
 
   isBackground(record: RunningSession): boolean {
-    return BACKGROUND.has(record.status ?? '') && !this.#isInTurn(record)
+    return record.isFrozen !== true && BACKGROUND.has(record.status ?? '') && !this.#isInTurn(record)
   }
 
   async shownOf(records: readonly RunningSession[], lastTurnOf: (session: string) => Promise<Turn | undefined>): Promise<Shown> {

@@ -3,7 +3,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import type { AgentStatus, Delivered, DeviceRef, Message, Offline, Routed } from '../../relay/protocol.ts'
 import type { Activity, Shown } from './activity.ts'
-import { captureAgainFrom, chainOf, changedFiles, checkoutOf, checkoutOfEntry, framesOf, holdHere, journalOf, journalPrefix, sealJournal, startCode, stopJournal, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
+import { captureAgainFrom, chainOf, changedFiles, checkoutOf, checkoutOfEntry, framesOf, holdHere, isDeleted, journalOf, journalPrefix, sealJournal, startCode, stopJournal, workingFolderOf, writeIndex, type Capture, type Problems } from './capture.ts'
 import { claimsOf, HeldElsewhere, takeClaim, type Placement } from './claims.ts'
 import { claudeStart, pauseCopy, pausedSessions, recordedSessions, resumeArgv, resumedOf, resumeCopy, run, statusOf, statusOfRecord, stopCopy, whenSessions, type OnRecordsChange, type RunningSession } from './claude.ts'
 import { devicesOf, otherMachine } from './device.ts'
@@ -11,8 +11,8 @@ import { askToSleep, hcPath, labelledTerminals, openTerminal, pressKeys, readTer
 import { showTerminal, type Place } from './herdr.ts'
 import type { Relay } from './relay.ts'
 import { cloneMissing, localFolder, restore } from './resume.ts'
-import { agentsOf, titleOfPrompt } from './sessions.ts'
-import { sharedOf } from './shared.ts'
+import { agentsOf, titleOfPrompt, type Agent } from './sessions.ts'
+import { organize, SHARED_KEY, sharedIn, sharedOf } from './shared.ts'
 import { FORK_VERSION, forkedTranscript, lastFolderOf, lastMessageIn, lastTurnOf, messagesOf, ownerOf, transcriptOf, transcriptTailOf, type Tool } from './transcript.ts'
 
 const RUNNING_MS = 60_000
@@ -410,7 +410,7 @@ async function takeSession(capture: Capture, session: string, trusted: boolean, 
     const { session: listed, cwd } = await restore(capture, session, { take: true, if: { gone: true }, checkouts: here.checkouts, isMove: true })
     if (trusted) await trustHere(capture, await trustToWrite(capture, cwd), "the machine it moved from trusts the session's folder")
     const [tail, checkout] = await Promise.all([newestTail(capture, listed.id), checkoutAt(capture, listed.id, cwd)])
-    await openTerminal(cwd, listed.id, claudeOf(capture, listed.id, tail), checkout)
+    await openTerminal(cwd, listed.id, claudeOf(capture, listed.id, tail), checkout, isSubagentOf(capture, listed.id))
     isOpened = true
     const running = await whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === listed.id), RUNNING_MS, here.onRecordsChange)
     if (running === undefined) throw new Error(`Claude Code listed the session ${listed.id.slice(0, 8)} running on ${device.name} no ${RUNNING_MS / 1000} s after its start`)
@@ -423,13 +423,14 @@ async function takeSession(capture: Capture, session: string, trusted: boolean, 
 
 export async function startNew(capture: Capture, machine: string, cwd: string, prompt: string, here: MoveHere, parent = ''): Promise<string> {
   const { relay, device, holders } = capture
-  if (machine === '' || machine === device.name) return await startIn(capture, cwd, prompt, here, { session: parent, machine: device.name })
+  const session = crypto.randomUUID()
+  if (parent !== '') await organize(relay, device.id, [{ op: 'parentSession', session, parent }])
+  if (machine === '' || machine === device.name) return await startIn(capture, cwd, prompt, here, { session: parent, machine: device.name }, session)
   const target = await otherMachine(relay, device, machine, 'Run claude here.')
   if (!target.connected) throw new Error(`${machine} is offline, so no session starts there.`)
   const { repo, folder: inside } = await checkoutOf(cwd)
   const branch = repo === '' ? '' : (await run(['git', '-C', cwd, 'branch', '--show-current'])).trim()
   const spec: StartSpec = { kind: 'start', from: { id: device.id, name: device.name }, repo, branch, folder: repo === '' ? cwd : inside, trusted: await trusts(capture, cwd), prompt, sender: parent }
-  const session = crypto.randomUUID()
   return await new Promise<string>((resolve, reject) => {
     const stop = (): void => {
       here.placed.delete(placed)
@@ -483,7 +484,7 @@ async function startIn(capture: Capture, cwd: string, prompt: string, here: Move
   let isOpened = false
   try {
     const [isTrusted, checkout] = await Promise.all([trusts(capture, cwd), checkoutAt(capture, session, cwd)])
-    await openTerminal(cwd, session, claudeStart(['claude', '--session-id', session], false), checkout)
+    await openTerminal(cwd, session, claudeStart(['claude', '--session-id', session], false), checkout, parent.session !== '')
     isOpened = true
     const running = whenSessions(roots.claudeHome, (sessions) => sessions.find((entry) => entry.sessionId === session), isTrusted ? RUNNING_MS : TRUST_ANSWER_MS, here.onRecordsChange)
     if (!isTrusted) {
@@ -519,9 +520,16 @@ export type Told = { readonly machine: string; readonly session: string; readonl
 
 async function newestTranscript(capture: Capture, session: string): Promise<string | undefined> {
   const projects = join(capture.roots.claudeHome, 'projects')
-  const paths = await Array.fromAsync(new Bun.Glob(`*/${session}.jsonl`).scan({ cwd: projects })).catch(() => [])
-  const found = await Promise.all(paths.map(async (path) => ({ path: join(projects, path), at: (await stat(join(projects, path))).mtimeMs })))
-  return found.sort((a, b) => b.at - a.at)[0]?.path
+  const newestOf = async (paths: readonly string[]): Promise<string | undefined> => {
+    const found = await Promise.all(paths.map(async (path) => ({ path, at: (await stat(path).catch(() => undefined))?.mtimeMs })))
+    return found.filter(({ at }) => at !== undefined).sort((a, b) => (b.at ?? 0) - (a.at ?? 0))[0]?.path
+  }
+  const known = capture.db
+    .query<{ path: string }, [string, string]>('select path from files where session = ?1 and substr(path, -length(?2)) = ?2')
+    .all(session, `/${session}.jsonl`)
+    .map(({ path }) => path)
+    .filter((path) => dirname(dirname(path)) === projects)
+  return (await newestOf(known)) ?? (await newestOf((await Array.fromAsync(new Bun.Glob(`*/${session}.jsonl`).scan({ cwd: projects })).catch(() => [])).map((path) => join(projects, path))))
 }
 
 async function checkoutAt(capture: Capture, session: string, cwd: string): Promise<string> {
@@ -608,8 +616,10 @@ async function placeInTerminal(capture: Capture, session: string, here: MoveHere
   const placed = await placeHere(capture, session, here, status, run)
   const argv = claudeOf(capture, session, placed.tail)
   const [checkout] = await Promise.all([checkoutAt(capture, session, placed.cwd), trustHere(capture, placed.trust, 'the session ran there')])
-  return await openTerminal(placed.cwd, session, argv, checkout)
+  return await openTerminal(placed.cwd, session, argv, checkout, isSubagentOf(capture, session))
 }
+
+const isSubagentOf = (capture: Capture, session: string): boolean => (sharedIn(capture.relay.cached([SHARED_KEY])[0]).parents[session] ?? '') !== ''
 
 async function placeHere(capture: Capture, session: string, here: MoveHere, status: AgentStatus | undefined, read: LastRun): Promise<LastRun> {
   const { db, roots } = capture
@@ -668,6 +678,7 @@ export async function tell(capture: Capture, asked: string, told: Tell, here: Mo
 
 export async function showAgent(capture: Capture, asked: string, place: Place, here: MoveHere, reachOf: (machine: string) => Promise<string | null>): Promise<{ readonly session: string; readonly machine: string; readonly terminal: string }> {
   const { session, holder } = await heldOf(capture, asked)
+  if ((place === 'focus' || place === 'tab') && isSubagentOf(capture, session)) await organize(capture.relay, capture.device.id, [{ op: 'parentSession', session, parent: '' }])
   if (holder === undefined || holder.id === capture.device.id) {
     const terminal = await terminalOf(capture, session, here, { movesCopy: true })
     await showTerminal(session, terminal, place)
@@ -795,6 +806,23 @@ async function deleteHere(capture: Capture, asked: string, here: MoveHere): Prom
   await here.flush(session, new AbortController().signal, () => undefined)
   await writeIndex(capture)
   return session
+}
+
+export async function deleteOrphans(capture: Capture, agents: readonly Agent[], here: MoveHere): Promise<void> {
+  const { db } = capture
+  const byId = new Map(agents.map((agent) => [agent.id, agent]))
+  const isOrphaned = (agent: Agent): boolean => {
+    const seen = new Set([agent.id])
+    for (let parent = byId.get(agent.parent); parent !== undefined && !seen.has(parent.id); parent = byId.get(parent.parent)) {
+      if (parent.deleted || isDeleted(db, parent.id)) return true
+      seen.add(parent.id)
+    }
+    return false
+  }
+  for (const agent of agents) {
+    if (journalOf(db, agent.id)?.holder !== '' || isDeleted(db, agent.id) || !isOrphaned(agent)) continue
+    await deleteHere(capture, agent.id, here).catch((error: unknown) => console.error(`${stamp()} anyhost could not delete ${agent.id}, whose session was deleted: ${messageOf(error)}`))
+  }
 }
 
 export async function forkAgent(capture: Capture, asked: string, message: string, here: MoveHere): Promise<{ readonly session: string; readonly machine: string }> {

@@ -15,12 +15,12 @@ import { cmod, dataFolders, dataRoot, devicesOf, forgetRelayLogin, inviteMachine
 import { coreEnvironment, followTerminals, hcPath, isKeptShell, isShown, killTerminal, shownAt, label, machinesReached, SESSION_LABEL, shellsOf, SHOWN_LABEL, SHOWN_MS, SLEEP_LABEL, type Terminal, type TerminalChange } from './hc.ts'
 import { PLACES, type Place } from './herdr.ts'
 import { addMachine, candidatesOf, keepHerdrReaching, reachedAt } from './machines.ts'
-import { activityOf, deleteAgent, forkAgent, keepHere, sessionOf, move, noteWaiting, placeSession, receiveDelete, receiveFork, receiveList, receiveReleased, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
+import { activityOf, deleteAgent, deleteOrphans, forkAgent, keepHere, sessionOf, move, noteWaiting, placeSession, receiveDelete, receiveFork, receiveList, receiveReleased, receiveTell, openHere, resumeInPlace, showAgent, startNew, statusesElsewhere, statusesHere, tell, type MoveHere, type Moving } from './move.ts'
 import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type Relay, type RelayState, type Written } from './relay.ts'
 import { readSession } from './resume.ts'
 import { HOOK_EVENTS, type AgentStatus, type DeviceRef, type HookEvent, type Routed } from '../../relay/protocol.ts'
 import { agentsOf, indexesIn, indexKeyOf, type Agent, type ListRead } from './sessions.ts'
-import { archive, isArchived, moveWindowPreferences, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, windowsIn, windowsKeyOf, type Organize } from './shared.ts'
+import { archive, isArchived, moveWindowPreferences, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, windowsIn, windowsKeyOf, type Attention, type Organize, type Shared } from './shared.ts'
 import { copyT3Marks } from './t3.ts'
 import { codexSessionOf, codexState, familyOf, filesUnder, isCodexRun, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
 
@@ -420,9 +420,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     set(key, error) {
       const reason = error instanceof AggregateError ? error.errors.map(String).join(', ') : String(error)
       const limited = isRowsLimit(reason)
-      const message = `${new Date().toISOString()} ${limited ? `relay: ${ROWS_LIMIT}` : `${key}: ${reason}`}`
-      if (limited && current.has('relay')) return
-      current.set(limited ? 'relay' : key, message)
+      const said = limited ? `relay: ${ROWS_LIMIT}` : `${key}: ${reason}`
+      const name = limited ? 'relay' : key
+      if (current.get(name)?.endsWith(` ${said}`) === true || (limited && current.has('relay'))) return
+      const message = `${new Date().toISOString()} ${said}`
+      current.set(name, message)
       console.error(message)
     },
     clear: (key) => void current.delete(key),
@@ -611,11 +613,15 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (archived && !isBusy) await stopCopy(capture.roots.claudeHome, id)
     await archive(relay, id, archived)
   }
+  const attentionHere = (session: string): Attention | undefined => {
+    const row = capture.db.query<{ last_activity: string; last_prompt_at: string }, [string]>('select last_activity, last_prompt_at from sessions where id = ?').get(session)
+    return row === null || row.last_activity === '' ? undefined : { id: session, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, waitingSince: '' }
+  }
   const restoreOpened = (session: string): void => {
-    const lastActivity = capture.db.query<{ last_activity: string }, [string]>('select last_activity from sessions where id = ?').get(session)?.last_activity ?? ''
-    if (lastActivity === '') return
+    const attention = attentionHere(session)
+    if (attention === undefined) return
     void sharedOf(relay)
-      .then(async (shared) => (isArchived(shared, { id: session, lastActivity }) ? await archive(relay, session, false) : undefined))
+      .then(async (shared) => (isArchived(shared, attention) ? await archive(relay, session, false) : undefined))
       .catch((error: unknown) => console.error(`${new Date().toISOString()} anyhost could not restore ${session.slice(0, 8)}, which an open brought back: ${error instanceof Error ? error.message : String(error)}`))
   }
 
@@ -654,9 +660,9 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const resumedIn = new Map<string, number>()
   const keepSessionIn = async (address: string, session: string): Promise<void> => {
     if (Date.now() - (resumedIn.get(address) ?? 0) < RESUME_IN_PLACE_MS) return
-    const lastActivity = capture.db.query<{ last_activity: string }, [string]>('select last_activity from sessions where id = ?').get(session)?.last_activity ?? ''
+    const attention = attentionHere(session)
     const isHeldHere = (journalOf(capture.db, session)?.holder ?? '') === ''
-    const isGone = !isHeldHere || (lastActivity !== '' && isArchived(await sharedOf(relay), { id: session, lastActivity }))
+    const isGone = !isHeldHere || (attention !== undefined && isArchived(await sharedOf(relay), attention))
     if (isGone) return void (await killTerminal(address))
     resumedIn.set(address, Date.now())
     await resumeInPlace(capture, session, address).catch(async (error: unknown) => {
@@ -667,6 +673,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const discardIdle = async (): Promise<void> => {
     const records = new Map((await recordedSessions(roots.claudeHome)).map((record) => [record.sessionId, record]))
     const now = Date.now()
+    let pinned: Shared['pinned'] | undefined
     for (const [address, terminal] of terminals) {
       const session = sessionIn(address)
       if (!isHere(address) || session === '' || terminal.state !== 'live') continue
@@ -681,9 +688,11 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       }
       if (record === undefined || mover.activity.of(record) !== 'idle') continue
       const since = record.statusSince ?? now
-      const isAsked = Number(terminal.labels[SLEEP_LABEL] ?? 0) > since
+      const isAsked = Number(terminal.labels[SLEEP_LABEL] ?? 0) > (Date.parse(attentionHere(session)?.lastPromptAt ?? '') || 0)
       const lastActive = Math.max(since, shownAt(terminal.labels), mover.touched.get(session) ?? 0)
-      if (isAsked || (!isShown(terminal.labels, now) && now - lastActive >= STOP_MS)) await stopIfStillIdle(session, record.statusSince, now)
+      if (!isAsked && (isShown(terminal.labels, now) || now - lastActive < STOP_MS)) continue
+      pinned ??= (await sharedOf(relay).catch(() => sharedIn(relay.cached([SHARED_KEY])[0]))).pinned
+      if (isAsked || pinned[session] === undefined) await stopIfStillIdle(session, record.statusSince, now)
     }
   }
   const stopIfStillIdle = async (session: string, since: number | undefined, decidedAt: number): Promise<void> => {
@@ -1030,12 +1039,14 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       if (status !== 'working' && status !== 'waiting' && !isShown(terminals.get(address)?.labels ?? {})) settled.push(session)
     }
     if (settled.length === 0) return
-    const shared = await sharedOf(relay)
-    for (const session of settled) {
-      const lastActivity = capture.db.query<{ last_activity: string }, [string]>('select last_activity from sessions where id = ?').get(session)?.last_activity ?? ''
-      if (lastActivity !== '' && isArchived(shared, { id: session, lastActivity })) await stopCopy(capture.roots.claudeHome, session)
-    }
+    const archived = new Set((await listedAgents()).filter((agent) => agent.archived).map(({ id }) => id))
+    for (const session of settled) if (archived.has(session)) await stopCopy(capture.roots.claudeHome, session)
   }
+  const listedAgents = async (): Promise<readonly Agent[]> => {
+    const { devices } = await machinesForList()
+    return (await agentsOf(capture, await statusesHere(capture, mover.activity), sessionTerminals(), await listOf(new Map(devices.map((each) => [each.id, each]))))).agents
+  }
+  const deleteOrphansHere = async (): Promise<void> => await deleteOrphans(capture, await listedAgents(), mover)
   const backup = async (): Promise<void> => {
     await watchFolders()
     await Bun.write(heartbeat, '')
@@ -1055,6 +1066,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
     if (queue.uploadEvery === 0) queue.drain()
     await settle('index', () => writeIndex(capture))
     await settle('asleep', () => closeArchived())
+    await settle('orphans', () => deleteOrphansHere())
     await settle('t3', () => copyT3Marks(relay, capture.db))
     noteChildren()
     await settle('upkeep', upkeepInJob)
@@ -1350,7 +1362,10 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         return await throughRelay(async () => void (await visit(relay, await sessionOf(capture, session), at)))
       case '/agents/delete':
         return await deleteAgent(capture, session, mover).then(
-          (deleted) => Response.json({ session: deleted }),
+          async (deleted) => {
+            await settle('orphans', () => deleteOrphansHere())
+            return Response.json({ session: deleted })
+          },
           (error: unknown) => failed(400, error),
         )
       case '/agents/fork':
@@ -1381,7 +1396,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       case '/new':
         return await startNew(capture, machine, folder, prompt, mover, parent).then(
           async (started) => {
-            await updateShared(relay, (shared) => ({ ...shared, lastMachine: machine || device.name, parents: parent === '' ? shared.parents : { ...shared.parents, [started]: parent } }))
+            await updateShared(relay, (shared) => ({ ...shared, lastMachine: machine || device.name }))
             return Response.json({ session: started, machine: machine || device.name })
           },
           (error: unknown) => failed(400, error),
@@ -1539,6 +1554,7 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
         delete: async (session) => {
           await offSession(session)
           await deleteAgent(capture, session, mover)
+          await settle('orphans', () => deleteOrphansHere())
           sessions.tell('Change', { session, part: 'deleted' })
         },
       })

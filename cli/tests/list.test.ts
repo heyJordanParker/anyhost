@@ -24,17 +24,21 @@ test('a session whose record says busy after its turn ended, as while its backgr
   expect(await statusOf(claudeHome, SESSION)).toBe('working')
 }, 60_000)
 
-test('a session whose record Claude Code left with bytes after its JSON, as when two of its writes cross, still lists running and follows its turns', async () => {
+test('a session whose record Claude Code left with bytes after its JSON, as when two of its writes cross, still lists running, follows its turns, and never lists the stale busy as background work', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
   const claudeHome = laptop.env['CLAUDE_CONFIG_DIR'] ?? ''
   writeFileSync(join(claudeHome, 'sessions', `${laptop.claude.pid}.json`), `${JSON.stringify({ pid: laptop.claude.pid, sessionId: SESSION, kind: 'interactive', cwd: laptop.cwd, status: 'busy', statusUpdatedAt: Date.now() - 60_000 })}}`)
-  const listed = async (): Promise<string | undefined> =>
-    ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; status: string }[] }).agents.find(({ id }) => id === SESSION)?.status
+  const listed = async (): Promise<{ status: string; background: boolean } | undefined> => {
+    const agent = ((await (await fetch('http://localhost/agents', { unix: laptop.socket })).json()) as { agents: { id: string; status: string; background: boolean }[] }).agents.find(({ id }) => id === SESSION)
+    return agent === undefined ? undefined : { status: agent.status, background: agent.background }
+  }
 
   await hookOn(laptop.socket, 'turnStart', laptop.cwd)
+  const turning = await listed()
+  await hookOn(laptop.socket, 'turnEnd', laptop.cwd)
 
-  expect(await listed()).toBe('working')
+  expect([turning, await listed()]).toEqual([{ status: 'working', background: false }, { status: 'idle', background: false }])
   expect(await statusOf(claudeHome, SESSION)).toBe('working')
 }, 60_000)
 

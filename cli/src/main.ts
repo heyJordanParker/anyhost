@@ -50,7 +50,7 @@ const USAGE = `anyhost ${plugin.version} keeps every Claude Code and Codex sessi
   anyhost project-name <project> [<name>|--undo]
                                      name a project, by its owner/name key, on every machine, or go back to its own name
   anyhost pin <session> [--undo]     pin a session to the top of every machine's list, where it never settles by itself, or unpin it
-  anyhost organize '<json list>'     change the tags, stages, project, pin and worktree order and preferences every machine shows: defineTag, dropTag, tagSession, defineStages, stageSession, moveProjects, movePins, moveWorktrees (items before an anchor, null for the end), prefer (a key, or one entry of it)
+  anyhost organize '<json list>'     change the tags, stages, subagents, project, pin and worktree order and preferences every machine shows: defineTag, dropTag, tagSession, defineStages, stageSession, parentSession (an agent's subagent, or an empty parent to make it an agent of its own), moveProjects, movePins, moveWorktrees (items before an anchor, null for the end), prefer (a key, or one entry of it)
   anyhost visit <session> [--at <time>]
                                      mark a session read on every machine up to now or that ISO time, earlier than its last turn marks it unread
   anyhost delete <session>           stop a session and delete its files on the machine that holds it; Deleted lists it, and opening it brings it back
@@ -124,7 +124,7 @@ async function moveThroughProgram(session: string, machine: string): Promise<num
 }
 
 async function startThroughProgram(machine: string, folder: string, prompt: string): Promise<string> {
-  const status = await askProgram<Status>('/status')
+  const status = await askProgram<Status>('/status', undefined, PROGRAM_RESTART_MS)
   if (status === undefined) throw noProgram()
   const { relay } = status
   if (relay.state !== 'connected') console.log(`Waiting for the relay at ${relay.url} to connect.${relay.message === '' ? '' : ` ${relay.message}`} Ctrl-C stops waiting.`)
@@ -316,15 +316,15 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (command === 'delete' && rest.length === 1 && rest[0] !== undefined) {
-    const deleted = await askProgram<{ readonly session: string }>('/agents/delete', { session: rest[0] })
+    const deleted = await askProgram<{ readonly session: string }>('/agents/delete', { session: rest[0] }, PROGRAM_RESTART_MS)
     if (deleted === undefined) throw noProgram()
     console.log(`Deleted ${deleted.session.slice(0, 8)}. Deleted lists it, and opening it brings it back.`)
     return 0
   }
   if (command === 'fork' && rest.length === 1 && rest[0] !== undefined) {
-    const forked = await askProgram<{ readonly session: string; readonly machine: string }>('/agents/fork', { session: rest[0], at: values.at ?? '' })
+    const forked = await askProgram<{ readonly session: string; readonly machine: string }>('/agents/fork', { session: rest[0], at: values.at ?? '' }, PROGRAM_RESTART_MS)
     if (forked === undefined) throw noProgram()
-    const opened = values.open === true ? await askProgram<{ readonly terminal: string; readonly machine: string }>('/agents/open', { session: forked.session }) : undefined
+    const opened = values.open === true ? await askProgram<{ readonly terminal: string; readonly machine: string }>('/agents/open', { session: forked.session }, PROGRAM_RESTART_MS) : undefined
     if (values.open === true && opened === undefined) throw noProgram()
     console.log(`Forked ${rest[0].slice(0, 8)} into ${forked.session}${opened === undefined ? ` on ${forked.machine}` : `, which runs on ${opened.machine} in terminal ${opened.terminal} of herdr-core`}.`)
     return 0
@@ -349,7 +349,7 @@ async function main(argv: string[]): Promise<number> {
     return 0
   }
   if (command === 'open' && rest.length === 1 && rest[0] !== undefined) {
-    const opened = await askProgram<{ readonly session: string; readonly terminal: string; readonly machine: string }>('/agents/open', { session: rest[0] })
+    const opened = await askProgram<{ readonly session: string; readonly terminal: string; readonly machine: string }>('/agents/open', { session: rest[0] }, PROGRAM_RESTART_MS)
     if (opened === undefined) throw noProgram()
     console.log(values.json === true ? JSON.stringify(opened) : `${opened.session.slice(0, 8)} runs on ${opened.machine} in terminal ${opened.terminal} of herdr-core.`)
     return 0
@@ -359,19 +359,19 @@ async function main(argv: string[]): Promise<number> {
     if (!Number.isInteger(messages) || messages < 0) throw new Error(`--messages takes a count of messages, not ${values.messages}.`)
     const skip = Number(values.skip ?? 0)
     if (!Number.isInteger(skip) || skip < 0) throw new Error(`--skip takes a count of messages, not ${values.skip}.`)
-    const told = await askProgram<Pick<Told, 'screen' | 'messages'>>('/agents/tell', { session: rest[0], text: rest[1] ?? '', keys: values.keys ?? [], messages, skip })
+    const told = await askProgram<Pick<Told, 'screen' | 'messages'>>('/agents/tell', { session: rest[0], text: rest[1] ?? '', keys: values.keys ?? [], messages, skip }, PROGRAM_RESTART_MS)
     if (told === undefined) throw noProgram()
     console.log(told.messages === undefined ? told.screen : values.json === true ? JSON.stringify(told.messages) : told.messages.map(({ role, at, text }) => `${role} ${at}\n${text}\n`).join('\n'))
     return 0
   }
   if (command === 'show' && (rest.length === 1 || rest.length === 2) && rest[0] !== undefined) {
-    const shown = await askProgram<{ readonly session: string; readonly machine: string; readonly terminal: string }>('/agents/show', { session: rest[0], place: rest[1] ?? 'focus' })
+    const shown = await askProgram<{ readonly session: string; readonly machine: string; readonly terminal: string }>('/agents/show', { session: rest[0], place: rest[1] ?? 'focus' }, PROGRAM_RESTART_MS)
     if (shown === undefined) throw noProgram()
     console.log(`${shown.session.slice(0, 8)} of ${shown.machine} shows in terminal ${shown.terminal}.`)
     return 0
   }
   if (command === 'sleep' && rest.length === 1 && rest[0] !== undefined) {
-    const told = await askProgram<Pick<Told, 'session' | 'machine' | 'status'>>('/agents/tell', { session: rest[0], sleep: true })
+    const told = await askProgram<Pick<Told, 'session' | 'machine' | 'status'>>('/agents/tell', { session: rest[0], sleep: true }, PROGRAM_RESTART_MS)
     if (told === undefined) throw noProgram()
     console.log(`${told.session.slice(0, 8)} on ${told.machine} goes to sleep once its turn ends. A message wakes it.`)
     return 0

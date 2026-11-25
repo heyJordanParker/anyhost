@@ -157,6 +157,8 @@ function startOver(db: Database): void {
   db.run(`pragma user_version = ${OLDEST_SCHEMA}`)
 }
 
+const IS_TRANSCRIPT_PATH = "(path like '%.jsonl' or path like '%.jsonl.zst')"
+
 function makeTables(db: Database): void {
   db.run(`create table if not exists journals (
     session text primary key, tool text not null, end integer not null default 0, sealed integer not null default 0,
@@ -165,6 +167,7 @@ function makeTables(db: Database): void {
     session text not null, path text not null, journal_size integer not null default 0, local_size integer not null default 0,
     tail blob not null default x'', sha256 text not null default '', mtime integer not null default 0, primary key (session, path))`)
   db.run('create index if not exists files_by_path on files (path)')
+  db.run(`create index if not exists files_transcripts on files (session, path, sha256) where ${IS_TRANSCRIPT_PATH}`)
   db.run('create table if not exists line_offsets (path text primary key, offset integer not null)')
   db.run(`create table if not exists sessions (
     id text primary key, tool text not null, title text not null default '', title_rank integer not null default 0, first_prompt text not null default '',
@@ -867,6 +870,7 @@ async function changeOf(capture: Capture, session: string, path: string, budget:
     if (row !== null && source.size === known.localSize && (await hasherOf(source, source.size)).digest('hex') === known.sha256) return touched()
     return await streamedChange(capture, session, path, source, { from: 0, to: wholeEnd }, 0, new Bun.CryptoHasher('sha256'))
   }
+  if (source.size > FRAME_BYTES) throw new Error(`anyhost keeps no copy of this file: it is ${(source.size / 2 ** 30).toFixed(1)} GiB, and a file rewritten in place goes up whole, which anyhost does up to ${FRAME_BYTES / 2 ** 20} MiB, while a log or transcript of any size goes up in chunks.`)
   const bytes = await source.read(0, source.size)
   const hasher = new Bun.CryptoHasher('sha256').update(bytes)
   if (row !== null && bytes.length === known.localSize && hasher.copy().digest('hex') === known.sha256) return touched()
@@ -1943,7 +1947,9 @@ export async function rewriteNext(capture: Capture, problems: Problems, now = Da
 export function rewriteProgress(capture: Capture): { readonly done: number; readonly journals: number } | undefined {
   const { readAt, isRewritten } = capture.journalsInR2
   if (readAt === 0) return undefined
-  return { done: [...isRewritten.values()].filter(Boolean).length, journals: isRewritten.size }
+  let done = 0
+  for (const isDone of isRewritten.values()) if (isDone) done += 1
+  return { done, journals: isRewritten.size }
 }
 
 export async function checkoutOf(cwd: string): Promise<{ repo: string; folder: string }> {
@@ -2009,24 +2015,36 @@ export const recordName = (db: Database, id: string, name: string): boolean =>
 
 export const forgetUnstarted =(db: Database, id: string): void => void db.query("delete from sessions where id = ? and first_prompt = '' and title_rank < ?").run(id, NAMED_RANK)
 
-const IS_TRANSCRIPT = "files.session = sessions.id and (files.path like '%' || sessions.id || '.jsonl' or files.path like '%' || sessions.id || '.jsonl.zst')"
-const TRANSCRIPT_GONE = `(exists (select 1 from files where ${IS_TRANSCRIPT}) and not exists (select 1 from files where ${IS_TRANSCRIPT} and files.sha256 != ''))`
+type TranscriptRow = { readonly session: string; readonly path: string; readonly kept: number }
 
-const isDeletedRow = (db: Database, { id, gone }: { readonly id: string; readonly gone: number }): boolean =>
-  gone === 1 && !db.query<{ path: string }, [string]>(`select files.path from files join sessions on ${IS_TRANSCRIPT} where sessions.id = ?`).all(id).some(({ path }) => existsSync(path))
-
-export function isDeleted(db: Database, session: string): boolean {
-  const row = db.query<{ id: string; gone: number }, [string]>(`select id, ${TRANSCRIPT_GONE} as gone from sessions where id = ?`).get(session)
-  return row !== null && isDeletedRow(db, row)
+function transcriptsIn(db: Database, session?: string): Map<string, TranscriptRow[]> {
+  const rows =
+    session === undefined
+      ? db.query<TranscriptRow, []>(`select session, path, sha256 != '' as kept from files where ${IS_TRANSCRIPT_PATH}`).all()
+      : db.query<TranscriptRow, [string]>(`select session, path, sha256 != '' as kept from files where session = ? and ${IS_TRANSCRIPT_PATH}`).all(session)
+  const bySession = new Map<string, TranscriptRow[]>()
+  for (const row of rows) {
+    if (!row.path.endsWith(`${row.session}.jsonl`) && !row.path.endsWith(`${row.session}.jsonl.zst`)) continue
+    const known = bySession.get(row.session)
+    if (known === undefined) bySession.set(row.session, [row])
+    else known.push(row)
+  }
+  return bySession
 }
 
+const isGone = (transcripts: readonly TranscriptRow[] | undefined): boolean =>
+  transcripts !== undefined && transcripts.every(({ kept }) => kept === 0) && !transcripts.some(({ path }) => existsSync(path))
+
+export const isDeleted = (db: Database, session: string): boolean => isGone(transcriptsIn(db, session).get(session))
+
 function indexOf(db: Database): IndexedSession[] {
+  const transcripts = transcriptsIn(db)
   return db
-    .query<SessionRow & { gone: number }, []>(`select *, ${TRANSCRIPT_GONE} as gone from sessions order by last_activity desc`)
+    .query<SessionRow, []>('select * from sessions order by last_activity desc')
     .all()
     .map((row) => ({
       id: row.id, tool: row.tool, title: row.title, named: row.title_rank >= NAMED_RANK, firstPrompt: row.first_prompt, cwd: row.cwd, repo: row.repo, repoFolder: row.repo_folder,
-      entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source, size: row.size, deleted: isDeletedRow(db, row),
+      entrypoint: row.entrypoint, lastSaid: row.last_said, lastActivity: row.last_activity, lastPromptAt: row.last_prompt_at, source: row.source, size: row.size, deleted: isGone(transcripts.get(row.id)),
     }))
 }
 

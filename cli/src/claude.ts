@@ -14,6 +14,7 @@ export type RunningSession = {
   readonly cwd: string
   readonly status?: string
   readonly statusSince?: number
+  readonly isFrozen?: true
 }
 
 export type OnRecordsChange = (heard: () => void) => () => void
@@ -240,12 +241,17 @@ export const isPaused = (pid: number): boolean => (process.platform === 'linux' 
 
 const isProcess = (pid: number, procStart: string | undefined): boolean => isAlive(pid) && (procStart === undefined || startOf(pid) === procStart)
 
-function jsonOf(path: string): unknown {
+function parsedOf(path: string): { readonly value: unknown; readonly isWhole: boolean } | undefined {
   try {
-    return Bun.JSONL.parseChunk(readFileSync(path, 'utf8')).values[0]
+    const parsed = Bun.JSONL.parseChunk(readFileSync(path, 'utf8'))
+    return { value: parsed.values[0], isWhole: parsed.done }
   } catch {
     return undefined
   }
+}
+
+function jsonOf(path: string): unknown {
+  return parsedOf(path)?.value
 }
 
 function namesIn(folder: string): string[] {
@@ -258,15 +264,29 @@ function namesIn(folder: string): string[] {
 
 const withCurrentStatus = (record: SessionRecord): SessionRecord => (record.parkedJobId === undefined ? record : { ...record, status: 'idle' })
 
+const recordsRead = new Map<string, { readonly stamp: string; readonly parsed: ReturnType<typeof parsedOf> }>()
+
+function recordOf(path: string): ReturnType<typeof parsedOf> {
+  const found = statSync(path, { throwIfNoEntry: false })
+  const stamp = found === undefined ? '' : `${found.mtimeMs} ${found.size}`
+  const known = recordsRead.get(path)
+  if (known !== undefined && known.stamp === stamp) return known.parsed
+  const parsed = parsedOf(path)
+  recordsRead.set(path, { stamp, parsed })
+  return parsed
+}
+
 export async function recordedSessions(claudeHome: string): Promise<RunningSession[]> {
   const folder = join(claudeHome, 'sessions')
-  return namesIn(folder)
-    .filter((name) => /^\d+\.json$/.test(name))
-    .flatMap((name) => {
-      const found = jsonOf(join(folder, name)) as SessionRecord | undefined
+  const paths = new Set(namesIn(folder).filter((name) => /^\d+\.json$/.test(name)).map((name) => join(folder, name)))
+  for (const path of recordsRead.keys()) if (path.startsWith(`${folder}/`) && !paths.has(path)) recordsRead.delete(path)
+  return [...paths]
+    .flatMap((path) => {
+      const parsed = recordOf(path)
+      const found = parsed?.value as SessionRecord | undefined
       if (found?.pid === undefined || found.sessionId === undefined || !isAlive(found.pid)) return []
       const record = withCurrentStatus(found)
-      return [{ pid: found.pid, sessionId: found.sessionId, cwd: record.cwd ?? '', ...(record.status === undefined ? {} : { status: record.status }), ...(found.statusUpdatedAt === undefined ? {} : { statusSince: found.statusUpdatedAt }) } as const]
+      return [{ pid: found.pid, sessionId: found.sessionId, cwd: record.cwd ?? '', ...(record.status === undefined ? {} : { status: record.status }), ...(found.statusUpdatedAt === undefined ? {} : { statusSince: found.statusUpdatedAt }), ...(parsed?.isWhole === false ? { isFrozen: true } : {}) } as const]
     })
 }
 

@@ -49,6 +49,21 @@ test('the newest of a hook and Claude Code’s record decides a session’s acti
   expect(seen).toEqual(steps.map(([, , status, main, background]) => [status, main, background]))
 })
 
+test('a record Claude Code left with bytes after its JSON and stopped rewriting never reads as background work, and the turns its hooks report decide the session', () => {
+  const activity = new Activity()
+  const frozen: RunningSession = { ...recordAt('busy', 1000), isFrozen: true }
+  const before = [activity.of(frozen), activity.mainOf(frozen), activity.isBackground(frozen)]
+  activity.hear(SESSION, 'turnStart', 500)
+  const turning = [activity.of(frozen), activity.mainOf(frozen), activity.isBackground(frozen)]
+  activity.hear(SESSION, 'turnEnd', 600)
+
+  expect([before, turning, [activity.of(frozen), activity.mainOf(frozen), activity.isBackground(frozen)]]).toEqual([
+    ['idle', 'idle', false],
+    ['working', 'working', false],
+    ['idle', 'idle', false],
+  ])
+})
+
 test('a prompt turns its session Working in the list within 500 ms of its hook, through list reads that wait for each change', async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)

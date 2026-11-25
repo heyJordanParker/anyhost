@@ -1,16 +1,16 @@
 import { Database } from 'bun:sqlite'
 import { expect } from 'bun:test'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { Activity } from '../src/activity.ts'
-import { compressHot, forgetUnstarted, journalOf, openCapture, openDatabase, QUIET_MS, recordFolder, recordSummary, recordSummaryFrom, relistSessions, seal, sealQuiet, untoldOf, writeIndex, type Capture } from '../src/capture.ts'
+import { compressHot, forgetUnstarted, FRAME_BYTES, journalOf, openCapture, openDatabase, QUIET_MS, recordFolder, recordSummary, recordSummaryFrom, relistSessions, seal, sealQuiet, untoldOf, uploadSessions, writeIndex, type Capture } from '../src/capture.ts'
 import { followHolders, HeldElsewhere, takeClaim } from '../src/claims.ts'
 import type { Relay } from '../src/relay.ts'
 import { devicesOf, type Device, type MachineRoots } from '../src/device.ts'
 import { restore } from '../src/resume.ts'
 import { agentsOf, downloadJournal, listSessions } from '../src/sessions.ts'
 import type { AgentStatus } from '../../relay/protocol.ts'
-import { pin, settle, snooze, type Shared } from '../src/shared.ts'
+import { organize, pin, settle, snooze, type Shared } from '../src/shared.ts'
 import { copyT3Marks } from '../src/t3.ts'
 import { test, whenTestEnds } from './test.ts'
 import { statusesHere } from '../src/move.ts'
@@ -292,21 +292,65 @@ test('a session idle past settleAfterDays reads settled, and a pinned, snoozed, 
   expect(byId('settled')).toEqual([true, false, false, false, false])
 })
 
-test('a settle mark holds until the next message, which un-settles the session, and an unsettle mark keeps an idle session out of Settled until then', async () => {
+test("a session's subagents and theirs archive with it, their own work keeps them archived, and one that starts waiting for you brings the whole family back", async () => {
+  const quiet = { lastActivity: hoursAgo(2) }
+  const family = { parents: { [idOf(2)]: idOf(1), [idOf(3)]: idOf(2) }, archived: { [idOf(1)]: { archived: true, at: hoursAgo(1) } } }
+
+  const working = await listedWith([quiet, quiet, { lastActivity: hoursAgo(0.5) }], family, { [idOf(3)]: 'working' })
+  const waiting = await listedWith([quiet, quiet, quiet], family, { [idOf(3)]: 'waiting' })
+
+  expect([working.byId('archived'), waiting.byId('archived')]).toEqual([[true, true, true], [false, false, false]])
+})
+
+test('a subagent that works keeps the session that started it out of Settled, and one that waits keeps it out of Snoozed too, however deep it runs', async () => {
+  const old = { lastActivity: hoursAgo(10 * 24) }
+  const parents = { [idOf(2)]: idOf(1), [idOf(3)]: idOf(2), [idOf(5)]: idOf(4) }
+  const snoozed = { [idOf(1)]: { until: hoursAgo(-24), at: hoursAgo(1) }, [idOf(4)]: { until: hoursAgo(-24), at: hoursAgo(1) } }
+
+  const quiet = await listedWith([old, old, old, old, old], { parents, snoozed: { [idOf(4)]: snoozed[idOf(4)] } })
+  const busy = await listedWith([old, old, old, old, old], { parents, snoozed }, { [idOf(3)]: 'working', [idOf(5)]: 'waiting' })
+
+  expect([quiet.byId('settled'), busy.byId('settled'), busy.byId('snoozedUntil')]).toEqual([
+    [true, true, true, false, true],
+    [false, false, false, false, false],
+    [hoursAgo(-24), '', '', '', ''],
+  ])
+})
+
+test('a subagent names the session that started it even while that session lists nowhere, and an empty parent makes it an agent of its own', async () => {
+  const { capture, listed } = await listedWith([{ lastActivity: hoursAgo(1) }, { lastActivity: hoursAgo(1) }], { parents: { [idOf(2)]: 'ffffffff-0000-0000-0000-00000000000f' } })
+  await organize(capture.relay, mac.id, [{ op: 'parentSession', session: idOf(1), parent: idOf(2) }, { op: 'parentSession', session: idOf(2), parent: '' }])
+  const parentsOf = (agents: readonly { readonly id: string; readonly parent: string }[]) => [idOf(1), idOf(2)].map((id) => agents.find((agent) => agent.id === id)?.parent)
+
+  expect([parentsOf(listed.agents), parentsOf((await agentsOf(capture)).agents)]).toEqual([
+    ['', 'ffffffff-0000-0000-0000-00000000000f'],
+    [idOf(2), ''],
+  ])
+})
+
+test("a settle mark holds through the session's own work until you prompt it or it starts waiting for you, and an unsettle mark keeps an idle session out of Settled until then", async () => {
   const { byId } = await listedWith(
-    [{ lastActivity: hoursAgo(1) }, { lastActivity: hoursAgo(1) }, { lastActivity: hoursAgo(10 * 24) }, { lastActivity: hoursAgo(10 * 24) }],
+    [
+      { lastActivity: hoursAgo(0.1) },
+      { lastActivity: hoursAgo(1), lastPromptAt: hoursAgo(1) },
+      { lastActivity: hoursAgo(1) },
+      { lastActivity: hoursAgo(10 * 24) },
+      { lastActivity: hoursAgo(10 * 24), lastPromptAt: hoursAgo(10 * 24) },
+    ],
     {
       settled: {
         [idOf(1)]: { settled: true, at: hoursAgo(0.5) },
         [idOf(2)]: { settled: true, at: hoursAgo(2) },
-        [idOf(3)]: { settled: false, at: hoursAgo(9 * 24) },
-        [idOf(4)]: { settled: false, at: hoursAgo(11 * 24) },
+        [idOf(3)]: { settled: true, at: hoursAgo(2) },
+        [idOf(4)]: { settled: false, at: hoursAgo(9 * 24) },
+        [idOf(5)]: { settled: false, at: hoursAgo(11 * 24) },
       },
     },
+    { [idOf(1)]: 'working', [idOf(3)]: 'waiting' },
   )
 
-  expect(byId('settled')).toEqual([true, false, false, true])
-  expect(byId('settledAt')).toEqual([hoursAgo(0.5), '', '', hoursAgo(3 * 24)])
+  expect(byId('settled')).toEqual([true, false, false, false, true])
+  expect(byId('settledAt')).toEqual([hoursAgo(0.5), '', '', '', hoursAgo(3 * 24)])
 })
 
 test('a session settles settleAfterDays after the later of its last message and the end of a snooze, and the list says when', async () => {
@@ -624,6 +668,24 @@ test("restore onto another home rewrites the writer's paths, and a /rewind backu
   expect([readFileSync(here.plan, 'utf8'), readFileSync(here.planBackup, 'utf8')]).toEqual([moved, moved])
   expect(readFileSync(here.notesBackup, 'utf8')).toBe(`notes kept at ${first}/work/shop\n`)
   expect(readFileSync(here.transcript, 'utf8')).toContain(`"cwd":${JSON.stringify(join(second, 'work', 'shop'))}`)
+})
+
+test('a file rewritten in place that is larger than one frame, as a mod database of many GiB, is never read into memory, and its problem says why anyhost keeps no copy', async () => {
+  const relay = await memoryRelay()
+  const session = 'ffffffff-0000-4000-8000-000000000007'
+  const { roots, capture } = captureOn(mac, relay)
+  const encoded = (path: string): string => path.replace(/[^a-zA-Z0-9]/g, '-')
+  const transcript = join(roots.claudeHome, 'projects', encoded(join(roots.home, 'work')), `${session}.jsonl`)
+  const backup = join(roots.claudeHome, 'file-history', session, 'cccc3333@v1')
+  for (const path of [transcript, backup]) mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(transcript, `{"type":"user","message":{"role":"user","content":"Keep the database"},"cwd":${JSON.stringify(join(roots.home, 'work'))},"sessionId":"${session}"}\n`)
+  writeFileSync(backup, '')
+  truncateSync(backup, FRAME_BYTES + 1)
+  const problems = new Map<string, string>()
+
+  await Promise.all(uploadSessions(capture, [{ session, tool: 'claude', paths: new Set([transcript, backup]) }], { set: (key, error) => void problems.set(key, String(error)), clear: (key) => void problems.delete(key) }).map(([, left]) => left))
+
+  expect([...problems]).toEqual([[backup, `Error: anyhost keeps no copy of this file: it is 0.1 GiB, and a file rewritten in place goes up whole, which anyhost does up to ${FRAME_BYTES / 2 ** 20} MiB, while a log or transcript of any size goes up in chunks.`]])
 })
 
 test("a session that worked in macOS's temp root continues in this machine's, and every path in it names this machine's", async () => {
