@@ -2,6 +2,26 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.8] - 2026-11-25
+
+### Changed
+- Your list shows your sessions. Every session an agent starts is that agent's subagent, on any machine, whether the agent started it through anyhost, cmod or Claude Code's background agents, so none shows up in the list on its own. A subagent whose session lists nowhere waits in Background, which the filter shows on demand.
+- A session's subagents show on its title line as a small stack icon and their count, colored while one works or needs you. A click opens them below the card, subagents of subagents included, each with its state, how long it has been in it, and its last message. Search finds them too.
+- A click on a subagent focuses the session that started it and shows the subagent live in the side panel. Tab in the panel's bar, or Make it an agent in the subagent's own right-click menu, makes it an agent of its own: it leaves the dropdown, joins your list and gets a tab, and it stays an agent on every machine.
+- A session whose subagents work reads Tasks running instead of Done, and one whose subagent waits for you reads Needs you, even while it is snoozed or settled.
+- Archiving a session archives its subagents, and their Claude Code stops at the next backup. Deleting a session deletes its subagents on whichever machine holds each, even one offline at the time. Archived and deleted subagents stay under the session, marked as such, and a click brings one back.
+- Every action in a session's menu works whatever the session is doing: Rename, Sleep, Settle, Snooze, Archive, Delete and Mark unread no longer gray out while it works or waits. Sleep asked mid-turn puts it to sleep when the turn ends. Archiving a working session no longer asks first.
+- Archive, settle and snooze hold until you prompt the session or it starts waiting for you, so a session's own work never undoes them.
+- A pinned session never goes to sleep on its own. Sleep in its menu still puts it to sleep.
+
+### Fixed
+- Opening, deleting, forking, telling or showing a session while the anyhost program restarts, as it does when cmod updates, waits for the program instead of failing with "The anyhost program does not answer".
+- A session whose Claude Code stopped updating its status no longer reads Tasks running forever. Its turns decide its state, as they already did for a running session.
+- A mod's database of many gigabytes no longer fails its backup every minute with "Out of memory". anyhost keeps no copy of a file rewritten in place that is larger than 64 MiB, says so once in its log, and backs up the rest of the mod's data. A restore writes large files to disk piece by piece instead of reading each one whole.
+- The anyhost program no longer stalls for half a minute at a time on a busy Mac, which made the relay drop its link, cmod drop its connection and a new session wait on it. A session working in a folder that holds a file over 100 MiB, such as a copied database, made anyhost build a patch of the whole file for every change. anyhost now leaves any file of code over the 100 MiB GitHub takes in a push out of the code it keeps, and says so once in its log. macOS also runs the program at the priority of an app, where it used to throttle it as a background job.
+- A session you resumed no longer stays grayed out in the sidebar. A card grays out only while no Claude Code runs the session, the same rule the tabs use for an asleep session, however long ago its last turn was.
+- The anyhost program does less work for each list and each backup. Reading the list of sessions takes about a third of the time it did. A session's code backup runs fewer git commands. A session's status reads each Claude Code record again only when it changed, and finds its transcript without searching every project folder. Two sessions in one folder outside git no longer fail their first code backup.
+
 ## [0.11.7] - 2026-11-24
 
 ### Changed

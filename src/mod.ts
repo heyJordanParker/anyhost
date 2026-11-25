@@ -47,6 +47,7 @@ export const anyhost = defineMod({
         command: ['anyhost', 'serve'],
         environment: { ANYHOST_DEVICE_ID: here.id, ANYHOST_DEVICE_NAME: here.name, ANYHOST_DEVICE_OS: here.os, ANYHOST_DEVICE_ARCH: here.arch },
         isService: true,
+        processType: 'Interactive',
       }),
     )
     reachProgram(mod, capture)
@@ -98,11 +99,21 @@ export const anyhost = defineMod({
         (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not hear this session's change: ${messageOf(error)}`, { level: 'warning' })),
       )
     }
+    const adopt = (tasks: readonly { readonly id: string; readonly isBackground?: true }[]): Promise<void> => {
+      const changes = tasks.filter((task) => task.isBackground === true).map((task) => ({ op: 'parentSession', session: task.id, parent: sessions.current.id }))
+      if (changes.length === 0) return Promise.resolve()
+      return askProgram(mod, '/organize', { changes }).then(
+        () => undefined,
+        (error: unknown) => (error instanceof NoAnswer ? undefined : mod.log(`anyhost could not list this session's background agents as its subagents: ${messageOf(error)}`, { level: 'warning' })),
+      )
+    }
     sessions.current.onSessionStart(async (started) => {
       if (started.source === 'clear' && ended !== '' && ended !== started.session) clearedFrom.set(started.session, ended)
       await check()
       await changed('started')
+      await adopt(await sessions.current.goal.tasks())
     })
+    sessions.current.onTaskStart((task) => adopt([task]))
     sessions.current.onSessionEnd((end) => {
       ended = end.session
       return changed(end.reason === 'exit' ? 'quit' : 'ended')
