@@ -2,6 +2,18 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.9] - 2026-11-25
+
+### Changed
+- A session's subagents list like the sessions in your list. Each row shows the subagent's agent icon and title, then the same status the list shows, and its last message below. A row grays out only while its subagent sleeps, as a card does.
+- Subagents open from a Subagents count and arrow on the card's title line, the same control as the list's Archived and Settled shelves. Subagents of subagents nest under their own parent with the same control, so each level shows only its own.
+- Archived and deleted subagents no longer show under a session that is not archived. Search still finds them, and a click brings one back.
+
+### Fixed
+- Opening a session's subagents, or clicking one, no longer starts dragging the session's card.
+- A session you pin while anyhost decides to put it to sleep stays awake. anyhost now reads the pins at the moment it would stop Claude Code.
+- A folder outside git that holds a git repository with no commit yet backs up its other files again. anyhost used to fail that folder's whole code backup every minute.
+
 ## [0.11.8] - 2026-11-25
 
 ### Changed
