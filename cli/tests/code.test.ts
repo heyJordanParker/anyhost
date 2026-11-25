@@ -384,6 +384,19 @@ test('a file over 100 MiB in a folder outside git, as a database a session copie
   expect(said).toEqual([expect.stringContaining('anyhost leaves store/history.sqlite (100 MiB) out of the code it keeps of ')])
 })
 
+test('a folder outside git that holds a git repository with no commit yet keeps the rest of its files, and leaves that repository out', async () => {
+  const base = temporaryFolder()
+  const work = join(base, 'scratchpad')
+  write(join(work, 'notes.md'), '# notes\n')
+  sh(base, ['init', '-q', join(work, 'project')])
+  write(join(work, 'project', 'draft.ts'), 'export const draft = 1\n')
+
+  const journal = journalOf()
+  const restored = await journal.restore(await journal.capture(work), join(base, 'restored'))
+
+  expect(filesOf(restored)).toEqual(['notes.md file - ' + createHash('sha256').update('# notes\n').digest('hex')])
+})
+
 test('a file over 100 MiB a session staged or left untracked in its checkout stays out of the code anyhost keeps, and the checkout restores the rest exactly', async () => {
   const { base, work } = repository()
   write(join(work, 'staged.bin'), '')

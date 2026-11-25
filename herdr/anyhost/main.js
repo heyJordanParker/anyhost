@@ -175,8 +175,9 @@ const MOTION_MOST = 40;
 const FILTER_BODY_MOST = 460;
 const CARD_HEIGHT = UI.space.xs * 2 + UI.height.inline * 3;
 const SUBAGENT_HEIGHT = UI.space.xs * 2 + UI.height.inline * 2;
-const SUBAGENT_ORDER = { blocked: 0, working: 1, tasks: 1, done: 2, idle: 3, archived: 4, deleted: 5 };
-const SUBAGENT_GONE = { archived: ["Archived", "archive"], deleted: ["Deleted", `${OWN}/trash`] };
+const URGENCY = { blocked: 0, done: 1, idle: 2, working: 3, tasks: 3 };
+const byUrgency = (a, b) => URGENCY[a.state] - URGENCY[b.state] || (a.state === "blocked" ? a.since - b.since : b.since - a.since);
+const recedes = (r, isShown) => !isShown && (r.archived || r.deleted || r.isOffline || r.isAsleep || r.section === "settled" || r.section === "snoozed");
 const PICKER_HEIGHT = UI.height.row * 10 + UI.space.lg;
 const MENU_WIDTH = 220;
 const MENU_SEPARATOR = UI.space.xs * 2 + 1;
@@ -1287,14 +1288,14 @@ export default class Anyhost extends View {
   cardDrawnOf(shown, r) {
     const { model, terminal } = shown;
     const subs = this.subsOf(r, model);
+    const drawnSubs = ({ isOpen, rows }) => [isOpen, rows.map(({ id, row, subs, kid }) => (row ? [id, row.title, row.state, row.label, row.since, row.at, row.section, row.isAsleep, row.isOffline, row.isUnread, row.lastSaid, row.address === terminal || row.views.includes(terminal), drawnSubs(subs)] : [id, kid.title, kid.state]))];
     const tags = r.tags.map((id) => this.data.tags[id]?.name ?? "");
     const extra = JSON.stringify([
       Boolean(r.address) && (r.address === terminal || r.views.includes(terminal)),
       this.worktreeOf(r),
       r.session.source ? (model.byKey.get(r.session.source)?.title ?? "") : "",
       r.isChild ? (model.byKey.get(r.parent)?.title ?? "") : "",
-      subs.isOpen,
-      subs.rows.map((row) => [row.id, row.title, row.state, row.isAsleep, row.status, row.said]),
+      drawnSubs(subs),
       tags,
       this.data.stages.find((stage) => stage.id === r.stage)?.name ?? "",
       this.found !== null,
@@ -1827,19 +1828,21 @@ export default class Anyhost extends View {
       if (r.parent && !r.isChild) r.kind = "background";
     }
     const childrenOf = new Map();
+    const descendantsOf = new Map();
     for (const r of rows.filter((r) => r.isChild)) {
+      childrenOf.set(r.parent, [...(childrenOf.get(r.parent) ?? []), r]);
       const seen = new Set([r.key]);
       let root = rowByKey.get(r.parent);
       while (root.isChild && !seen.has(root.key)) {
         seen.add(root.key);
         root = rowByKey.get(root.parent);
       }
-      childrenOf.set(root.key, [...(childrenOf.get(root.key) ?? []), r]);
+      descendantsOf.set(root.key, [...(descendantsOf.get(root.key) ?? []), r]);
     }
-    for (const [key, children] of childrenOf) {
+    for (const [key, descendants] of descendantsOf) {
       const r = rowByKey.get(key);
       if (r.isOffline || r.state === "blocked") continue;
-      const shown = children.filter((c) => !c.archived && !c.deleted);
+      const shown = descendants.filter((c) => !c.archived && !c.deleted);
       const waiting = shown.find((c) => c.state === "blocked" && !c.isOffline);
       const working = shown.filter((c) => isRunning(c.state));
       if (waiting) Object.assign(r, { state: "blocked", label: `Subagent: ${waiting.label}`, since: waiting.since });
@@ -1857,9 +1860,8 @@ export default class Anyhost extends View {
       r.section = this.sectionOf(r, now, isShownKind(r), filter);
       if (r.section && passes(r)) sections[r.section].push(r);
     }
-    const urgency = { blocked: 0, done: 1, idle: 2, working: 3, tasks: 3 };
     sections.pinned = this.pinnedOf(sections.pinned);
-    sections.active.sort((a, b) => urgency[a.state] - urgency[b.state] || (a.state === "blocked" ? a.since - b.since : b.since - a.since));
+    sections.active.sort(byUrgency);
     sections.working.sort((a, b) => b.since - a.since);
     sections.snoozed.sort((a, b) => a.snoozedMs - b.snoozedMs || byKey(a, b));
     sections.settled.sort((a, b) => b.settledMs - a.settledMs || byKey(a, b));
@@ -2792,7 +2794,7 @@ export default class Anyhost extends View {
     const { t, model } = ctx;
     const card = (r) => {
       const subs = this.subsOf(r, model);
-      return { key: r.key, r, height: CARD_HEIGHT + subs.height, el: () => this.cardFor(ctx, r, ctx.mounted) };
+      return { key: r.key, r, height: CARD_HEIGHT + (subs.isOpen ? UI.space.xs : 0) + subs.height, el: () => this.cardFor(ctx, r, ctx.mounted) };
     };
     const head = (id, label) => ({ key: `head-${id}`, height: UI.height.row, el: () => this.sectionHead(t, id, label) });
     const hasPins = sections.pinned.length > 0;
@@ -3028,7 +3030,7 @@ export default class Anyhost extends View {
     const { t, shown, model } = ctx;
     const isShown = Boolean(r.address) && (r.address === shown || r.views.includes(shown));
     const isHovered = this.hovered === r.key && this.pressed?.isMoving !== true;
-    const recedes = !isShown && (r.archived || r.deleted || r.isOffline || r.isAsleep || r.section === "settled" || r.section === "snoozed");
+    const isFaded = recedes(r, isShown);
     const opening = isOpening(r.key) && !r.address;
     const status = isHovered ? this.actions(t, r) : opening ? this.spinnerLabel(t, "Opening") : this.status(t, r);
     const frame = this.frame(t, r, isShown);
@@ -3044,7 +3046,7 @@ export default class Anyhost extends View {
         v_flex()
           .px(UI.space.sm)
           .py(UI.space.xs)
-          .opacity(recedes && !isHovered ? 0.7 : 1)
+          .opacity(isFaded && !isHovered ? 0.7 : 1)
           .transition("opacity", UI.motion)
           .child(
             h_flex()
@@ -3063,7 +3065,7 @@ export default class Anyhost extends View {
               .gap(UI.space.sm)
               .items_center()
               .child(this.harnessIcon(t, r))
-              .child(div().min_w(0).truncate().text_size(UI.text.body).when(r.isUnread, (el) => el.font_semibold()).when(!recedes && !r.isUnread, (el) => el.font_medium()).text_color(recedes ? t.muted : t.foreground).child(r.title))
+              .child(div().min_w(0).truncate().text_size(UI.text.body).when(r.isUnread, (el) => el.font_semibold()).when(!isFaded && !r.isUnread, (el) => el.font_medium()).text_color(isFaded ? t.muted : t.foreground).child(r.title))
               .child(div().flex_1())
               .when(subs.rows.length > 0, (line) => line.child(this.subagentFold(t, r, subs))),
           )
@@ -3078,7 +3080,7 @@ export default class Anyhost extends View {
               .child(div().flex_1().min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(r.lastSaid || "No reply yet")),
           ),
       )
-      .when(subs.isOpen, (el) => el.pb(UI.space.xs).children(this.subRows(t, subs)));
+      .when(subs.isOpen, (el) => el.pb(UI.space.xs).children(this.subRows(ctx, subs)));
   }
 
   chip(t, name, color, { isOutlined = false, icon = null, remove = null } = {}) {
@@ -3220,20 +3222,25 @@ export default class Anyhost extends View {
       .on_mouse_down("right", () => this.menu(r));
   }
 
-  subsOf(r, model) {
+  subsOf(r, model, root = r) {
     const children = (model.childrenOf.get(r.key) ?? [])
-      .map((c) => [c, c.deleted ? "deleted" : c.archived ? "archived" : c.state])
-      .map(([c, state]) => ({ id: `ah-child-${c.key}`, title: c.title, state, isAsleep: c.isAsleep, status: SUBAGENT_GONE[state]?.[0] ?? (c.isOffline || c.state === "idle" ? (c.isOffline ? c.label : ago(c.at)) : c.state === "done" ? c.label : `${c.label} ${ago(c.since)}`), said: c.lastSaid || "No reply yet", height: SUBAGENT_HEIGHT, row: c, open: (cx) => this.showSubagent(cx, r, c) }))
-      .sort((a, b) => SUBAGENT_ORDER[a.state] - SUBAGENT_ORDER[b.state]);
+      .filter((c) => (!c.archived || r.archived) && (!c.deleted || r.deleted))
+      .sort(byUrgency)
+      .map((c) => {
+        const subs = this.subsOf(c, model, root);
+        return { id: `ah-child-${c.key}`, row: c, subs, height: SUBAGENT_HEIGHT + subs.height, open: (cx) => this.showSubagent(cx, root, c) };
+      });
     const kids = r.address
-      ? (model.kidsOf.get(r.address) ?? []).map((k) => {
-          const state = model.statusOf.get(k.address)?.status ?? "idle";
-          return { id: `ah-kid-${k.address}`, title: k.name || k.template || k.program?.name || k.address, state, isAsleep: false, status: state === "idle" ? "" : (STATE[state] ?? STATE.idle).name, said: null, height: UI.height.row, open: () => run(model.statusOf.has(k.address) ? "pane.focus" : "terminal.peek", { terminal: k.address }) };
-        })
+      ? (model.kidsOf.get(r.address) ?? []).map((k) => ({
+          id: `ah-kid-${k.address}`,
+          kid: { title: k.name || k.template || k.program?.name || k.address, program: k.program, state: model.statusOf.get(k.address)?.status ?? "idle" },
+          height: UI.height.row,
+          open: () => run(model.statusOf.has(k.address) ? "pane.focus" : "terminal.peek", { terminal: k.address }),
+        }))
       : [];
     const rows = [...children, ...kids];
     const isOpen = rows.length > 0 && this.unfolded.has(r.key);
-    return { rows, working: rows.filter((row) => isRunning(row.state)).length, waiting: rows.filter((row) => row.state === "blocked").length, isOpen, height: isOpen ? UI.space.xs + rows.reduce((sum, row) => sum + row.height, 0) : 0 };
+    return { rows, isOpen, height: isOpen ? rows.reduce((sum, row) => sum + row.height, 0) : 0 };
   }
 
   showSubagent(cx, parent, r) {
@@ -3256,70 +3263,79 @@ export default class Anyhost extends View {
 
   subagentFold(t, r, subs) {
     const count = subs.rows.length;
-    const color = subs.waiting > 0 ? this.stateColor("blocked") : subs.working > 0 ? this.stateColor("working") : t.dim;
     return h_flex()
       .id(`ah-fold-${r.key}`)
       .h(UI.height.inline)
-      .px(UI.space.xs)
       .gap(UI.space.xs)
       .flex_none()
       .items_center()
-      .rounded(UI.radius.control)
       .text_size(UI.text.caption)
-      .text_color(color)
+      .font_medium()
+      .text_color(t.muted)
       .cursor_pointer()
-      .tooltip(`${count} ${count === 1 ? "subagent" : "subagents"}${subs.waiting > 0 ? ` · ${subs.waiting} need${subs.waiting === 1 ? "s" : ""} you` : ""}${subs.working > 0 ? ` · ${subs.working} working` : ""}`)
-      .hover((s) => s.bg(t.hover))
+      .hover((s) => s.text_color(t.foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => {
         cx.stop_propagation();
         if (!this.unfolded.delete(r.key)) this.unfolded.add(r.key);
         preferEntry("unfolded", r.key, this.unfolded.has(r.key) ? true : null);
         this.act((cx) => this.redrawList(cx));
       })
-      .child(svg(iconPath(`${OWN}/square-stack`)).size(UI.icon.small).flex_none())
-      .child(String(count))
-      .child(svg(`${ICON}/chevron-${subs.isOpen ? "down" : "right"}.svg`).size(UI.icon.small).flex_none().text_color(t.dim));
+      .child(count === 1 ? "Subagent" : "Subagents")
+      .child(div().font_normal().child(String(count)))
+      .child(svg(`${ICON}/chevron-${subs.isOpen ? "down" : "right"}.svg`).size(UI.icon.small).flex_none());
   }
 
-  subRows(t, subs) {
-    return subs.rows.map((s) =>
-      h_flex()
+  subRows(ctx, subs, depth = 0) {
+    const { t, shown } = ctx;
+    return subs.rows.flatMap((s) => {
+      const r = s.row;
+      const isFaded = r !== undefined && recedes(r, Boolean(r.address) && (r.address === shown || r.views.includes(shown)));
+      const lead = r !== undefined ? this.harnessIcon(t, r) : (this.programIcon(s.kid.program, t.dim) ?? div().size(UI.icon.body).flex_none());
+      const status = r !== undefined ? this.status(t, r) : s.kid.state === "idle" ? null : this.stateChip(t, s.kid.state, (STATE[s.kid.state] ?? STATE.idle).name);
+      const entry = v_flex()
         .id(s.id)
-        .h(s.height)
+        .h(s.height - (s.subs?.height ?? 0))
         .flex_none()
-        .px(UI.space.sm)
-        .gap(UI.space.sm)
-        .items_center()
+        .pl(UI.space.sm + depth * UI.space.lg)
+        .pr(UI.space.sm)
+        .justify_center()
         .rounded(UI.radius.control)
         .cursor_pointer()
         .hover((st) => st.bg(t.hover))
+        .opacity(isFaded ? 0.7 : 1)
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => {
           cx.stop_propagation();
           this.act((cx) => s.open(cx));
         })
-        .when(s.row !== undefined, (el) =>
+        .when(r !== undefined, (el) =>
           el.on_mouse_down("right", (_e, cx) => {
             cx.stop_propagation();
-            this.menu(s.row);
+            this.menu(r);
           }),
         )
-        .child(div().size(UI.icon.body).flex_none().flex().items_center().justify_center().child(this.stateLead(s.state) ?? svg(iconPath(SUBAGENT_GONE[s.state]?.[1] ?? STATE.idle.icon)).size(UI.icon.small).text_color(t.dim)))
         .child(
-          v_flex()
-            .flex_1()
-            .min_w(0)
-            .child(
-              h_flex()
-                .h(UI.height.inline)
-                .gap(UI.space.sm)
-                .items_center()
-                .text_size(UI.text.caption)
-                .child(div().flex_1().min_w(0).truncate().text_color(s.isAsleep || SUBAGENT_GONE[s.state] ? t.muted : t.foreground).child(s.title))
-                .when(s.status !== "", (line) => line.child(div().flex_none().text_color(t.dim).child(s.status))),
-            )
-            .when(s.said !== null, (el) => el.child(div().h(UI.height.inline).min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(s.said))),
-        ),
-    );
+          h_flex()
+            .h(UI.height.inline)
+            .gap(UI.space.sm)
+            .items_center()
+            .child(lead)
+            .child(div().flex_1().min_w(0).truncate().text_size(UI.text.caption).when(r?.isUnread === true, (el) => el.font_semibold()).text_color(isFaded ? t.muted : t.foreground).child(r?.title ?? s.kid.title))
+            .when(status !== null, (line) => line.child(status)),
+        )
+        .when(r !== undefined, (el) =>
+          el.child(
+            h_flex()
+              .h(UI.height.inline)
+              .gap(UI.space.sm)
+              .items_center()
+              .child(div().flex_1().min_w(0).truncate().text_size(UI.text.caption).text_color(t.dim).child(r.lastSaid || "No reply yet"))
+              .when(s.subs.rows.length > 0, (row) => row.child(this.subagentFold(t, r, s.subs))),
+          ),
+        );
+      return s.subs?.isOpen ? [entry, ...this.subRows(ctx, s.subs, depth + 1)] : [entry];
+    });
   }
 
   handOffTerminalMenu(given) {
@@ -3570,6 +3586,11 @@ export default class Anyhost extends View {
             .child(svg(iconPath(STATE[r.state].icon)).size(UI.icon.small).text_color(this.stateColor(r.state))),
         ),
       );
+  }
+
+  programIcon(program, color) {
+    if (!program?.icon) return null;
+    return program.tint ? svg(program.icon).size(UI.icon.body).flex_none().text_color(color) : image(program.icon).size(UI.icon.body).flex_none();
   }
 
   harnessIcon(t, r) {
@@ -6617,9 +6638,7 @@ export default class Anyhost extends View {
     const isShown = slot.pill.isShown && this.picked === null;
     const isHovered = this.hovered === tab.id;
     const isDragged = this.pressed?.isMoving === true && this.pressed.id === tab.id;
-    const lead =
-      this.stateLead(state) ??
-      (!program?.icon ? null : program.tint ? svg(program.icon).size(UI.icon.body).flex_none().text_color(t.muted) : image(program.icon).size(UI.icon.body).flex_none());
+    const lead = this.stateLead(state) ?? this.programIcon(program, t.muted);
     return h_flex()
       .id(`ah-tab-${tab.id}`)
       .h_full()
@@ -6671,7 +6690,7 @@ export default class Anyhost extends View {
     if (!p) return div();
     const session = terminals().find((x) => x.address === p.terminal)?.labels?.[SESSION_LABEL];
     const name = shared(PULSE)?.sessions?.[session]?.title ?? (((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell");
-    const icon = !p.program?.icon ? null : p.program.tint ? svg(p.program.icon).size(UI.icon.body).flex_none().text_color(t.dim) : image(p.program.icon).size(UI.icon.body).flex_none();
+    const icon = this.programIcon(p.program, t.dim);
     const button = (id, glyph, label, command, args) => this.iconButton(t, `ah-pane-${id}-${pane}`, `mods/pane/${glyph}`, label, () => run(command, args), UI.height.inline);
     return h_flex()
       .id(`ah-pane-head-${pane}`)

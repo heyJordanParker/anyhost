@@ -20,7 +20,7 @@ import { connectRelay, isRowsLimit, ROWS_LIMIT, waitAfter, type Login, type Rela
 import { readSession } from './resume.ts'
 import { HOOK_EVENTS, type AgentStatus, type DeviceRef, type HookEvent, type Routed } from '../../relay/protocol.ts'
 import { agentsOf, indexesIn, indexKeyOf, type Agent, type ListRead } from './sessions.ts'
-import { archive, isArchived, moveWindowPreferences, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, windowsIn, windowsKeyOf, type Attention, type Organize, type Shared } from './shared.ts'
+import { archive, isArchived, moveWindowPreferences, nameProject, organize, pin, settle as settleSession, SETTLE_MOST_DAYS, SHARED_KEY, sharedIn, sharedOf, snooze, updateShared, visit, windowsIn, windowsKeyOf, type Attention, type Organize } from './shared.ts'
 import { copyT3Marks } from './t3.ts'
 import { codexSessionOf, codexState, familyOf, filesUnder, isCodexRun, transcriptOf, watchedFolders, type Tool } from './transcript.ts'
 
@@ -673,7 +673,6 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
   const discardIdle = async (): Promise<void> => {
     const records = new Map((await recordedSessions(roots.claudeHome)).map((record) => [record.sessionId, record]))
     const now = Date.now()
-    let pinned: Shared['pinned'] | undefined
     for (const [address, terminal] of terminals) {
       const session = sessionIn(address)
       if (!isHere(address) || session === '' || terminal.state !== 'live') continue
@@ -691,15 +690,15 @@ export async function serve(device: Device, names?: RelayNames, cloudflare?: Clo
       const isAsked = Number(terminal.labels[SLEEP_LABEL] ?? 0) > (Date.parse(attentionHere(session)?.lastPromptAt ?? '') || 0)
       const lastActive = Math.max(since, shownAt(terminal.labels), mover.touched.get(session) ?? 0)
       if (!isAsked && (isShown(terminal.labels, now) || now - lastActive < STOP_MS)) continue
-      pinned ??= (await sharedOf(relay).catch(() => sharedIn(relay.cached([SHARED_KEY])[0]))).pinned
-      if (isAsked || pinned[session] === undefined) await stopIfStillIdle(session, record.statusSince, now)
+      await stopIfStillIdle(session, record.statusSince, now, isAsked)
     }
   }
-  const stopIfStillIdle = async (session: string, since: number | undefined, decidedAt: number): Promise<void> => {
+  const stopIfStillIdle = async (session: string, since: number | undefined, decidedAt: number, isAsked: boolean): Promise<void> => {
     const isTouched = (): boolean => mover.opening.has(session) || (mover.touched.get(session) ?? 0) >= decidedAt
     if (isTouched()) return
     const record = (await recordedSessions(roots.claudeHome)).find((entry) => entry.sessionId === session)
     if (record === undefined || record.statusSince !== since || mover.activity.of(record) !== 'idle' || isTouched()) return
+    if (!isAsked && (await sharedOf(relay).catch(() => sharedIn(relay.cached([SHARED_KEY])[0]))).pinned[session] !== undefined) return
     await stopCopy(roots.claudeHome, session)
   }
   let isDiscarding = false

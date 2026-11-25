@@ -190,7 +190,8 @@ async function treesOf(repo: Repository, head: string | null): Promise<Trees> {
     const largeChanges = onDisk.filter(({ size }) => size > LARGEST_CODE_FILE)
     const stillIndexed = largeChanges.filter(({ path }) => !largeStaged.some((file) => file.path === path))
     if (isFolder && stillIndexed.length > 0) await resetToHead(repo, null, stillIndexed.map(({ path }) => path), env)
-    await git(repo, ['add', '-A', '--', ':/', ...largeChanges.map(({ path }) => `:(exclude,literal)${path}`)], { env })
+    const nestedRepositories = changed.filter((path) => path.endsWith('/'))
+    await git(repo, ['add', '-A', '--', ':/', ...[...largeChanges.map(({ path }) => path), ...nestedRepositories].map((path) => `:(exclude,literal)${path}`)], { env })
     const worktree = await valueOf(repo, ['write-tree'], { env })
     if (repo.kind === 'folder') await copyIndex(index, repo.index)
     return { index: staged, worktree, conflicts, leftOut: [...new Map([...largeStaged, ...largeChanges].map((file) => [file.path, file])).values()] }
