@@ -246,6 +246,7 @@ const isTabKey = (key: string): boolean => key.split('-').at(-1) === 'tab'
 const BOUND: readonly (readonly [string, (key: string) => string, (key: string) => string | undefined])[] = [
   ['mod.open:picker', () => 'anyhost.palette', same],
   ['tab.close', () => 'anyhost.close', same],
+  ['pane.close', () => 'anyhost.close-tab', same],
   ['tab.new', () => 'anyhost.new', same],
   ['space.new', () => 'anyhost.new', same],
   ['tab.new', () => 'tab.new', (key) => (key.includes('shift-') || key.includes('alt-') ? undefined : withModifier(key, 'alt'))],

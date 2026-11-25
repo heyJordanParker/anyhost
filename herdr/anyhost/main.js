@@ -2022,13 +2022,29 @@ export default class Anyhost extends View {
     this.change(cx, { [r.key]: { archived } }, [["archive", r.key, ...(archived ? [] : ["--undo"])]], archived ? "anyhost could not archive it" : "anyhost could not restore it", undo, [], show);
   }
 
-  archiveAll(cx, rows, { isClosed = false, panes: closed = [], show = null } = {}) {
+  archiveAll(cx, rows, { isClosed = false, panes: closed = [], show = null, isConfirmed = false } = {}) {
     const leaving = rows.filter((r) => !r.pinned && !r.archived);
-    if (leaving.length === 0) return closed.forEach((pane) => run("pane.close", { pane }));
+    if (leaving.length === 0) return void closed.forEach((pane) => run("pane.close", { pane }));
+    const midTurn = leaving.filter((r) => r.state === "blocked" || isRunning(r.state));
+    if (!isConfirmed && midTurn.length > 0) return this.confirmArchive(leaving, midTurn, { isClosed, panes: closed, show });
     const [first] = leaving;
     const hold = this.holdFor(cx, leaving.length === 1 ? `${isClosed ? "Closed" : "Archived"} ${first.title.slice(0, 50)}` : `${isClosed ? "Closed" : "Archived"} ${leaving.length} sessions`);
     leaving.forEach((r, i) => this.archive(cx, r, true, { isClosed, hold, show: i === 0 ? show : null }));
     if (closed.length > 0) enqueue({ run: closed.map((pane) => ({ app: ["pane.close", { pane }] })), hold });
+  }
+
+  confirmArchive(leaving, midTurn, how) {
+    const verb = how.isClosed ? "Close" : "Archive";
+    const [first] = midTurn;
+    const doing = first.state === "blocked" ? "waits for you" : "is working";
+    const others = midTurn.length > 1 ? ` and ${midTurn.length - 1} more ${midTurn.length === 2 ? "session" : "sessions"} mid-turn` : "";
+    this.confirm({
+      title: leaving.length === 1 ? `${verb} ${first.title}?` : `${verb} ${leaving.length} sessions?`,
+      body: `${first.title} ${doing}${others}. ${how.isClosed ? "Closing" : "Archiving"} stops Claude Code mid-turn. Restore brings the session back.`,
+      go: verb,
+      archive: { ...how, rows: leaving.map(({ key, title, address, state }) => ({ key, title, address, state, archived: false, pinned: false })) },
+    });
+    return true;
   }
 
   restore(cx, r) {
@@ -2058,7 +2074,7 @@ export default class Anyhost extends View {
       closed.push(...ps.filter((p) => !byAddress.get(p.terminal)?.labels?.[SESSION_LABEL]).map((p) => p.pane));
       leaving.push(...rows);
     }
-    this.archiveAll(cx, leaving, { isClosed: true, panes: closed, show });
+    return this.archiveAll(cx, leaving, { isClosed: true, panes: closed, show });
   }
 
   sessionRowOf(key) {
@@ -4566,7 +4582,7 @@ export default class Anyhost extends View {
     const closeItems = w
       ? [
           ...(w.isPane ? [{ id: "close-pane", icon: "x", label: "Close pane", ask: { action: "closePane" } }] : []),
-          { id: "close-tab", icon: "x", label: "Close tab", detail: keyFor("anyhost.close"), disabled: Boolean(p.pinned), reason: "Unpin it to close it", ask: { action: "closeTabs", tabs: [w.tab] } },
+          { id: "close-tab", icon: "x", label: "Close tab", detail: keyFor("anyhost.close-tab"), disabled: Boolean(p.pinned), reason: "Unpin it to close it", ask: { action: "closeTabs", tabs: [w.tab] } },
           { id: "close-others", icon: "x", label: "Close other tabs", disabled: w.others.length === 0, reason: "No other tab is open", ask: { action: "closeTabs", tabs: w.others } },
           { id: "close-right", icon: "x", label: "Close tabs to the right", disabled: w.right.length === 0, reason: "No tab is to its right", ask: { action: "closeTabs", tabs: w.right } },
           { id: "reopen", icon: `${OWN}/archive-restore`, label: "Reopen closed tab", detail: keyFor("anyhost.reopen"), disabled: !p.canReopen, reason: "No closed tab to reopen", ask: { action: "reopen" } },
@@ -5639,6 +5655,7 @@ export default class Anyhost extends View {
             this.button(t, "ah-confirm-go", this.isGoing ? `${p.go}…` : p.go, false, (cx) => {
               if (p.removeWorktree) return this.removeConfirmed(cx, p);
               closeOverlay(p.overlay);
+              if (p.archive) return void this.archiveAll(cx, p.archive.rows, { ...p.archive, isConfirmed: true });
               this.dispatchDelete(cx, p.delete.row, p.delete.on);
             }),
           ),
@@ -5785,7 +5802,8 @@ export default class Anyhost extends View {
     if (command === "next" || command === "prev") return run(command === "next" ? "tab.next" : "tab.prev");
     if (command === "recent" || command === "recent-back") return this.walkRecent(cx, command === "recent" ? 1 : -1);
     if (command === "new") return this.newHere();
-    if (command === "close") return this.closeShownWindow(cx);
+    if (command === "close") return this.closeShownSession(cx);
+    if (command === "close-tab") return this.closeShownWindow(cx);
     if (command === "reopen") return this.reopenClosed(cx);
     if (held) return undoHeld(held);
     if (command === "zoom") return this.zoom(work);
@@ -6474,11 +6492,21 @@ export default class Anyhost extends View {
   closeNow(cx, pill) {
     const { tab } = pill;
     if (pill.isPinned) return;
+    if (this.closeTabs(cx, [tab.id], pill.isShown ? { tab: tab.id, space: pill.space } : null)) return;
     this.closing.add(tab.id);
     const next = this.nextWindow(tab.id);
     if (pill.isShown && next) this.showWindow(next);
-    this.closeTabs(cx, [tab.id], pill.isShown ? { tab: tab.id, space: pill.space } : null);
     cx.notify();
+  }
+
+  closeShownSession(cx) {
+    const work = this.workNow();
+    const terminal = work.shown?.terminal ?? null;
+    if (terminal === null || work.terminals.length < 2) return this.closeShownWindow(cx);
+    const key = terminals().find((x) => x.address === terminal)?.labels?.[SESSION_LABEL];
+    const r = key ? this.sessionRowOf(key) : undefined;
+    if (!r) return run("pane.close", { pane: panes().find((p) => p.terminal === terminal)?.pane });
+    this.archiveAll(cx, [r], { isClosed: true });
   }
 
   openSlept(cx, session) {

@@ -2,6 +2,12 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.10] - 2026-11-25
+
+### Changed
+- ⌘W closes the session you're in, as a browser closes the tab you look at. When it's the tab's only session, the tab closes with it. ⌘⇧W closes the whole tab with every session in it, where ⌘W used to.
+- Closing or archiving a session that works, runs tasks or waits for you asks first, whether through ⌘W, ⌘⇧W, the tab's ×, a middle-click on the tab, E in the list or the menu's Archive. Keep it is the highlighted answer, so a stray key or click never stops an agent mid-turn. An idle session still goes at once, with Undo in the toast. A pinned session never goes, as before.
+
 ## [0.11.9] - 2026-11-25
 
 ### Changed

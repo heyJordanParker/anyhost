@@ -150,6 +150,7 @@ test("in the anyhost layout the new-tab key starts a session as the sidebar's Ne
     'cmd-t': 'tab.new',
     'ctrl-shift-t': 'tab.new',
     'cmd-w': 'tab.close',
+    'cmd-shift-w': 'pane.close',
     'ctrl-tab': 'tab.next',
     'ctrl-shift-tab': 'tab.prev',
     'cmd-shift-]': 'tab.next',
@@ -175,6 +176,7 @@ test("in the anyhost layout the new-tab key starts a session as the sidebar's Ne
     'layout:anyhost': {
       'cmd-p': 'files.open',
       'cmd-w': 'anyhost.close',
+      'cmd-shift-w': 'anyhost.close-tab',
       'cmd-t': 'anyhost.new',
       'ctrl-shift-t': 'anyhost.new',
       'cmd-alt-t': 'tab.new',
