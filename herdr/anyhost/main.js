@@ -3182,6 +3182,7 @@ export default class Anyhost extends View {
     if (r.section === "snoozed") return this.iconButton(t, `ah-unsnooze-${r.key}`, `${OWN}/alarm-clock-off`, "Wake now", () => this.act((cx) => this.snooze(cx, r, null)), UI.height.inline);
     if (r.section === "settled") return this.iconButton(t, `ah-unsettle-${r.key}`, `${OWN}/undo-2`, "Unsettle", () => this.act((cx) => this.unsettle(cx, r)), UI.height.inline);
     const pin = this.iconButton(t, `ah-pin-${r.key}`, r.pinned ? "pin-off" : "pin", r.pinned ? "Unpin" : "Pin", () => this.act((cx) => this.togglePin(cx, r)), UI.height.inline);
+    if (r.pinned) return pin;
     const settle = this.iconButton(t, `ah-settle-${r.key}`, "check", "Settle", () => this.act((cx) => this.settle(cx, r)), UI.height.inline);
     return h_flex().flex_none().gap(UI.space.xs).items_center().child(pin).child(settle);
   }

@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.11] - 2026-11-25
+
+### Changed
+- A pinned session's card shows only Unpin on hover, as a pinned tab in Chrome loses its close button. Settle, which also unpinned it, is gone from there.
+
 ## [0.11.10] - 2026-11-25
 
 ### Changed
