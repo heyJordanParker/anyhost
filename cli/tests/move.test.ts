@@ -1,6 +1,6 @@
 import { expect } from 'bun:test'
 import { test } from './test.ts'
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { hotKey } from '../src/capture.ts'
 import { isPaused } from '../src/claude.ts'
@@ -10,9 +10,10 @@ import { EXIT_MS } from './times.ts'
 
 const OTHER = '99999999-2222-3333-4444-555555555555'
 
-test("a move waits for the turn to end, pauses the laptop's Claude Code, uploads and seals the session, the worker restores it and runs it in a terminal of herdr-core with the same command, and only then the laptop ends its copy", async () => {
+test("a move waits for the turn to end, pauses the laptop's Claude Code, uploads and seals the session, the worker restores it and runs it in a terminal of herdr-core as the same agent, and only then the laptop ends its copy", async () => {
   const relay = await memoryRelay()
   const laptop = await runningOn(relay)
+  appendFileSync(laptop.transcript, `{"type":"agent-setting","agentSetting":"planner","sessionId":"${SESSION}"}\n`)
   const worker = await workerOn(relay)
   let isPausedAsWorkerRan = false
   void until(() => runsOn(worker.folder).length > 0, 'the worker running the session', 60_000).then(() => (isPausedAsWorkerRan = isPaused(laptop.claude.pid)))
@@ -37,7 +38,7 @@ test("a move waits for the turn to end, pauses the laptop's Claude Code, uploads
   expect(readFileSync(join(workerHome, '.claude', 'projects', workerCwd.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`), 'utf8')).toContain(`"cwd":"${workerCwd}"`)
   const [started, ...more] = runsOn(worker.folder)
   expect(more).toEqual([])
-  expect(started).toMatchObject({ session: SESSION, command: `claude --resume ${SESSION}` })
+  expect(started).toMatchObject({ session: SESSION, command: `claude --agent planner --resume ${SESSION}` })
   expect(realpathSync(started?.cwd ?? '')).toBe(realpathSync(workerCwd))
   expect(isPausedAsWorkerRan).toBe(true)
   await laptop.claude.exited

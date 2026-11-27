@@ -373,17 +373,21 @@ const CLAUDE_START = [
 
 export const claudeStart = (argv: readonly string[], trustsHome: boolean): string[] => [process.platform === 'darwin' ? '/usr/bin/perl' : 'perl', '-e', CLAUDE_START, '--', environmentFile(), trustsHome ? '1' : '', ...argv]
 
-export type Resumed = { readonly model?: string; readonly effort?: string }
+export type Resumed = { readonly agent?: string; readonly model?: string; readonly effort?: string }
 
 export function resumedOf(tail: string): Resumed {
-  const last = tail.split('\n').findLast((line) => line.startsWith('{') && line.includes('"type":"assistant"'))
+  const lines = tail.split('\n')
+  const last = lines.findLast((line) => line.startsWith('{') && line.includes('"type":"assistant"'))
   const turn = last === undefined ? undefined : (JSON.parse(last) as { message?: { model?: string }; effort?: string })
   const model = turn?.message?.model?.startsWith('<') === false ? turn.message.model : undefined
-  return { ...(model === undefined ? {} : { model }), ...(turn?.effort === undefined ? {} : { effort: turn.effort }) }
+  const setting = lines.findLast((line) => line.startsWith('{"type":"agent-setting"'))
+  const agent = setting === undefined ? undefined : (JSON.parse(setting) as { agentSetting?: string }).agentSetting
+  return { ...(agent === undefined ? {} : { agent }), ...(model === undefined ? {} : { model }), ...(turn?.effort === undefined ? {} : { effort: turn.effort }) }
 }
 
 export const resumeArgv = (session: string, resumed: Resumed): string[] => [
   'claude',
+  ...(resumed.agent === undefined ? [] : ['--agent', resumed.agent]),
   ...(resumed.model === undefined ? [] : ['--model', resumed.model]),
   ...(resumed.effort === undefined ? [] : ['--effort', resumed.effort]),
   '--resume',
