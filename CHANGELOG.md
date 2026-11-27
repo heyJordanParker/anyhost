@@ -2,6 +2,11 @@
 
 What changed in each version of anyhost, for the people who use it. cmod publish releases the section for the version, and cmod's Settings shows it.
 
+## [0.11.12] - 2026-11-27
+
+### Fixed
+- A session anyhost starts again, after it slept or moved to another machine, runs as the agent it ran as before, such as `planner` or `pstack:poteto-agent`. It used to come back as the agent your settings name, or as plain Claude Code.
+
 ## [0.11.11] - 2026-11-25
 
 ### Changed
