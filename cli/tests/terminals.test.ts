@@ -86,13 +86,16 @@ test.serial("the launcher starts Claude Code with the saved login environment, w
   expect(printed).toBe(`login unmarked trust=${child.pid}:${startOf(child.pid)};\n`)
 })
 
-test('a resumed session runs on the model and effort its last turn ran with, in the folder it last ran in, from one read of its transcript', async () => {
+test('a resumed session runs as the agent it last ran as, on the model and effort its last turn ran with, in the folder it last ran in, from one read of its transcript', async () => {
   const transcript = join(temporaryFolder(), `${SESSION}.jsonl`)
-  writeFileSync(transcript, `{"type":"user","cwd":"/work/first","message":{"role":"user","content":"Plan the trip"}}\n{"type":"assistant","cwd":"/work/trip","message":{"model":"claude-haiku-5-5"},"effort":"medium"}\n`)
+  writeFileSync(
+    transcript,
+    `{"type":"agent-setting","agentSetting":"planner","sessionId":"${SESSION}"}\n{"type":"user","cwd":"/work/first","message":{"role":"user","content":"Plan the trip"}}\n{"type":"assistant","cwd":"/work/trip","message":{"model":"claude-haiku-5-5"},"effort":"medium"}\n{"type":"agent-setting","agentSetting":"pstack:poteto-agent","sessionId":"${SESSION}"}\n`,
+  )
 
   const tail = await transcriptTailOf(transcript)
 
-  expect(resumeArgv(SESSION, resumedOf(tail))).toEqual(['claude', '--model', 'claude-haiku-5-5', '--effort', 'medium', '--resume', SESSION])
+  expect(resumeArgv(SESSION, resumedOf(tail))).toEqual(['claude', '--agent', 'pstack:poteto-agent', '--model', 'claude-haiku-5-5', '--effort', 'medium', '--resume', SESSION])
   expect(lastFolderOf(tail)).toBe('/work/trip')
 })
 
