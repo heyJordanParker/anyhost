@@ -10,8 +10,8 @@
       "description": "Every Claude Code and Codex session of every machine, kept in R2, listed everywhere and resumed on any machine",
       "source": {
         "source": "archive",
-        "url": "https://github.com/heyJordanParker/anyhost/releases/download/v0.11.11/anyhost-0.11.11.zip",
-        "sha256": "8722cab3bb54bfc6ef0c63946eef98d00a36e1cef1298808739d018067c9ddc5"
+        "url": "https://github.com/heyJordanParker/anyhost/releases/download/v0.11.12/anyhost-0.11.12.zip",
+        "sha256": "f83d24aa3f4452f8b613ac54c5da4651a7d9d3936ead7b0aa3346772de2e5600"
       }
     },
     {
